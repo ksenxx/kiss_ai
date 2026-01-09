@@ -13,6 +13,39 @@
 
 set -e
 
+# Cleanup function to restore original state on exit or error
+cleanup() {
+    local exit_code=$?
+    if [ -n "$CURRENT_BRANCH" ] && [ -n "$RELEASE_BRANCH" ]; then
+        echo -e "\n${YELLOW}Cleaning up...${NC}"
+        
+        # Return to original branch if not already there
+        current=$(git branch --show-current 2>/dev/null || echo "")
+        if [ "$current" != "$CURRENT_BRANCH" ]; then
+            git checkout "$CURRENT_BRANCH" 2>/dev/null || true
+        fi
+        
+        # Restore all files from the original branch
+        git checkout "$CURRENT_BRANCH" -- . 2>/dev/null || true
+        git reset HEAD 2>/dev/null || true
+        
+        # Delete temporary branch if it exists
+        git branch -D "$RELEASE_BRANCH" 2>/dev/null || true
+        
+        # Delete the temporary tag if it was created (only for dry runs)
+        if [ "$PUSH_MODE" != true ]; then
+            git tag -d "v${VERSION}" 2>/dev/null || true
+        fi
+        
+        # Restore stashed changes
+        git stash pop 2>/dev/null || true
+    fi
+    exit $exit_code
+}
+
+# Set trap to run cleanup on EXIT, INT (Ctrl+C), TERM
+trap cleanup EXIT INT TERM
+
 # Configuration - MODIFY THESE FOR YOUR SETUP
 PUBLIC_REPO_URL="git@github.com:ksenxx/kiss_ai.git"  # Your PUBLIC repo URL
 PUBLIC_BRANCH="main"
@@ -172,14 +205,7 @@ else
     echo -e "\nTo push for real, run: $0 --push"
 fi
 
-# Return to original branch
-echo -e "\n${GREEN}Returning to original branch: ${CURRENT_BRANCH}${NC}"
-git checkout "$CURRENT_BRANCH"
-
-# Delete temporary branch
-git branch -D "$RELEASE_BRANCH"
-
-# Restore stashed changes
-git stash pop 2>/dev/null || true
-
-echo -e "\n${GREEN}Done! Your private repo is unchanged.${NC}"
+# Cleanup is handled by the trap function
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}Done! Your private repo is unchanged.${NC}"
+echo -e "${GREEN}========================================${NC}"
