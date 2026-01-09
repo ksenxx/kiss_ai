@@ -15,6 +15,7 @@ import kiss.agents.kiss_evolve.config  # noqa: F401
 from kiss.agents.kiss_evolve.novelty_prompts import INNOVATION_INSTRUCTIONS
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model import Model
+from kiss.core.utils import get_config_value
 from kiss.rag.simple_rag import SimpleRAG
 
 
@@ -173,112 +174,64 @@ class KISSEvolve:
         self.code_agent_wrapper = code_agent_wrapper
         self.extra_coding_instructions = extra_coding_instructions
 
-        # Validate models list
+        # Validate and normalize model probabilities
+        self.model_names = self._validate_and_normalize_models(model_names)
+
+        # Get config with fallback defaults
+        cfg = getattr(DEFAULT_CONFIG, "kiss_evolve", None)
+        defaults = {
+            "population_size": 8, "max_generations": 10, "mutation_rate": 0.7,
+            "elite_size": 2, "num_islands": 1, "migration_frequency": 5,
+            "migration_size": 1, "migration_topology": "ring",
+            "enable_novelty_rejection": False, "novelty_threshold": 0.95,
+            "max_rejection_attempts": 5, "parent_sampling_method": "tournament",
+            "power_law_alpha": 1.0, "performance_novelty_lambda": 1.0,
+        }
+
+        def get_val(name: str, value: Any) -> Any:
+            if cfg:
+                return get_config_value(value, cfg, name, defaults[name])
+            return value if value is not None else defaults[name]
+
+        self.population_size = get_val("population_size", population_size)
+        self.max_generations = get_val("max_generations", max_generations)
+        self.mutation_rate = get_val("mutation_rate", mutation_rate)
+        self.elite_size = get_val("elite_size", elite_size)
+        self.num_islands = get_val("num_islands", num_islands)
+        self.migration_frequency = get_val("migration_frequency", migration_frequency)
+        self.migration_size = get_val("migration_size", migration_size)
+        self.migration_topology = get_val("migration_topology", migration_topology)
+        self.enable_novelty_rejection = get_val(
+            "enable_novelty_rejection", enable_novelty_rejection
+        )
+        self.novelty_threshold = get_val("novelty_threshold", novelty_threshold)
+        self.max_rejection_attempts = get_val("max_rejection_attempts", max_rejection_attempts)
+        self.parent_sampling_method = get_val("parent_sampling_method", parent_sampling_method)
+        self.power_law_alpha = get_val("power_law_alpha", power_law_alpha)
+        self.performance_novelty_lambda = get_val(
+            "performance_novelty_lambda", performance_novelty_lambda
+        )
+
+        self._validate_parameters()
+        self._initialize_tracking(novelty_rag_model)
+        self._setup_prompt_templates()
+
+    @staticmethod
+    def _validate_and_normalize_models(
+        model_names: list[tuple[str, float]],
+    ) -> list[tuple[str, float]]:
+        """Validate and normalize model probabilities."""
         if not model_names:
             raise ValueError("models list cannot be empty")
         if not all(isinstance(p, (int, float)) and p >= 0 for _, p in model_names):
             raise ValueError("all probabilities must be non-negative numbers")
-
-        # Normalize probabilities
         total_prob = sum(prob for _, prob in model_names)
         if total_prob == 0:
             raise ValueError("sum of probabilities cannot be zero")
+        return [(name, prob / total_prob) for name, prob in model_names]
 
-        self.model_names = [(model_name, prob / total_prob) for model_name, prob in model_names]
-
-        # Get KISSEvolve config, with fallback to defaults if not available
-        kiss_evolve_config = getattr(DEFAULT_CONFIG, "kiss_evolve", None)
-        if kiss_evolve_config is None:
-            # Fallback defaults if KISSEvolve config is not available
-            self.population_size = population_size if population_size is not None else 8
-            self.max_generations = max_generations if max_generations is not None else 10
-            self.mutation_rate = mutation_rate if mutation_rate is not None else 0.7
-            self.elite_size = elite_size if elite_size is not None else 2
-            self.num_islands = num_islands if num_islands is not None else 1
-            self.migration_frequency = migration_frequency if migration_frequency is not None else 5
-            self.migration_size = migration_size if migration_size is not None else 1
-            self.migration_topology = (
-                migration_topology if migration_topology is not None else "ring"
-            )
-            self.enable_novelty_rejection = (
-                enable_novelty_rejection if enable_novelty_rejection is not None else False
-            )
-            self.novelty_threshold = novelty_threshold if novelty_threshold is not None else 0.95
-            self.max_rejection_attempts = (
-                max_rejection_attempts if max_rejection_attempts is not None else 5
-            )
-            self.parent_sampling_method = (
-                parent_sampling_method if parent_sampling_method is not None else "tournament"
-            )
-            self.power_law_alpha = power_law_alpha if power_law_alpha is not None else 1.0
-            self.performance_novelty_lambda = (
-                performance_novelty_lambda if performance_novelty_lambda is not None else 1.0
-            )
-        else:
-            self.population_size = (
-                population_size
-                if population_size is not None
-                else kiss_evolve_config.population_size
-            )
-            self.max_generations = (
-                max_generations
-                if max_generations is not None
-                else kiss_evolve_config.max_generations
-            )
-            self.mutation_rate = (
-                mutation_rate if mutation_rate is not None else kiss_evolve_config.mutation_rate
-            )
-            self.elite_size = (
-                elite_size if elite_size is not None else kiss_evolve_config.elite_size
-            )
-            self.num_islands = (
-                num_islands if num_islands is not None else kiss_evolve_config.num_islands
-            )
-            self.migration_frequency = (
-                migration_frequency
-                if migration_frequency is not None
-                else kiss_evolve_config.migration_frequency
-            )
-            self.migration_size = (
-                migration_size if migration_size is not None else kiss_evolve_config.migration_size
-            )
-            self.migration_topology = (
-                migration_topology
-                if migration_topology is not None
-                else kiss_evolve_config.migration_topology
-            )
-            self.enable_novelty_rejection = (
-                enable_novelty_rejection
-                if enable_novelty_rejection is not None
-                else getattr(kiss_evolve_config, "enable_novelty_rejection", False)
-            )
-            self.novelty_threshold = (
-                novelty_threshold
-                if novelty_threshold is not None
-                else getattr(kiss_evolve_config, "novelty_threshold", 0.95)
-            )
-            self.max_rejection_attempts = (
-                max_rejection_attempts
-                if max_rejection_attempts is not None
-                else getattr(kiss_evolve_config, "max_rejection_attempts", 5)
-            )
-            self.parent_sampling_method = (
-                parent_sampling_method
-                if parent_sampling_method is not None
-                else getattr(kiss_evolve_config, "parent_sampling_method", "tournament")
-            )
-            self.power_law_alpha = (
-                power_law_alpha
-                if power_law_alpha is not None
-                else getattr(kiss_evolve_config, "power_law_alpha", 1.0)
-            )
-            self.performance_novelty_lambda = (
-                performance_novelty_lambda
-                if performance_novelty_lambda is not None
-                else getattr(kiss_evolve_config, "performance_novelty_lambda", 1.0)
-            )
-
-        # Validate parameters
+    def _validate_parameters(self) -> None:
+        """Validate all configuration parameters."""
         if self.elite_size >= self.population_size:
             error_msg = (
                 f"elite_size ({self.elite_size}) must be less than "
@@ -322,6 +275,8 @@ class KISSEvolve:
                 f"got {self.performance_novelty_lambda}"
             )
 
+    def _initialize_tracking(self, novelty_rag_model: Model | None) -> None:
+        """Initialize population tracking and novelty RAG."""
         # Population tracking
         self.population: list[CodeVariant] = []
         self.variant_counter = 0
@@ -347,7 +302,8 @@ class KISSEvolve:
                 f"max_attempts={self.max_rejection_attempts}"
             )
 
-        # Code generation prompt template
+    def _setup_prompt_templates(self) -> None:
+        """Initialize prompt templates for mutation and crossover."""
         self.mutation_prompt_template = """You are an expert code optimizer. Your task is to \
 improve the given code by optimizing it for better performance while maintaining correctness.
 
@@ -430,7 +386,7 @@ combine the best aspects of two code variants to create an improved version.
         # Check if highest similarity is below threshold
         # For cosine similarity, higher score = more similar
         max_similarity = float(results[0]["score"])
-        is_novel = max_similarity < self.novelty_threshold
+        is_novel: bool = max_similarity < self.novelty_threshold
 
         if not is_novel:
             print(

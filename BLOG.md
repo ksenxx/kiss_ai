@@ -1,3 +1,6 @@
+
+![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sgowzpvzkfmm0373li3m.png)
+
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
@@ -22,7 +25,7 @@ Enter **KISS** — the *Keep It Simple, Stupid* Agent Framework.
 
 KISS isn't just a clever acronym. It's a design philosophy that permeates every line of code in this framework.
 
-Born from the frustration of wrestling with overcomplicated agent architectures, KISS strips away the unnecessary and focuses on what actually matters: **getting intelligent agents to solve real problems**.
+Born of the frustration of wrestling with overly complex agent architectures, KISS strips away the unnecessary and focuses on what actually matters: **getting intelligent agents to solve real problems**.
 
 Here's the entire mental model you need:
 
@@ -50,7 +53,7 @@ def calculate(expression: str) -> str:
 
 agent = KISSAgent(name="Math Buddy")
 result = agent.run(
-    model_name="gemni-3-flash-preview",
+    model_name="gemini-3-flash-preview",
     prompt_template="Calculate: {question}",
     arguments={"question": "What is 15% of 847?"},
     tools=[calculate]
@@ -138,32 +141,32 @@ for iteration in range(max_iterations):
 
 **What's happening here?**
 
-1. **Coding Agent** (`get_run_simple_coding_agent`): Generates code and validates it against test cases
-2. **Prompt Refiner Agent** (`refine_prompt_template`): Analyzes failures and evolves the prompt
-3. **Orchestration**: Simple Python loop coordinates the agents
+1. **Coding Agent** ['get_run_simple_coding_agent'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Generates code and validates it against test cases
+2. **Prompt Refiner Agent** ['refine_prompt_template'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and evolves the prompt
+3. **Orchestration**: A simple Python loop coordinates the agents
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
 
 ### Why This Matters
 
-Most multi-agent frameworks require you to learn a new paradigm: graphs, workflows, channels, supervisors. KISS takes a different approach: **agents are just functions**.
+Most multi-agent frameworks require you to learn a new paradigm: graphs, workflows, channels, and supervisors. KISS takes a different approach: **agents are just functions**.
 
 ```python
 # Agent 1: Research
-research_result = research_agent.run(model_name="gpt-4o", ...)
+research_result = research_agent.run(model_name="gpt-4o", more_args)
 
 # Agent 2: Write (uses research)
 draft = writer_agent.run(
     model_name="claude-sonnet-4-5",
     arguments={"research": research_result},
-    ...
+    # ...
 )
 
 # Agent 3: Edit (uses draft)
 final = editor_agent.run(
     model_name="gemini-3-pro-preview", 
     arguments={"draft": draft},
-    ...
+    # ...
 )
 ```
 
@@ -260,7 +263,7 @@ The framework includes advanced features that would make any evolutionary comput
 - **Power-Law & Performance-Novelty Sampling**: Sophisticated parent selection strategies
 - **Multi-Model Support**: Use different LLMs with configurable probabilities
 
-This isn't theoretical. The included `kissevolve_bubblesort.py` script demonstrates discovering O(n log n) sorting algorithms from scratch.
+This isn't theoretical. The included `kissevolve_bubblesort.py` script demonstrates how to find an O(n log n) sorting algorithm.
 
 ---
 
@@ -421,8 +424,8 @@ The entire core agent implementation is under 500 lines. Not because features ar
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and setup
-git clone https://github.com/your-repo/kiss.git
-cd kiss
+git clone https://github.com/your-repo/kiss_ai.git
+cd kiss_ai
 uv venv --python 3.13
 uv sync --group dev
 
@@ -462,6 +465,7 @@ KISS is actively evolving (pun intended). The roadmap includes:
 - Enhanced multi-agent orchestration
 - Improved evolution strategies
 - Community-contributed tools and agents
+- Asynchronous tool calling support
 
 But the core philosophy will never change: **Keep It Simple, Stupid**.
 

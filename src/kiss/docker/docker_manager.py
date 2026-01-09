@@ -123,17 +123,26 @@ class DockerManager:
             return
 
         container_id = self.container.id[:12] if self.container.id else "unknown"
-        self.formatter.print_status(f"Stopping container {container_id}")
-        self.container.stop()
+        try:
+            self.formatter.print_status(f"Stopping container {container_id}")
+            self.container.stop()
+        except Exception as e:
+            self.formatter.print_error(f"Failed to stop container {container_id}: {e}")
 
-        self.formatter.print_status(f"Removing container {container_id}")
-        self.container.remove()
+        try:
+            self.formatter.print_status(f"Removing container {container_id}")
+            self.container.remove()
+        except Exception as e:
+            self.formatter.print_error(f"Failed to remove container {container_id}: {e}")
 
         self.container = None
 
         # Clean up temporary directory
         if self.host_shared_path and os.path.exists(self.host_shared_path):
-            shutil.rmtree(self.host_shared_path)
+            try:
+                shutil.rmtree(self.host_shared_path)
+            except Exception as e:
+                self.formatter.print_error(f"Failed to clean up temp directory: {e}")
 
         print("Container closed successfully")
 

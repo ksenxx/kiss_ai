@@ -24,7 +24,7 @@ from string import Formatter as StringFormatter
 from kiss.agents.gepa.config import GEPAConfig  # noqa: F401
 from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.utils import get_template_field_names
+from kiss.core.utils import get_config_value, get_template_field_names
 
 
 @dataclass
@@ -98,26 +98,16 @@ class GEPA:
         self.evaluation_fn = evaluation_fn or self._default_evaluation
         self.initial_prompt_template = initial_prompt_template
 
-        gepa_config = config_module.DEFAULT_CONFIG.gepa  # type: ignore[attr-defined]
+        cfg = config_module.DEFAULT_CONFIG.gepa  # type: ignore[attr-defined]
 
-        self.max_generations = (
-            max_generations if max_generations is not None else gepa_config.max_generations
+        self.max_generations = get_config_value(max_generations, cfg, "max_generations")
+        self.population_size = get_config_value(population_size, cfg, "population_size")
+        self.pareto_size = get_config_value(pareto_size, cfg, "pareto_size")
+        self.mutation_rate = get_config_value(mutation_rate, cfg, "mutation_rate")
+        self.crossover_probability = get_config_value(
+            crossover_probability, cfg, "crossover_probability"
         )
-        self.population_size = (
-            population_size if population_size is not None else gepa_config.population_size
-        )
-        self.pareto_size = pareto_size if pareto_size is not None else gepa_config.pareto_size
-        self.mutation_rate = (
-            mutation_rate if mutation_rate is not None else gepa_config.mutation_rate
-        )
-        self.crossover_probability = (
-            crossover_probability
-            if crossover_probability is not None
-            else gepa_config.crossover_probability
-        )
-        self.reflection_model = (
-            reflection_model if reflection_model is not None else gepa_config.reflection_model
-        )
+        self.reflection_model = get_config_value(reflection_model, cfg, "reflection_model")
 
         # Population and Pareto frontier
         self.candidates: list[PromptCandidate] = []

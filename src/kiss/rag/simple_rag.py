@@ -186,14 +186,17 @@ class SimpleRAG:
         else:
             raise KISSError(f"Unknown metric: {self.metric}. Use 'cosine' or 'l2'.")
 
-        # Get top-k indices
-        top_indices = np.argsort(scores)[::-1][:top_k]
+        # Get all indices sorted by score (descending)
+        sorted_indices = np.argsort(scores)[::-1]
 
-        # Format results
-        results = []
-        for idx in top_indices:
+        # Format results, applying filter and collecting up to top_k
+        results: list[dict[str, Any]] = []
+        for idx in sorted_indices:
+            if len(results) >= top_k:
+                break
+
             doc = self.documents[idx]
-            # Apply filter if provided
+            # Apply filter if provided - filter BEFORE adding to results
             if filter_fn is not None and not filter_fn(doc):
                 continue
 

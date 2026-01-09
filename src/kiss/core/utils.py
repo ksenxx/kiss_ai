@@ -7,11 +7,40 @@
 
 from pathlib import Path
 from string import Formatter as StringFormatter
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import yaml
 
 from kiss.core.config import DEFAULT_CONFIG
+
+T = TypeVar("T")
+
+
+def get_config_value(
+    value: T | None, config_obj: Any, attr_name: str, default: T | None = None
+) -> T:
+    """Get a config value, preferring explicit value over config default.
+
+    This eliminates the repetitive pattern:
+        value if value is not None else config.attr_name
+
+    Args:
+        value: The explicitly provided value (may be None)
+        config_obj: The config object to read from if value is None
+        attr_name: The attribute name to read from config_obj
+        default: Fallback default if both value and config attribute are None
+
+    Returns:
+        The resolved value (explicit value > config value > default)
+    """
+    if value is not None:
+        return value
+    config_value = getattr(config_obj, attr_name, None)
+    if config_value is not None:
+        return cast(T, config_value)
+    if default is not None:
+        return default
+    raise ValueError(f"No value provided and config.{attr_name} is not set")
 
 
 def get_template_field_names(text: str) -> list[str]:

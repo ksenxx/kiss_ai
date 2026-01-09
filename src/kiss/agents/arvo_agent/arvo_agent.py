@@ -1,3 +1,10 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+
+"""ARVO vulnerability detection agent for finding security vulnerabilities."""
+
 import json
 from importlib import resources
 from pathlib import Path
@@ -50,7 +57,7 @@ def get_all_arvo_tags(image_name: str = "n132/arvo") -> list[str]:
     """
     try:
         tags_text = resources.read_text(
-            "kiss.agents.vulnerability_detector", "arvo_tags.json", encoding="utf-8"
+            "kiss.agents.arvo_agent", "arvo_tags.json", encoding="utf-8"
         )
         return cast(list[str], json.loads(tags_text))
     except (FileNotFoundError, ModuleNotFoundError):
@@ -116,7 +123,8 @@ def find_vulnerability(
                 tools=[env.run_bash_command, run_test, utils.finish],
             )
             result = yaml.safe_load(result_str)
-            if result["status"] != "success":
+            # Handle case where yaml parsing returns None or dict without 'status'
+            if not isinstance(result, dict) or result.get("status") != "success":
                 trajectory = vuln_agent.get_trajectory()
                 refined_prompt_template = refine_prompt_template(
                     original_prompt_template,

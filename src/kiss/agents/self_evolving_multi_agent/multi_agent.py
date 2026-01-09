@@ -13,10 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import kiss.agents.advanced_coding_agent.config  # noqa: F401
+import kiss.agents.self_evolving_multi_agent.config  # noqa: F401
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.utils import get_config_value
 from kiss.docker.docker_manager import DockerManager
 
 
@@ -97,7 +98,7 @@ This is part of a larger task. Focus only on completing this specific step.
 """
 
 
-class AdvancedCodingAgent:
+class SelfEvolvingMultiAgent:
     """Advanced coding agent with planning, error recovery, and dynamic tools."""
 
     def __init__(
@@ -111,7 +112,7 @@ class AdvancedCodingAgent:
         enable_error_recovery: bool | None = None,
         enable_dynamic_tools: bool | None = None,
     ):
-        """Initialize the advanced coding agent.
+        """Initialize the self evolving multi agent.
 
         Args:
             model_name: LLM model to use
@@ -123,25 +124,23 @@ class AdvancedCodingAgent:
             enable_error_recovery: Enable error recovery
             enable_dynamic_tools: Enable dynamic tool creation
         """
-        cfg = DEFAULT_CONFIG.advanced_coding_agent  # type: ignore[attr-defined]
+        cfg = DEFAULT_CONFIG.self_evolving_multi_agent  # type: ignore[attr-defined]
 
-        self.model_name = model_name or cfg.model
-        self.docker_image = docker_image or cfg.docker_image
-        self.workdir = workdir or cfg.workdir
-        self.max_steps = max_steps or cfg.max_steps
-        self.max_budget = max_budget or cfg.max_budget
-        self.enable_planning = (
-            enable_planning if enable_planning is not None else cfg.enable_planning
+        # Use helper to reduce repetitive config access pattern
+        self.model_name = get_config_value(model_name, cfg, "model")
+        self.docker_image = get_config_value(docker_image, cfg, "docker_image")
+        self.workdir = get_config_value(workdir, cfg, "workdir")
+        self.max_steps = get_config_value(max_steps, cfg, "max_steps")
+        self.max_budget = get_config_value(max_budget, cfg, "max_budget")
+        self.enable_planning = get_config_value(enable_planning, cfg, "enable_planning")
+        self.enable_error_recovery = get_config_value(
+            enable_error_recovery, cfg, "enable_error_recovery"
         )
-        self.enable_error_recovery = (
-            enable_error_recovery
-            if enable_error_recovery is not None
-            else cfg.enable_error_recovery
-        )
-        self.enable_dynamic_tools = (
-            enable_dynamic_tools if enable_dynamic_tools is not None else cfg.enable_dynamic_tools
+        self.enable_dynamic_tools = get_config_value(
+            enable_dynamic_tools, cfg, "enable_dynamic_tools"
         )
 
+        # These are always from config
         self.sub_agent_max_steps = cfg.sub_agent_max_steps
         self.sub_agent_max_budget = cfg.sub_agent_max_budget
         self.max_retries = cfg.max_retries
@@ -228,11 +227,7 @@ class AdvancedCodingAgent:
                 sub_agent = KISSAgent(name=f"SubAgent-{todo_id}")
 
                 # Create sub-agent tools
-                sub_tools = [
-                    self._make_run_bash(),
-                    self._make_read_file(),
-                    self._make_write_file(),
-                ]
+                sub_tools = self._get_docker_tools()
 
                 result = sub_agent.run(
                     model_name=self.model_name,
@@ -288,7 +283,7 @@ class AdvancedCodingAgent:
                 """Dynamically created tool."""
                 try:
                     cmd = bash_command_template.format(arg=arg)
-                    return self._run_bash_internal(cmd, description)
+                    return self._run_bash(cmd, description)
                 except Exception as e:
                     return f"Error: {e}"
 
@@ -300,13 +295,14 @@ class AdvancedCodingAgent:
             self.state.dynamic_tools[name] = dynamic_tool
             return f"Created tool '{name}': {description}"
 
+        docker_tools = self._get_docker_tools()
         tools: list[Callable[..., str]] = [
             plan_task,
             execute_todo,
-            self._make_run_bash(),
+            docker_tools[0],  # run_bash
             create_tool,
-            self._make_read_file(),
-            self._make_write_file(),
+            docker_tools[1],  # read_file
+            docker_tools[2],  # write_file
         ]
 
         # Add any dynamic tools
@@ -314,66 +310,70 @@ class AdvancedCodingAgent:
 
         return tools
 
-    def _make_run_bash(self) -> Callable[..., str]:
-        """Create a run_bash tool function."""
+    def _run_bash(self, command: str, description: str = "") -> str:
+        """Execute a bash command in the Docker container.
 
-        def run_bash(command: str, description: str = "") -> str:
-            """Execute a bash command in the Docker container.
+        Args:
+            command: The bash command to execute
+            description: Brief description of what the command does
 
-            Args:
-                command: The bash command to execute
-                description: Brief description of what the command does
-
-            Returns:
-                Command output including stdout, stderr, and exit code
-            """
-            return self._run_bash_internal(command, description)
-
-        return run_bash
-
-    def _run_bash_internal(self, command: str, description: str = "") -> str:
-        """Internal method to run bash commands."""
+        Returns:
+            Command output including stdout, stderr, and exit code
+        """
         if self.docker is None:
             raise KISSError("Docker container not initialized.")
         return self.docker.run_bash_command(command, description or "Executing command")
 
-    def _make_read_file(self) -> Callable[..., str]:
-        """Create a read_file tool function."""
+    def _read_file(self, path: str) -> str:
+        """Read content from a file in the workspace.
+
+        Args:
+            path: Path to the file (relative to workspace)
+
+        Returns:
+            File content or error message
+        """
+        return self._run_bash(f"cat {path}", f"Reading {path}")
+
+    def _write_file(self, path: str, content: str) -> str:
+        """Write content to a file in the workspace.
+
+        Args:
+            path: Path to the file (relative to workspace)
+            content: Content to write
+
+        Returns:
+            Success message or error
+        """
+        import base64
+
+        # Use base64 encoding to safely handle any content including special characters
+        # and heredoc delimiters
+        encoded_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        cmd = f"echo '{encoded_content}' | base64 -d > {path}"
+        return self._run_bash(cmd, f"Writing to {path}")
+
+    def _get_docker_tools(self) -> list[Callable[..., str]]:
+        """Get the Docker-related tools (run_bash, read_file, write_file).
+
+        Returns closures that can be used as tools by the agent.
+        """
+        def run_bash(command: str, description: str = "") -> str:
+            """Execute a bash command in the Docker container."""
+            return self._run_bash(command, description)
 
         def read_file(path: str) -> str:
-            """Read content from a file in the workspace.
-
-            Args:
-                path: Path to the file (relative to workspace)
-
-            Returns:
-                File content or error message
-            """
-            return self._run_bash_internal(f"cat {path}", f"Reading {path}")
-
-        return read_file
-
-    def _make_write_file(self) -> Callable[..., str]:
-        """Create a write_file tool function."""
+            """Read content from a file in the workspace."""
+            return self._read_file(path)
 
         def write_file(path: str, content: str) -> str:
-            """Write content to a file in the workspace.
+            """Write content to a file in the workspace."""
+            return self._write_file(path, content)
 
-            Args:
-                path: Path to the file (relative to workspace)
-                content: Content to write
-
-            Returns:
-                Success message or error
-            """
-            # Use heredoc for safe content writing
-            cmd = f"cat > {path} << 'KISS_EOF'\n{content}\nKISS_EOF"
-            return self._run_bash_internal(cmd, f"Writing to {path}")
-
-        return write_file
+        return [run_bash, read_file, write_file]
 
     def run(self, task: str) -> str:
-        """Run the coding agent on a task.
+        """Run the self evolving multi agent on a task.
 
         Args:
             task: The coding task to complete
@@ -398,7 +398,7 @@ class AdvancedCodingAgent:
             docker.workdir = self.workdir
 
             # Create orchestrator agent
-            orchestrator = KISSAgent(name="AdvancedCodingAgent")
+            orchestrator = KISSAgent(name="Multi Agent Orchestrator")
 
             try:
                 result = orchestrator.run(
@@ -442,17 +442,17 @@ class AdvancedCodingAgent:
         }
 
 
-def run_coding_task(
+def run_self_evolving_multi_agent_task(
     task: str,
     model_name: str | None = None,
     docker_image: str | None = None,
     max_steps: int | None = None,
     max_budget: float | None = None,
 ) -> dict[str, Any]:
-    """Convenience function to run a coding task.
+    """Convenience function to run a self evolving multi agent task.
 
     Args:
-        task: The coding task to complete
+        task: The self evolving multi agent task to complete
         model_name: LLM model to use
         docker_image: Docker image for execution
         max_steps: Maximum steps
@@ -461,7 +461,7 @@ def run_coding_task(
     Returns:
         Dictionary with result, trajectory, and stats
     """
-    agent = AdvancedCodingAgent(
+    agent = SelfEvolvingMultiAgent(
         model_name=model_name,
         docker_image=docker_image,
         max_steps=max_steps,
@@ -497,10 +497,10 @@ if __name__ == "__main__":
     """
 
     print("=" * 60)
-    print("Advanced Coding Agent Test")
+    print("Self Evolving Multi Agent Test")
     print("=" * 60)
 
-    result = run_coding_task(
+    result = run_self_evolving_multi_agent_task(
         task=test_task,
         model_name="gemini-3-flash-preview",
         max_steps=30,

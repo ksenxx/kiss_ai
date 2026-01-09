@@ -3,15 +3,15 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Configuration for Advanced Coding Agent."""
+"""Configuration for Self Evolving Multi Agent."""
 
 from pydantic import BaseModel, Field
 
 from kiss.core.config_builder import add_config
 
 
-class AdvancedCodingAgentConfig(BaseModel):
-    """Configuration for the Advanced Coding Agent."""
+class SelfEvolvingMultiAgentConfig(BaseModel):
+    """Configuration for the Self Evolving Multi Agent."""
 
     # Model settings
     model: str = Field(
@@ -63,7 +63,7 @@ class AdvancedCodingAgentConfig(BaseModel):
         description="Maximum number of dynamic tools",
     )
 
-    # Planning settings
+    # Planning settings (for multi_agent.py)
     enable_planning: bool = Field(
         default=True,
         description="Enable planning capabilities",
@@ -73,7 +73,7 @@ class AdvancedCodingAgentConfig(BaseModel):
         description="Maximum items in a plan",
     )
 
-    # Error recovery settings
+    # Error recovery settings (for multi_agent.py)
     enable_error_recovery: bool = Field(
         default=True,
         description="Enable error recovery",
@@ -121,6 +121,16 @@ class AdvancedCodingAgentConfig(BaseModel):
         description="Timeout per task in seconds",
     )
 
+    # Evolver output settings
+    evolver_output: str = Field(
+        default="evolved_agent.py",
+        description="Output file for best evolved agent",
+    )
+    evolver_test_only: bool = Field(
+        default=False,
+        description="Only test the base agent without evolution",
+    )
+
 
 # Register config with the global DEFAULT_CONFIG
-add_config("advanced_coding_agent", AdvancedCodingAgentConfig)
+add_config("self_evolving_multi_agent", SelfEvolvingMultiAgentConfig)

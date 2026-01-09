@@ -283,12 +283,12 @@ For usage examples, API reference, and configuration options, please see the [KI
 
 ### Running Agent Examples
 
-**Vulnerability Detector Agent:**
+**Vulnerability Detector Agent (ARVO):**
 ```bash
-uv run python -m kiss.agents.vulnerability_detector.avro_vuln_agent
+uv run python -m kiss.agents.arvo_agent.arvo_agent
 ```
 
-The Vulnerability Detector agent uses the Arvo fuzzing framework to discover security vulnerabilities in C/C++ code:
+The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discover security vulnerabilities in C/C++ code:
 - Runs in a Docker container with Arvo fuzzing framework
 - Analyzes code to create hypotheses for potential vulnerabilities
 - Generates Python scripts to create test inputs for fuzzing
@@ -297,7 +297,7 @@ The Vulnerability Detector agent uses the Arvo fuzzing framework to discover sec
 
 **Programmatic Usage:**
 ```python
-from kiss.agents.vulnerability_detector.arvo_vuln_agent import find_vulnerability, get_all_arvo_tags
+from kiss.agents.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
 
 # Get available Arvo Docker image tags
 tags = get_all_arvo_tags("n132/arvo")
@@ -501,12 +501,12 @@ kiss/
 │   │   │   ├── run_swebench.py     # Main runner with CLI support
 │   │   │   ├── config.py           # Configuration for SWE-bench runs
 │   │   │   └── README.md           # SWE-bench documentation
-│   │   ├── advanced_coding_agent/  # Advanced coding agent with evolution
-│   │   │   ├── advanced_coding_agent.py
-│   │   │   ├── coding_agent_evolver.py
+│   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent with planning
+│   │   │   ├── multi_agent.py          # Main multi-agent implementation
+│   │   │   ├── agent_evolver.py        # Agent evolution using KISSEvolve
 │   │   │   └── config.py
-│   │   └── vulnerability_detector/ # Vulnerability detection agent
-│   │       ├── avro_vuln_agent.py  # Arvo-based vulnerability detector
+│   │   └── arvo_agent/             # ARVO vulnerability detection agent
+│   │       ├── arvo_agent.py       # Arvo-based vulnerability detector
 │   │       └── arvo_tags.json      # Docker image tags for Arvo
 │   ├── core/            # Core framework components
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
@@ -623,7 +623,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 
 ### Utilities
 
-- `uv run python -m kiss.agents.vulnerability_detector.avro_vuln_agent` - Run the Vulnerability Detector agent
+- `uv run python -m kiss.agents.arvo_agent.arvo_agent` - Run the ARVO Vulnerability Detector agent
 - `uv run src/kiss/agents/swe_agent_verified/run_swebench.py` - Run the SWE-bench Verified agent
 - `uv run python -m kiss.scripts.kissevolve_bubblesort` - Run the KISSEvolve bubble sort evolution example
 - `uv run python -m kiss.viz_trajectory.server artifacts` - Start the trajectory visualizer server
