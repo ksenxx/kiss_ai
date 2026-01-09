@@ -1,5 +1,0 @@
-Successfully fixed the trailing newline issue in username validators and added regression tests.
-
-Changes:
-- Modified `django/contrib/auth/validators.py`: Changed `regex = r'^[\w.@+-]+$'` to `regex = r'\A[\w.@+-]+\Z'` for both `ASCIIUsernameValidator` and `UnicodeUsernameValidator`.
-- Modified `tests/auth_tests/test_validators.py`: Added `test_unicode_validator_trailing_newline` and `test_ascii_validator_trailing_newline` to the `UsernameValidatorsTests` class.
