@@ -1,0 +1,149 @@
+[project]
+name = "kiss"
+dynamic = ["version"]
+description = "KISS Agent Framework - A simple and portable agent framework for building and evolving AI agents"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+    {name = "Koushik Sen", email = "ksen@berkeley.edu"},
+]
+license = {text = "Apache-2.0"}
+keywords = [
+    "llm",
+    "agent",
+    "ai",
+    "framework",
+    "react",
+    "function-calling",
+    "openai",
+    "anthropic",
+    "gemini",
+    "together",
+    "docker",
+    "evolution",
+    "genetic-algorithm",
+    "swe-bench",
+    "rag",
+]
+dependencies = [
+    "openai>=2.13.0",
+    "anthropic>=0.40.0",
+    "rich>=14.2.0",
+    "docker>=7.0.0",
+    "types-docker>=7.1.0.20251202",
+    "google-genai>=0.30.0",
+    "setuptools>=65.0.0",
+    "pyyaml>=6.0.0",
+    "types-PyYAML>=6.0.0",
+    "datasets>=2.0.0",
+    "swebench>=1.0.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "flask>=3.0.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.19.1",
+    "ruff>=0.14.9",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/kiss/_version.py"
+pattern = '__version__ = "(?P<version>[^"]+)"'
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kiss"]
+# JSON files in package directories are included automatically by hatchling
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "ruff>=0.14.9",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-timeout>=2.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["src/kiss/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["src/kiss"]
+omit = ["src/kiss/tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = "backports.zstd.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "rich.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "google.genai.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "google.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "docker.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "datasets.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "openai.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "kiss.tests.*"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "kiss.viz_trajectory.*"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "kiss.agents.kiss_evolve.algotune.*"
+disallow_untyped_defs = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = []
+
+[project.scripts]
+check = "kiss.scripts.check:main"
+algotune = "kiss.agents.kiss_evolve.algotune.run_algotune:main"
