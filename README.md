@@ -1,4 +1,4 @@
-# KISS Agent Framework
+# KISS Agent Framework (Keep it Simple, Stupid Agent Framework)
 
 A simple and portable AI agent framework for building and evolving LLM agents. The framework follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) and provides native function calling for seamless tool integration.
 
@@ -485,21 +485,26 @@ kiss/
 ├── src/kiss/
 │   ├── agents/          # Example agents
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
-│   │   │   └── gepa.py
+│   │   │   ├── gepa.py
+│   │   │   ├── config.py           # GEPA configuration
+│   │   │   └── README.md           # GEPA documentation
 │   │   ├── kiss_evolve/            # KISSEvolve evolutionary algorithm discovery
 │   │   │   ├── kiss_evolve.py
 │   │   │   ├── novelty_prompts.py  # Prompts for novelty-based evolution
 │   │   │   ├── config.py           # KISSEvolve configuration
+│   │   │   ├── README.md           # KISSEvolve documentation
 │   │   │   └── algotune/           # AlgoTune benchmark integration
 │   │   │       ├── run_algotune.py # AlgoTune task evolution
 │   │   │       └── config.py       # AlgoTune configuration
 │   │   ├── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   │   ├── swe_agent_verified/     # SWE-bench Verified benchmark integration
 │   │   │   ├── run_swebench.py     # Main runner with CLI support
-│   │   │   └── config.py           # Configuration for SWE-bench runs
-│   │   ├── sweagent/               # SWE-bench evaluation agent (legacy)
-│   │   │   ├── swe_agent.py
-│   │   │   └── swebench_helper.py
+│   │   │   ├── config.py           # Configuration for SWE-bench runs
+│   │   │   └── README.md           # SWE-bench documentation
+│   │   ├── advanced_coding_agent/  # Advanced coding agent with evolution
+│   │   │   ├── advanced_coding_agent.py
+│   │   │   ├── coding_agent_evolver.py
+│   │   │   └── config.py
 │   │   └── vulnerability_detector/ # Vulnerability detection agent
 │   │       ├── avro_vuln_agent.py  # Arvo-based vulnerability detector
 │   │       └── arvo_tags.json      # Docker image tags for Arvo
@@ -540,6 +545,7 @@ kiss/
 │   │   └── test_internal.py
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
+│       ├── README.md                    # Trajectory visualizer documentation
 │       └── templates/                   # HTML templates for the visualizer
 │           └── index.html
 ├── pyproject.toml       # Project configuration
@@ -669,28 +675,31 @@ The visualizer provides:
 **Generation Models** (text generation with function calling support):
 - **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5.1, gpt-5.2
 - **Anthropic**: claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-haiku-4-5
-- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview, gemini-3-flash-preview
+- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3-pro-preview, gemini-3-flash-preview
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
 - **Together AI (Qwen)**: Qwen2.5-72B-Instruct-Turbo, Qwen3 series (with function calling)
 - **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3.1 (with function calling)
-- **Together AI (Other)**: Kimi-K2-Instruct/Thinking, GLM-4.5/4.6, Nemotron-Nano-9B
+- **Together AI (Other)**: Kimi-K2-Instruct, GLM-4.5/4.6, Nemotron-Nano-9B
 - **OpenRouter**: Access to 400+ models from multiple providers via unified API:
-  - OpenAI (gpt-4o, gpt-4o-mini, o3-mini, o4-mini)
-  - Anthropic (claude-3.5-sonnet, claude-3.7-sonnet, claude-sonnet-4, claude-sonnet-4.5, claude-haiku-4.5, claude-opus-4.5)
+  - OpenAI (gpt-4.1, gpt-4o, gpt-5, gpt-5.1, gpt-5.2, o1, o3, o3-pro, o4-mini, codex-mini)
+  - Anthropic (claude-3.5-sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5)
   - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-3-27b)
   - Meta Llama (llama-3.3-70b, llama-4-maverick/scout)
-  - DeepSeek (deepseek-chat, deepseek-r1, deepseek-v3.2)
-  - Qwen (qwen-2.5-72b, qwen-turbo/plus, qwen3-8b/14b/32b/235b, qwen3-coder, qwq-32b)
-  - Amazon Nova (nova-micro/lite/pro)
-  - Cohere (command-r, command-r-plus)
-  - X.AI Grok (grok-3-mini, grok-4-fast)
-  - And many more (bytedance-seed, z-ai/glm, etc.)
+  - DeepSeek (deepseek-chat, deepseek-r1, deepseek-v3.1/v3.2)
+  - Qwen (qwen-2.5-72b, qwen-turbo/plus/max, qwen3-8b/14b/32b/235b, qwen3-coder, qwq-32b)
+  - Amazon Nova (nova-micro/lite/pro, nova-2-lite, nova-premier)
+  - Cohere (command-r, command-r-plus, command-a)
+  - X.AI Grok (grok-3/3-mini, grok-4/4-fast, grok-4.1-fast)
+  - MiniMax (minimax-m1, minimax-m2/m2.1)
+  - ByteDance Seed (seed-1.6, seed-1.6-flash)
+  - MoonshotAI (kimi-k2, kimi-k2-thinking)
+  - Mistral (codestral, devstral, mistral-large/medium/small, mixtral)
+  - And many more (nvidia, z-ai/glm, inception, arcee-ai, etc.)
 
 **Embedding Models** (for RAG and semantic search):
 - **OpenAI**: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
-- **Voyage AI**: voyage-3, voyage-3-lite, voyage-code-3
 - **Google**: text-embedding-004
-- **Together AI**: BAAI/bge-large-en-v1.5, BAAI/bge-base-en-v1.5, m2-bert-80M-8k/32k-retrieval, UAE-Large-V1
+- **Together AI**: BAAI/bge-large-en-v1.5, BAAI/bge-base-en-v1.5, m2-bert-80M-32k-retrieval, multilingual-e5-large-instruct, gte-modernbert-base
 
 Each model in `MODEL_INFO` includes capability flags:
 - `is_function_calling_supported`: Whether the model reliably supports tool/function calling

@@ -49,7 +49,11 @@ def my_tool(input: str) -> str:
 def agent_wrapper(
     prompt_template: str, arguments: dict[str, str]
 ) -> tuple[str, list[dict[str, str]]]:
-    """Wrapper function that runs the agent and returns result and trajectory."""
+    """Wrapper function that runs the agent and returns result and trajectory.
+    
+    Note: get_trajectory() returns a JSON string, so we parse it to a list.
+    """
+    import json
     agent = KISSAgent(name="My Agent")
     result = agent.run(
         model_name="gemini-3-pro-preview",
@@ -57,7 +61,8 @@ def agent_wrapper(
         arguments=arguments,
         tools=[my_tool]  # Optional: tools are available to the agent
     )
-    return result, agent.get_trajectory()
+    trajectory = json.loads(agent.get_trajectory())
+    return result, trajectory
 
 prompt_template = """
 You are a helpful assistant. Use the available tools to help the user.
@@ -108,7 +113,7 @@ GEPA(
 ```
 
 **Parameters:**
-- `agent_wrapper`: Function that takes a prompt template and arguments, runs the agent, and returns `(result, trajectory)`
+- `agent_wrapper`: Function that takes a prompt template and arguments, runs the agent, and returns `(result, trajectory)`. Note: `agent.get_trajectory()` returns a JSON string, so you need to parse it with `json.loads()` to get the list.
 - `initial_prompt_template`: The initial prompt template to optimize (may contain placeholders like `{task}`)
 - `evaluation_fn`: Function to evaluate a rollout result and return scores as `dict[str, float]` (higher is better). If `None`, uses default evaluation based on "success" keyword in result.
 - `max_generations`: Maximum number of evolutionary generations (default: from config)
