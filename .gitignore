@@ -1,0 +1,20 @@
+venv
+.venv
+.vscode
+.DS_store
+__pycache__
+src/astropy__astropy-12907_trajectory.json
+push/
+artifacts/
+
+# uv artifacts
+.uv/
+uv.lock
+*.egg-info
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+ref

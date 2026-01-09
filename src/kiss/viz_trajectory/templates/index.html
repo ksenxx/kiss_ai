@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Trajectory Visualizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
+    <style>
+        :root {
+            --bg: #0b0d10;
+            --panel: #11151b;
+            --panel-2: #0f1318;
+            --border: #232a34;
+            --text: #e7edf5;
+            --muted: #9aa7b5;
+            --accent: #7ab8e0;
+            --accent-2: #b87ae0;
+            --accent-3: #7ae0b8;
+            --code-bg: #0a0f16;
+            --code-border: #233246;
+        }
+
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            overflow: hidden;
+        }
+
+        .hidden { display: none !important; }
+
+        .container { display: flex; height: 100vh; }
+        .state-sidebar, .sidebar {
+            background: var(--panel);
+            border-right: 1px solid var(--border);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .state-sidebar { width: 220px; }
+        .sidebar { width: 360px; }
+
+        .state-sidebar-header, .sidebar-header, .content-header {
+            padding: 16px 18px;
+            background: var(--panel-2);
+            border-bottom: 1px solid var(--border);
+        }
+        .state-sidebar-header h2 {
+            margin: 0;
+            font-size: 12px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+        .sidebar-header h1 {
+            margin: 0 0 6px 0;
+            font-size: 16px;
+            font-weight: 650;
+        }
+        .sidebar-header p { margin: 0; font-size: 12px; color: var(--muted); }
+
+        .state-list, .trajectory-list { padding: 10px; overflow: auto; }
+
+        .state-item, .trajectory-item {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            cursor: pointer;
+        }
+        .state-item:hover, .trajectory-item:hover { border-color: rgba(122,184,224,0.55); }
+        .state-item.active, .trajectory-item.active {
+            border-color: rgba(122,184,224,0.85);
+            box-shadow: 0 0 0 1px rgba(122,184,224,0.2) inset;
+        }
+
+        .state-item-name, .trajectory-item-name { font-weight: 650; font-size: 13px; }
+        .item-subtext { font-size: 11px; color: var(--muted); margin-top: 4px; }
+        .trajectory-item-command { font-size: 11px; color: var(--accent-3); margin: 4px 0; }
+        .trajectory-item-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+
+        .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .messages-container { flex: 1; overflow: auto; padding: 18px; }
+
+        .trajectory-command { color: var(--accent-3); font-size: 12px; margin: 6px 0 10px 0; }
+        .content-header h2 { margin: 0; font-size: 18px; }
+        .content-header-meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+
+        .message { margin-bottom: 14px; }
+        .message-header { margin-bottom: 6px; }
+        .message-role {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            background: rgba(255,255,255,0.02);
+        }
+        .message-role.user { color: var(--accent); border-color: rgba(122,184,224,0.35); }
+        .message-role.model { color: var(--accent-2); border-color: rgba(184,122,224,0.35); }
+        .message-role.tool { color: var(--accent-3); border-color: rgba(122,224,184,0.35); }
+        .message-role.system { color: #e0b87a; border-color: rgba(224,184,122,0.35); }
+
+        .message-content {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px 14px;
+            line-height: 1.55;
+        }
+
+        /* Minimal markdown theme (colors come from CSS, not a syntax highlighter). */
+        .message-content h1, .message-content h2, .message-content h3 { margin: 16px 0 8px; }
+        .message-content h1 { font-size: 20px; color: var(--accent); }
+        .message-content h2 { font-size: 17px; color: var(--accent-2); }
+        .message-content h3 { font-size: 15px; color: #e0b87a; }
+        .message-content p { margin: 0 0 10px 0; }
+        .message-content a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(122,184,224,0.5); }
+        .message-content a:hover { border-bottom-color: rgba(122,184,224,0.9); }
+        .message-content code {
+            background: var(--code-bg);
+            border: 1px solid var(--code-border);
+            padding: 1px 6px;
+            border-radius: 6px;
+            color: #9ad8f0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+            font-size: 0.92em;
+        }
+        .message-content pre {
+            background: var(--code-bg);
+            border: 1px solid var(--code-border);
+            padding: 12px;
+            border-radius: 10px;
+            overflow: auto;
+            margin: 10px 0;
+        }
+        .message-content pre code {
+            border: none;
+            padding: 0;
+            background: transparent;
+            font-size: 13px;
+        }
+        /* Default code color only when we are not using a syntax highlighter. */
+        .message-content pre code:not(.hljs) {
+            color: #d7e6f5;
+        }
+
+        /* Lightweight Python-call highlighting (function name + argument literal values). */
+        .message-content pre code .py-fn { color: #ff5c57; font-weight: 650; }
+        .message-content pre code .py-val { color: #9ee37d; }
+
+        .message-content blockquote {
+            margin: 10px 0;
+            padding: 10px 12px;
+            border-left: 3px solid rgba(122,224,184,0.8);
+            background: rgba(122,224,184,0.05);
+            border-radius: 8px;
+            color: #bfe7db;
+        }
+        .message-content ul, .message-content ol { margin: 0 0 10px 22px; }
+        .message-content table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+        .message-content th, .message-content td { border: 1px solid var(--border); padding: 8px; }
+        .message-content th { background: rgba(122,184,224,0.08); color: var(--accent); text-align: left; }
+
+        .empty-state, .loading {
+            padding: 30px 18px;
+            color: var(--muted);
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="state-sidebar">
+            <div class="state-sidebar-header">
+                <h2>State Directories</h2>
+            </div>
+            <div class="state-list" id="state-list">
+                <div class="loading">Loading states...</div>
+            </div>
+        </div>
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h1>Agent Trajectories</h1>
+                <p id="trajectory-count">Select a state directory</p>
+            </div>
+            <div class="trajectory-list" id="trajectory-list">
+                <div class="empty-state">
+                    <p>Select a state directory to view trajectories</p>
+                </div>
+            </div>
+        </div>
+        <div class="main-content">
+            <div class="content-header hidden" id="content-header">
+                <h2 id="trajectory-title">Select a trajectory</h2>
+                <div id="trajectory-command" class="trajectory-command"></div>
+                <div class="content-header-meta" id="trajectory-meta"></div>
+            </div>
+            <div class="messages-container" id="messages-container">
+                <div class="empty-state">
+                    <h3>No trajectory selected</h3>
+                    <p>Select a trajectory from the sidebar to view its messages</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const el = (id) => document.getElementById(id);
+        const escapeHtml = (input) => String(input)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+
+        const state = {
+            stateToTrajectories: {},
+            selectedState: null,
+        };
+
+        const sanitizeHref = (href) => {
+            const raw = (href ?? '').toString().trim();
+            if (!raw) return '';
+            // Allow same-page anchors and relative URLs.
+            if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) {
+                return raw;
+            }
+            // Allow only safe absolute protocols.
+            try {
+                const url = new URL(raw, window.location.origin);
+                const proto = (url.protocol || '').toLowerCase();
+                if (proto === 'http:' || proto === 'https:' || proto === 'mailto:') {
+                    return url.toString();
+                }
+            } catch (_) {
+                // Fall through
+            }
+            return '#';
+        };
+
+        // We treat message content as Markdown, but we do NOT allow raw HTML inside the Markdown.
+        // This keeps rendering safe without extra sanitization libraries.
+        const renderer = new marked.Renderer();
+        renderer.html = function(html) {
+            return escapeHtml(html);
+        };
+        renderer.code = function(code, infostring) {
+            // marked's renderer API has had slight variations; handle both string and token forms.
+            let rawCode = code;
+            let rawInfo = infostring;
+            if (code && typeof code === 'object') {
+                rawCode = code.text ?? code.raw ?? '';
+                rawInfo = code.lang ?? '';
+            }
+            const lang = (rawInfo || '').trim().split(/\s+/)[0];
+            const classAttr = lang ? ` class="language-${escapeHtml(lang)}"` : '';
+            return `<pre><code${classAttr}>${escapeHtml(rawCode)}</code></pre>`;
+        };
+        renderer.codespan = function(text) {
+            return `<code>${escapeHtml(text)}</code>`;
+        };
+
+        marked.setOptions({
+            breaks: true,
+            gfm: true,
+            headerIds: false,
+            mangle: false,
+            renderer: renderer
+        });
+
+        // Sanitize link/image hrefs without needing custom renderer signatures.
+        marked.use({
+            walkTokens: (token) => {
+                if (!token || typeof token !== 'object') return;
+                if (token.type === 'link' || token.type === 'image') {
+                    token.href = sanitizeHref(token.href);
+                }
+            }
+        });
+
+        const formatTimestamp = (timestamp) => {
+            if (!timestamp) return 'Unknown';
+            return new Date(timestamp * 1000).toLocaleString();
+        };
+
+        const formatTime = (timestamp) => {
+            if (!timestamp) return 'Unknown';
+            return new Date(timestamp * 1000).toLocaleTimeString();
+        };
+
+        const formatMoney = (value, digits = 4) => {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            return `$${n.toFixed(digits)}`;
+        };
+
+        const formatTokenCap = (used, cap) => {
+            const u = Number(used);
+            const c = Number(cap);
+            if (!Number.isFinite(u)) return '—';
+            if (!Number.isFinite(c) || c <= 0) return u.toLocaleString();
+            return `${u.toLocaleString()}/${c.toLocaleString()}`;
+        };
+
+        const plural = (n, one, many) => (n === 1 ? one : many);
+
+        const prepareMarkdown = (raw) => {
+            if (raw === null || raw === undefined) return '';
+            if (typeof raw === 'string') return raw.replace(/\r\n/g, '\n');
+            // Structured payloads (tool outputs) render cleanly as fenced JSON.
+            return `\`\`\`json\n${JSON.stringify(raw, null, 2)}\n\`\`\``;
+        };
+
+        const setHeaderHidden = (hidden) => {
+            el('content-header').classList.toggle('hidden', Boolean(hidden));
+        };
+
+        // States are sorted by the server (descending by creation time)
+        const getStates = () => Object.keys(state.stateToTrajectories);
+        const getTrajectories = () => (
+            state.selectedState ? (state.stateToTrajectories[state.selectedState] || []) : []
+        );
+
+        const formatTrajectory = (traj) => {
+            const startTime = formatTime(traj.run_start_timestamp);
+            const endTime = formatTime(traj.run_end_timestamp);
+            const agentBudget = `${formatMoney(traj.agent_budget_used)} / ${formatMoney(traj.agent_max_budget, 2)}`;
+            const globalBudget = `${formatMoney(traj.global_budget_used)} / ${formatMoney(traj.global_max_budget, 2)}`;
+            const tokens = formatTokenCap(traj.tokens_used, traj.max_tokens);
+            return { startTime, endTime, agentBudget, globalBudget, tokens };
+        };
+
+        const renderEmptyMessages = () => {
+            el('messages-container').innerHTML =
+                '<div class="empty-state"><h3>No trajectory selected</h3><p>Select a trajectory from the sidebar to view its messages</p></div>';
+        };
+
+        const renderTrajectoryHeader = (traj) => {
+            setHeaderHidden(false);
+            el('trajectory-title').textContent = traj.name || 'Unnamed Trajectory';
+            el('trajectory-command').textContent = `Command: ${traj.command || 'Unknown'}`;
+
+            const { agentBudget, globalBudget } = formatTrajectory(traj);
+            el('trajectory-meta').innerHTML = `
+                <span>ID: ${escapeHtml(traj.id)}</span>
+                <span>Model: ${escapeHtml(traj.model)}</span>
+                <span>Steps: ${escapeHtml(traj.step_count)}/${escapeHtml(traj.max_steps)}</span>
+                <span>Tokens Used: ${escapeHtml(formatTokenCap(traj.tokens_used, traj.max_tokens))}</span>
+                <span>Agent Budget: ${escapeHtml(agentBudget)}</span>
+                <span>Global Budget: ${escapeHtml(globalBudget)}</span>
+                <span>Start: ${escapeHtml(formatTimestamp(traj.run_start_timestamp))}</span>
+                <span>End: ${escapeHtml(formatTimestamp(traj.run_end_timestamp))}</span>
+            `;
+        };
+
+        const renderActiveItem = (selector, index) => {
+            document.querySelectorAll(selector).forEach((item, i) => {
+                item.classList.toggle('active', i === index);
+            });
+        };
+
+        async function loadTrajectories() {
+            try {
+                const response = await fetch('/api/trajectories');
+                if (!response.ok) {
+                    throw new Error('Failed to load trajectories');
+                }
+                state.stateToTrajectories = await response.json();
+                renderStateList();
+            } catch (error) {
+                console.error('Error loading trajectories:', error);
+                el('state-list').innerHTML =
+                    '<div class="empty-state"><p>Error loading states</p></div>';
+            }
+        }
+
+        function renderStateList() {
+            const stateListContainer = el('state-list');
+            const states = getStates();
+            
+            if (states.length === 0) {
+                stateListContainer.innerHTML = '<div class="empty-state"><p>No state directories found</p></div>';
+                return;
+            }
+
+            stateListContainer.innerHTML = states.map((stateName) => {
+                const trajectoryCount = state.stateToTrajectories[stateName].length;
+                return `
+                    <div class="state-item" data-state="${escapeHtml(stateName)}" role="button" tabindex="0">
+                        <div class="state-item-name">${escapeHtml(stateName)}</div>
+                        <div class="item-subtext">${trajectoryCount} ${plural(trajectoryCount, 'trajectory', 'trajectories')}</div>
+                    </div>
+                `;
+            }).join('');
+
+            // Select first state by default
+            if (states.length > 0) {
+                selectState(states[0]);
+            }
+        }
+
+        function selectState(stateName) {
+            state.selectedState = stateName;
+            
+            // Update active state
+            document.querySelectorAll('.state-item').forEach((item) => {
+                if (item.getAttribute('data-state') === stateName) {
+                    item.classList.add('active');
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+
+            // Render trajectories for this state
+            renderTrajectoryList();
+        }
+
+        function renderTrajectoryList() {
+            const listContainer = el('trajectory-list');
+            const countElement = el('trajectory-count');
+            const trajectories = getTrajectories();
+            
+            if (!state.selectedState) {
+                countElement.textContent = 'Select a state directory';
+                listContainer.innerHTML = '<div class="empty-state"><p>Select a state directory to view trajectories</p></div>';
+                return;
+            }
+
+            countElement.textContent = `${trajectories.length} ${plural(trajectories.length, 'trajectory', 'trajectories')} in ${state.selectedState}`;
+
+            if (trajectories.length === 0) {
+                listContainer.innerHTML = '<div class="empty-state"><p>No trajectories found in this state directory</p></div>';
+                setHeaderHidden(true);
+                renderEmptyMessages();
+                return;
+            }
+
+            listContainer.innerHTML = trajectories.map((traj, index) => {
+                const { startTime, endTime, agentBudget, globalBudget, tokens } = formatTrajectory(traj);
+                return `
+                    <div class="trajectory-item" data-index="${index}" role="button" tabindex="0">
+                        <div class="trajectory-item-name">${escapeHtml(traj.name || 'Unnamed')}</div>
+                        <div class="trajectory-item-command">Command: ${escapeHtml(traj.command || 'Unknown')}</div>
+                        <div class="trajectory-item-meta">
+                            <span>ID: ${escapeHtml(traj.id)}</span>
+                            <span>Model: ${escapeHtml(traj.model)}</span>
+                            <span>Steps: ${escapeHtml(traj.step_count)}/${escapeHtml(traj.max_steps)}</span>
+                            <span>${escapeHtml(startTime)} → ${escapeHtml(endTime)}</span>
+                            <span>Agent Budget: ${escapeHtml(agentBudget)}</span>
+                            <span>Global Budget: ${escapeHtml(globalBudget)}</span>
+                            <span>Tokens Used: ${escapeHtml(tokens)}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Select first trajectory by default
+            if (trajectories.length > 0) {
+                selectTrajectory(0);
+            }
+        }
+
+        function selectTrajectory(index) {
+            const trajectories = getTrajectories();
+            const selectedTrajectory = trajectories[index];
+            if (!selectedTrajectory) return;
+            
+            renderActiveItem('.trajectory-item', index);
+            renderTrajectoryHeader(selectedTrajectory);
+
+            // Render messages
+            renderMessages(selectedTrajectory.trajectory);
+        }
+
+        function renderMessages(trajectory) {
+            const container = el('messages-container');
+            
+            if (!trajectory || trajectory.length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>No messages in this trajectory</p></div>';
+                return;
+            }
+
+            // Render markdown content
+            container.innerHTML = trajectory.map((message) => {
+                const role = message.role || 'unknown';
+                const markdown = prepareMarkdown(message.content);
+                const renderedContent = marked.parse(markdown || '');
+                
+                return `
+                    <div class="message">
+                        <div class="message-header">
+                            <span class="message-role ${role}">${role}</span>
+                        </div>
+                        <div class="message-content">${renderedContent}</div>
+                    </div>
+                `;
+            }).join('');
+
+            const highlightPythonCallLike = (codeEl) => {
+                if (!codeEl || codeEl.dataset.pyHighlighted === '1') return false;
+                const raw = (codeEl.textContent ?? '');
+                // Focus on "function_call(...)" style snippets commonly produced by KISS tool-calls.
+                const callMatch = raw.match(/^\s*([A-Za-z_]\w*)(?=\s*\()/);
+                if (!callMatch) return false;
+
+                // Only apply this to python (or unlabeled) blocks; avoid corrupting other languages.
+                const cls = (codeEl.getAttribute('class') || '').toLowerCase();
+                const isPython = cls.includes('language-python') || cls.includes('lang-python') || cls.includes('python');
+                if (!isPython && cls.trim() && cls.includes('language-')) return false;
+
+                const tokenRe = /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|\b\d+(?:\.\d+)?\b|\b(?:True|False|None)\b/g;
+
+                const renderWithValueHighlights = (text) => {
+                    let out = '';
+                    let last = 0;
+                    for (const match of text.matchAll(tokenRe)) {
+                        const idx = match.index ?? 0;
+                        out += escapeHtml(text.slice(last, idx));
+                        const tok = match[0];
+                        if (tok && (tok.startsWith("'") || tok.startsWith('"'))) {
+                            // Display strings with double quotes to avoid confusing &#39; rendering.
+                            const inner = tok.slice(1, -1);
+                            const display = `"${inner}"`;
+                            out += `<span class="py-val">${escapeHtml(display)}</span>`;
+                        } else {
+                            out += `<span class="py-val">${escapeHtml(tok)}</span>`;
+                        }
+                        last = idx + tok.length;
+                    }
+                    out += escapeHtml(text.slice(last));
+                    return out;
+                };
+
+                // Highlight leading function name separately, then highlight value-like tokens in the remainder.
+                const fnMatch = raw.match(/^(\s*)([A-Za-z_]\w*)([\s\S]*)$/);
+                if (!fnMatch) return false;
+                const leadingWs = fnMatch[1] || '';
+                const fn = fnMatch[2] || '';
+                const rest = fnMatch[3] || '';
+                const html = `${escapeHtml(leadingWs)}<span class="py-fn">${escapeHtml(fn)}</span>${renderWithValueHighlights(rest)}`;
+
+                codeEl.innerHTML = html;
+                codeEl.dataset.pyHighlighted = '1';
+                return true;
+            };
+
+            // Syntax highlight fenced code blocks (e.g., ```python).
+            // We apply a lightweight "call-like" Python highlighter first for tool-call snippets,
+            // then fall back to highlight.js for everything else.
+            container.querySelectorAll('pre code').forEach((codeEl) => {
+                const didPy = highlightPythonCallLike(codeEl);
+                if (didPy) return;
+                try { hljs.highlightElement(codeEl); } catch (_) { /* ignore */ }
+            });
+        }
+
+        // Click handling (no inline onclick attributes)
+        el('state-list').addEventListener('click', (e) => {
+            const item = e.target.closest('.state-item');
+            const stateName = item?.getAttribute('data-state');
+            if (stateName) selectState(stateName);
+        });
+        el('trajectory-list').addEventListener('click', (e) => {
+            const item = e.target.closest('.trajectory-item');
+            const indexStr = item?.getAttribute('data-index');
+            const index = indexStr ? Number(indexStr) : NaN;
+            if (Number.isFinite(index)) selectTrajectory(index);
+        });
+
+        // Load trajectories on page load
+        loadTrajectories();
+    </script>
+</body>
+</html>
+
