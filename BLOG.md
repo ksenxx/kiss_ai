@@ -401,6 +401,9 @@ Open your browser and you get:
 
 It transforms agent debugging from archaeology into insight.
 
+![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/o8lp80b1awsz6q55bsbj.png)
+
+
 ---
 
 ## 🔍 RAG Made Simple

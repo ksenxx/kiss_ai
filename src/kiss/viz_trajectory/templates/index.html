@@ -82,13 +82,12 @@
 
         .state-item-name, .trajectory-item-name { font-weight: 650; font-size: 13px; }
         .item-subtext { font-size: 11px; color: var(--muted); margin-top: 4px; }
-        .trajectory-item-command { font-size: 11px; color: var(--accent-3); margin: 4px 0; }
+        .state-item-command { font-size: 10px; color: var(--accent-3); margin-top: 4px; word-break: break-all; }
         .trajectory-item-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
 
         .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
         .messages-container { flex: 1; overflow: auto; padding: 18px; }
 
-        .trajectory-command { color: var(--accent-3); font-size: 12px; margin: 6px 0 10px 0; }
         .content-header h2 { margin: 0; font-size: 18px; }
         .content-header-meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
 
@@ -202,7 +201,6 @@
         <div class="main-content">
             <div class="content-header hidden" id="content-header">
                 <h2 id="trajectory-title">Select a trajectory</h2>
-                <div id="trajectory-command" class="trajectory-command"></div>
                 <div class="content-header-meta" id="trajectory-meta"></div>
             </div>
             <div class="messages-container" id="messages-container">
@@ -348,7 +346,6 @@
         const renderTrajectoryHeader = (traj) => {
             setHeaderHidden(false);
             el('trajectory-title').textContent = traj.name || 'Unnamed Trajectory';
-            el('trajectory-command').textContent = `Command: ${traj.command || 'Unknown'}`;
 
             const { agentBudget, globalBudget } = formatTrajectory(traj);
             el('trajectory-meta').innerHTML = `
@@ -394,11 +391,15 @@
             }
 
             stateListContainer.innerHTML = states.map((stateName) => {
-                const trajectoryCount = state.stateToTrajectories[stateName].length;
+                const trajectories = state.stateToTrajectories[stateName];
+                const trajectoryCount = trajectories.length;
+                // Get the command from the first trajectory in this state (they typically share the same command)
+                const command = trajectories.length > 0 ? (trajectories[0].command || 'Unknown') : 'Unknown';
                 return `
                     <div class="state-item" data-state="${escapeHtml(stateName)}" role="button" tabindex="0">
                         <div class="state-item-name">${escapeHtml(stateName)}</div>
                         <div class="item-subtext">${trajectoryCount} ${plural(trajectoryCount, 'trajectory', 'trajectories')}</div>
+                        <div class="state-item-command">${escapeHtml(command)}</div>
                     </div>
                 `;
             }).join('');
@@ -450,7 +451,6 @@
                 return `
                     <div class="trajectory-item" data-index="${index}" role="button" tabindex="0">
                         <div class="trajectory-item-name">${escapeHtml(traj.name || 'Unnamed')}</div>
-                        <div class="trajectory-item-command">Command: ${escapeHtml(traj.command || 'Unknown')}</div>
                         <div class="trajectory-item-meta">
                             <span>ID: ${escapeHtml(traj.id)}</span>
                             <span>Model: ${escapeHtml(traj.model)}</span>
