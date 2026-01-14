@@ -134,7 +134,7 @@ class KISSAgent:
                 has_search = any(
                     getattr(tool, "__name__", None) == "search_web" for tool in tools
                 )
-                if DEFAULT_CONFIG.agent.use_google_search and not has_search:
+                if DEFAULT_CONFIG.agent.use_web_search and not has_search:
                     tools.append(search_web)
                 self._add_functions(tools)
             self._set_prompt(prompt_template, arguments)

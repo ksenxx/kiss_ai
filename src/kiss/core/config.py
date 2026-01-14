@@ -46,7 +46,7 @@ class AgentConfig(BaseModel):
     global_max_budget: float = Field(
         default=10.0, description="Maximum budget for the global agent"
     )
-    use_google_search: bool = Field(default=True, description="Use Google search")
+    use_web_search: bool = Field(default=True, description="Use web search")
 
 
 class DockerConfig(BaseModel):
