@@ -269,7 +269,7 @@ print(f"Budget used: ${agent.budget_used:.4f}")
 
 > 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
-GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains a Pareto frontier of top-performing prompts and combines complementary lessons through evolutionary search. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
+GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
 
 For usage examples, API reference, and configuration options, please see the [GEPA README](src/kiss/agents/gepa/README.md).
 
@@ -618,8 +618,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `population_size`: Number of candidates to maintain in population (default: 8)
   - `pareto_size`: Maximum size of Pareto frontier (default: 4)
   - `mutation_rate`: Probability of mutating a prompt template (default: 0.5)
-  - `crossover_probability`: Probability of combining with lessons from Pareto frontier (default: 0.3)
-  - `rollouts_per_generation`: Number of rollouts per generation (default: 1)
 - **AlgoTune Settings**: Modify `DEFAULT_CONFIG.algotune` in `src/kiss/agents/kiss_evolve/algotune/config.py`:
   - `task`: Specific task name to solve (default: "svm")
   - `all_tasks`: Solve all tasks in AlgoTuneTasks directory (default: False)

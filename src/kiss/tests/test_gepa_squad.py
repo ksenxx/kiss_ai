@@ -63,17 +63,16 @@ class TestGEPAHuggingFace(unittest.TestCase):
     """Test GEPA algorithm on HuggingFace datasets."""
 
     def test_gepa_on_squad_dataset(self):
-        """Test GEPA on a small sample from SQuAD dataset."""
+        """Test GEPA on a small sample from SQuAD dataset.
+
+        This test uses the new GEPA API with proper dev/val split:
+        - Training examples are split into dev (feedback) and val (selection) sets
+        - Candidates are evaluated on dev minibatches for trajectory feedback
+        - Selection is based on val set scores
+        """
         # Load a small sample from SQuAD dataset
         print("Loading SQuAD dataset...")
-        dataset = load_dataset("squad", split="validation[:5]")  # Just 5 examples for testing
-
-        # Create evaluation function that works with dataset examples
-        def create_evaluation_fn(example):
-            def evaluation_fn(result: str) -> dict[str, float]:
-                return evaluate_qa_result(result, example["answers"]["text"][0])
-
-            return evaluation_fn
+        dataset = load_dataset("squad", split="validation[:6]")  # 6 examples for dev/val split
 
         # Initial prompt template for question answering
         prompt_template = """You are a helpful assistant that answers questions
@@ -94,61 +93,83 @@ as the 'result' argument.
 
 """
 
-        # Get first example for testing
-        example = dataset[0]
-        context = example["context"]
-        question = example["question"]
-        expected_answer = example["answers"]["text"][0]
+        # Build train_examples list with expected answers embedded
+        train_examples: list[dict[str, str]] = []
+        for example in dataset:
+            train_examples.append({
+                "context": example["context"],
+                "question": example["question"],
+                "_expected_answer": example["answers"]["text"][0],
+            })
 
-        print(f"\nTesting with question: {question}")
-        print(f"Expected answer: {expected_answer}")
+        print(f"\nLoaded {len(train_examples)} examples for optimization")
+        for i, ex in enumerate(train_examples[:3]):
+            print(f"  [{i}] Q: {ex['question'][:50]}... -> A: {ex['_expected_answer']}")
+
+        # Agent counter for unique names
+        agent_counter = [0]
 
         def agent_wrapper(
             prompt_template: str, arguments: dict[str, str]
-        ) -> tuple[str, list[dict[str, str]]]:
-            agent = KISSAgent("SQuAD QA Agent")
+        ) -> tuple[str, list]:
+            """Agent wrapper that handles expected answer embedding."""
+            expected_answer = arguments.get("_expected_answer", "")
+            agent_args = {
+                "context": arguments["context"],
+                "question": arguments["question"],
+            }
+
+            agent_counter[0] += 1
+            agent = KISSAgent(f"SQuAD QA Agent {agent_counter[0]}")
             result = agent.run(
-                model_name="gpt-4o-mini",
+                model_name="gpt-4o",
                 prompt_template=prompt_template,
-                arguments=arguments,
+                arguments=agent_args,
                 tools=[utils.finish],
             )
-            import json
 
-            trajectory_json = agent.get_trajectory()
-            trajectory_list = json.loads(trajectory_json)
-            return result, trajectory_list
+            result_with_expected = f"EXPECTED:{expected_answer}\nRESULT:{result}"
+            return result_with_expected, []
 
-        # Create GEPA optimizer with limited generations for testing
+        def evaluation_fn(result: str) -> dict[str, float]:
+            """Evaluation function that extracts expected answer from result."""
+            try:
+                if result.startswith("EXPECTED:"):
+                    parts = result.split("\nRESULT:", 1)
+                    expected = parts[0].replace("EXPECTED:", "").strip()
+                    actual_result = parts[1] if len(parts) > 1 else ""
+                    return evaluate_qa_result(actual_result, expected)
+            except Exception:
+                pass
+            return {"success": 0.0, "answer_match": 0.0}
+
+        # Create GEPA optimizer with dev/val split
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=prompt_template,
-            evaluation_fn=create_evaluation_fn(example),
+            evaluation_fn=evaluation_fn,
             max_generations=2,
-            population_size=3,
+            population_size=2,
             pareto_size=2,
             mutation_rate=0.5,
+            dev_val_split=0.5,  # 50% dev, 50% val
         )
 
-        # Run optimization
-        print("\nRunning GEPA optimization...")
-        arguments = {
-            "context": context,
-            "question": question,
-        }
-
+        # Run optimization with dev/val split
+        print("\nRunning GEPA optimization with dev/val split...")
         best_candidate = gepa.optimize(
-            arguments=arguments,
-            rollouts_per_generation=1,
+            train_examples=train_examples,
+            dev_minibatch_size=2,  # Use 2 dev examples per evaluation
         )
 
         # Check results
-        print(f"\nBest prompt scores: {best_candidate.scores}")
+        print(f"\nBest prompt val_scores: {best_candidate.val_scores}")
+        print(f"Best prompt dev_scores: {best_candidate.dev_scores}")
         print(f"\nBest prompt (first 500 chars):\n{best_candidate.prompt_template[:500]}...")
 
         # Verify that optimization ran
         self.assertIsNotNone(best_candidate)
-        self.assertIsNotNone(best_candidate.scores)
+        self.assertIsNotNone(best_candidate.val_scores)
         self.assertGreater(len(best_candidate.prompt_template), 0)
 
         # Check Pareto frontier
@@ -157,7 +178,7 @@ as the 'result' argument.
 
         print(f"\nPareto frontier size: {len(pareto_frontier)}")
         for i, candidate in enumerate(pareto_frontier):
-            print(f"  Candidate {i}: scores={candidate.scores}")
+            print(f"  Candidate {i}: val_scores={candidate.val_scores}")
 
 
 if __name__ == "__main__":

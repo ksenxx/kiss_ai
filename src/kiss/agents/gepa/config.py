@@ -28,11 +28,6 @@ class GEPAConfig(BaseModel):
         default=0.5,
         description="Probability of mutating a prompt template in each generation",
     )
-    crossover_probability: float = Field(
-        default=0.3,
-        description="Probability of combining with lessons from Pareto frontier using crossover",
-    )
-    rollouts_per_generation: int = Field(default=1, description="Number of rollouts per generation")
 
 
 add_config("gepa", GEPAConfig)
