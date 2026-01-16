@@ -65,7 +65,7 @@ The framework centers around the `KISSAgent` class, which implements a ReAct age
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone/download KISS and navigate to the directory
-cd kiss
+cd kiss_ai
 
 # Create virtual environment
 uv venv --python 3.13
