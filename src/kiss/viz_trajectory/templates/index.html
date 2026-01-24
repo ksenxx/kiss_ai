@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Trajectory Visualizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
+    <style>
+        :root {
+            --bg: #0b0d10;
+            --panel: #11151b;
+            --panel-2: #0f1318;
+            --border: #232a34;
+            --text: #e7edf5;
+            --muted: #9aa7b5;
+            --accent: #7ab8e0;
+            --accent-2: #b87ae0;
+            --accent-3: #7ae0b8;
+            --code-bg: #0a0f16;
+            --code-border: #233246;
+        }
+
+        * { box-sizing: border-box; }
+        html, body { height: 100%; margin: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            overflow: hidden;
+        }
+
+        .hidden { display: none !important; }
+        .container { display: flex; height: 100vh; }
+
+        /* Sidebars */
+        .jobs-sidebar, .trajectories-sidebar {
+            background: var(--panel);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+        .jobs-sidebar { width: 220px; }
+        .trajectories-sidebar { width: 360px; }
+
+        .sidebar-header {
+            padding: 16px 18px;
+            background: var(--panel-2);
+            border-bottom: 1px solid var(--border);
+        }
+        .sidebar-header h2 {
+            margin: 0;
+            font-size: 12px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+        .sidebar-header p { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+
+        .sidebar-list { padding: 10px; overflow: auto; flex: 1; }
+
+        /* List items */
+        .list-item {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            overflow: hidden;
+        }
+        .list-item:hover { border-color: rgba(122,184,224,0.55); }
+        .list-item.active {
+            border-color: rgba(122,184,224,0.85);
+            box-shadow: 0 0 0 1px rgba(122,184,224,0.2) inset;
+        }
+        .list-item-title { font-weight: 600; font-size: 13px; word-break: break-word; }
+        .list-item-subtitle { font-size: 11px; color: var(--muted); margin-top: 4px; }
+        .list-item-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+        /* Main content */
+        .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+        .content-header {
+            padding: 16px 18px;
+            background: var(--panel-2);
+            border-bottom: 1px solid var(--border);
+        }
+        .content-header h2 { margin: 0; font-size: 18px; }
+        .content-header-command {
+            color: var(--accent-3);
+            font-size: 12px;
+            margin-top: 6px;
+            word-break: break-all;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        .content-header-meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+        .messages-container { flex: 1; overflow: auto; padding: 18px; }
+
+        /* Messages */
+        .message { margin-bottom: 14px; }
+        .message-role {
+            display: inline-block;
+            padding: 4px 10px;
+            margin-bottom: 6px;
+            border-radius: 999px;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            background: rgba(255,255,255,0.02);
+        }
+        .message-role.user { color: var(--accent); border-color: rgba(122,184,224,0.35); }
+        .message-role.model { color: var(--accent-2); border-color: rgba(184,122,224,0.35); }
+        .message-role.tool { color: var(--accent-3); border-color: rgba(122,224,184,0.35); }
+        .message-role.system { color: #e0b87a; border-color: rgba(224,184,122,0.35); }
+
+        .message-content {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            line-height: 1.55;
+        }
+
+        /* Markdown styles */
+        .message-content h1, .message-content h2, .message-content h3 { margin: 16px 0 8px; }
+        .message-content h1 { font-size: 20px; color: var(--accent); }
+        .message-content h2 { font-size: 17px; color: var(--accent-2); }
+        .message-content h3 { font-size: 15px; color: #e0b87a; }
+        .message-content p { margin: 0 0 10px; }
+        .message-content a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(122,184,224,0.5); }
+        .message-content a:hover { border-bottom-color: rgba(122,184,224,0.9); }
+        .message-content code {
+            background: var(--code-bg);
+            border: 1px solid var(--code-border);
+            padding: 1px 6px;
+            border-radius: 6px;
+            color: #9ad8f0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.92em;
+        }
+        .message-content pre {
+            background: var(--code-bg);
+            border: 1px solid var(--code-border);
+            padding: 12px;
+            border-radius: 10px;
+            overflow: auto;
+            margin: 10px 0;
+        }
+        .message-content pre code {
+            border: none;
+            padding: 0;
+            background: transparent;
+            font-size: 13px;
+            color: #d7e6f5;
+        }
+        .message-content blockquote {
+            margin: 10px 0;
+            padding: 10px 12px;
+            border-left: 3px solid rgba(122,224,184,0.8);
+            background: rgba(122,224,184,0.05);
+            border-radius: 8px;
+            color: #bfe7db;
+        }
+        .message-content ul, .message-content ol { margin: 0 0 10px 22px; }
+        .message-content table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+        .message-content th, .message-content td { border: 1px solid var(--border); padding: 8px; }
+        .message-content th { background: rgba(122,184,224,0.08); color: var(--accent); text-align: left; }
+
+        .empty-state, .loading { padding: 30px 18px; color: var(--muted); text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="jobs-sidebar">
+            <div class="sidebar-header"><h2>Jobs</h2></div>
+            <div class="sidebar-list" id="jobs-list">
+                <div class="loading">Loading jobs...</div>
+            </div>
+        </div>
+        <div class="trajectories-sidebar">
+            <div class="sidebar-header">
+                <h2>Trajectories</h2>
+                <p id="trajectory-count">Select a job</p>
+            </div>
+            <div class="sidebar-list" id="trajectories-list">
+                <div class="empty-state">Select a job to view trajectories</div>
+            </div>
+        </div>
+        <div class="main-content">
+            <div class="content-header hidden" id="content-header">
+                <h2 id="trajectory-title"></h2>
+                <div class="content-header-command" id="trajectory-command"></div>
+                <div class="content-header-meta" id="trajectory-meta"></div>
+            </div>
+            <div class="messages-container" id="messages-container">
+                <div class="empty-state">
+                    <h3>No trajectory selected</h3>
+                    <p>Select a trajectory from the sidebar to view its messages</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        const state = { jobs: [], selectedJob: null, trajectories: [] };
+
+        // Utilities
+        const $ = id => document.getElementById(id);
+        const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const plural = (n, one, many) => n === 1 ? one : many;
+        const formatTime = ts => ts ? new Date(ts * 1000).toLocaleTimeString() : '—';
+        const formatTimestamp = ts => ts ? new Date(ts * 1000).toLocaleString() : '—';
+        const formatMoney = (v, d = 4) => Number.isFinite(Number(v)) ? `$${Number(v).toFixed(d)}` : '—';
+
+        // Markdown setup
+        const renderer = new marked.Renderer();
+        renderer.html = html => escapeHtml(html);
+        renderer.code = (code, lang) => {
+            const text = typeof code === 'object' ? (code.text ?? code.raw ?? '') : code;
+            const language = typeof code === 'object' ? (code.lang ?? '') : (lang ?? '');
+            const cls = language ? ` class="language-${escapeHtml(language)}"` : '';
+            return `<pre><code${cls}>${escapeHtml(text)}</code></pre>`;
+        };
+        marked.setOptions({ breaks: true, gfm: true, headerIds: false, renderer });
+
+        // Sanitize links
+        marked.use({
+            walkTokens: token => {
+                if (token?.type === 'link' || token?.type === 'image') {
+                    const href = (token.href ?? '').trim();
+                    if (href.startsWith('#') || href.startsWith('/') || href.startsWith('./')) return;
+                    try {
+                        const url = new URL(href, location.origin);
+                        if (['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+                            token.href = url.toString();
+                            return;
+                        }
+                    } catch {}
+                    token.href = '#';
+                }
+            }
+        });
+
+        // API
+        async function fetchJSON(url) {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+        }
+
+        // Render functions
+        function renderJobsList() {
+            const container = $('jobs-list');
+            if (!state.jobs.length) {
+                container.innerHTML = '<div class="empty-state">No jobs found</div>';
+                return;
+            }
+            container.innerHTML = state.jobs.map(job => `
+                <div class="list-item" data-job="${escapeHtml(job.name)}">
+                    <div class="list-item-title">${escapeHtml(job.name)}</div>
+                    <div class="list-item-subtitle">${job.trajectory_count} ${plural(job.trajectory_count, 'trajectory', 'trajectories')}</div>
+                </div>
+            `).join('');
+
+            if (state.jobs.length) selectJob(state.jobs[0].name);
+        }
+
+        function renderTrajectoriesList() {
+            const container = $('trajectories-list');
+            const count = $('trajectory-count');
+            const trajs = state.trajectories;
+
+            count.textContent = state.selectedJob
+                ? `${trajs.length} ${plural(trajs.length, 'trajectory', 'trajectories')}`
+                : 'Select a job';
+
+            if (!trajs.length) {
+                container.innerHTML = '<div class="empty-state">No trajectories found</div>';
+                $('content-header').classList.add('hidden');
+                $('messages-container').innerHTML = '<div class="empty-state">No trajectory selected</div>';
+                return;
+            }
+
+            container.innerHTML = trajs.map((t, i) => `
+                <div class="list-item" data-index="${i}">
+                    <div class="list-item-title">${escapeHtml(t.name || 'Unnamed')}</div>
+                    <div class="list-item-meta">
+                        <span>ID: ${escapeHtml(t.id)}</span>
+                        <span>${escapeHtml(t.model)}</span>
+                        <span>Steps: ${t.step_count}/${t.max_steps}</span>
+                        <span>${formatTime(t.run_start_timestamp)} → ${formatTime(t.run_end_timestamp)}</span>
+                    </div>
+                </div>
+            `).join('');
+
+            selectTrajectory(0);
+        }
+
+        function renderMessages(messages) {
+            const container = $('messages-container');
+            if (!messages?.length) {
+                container.innerHTML = '<div class="empty-state">No messages</div>';
+                return;
+            }
+
+            container.innerHTML = messages.map(m => {
+                const content = typeof m.content === 'string'
+                    ? m.content.replace(/\r\n/g, '\n')
+                    : '```json\n' + JSON.stringify(m.content, null, 2) + '\n```';
+                return `
+                    <div class="message">
+                        <span class="message-role ${m.role || ''}">${m.role || 'unknown'}</span>
+                        <div class="message-content">${marked.parse(content)}</div>
+                    </div>
+                `;
+            }).join('');
+
+            container.querySelectorAll('pre code').forEach(el => {
+                try { hljs.highlightElement(el); } catch {}
+            });
+        }
+
+        // Selection handlers
+        async function selectJob(name) {
+            state.selectedJob = name;
+            state.trajectories = [];
+
+            // Update active state in jobs list
+            $('jobs-list').querySelectorAll('.list-item').forEach(el => {
+                el.classList.toggle('active', el.dataset.job === name);
+            });
+
+            $('trajectories-list').innerHTML = '<div class="loading">Loading...</div>';
+            $('content-header').classList.add('hidden');
+            $('messages-container').innerHTML = '';
+
+            try {
+                state.trajectories = await fetchJSON(`/api/jobs/${encodeURIComponent(name)}/trajectories`);
+                renderTrajectoriesList();
+            } catch (e) {
+                console.error(e);
+                $('trajectories-list').innerHTML = '<div class="empty-state">Error loading trajectories</div>';
+            }
+        }
+
+        function selectTrajectory(index) {
+            const traj = state.trajectories[index];
+            if (!traj) return;
+
+            // Update active state in trajectories list
+            $('trajectories-list').querySelectorAll('.list-item').forEach((el, i) => {
+                el.classList.toggle('active', i === index);
+            });
+
+            // Update header
+            $('content-header').classList.remove('hidden');
+            $('trajectory-title').textContent = traj.name || 'Unnamed';
+            $('trajectory-command').textContent = traj.command || '';
+            const formatTokens = (used, max) => max > 0 ? `${used.toLocaleString()}/${max.toLocaleString()}` : used.toLocaleString();
+            $('trajectory-meta').innerHTML = `
+                <span>ID: ${escapeHtml(traj.id)}</span>
+                <span>Model: ${escapeHtml(traj.model)}</span>
+                <span>Steps: ${traj.step_count}/${traj.max_steps}</span>
+                <span>Tokens: ${formatTokens(traj.tokens_used || 0, traj.max_tokens || 0)}</span>
+                <span>Agent Budget: ${formatMoney(traj.agent_budget_used)} / ${formatMoney(traj.agent_max_budget, 2)}</span>
+                <span>Global Budget: ${formatMoney(traj.global_budget_used)} / ${formatMoney(traj.global_max_budget, 2)}</span>
+                <span>Start: ${formatTimestamp(traj.run_start_timestamp)}</span>
+                <span>End: ${formatTimestamp(traj.run_end_timestamp)}</span>
+            `;
+
+            renderMessages(traj.messages);
+        }
+
+        // Event handlers
+        $('jobs-list').addEventListener('click', e => {
+            const item = e.target.closest('.list-item');
+            if (item?.dataset.job) selectJob(item.dataset.job);
+        });
+
+        $('trajectories-list').addEventListener('click', e => {
+            const item = e.target.closest('.list-item');
+            if (item?.dataset.index != null) selectTrajectory(Number(item.dataset.index));
+        });
+
+        // Initialize
+        (async () => {
+            try {
+                state.jobs = await fetchJSON('/api/jobs');
+                renderJobsList();
+            } catch (e) {
+                console.error(e);
+                $('jobs-list').innerHTML = '<div class="empty-state">Error loading jobs</div>';
+            }
+        })();
+    </script>
+</body>
+</html>
