@@ -10,6 +10,7 @@
 - [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
 - [KISSEvolve](#kissevolve) - Evolutionary algorithm discovery
 - [Utility Functions](#utility-functions) - Helper functions
+- [Formatter](#formatter) - Abstract formatter interface
 - [SimpleFormatter](#simpleformatter) - Terminal output formatting
 - [Pre-built Agents](#pre-built-agents) - Ready-to-use agents
 
@@ -872,22 +873,17 @@ Perform a web search and return the top search results with page contents.
 
 ---
 
-## SimpleFormatter
+## Formatter
 
-Simple formatter implementation using Rich for terminal output. Implements the `Formatter` interface.
+Abstract base class defining the interface for message formatting and printing. Custom formatters should inherit from this class.
 
-### Constructor
-
-```python
-SimpleFormatter()
-```
-
-### Methods
+### Methods (Abstract)
 
 #### `format_message()`
 
 ```python
-def format_message(self, message: dict[str, str]) -> str
+@abstractmethod
+def format_message(self, message: dict[str, Any]) -> str
 ```
 
 Format a single message as a string.
@@ -901,7 +897,8 @@ Format a single message as a string.
 #### `format_messages()`
 
 ```python
-def format_messages(self, messages: list[dict[str, str]]) -> str
+@abstractmethod
+def format_messages(self, messages: list[dict[str, Any]]) -> str
 ```
 
 Format a list of messages as a string.
@@ -915,10 +912,11 @@ Format a list of messages as a string.
 #### `print_message()`
 
 ```python
-def print_message(self, message: dict[str, str]) -> None
+@abstractmethod
+def print_message(self, message: dict[str, Any]) -> None
 ```
 
-Print a single message to the console with Rich formatting.
+Print a single message.
 
 **Parameters:**
 - `message` (dict): Message dictionary with 'role' and 'content' keys.
@@ -926,10 +924,111 @@ Print a single message to the console with Rich formatting.
 #### `print_messages()`
 
 ```python
-def print_messages(self, messages: list[dict[str, str]]) -> None
+@abstractmethod
+def print_messages(self, messages: list[dict[str, Any]]) -> None
 ```
 
-Print a list of messages to the console.
+Print a list of messages.
+
+**Parameters:**
+- `messages` (list[dict]): List of message dictionaries.
+
+#### `print_status()`
+
+```python
+@abstractmethod
+def print_status(self, message: str) -> None
+```
+
+Print a status message.
+
+**Parameters:**
+- `message` (str): The status message to print.
+
+#### `print_error()`
+
+```python
+@abstractmethod
+def print_error(self, message: str) -> None
+```
+
+Print an error message.
+
+**Parameters:**
+- `message` (str): The error message to print.
+
+#### `print_warning()`
+
+```python
+@abstractmethod
+def print_warning(self, message: str) -> None
+```
+
+Print a warning message.
+
+**Parameters:**
+- `message` (str): The warning message to print.
+
+---
+
+## SimpleFormatter
+
+Simple formatter implementation using Rich for terminal output. Implements the `Formatter` interface. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting - when verbose is False, no output is produced.
+
+### Constructor
+
+```python
+SimpleFormatter()
+```
+
+### Methods
+
+#### `format_message()`
+
+```python
+def format_message(self, message: dict[str, Any]) -> str
+```
+
+Format a single message as a string. Returns empty string if verbose mode is disabled.
+
+**Parameters:**
+- `message` (dict): Message dictionary with 'role' and 'content' keys.
+
+**Returns:**
+- `str`: Formatted message string, or empty string if verbose is False.
+
+#### `format_messages()`
+
+```python
+def format_messages(self, messages: list[dict[str, Any]]) -> str
+```
+
+Format a list of messages as a string. Returns empty string if verbose mode is disabled.
+
+**Parameters:**
+- `messages` (list[dict]): List of message dictionaries.
+
+**Returns:**
+- `str`: Formatted messages string, or empty string if verbose is False.
+
+#### `print_message()`
+
+```python
+def print_message(self, message: dict[str, Any]) -> None
+```
+
+Print a single message to the console with Rich formatting. No output if verbose mode is disabled.
+
+**Parameters:**
+- `message` (dict): Message dictionary with 'role' and 'content' keys.
+
+#### `print_messages()`
+
+```python
+def print_messages(self, messages: list[dict[str, Any]]) -> None
+```
+
+Print a list of messages to the console. No output if verbose mode is disabled.
 
 **Parameters:**
 - `messages` (list[dict]): List of message dictionaries.
@@ -940,7 +1039,7 @@ Print a list of messages to the console.
 def print_status(self, message: str) -> None
 ```
 
-Print a status message in green.
+Print a status message in green. No output if verbose mode is disabled.
 
 **Parameters:**
 - `message` (str): The status message to print.
@@ -951,7 +1050,7 @@ Print a status message in green.
 def print_error(self, message: str) -> None
 ```
 
-Print an error message in red to stderr.
+Print an error message in red to stderr. No output if verbose mode is disabled.
 
 **Parameters:**
 - `message` (str): The error message to print.
@@ -962,7 +1061,7 @@ Print an error message in red to stderr.
 def print_warning(self, message: str) -> None
 ```
 
-Print a warning message in yellow.
+Print a warning message in yellow. No output if verbose mode is disabled.
 
 **Parameters:**
 - `message` (str): The warning message to print.

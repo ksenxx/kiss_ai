@@ -1,8 +1,6 @@
-**Version:** 0.1.2
-
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-![KISS Logo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mrh2vinaml2ji2l65p0a.jpeg)
+**Version:** 0.1.2
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
@@ -94,11 +92,16 @@ export TOGETHER_API_KEY="your-key-here"
 export OPENROUTER_API_KEY="your-key-here"
 ```
 
-## Quick Start
+## Output Formatting
+
+Unlike other agentic systems, you do not need to specify the output schema for the agent.  Just create
+a suitable "finish" function with parameters.  The parameters could be treated as the top level keys
+in a json format.  
 
 ### KISSAgent API Reference
 
 > 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
+
 
 ## 🤝 Multi-Agent Orchestration
 
@@ -342,29 +345,6 @@ The SWE-bench Verified agent is a Software Engineering agent that:
 
 See the [SWE-bench Verified README](src/kiss/agents/swe_agent_verified/README.md) for detailed documentation.
 
-**KISSEvolve Bubble Sort Example:**
-```bash
-uv run python -m kiss.scripts.kissevolve_bubblesort
-```
-
-This script demonstrates KISSEvolve by evolving a bubble sort algorithm (O(n²)) to discover faster sorting algorithms like quicksort or mergesort (O(n log n)). It:
-- Starts with a bubble sort implementation
-- Uses KISSEvolve with LLM-guided mutation and crossover
-- Evaluates correctness and performance of evolved variants
-- Reports complexity analysis and performance improvements
-
-**AlgoTune Benchmark Experiments:**
-```bash
-uv run python -m kiss.agents.kiss_evolve.algotune.run_algotune
-```
-
-This module runs KISSEvolve on AlgoTune benchmarks to optimize numerical programs. It:
-- Automatically clones and installs the AlgoTune repository
-- Implements multiple AlgoTune benchmark tasks (PCA, matrix multiplication, sorting, SVM, etc.)
-- Uses KISSEvolve to evolve code for better performance
-- Measures speedup compared to reference implementations
-- Supports running all benchmarks or specific tasks via configuration
-- Saves results in JSON format for analysis in the artifacts directory
 
 
 

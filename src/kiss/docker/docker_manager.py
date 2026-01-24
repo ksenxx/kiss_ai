@@ -135,7 +135,7 @@ class DockerManager:
         if self.container is None:
             raise KISSError("No container is open. Please call open() first.")
 
-        self.container.reload() 
+        self.container.reload()
         port_bindings = self.container.attrs.get("NetworkSettings", {}).get("Ports", {})
         port_key = f"{container_port}/tcp"
         if port_key in port_bindings and port_bindings[port_key]:

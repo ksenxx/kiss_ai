@@ -6,26 +6,27 @@
 """Abstract formatter interface for message formatting and printing."""
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 
 class Formatter(ABC):
     @abstractmethod
-    def format_message(self, message: dict[str, str]) -> str:
+    def format_message(self, message: dict[str, Any]) -> str:
         """Format a single message."""
         pass
 
     @abstractmethod
-    def format_messages(self, messages: list[dict[str, str]]) -> str:
+    def format_messages(self, messages: list[dict[str, Any]]) -> str:
         """Format a list of messages."""
         pass
 
     @abstractmethod
-    def print_message(self, message: dict[str, str]) -> None:
+    def print_message(self, message: dict[str, Any]) -> None:
         """Print a single message."""
         pass
 
     @abstractmethod
-    def print_messages(self, messages: list[dict[str, str]]) -> None:
+    def print_messages(self, messages: list[dict[str, Any]]) -> None:
         """Print a list of messages."""
         pass
 
