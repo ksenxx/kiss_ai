@@ -1,6 +1,8 @@
 **Version:** 0.1.2
 
-![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sgowzpvzkfmm0373li3m.png)
+![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
+
+![KISS Logo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mrh2vinaml2ji2l65p0a.jpeg)
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
@@ -52,14 +54,14 @@ KISS is a lightweight agent framework that implements a ReAct (Reasoning and Act
 
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
-- **KISSEvolve Implementation From Sratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
+- **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
 - **Native Function Calling**: Seamless tool integration using native function calling APIs (OpenAI, Anthropic, Gemini, Together AI, and OpenRouter)
 - **Docker Integration**: Built-in Docker manager for running agents in isolated environments
 - **Trajectory Tracking**: Automatic saving of agent execution trajectories
 - **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
 - **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
-- **Self-Evolution**: Framework for agents to evolve and refine their prompts
+- **Self-Evolution**: Framework for agents to evolve and refine other multi agents.
 - **SWE-bench Dataset Support**: Built-in support for downloading and working with SWE-bench Verified dataset
 - **RAG Support**: Simple retrieval-augmented generation system with in-memory vector store
 - **Useful Agents**: Pre-built utility agents including prompt refinement and general bash execution agents
@@ -73,7 +75,7 @@ KISS is a lightweight agent framework that implements a ReAct (Reasoning and Act
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone/download KISS and navigate to the directory
-cd kiss_ai
+cd kiss
 
 # Create virtual environment
 uv venv --python 3.13
@@ -96,121 +98,7 @@ export OPENROUTER_API_KEY="your-key-here"
 
 ### KISSAgent API Reference
 
-## Architecture
-
-The framework centers around the `KISSAgent` class, which implements a ReAct agent using native function calling of LLMs.
-
-#### Constructor
-
-```python
-KISSAgent(name: str)
-```
-
-**Parameters:**
-- `name` (str): The name of the agent. Used for identification and artifact naming.
-
-#### Methods
-
-##### `run()`
-
-```python
-def run(
-    self,
-    model_name: str,
-    prompt_template: str,
-    arguments: dict[str, str] | None = None,
-    tools: list[Callable[..., Any]] | None = None,
-    formatter: Formatter | None = None,
-    is_agentic: bool = True,
-    max_steps: int = 100,
-    max_budget: float = 1.0,
-    model_config: dict[str, Any] | None = None,
-) -> str
-```
-
-Runs the agent's main ReAct loop to solve the task.
-
-**Parameters:**
-- `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-3-pro-preview", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "openrouter/anthropic/claude-3.5-sonnet")
-- `prompt_template` (str): The prompt template for the agent. Can include `{placeholder}` syntax for variable substitution.
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `tools` (list[Callable[..., Any]] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_google_search` is enabled in config, `search_web` is also automatically added. Default is None.
-- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
-- `is_agentic` (bool): If True, runs in agentic mode with tools. If False, returns raw LLM response. Default is True.
-- `max_steps` (int): Maximum number of ReAct loop iterations. Default is 100.
-- `max_budget` (float): Maximum budget in USD for this agent run. Default is 1.0.
-- `model_config` (dict[str, Any] | None): Optional model configuration to pass to the model. Default is None.
-
-**Returns:**
-- `str`: The result returned by the agent's `finish()` call, or the raw LLM response in non-agentic mode.
-
-**Raises:**
-- `KISSError`: If budget exceeded, max steps exceeded, or tools provided in non-agentic mode.
-
-##### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-
-Built-in tool that the agent must call to complete its task and return the final answer.
-The tool is added by default to any KISSAgent.
-
-**Returns:**
-- `str`: JSON-formatted string containing the list of messages with roles and content.
-
-##### `finish()`
-
-```python
-def finish(self, result: str) -> str
-```
-
-**Parameters:**
-- `result` (str): The final result/answer from the agent.
-
-**Returns:**
-- `str`: The same result string passed in.
-
-#### Class Attributes
-
-- `global_budget_used` (float): Total budget used across all agent instances.
-- `agent_counter` (int): Counter for unique agent IDs.
-- `artifact_subdir` (str): Subdirectory name for saving artifacts.
-
-#### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model`: The model instance being used.
-- `step_count` (int): Current step number in the ReAct loop.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
-- `messages` (list[dict[str, Any]]): List of messages in the trajectory.
-
-#### Tool Definition
-
-Tools are defined as regular Python functions with type hints and docstrings:
-
-```python
-def my_tool(param1: str, param2: int = 10) -> str:
-    """Description of what the tool does.
-    
-    Args:
-        param1: Description of param1
-        param2: Description of param2
-    
-    Returns:
-        Description of return value
-    """
-    # Tool implementation
-    return f"Result: {param1}, {param2}"
-```
-
-The framework automatically extracts the function signature, type hints, and docstring to generate the tool schema for the LLM.
-
+> 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
 
 ## 🤝 Multi-Agent Orchestration
 
@@ -794,9 +682,10 @@ The visualizer provides:
 **Supported Models**: The framework includes context length, pricing, and capability flags for:
 
 **Generation Models** (text generation with function calling support):
-- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5.1, gpt-5.2
-- **Anthropic**: claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-haiku-4-5
-- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3-pro-preview, gemini-3-flash-preview
+- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5, gpt-5.1, gpt-5.2
+- **Anthropic**: claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
+- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
+- **Gemini (preview, unreliable function calling)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-2.5-flash-lite
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
 - **Together AI (Qwen)**: Qwen2.5-72B-Instruct-Turbo, Qwen3 series (with function calling)
 - **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3.1 (with function calling)
@@ -862,4 +751,4 @@ Apache-2.0
 
 ## Authors
 
-- Koushik Sen (ksen@berkeley.edu)
+- Koushik Sen (ksen@berkeley.edu) | [LinkedIn](https://www.linkedin.com/in/koushik-sen-80b99a/) | [X @koushik77](https://x.com/koushik77)

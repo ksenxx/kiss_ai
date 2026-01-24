@@ -6,9 +6,11 @@
 """Test suite for DockerManager without mocking."""
 
 import os
+import socket
 import unittest
 
 import docker
+import requests
 
 from kiss.docker.docker_manager import DockerManager
 
@@ -60,6 +62,47 @@ class TestDockerManager(unittest.TestCase):
                 file_contents_from_container = output
 
             self.assertEqual(test_content, file_contents_from_container.strip())
+
+    def test_port_mapping(self):
+        """Test port mapping from container to host."""
+
+        def find_free_port() -> int:
+            """Find a free port on localhost."""
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                port: int = s.getsockname()[1]
+                return port
+
+        host_port = find_free_port()
+
+        # Use Python image and start a simple HTTP server on port 8000 inside container
+        with DockerManager("python:3.11-slim", ports={8000: host_port}) as env:
+            # Start a simple HTTP server in the background
+            env.run_bash_command(
+                "echo 'Hello from Docker!' > /tmp/index.html",
+                "Create test file for HTTP server",
+            )
+            env.run_bash_command(
+                "cd /tmp && python -m http.server 8000 &",
+                "Start HTTP server in background",
+            )
+
+            # Give the server a moment to start
+            import time
+
+            time.sleep(2)
+
+            # Verify the port is mapped correctly
+            mapped_port = env.get_host_port(8000)
+            self.assertEqual(mapped_port, host_port)
+
+            # Test that we can actually connect to the HTTP server via the mapped port
+            try:
+                response = requests.get(f"http://localhost:{host_port}/index.html", timeout=5)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("Hello from Docker!", response.text)
+            except requests.exceptions.ConnectionError:
+                self.fail(f"Could not connect to HTTP server on port {host_port}")
 
 
 if __name__ == "__main__":

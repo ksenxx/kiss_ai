@@ -28,6 +28,7 @@ class DockerManager:
         tag: str = "latest",
         workdir: str = "/",
         mount_shared_volume: bool = True,
+        ports: dict[int, int] | None = None,
     ) -> None:
         """Initialize the Docker client.
 
@@ -37,12 +38,16 @@ class DockerManager:
             workdir: The working directory inside the container
             mount_shared_volume: Whether to mount a shared volume. Set to False
                 for images that already have content in the workdir (e.g., SWE-bench).
+            ports: Port mapping from container port to host port.
+                Example: {8080: 8080} maps container port 8080 to host port 8080.
+                Example: {80: 8000, 443: 8443} maps multiple ports.
         """
         self.client = docker.from_env()
         self.container: Container | None = None
         self.formatter = SimpleFormatter()
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
+        self.ports = ports
         self.client_shared_path = DEFAULT_CONFIG.docker.client_shared_path
         self.host_shared_path = tempfile.mkdtemp() if mount_shared_volume else None
 
@@ -81,6 +86,8 @@ class DockerManager:
             container_kwargs["volumes"] = {
                 self.host_shared_path: {"bind": self.client_shared_path, "mode": "rw"}
             }
+        if self.ports:
+            container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
         self.container = self.client.containers.run(full_image_name, **container_kwargs)
         container_id = self.container.id[:12] if self.container.id else "unknown"
         self.formatter.print_status(f"Container {container_id} is now running")
@@ -115,6 +122,25 @@ class DockerManager:
             f"\n### ----STDOUT-----\n```{stdout}\n```### ----STDERR-----\n```{stderr}\n```"
             f"### ----EXIT_CODE-----\n{exit_code}\n"
         )
+
+    def get_host_port(self, container_port: int) -> int | None:
+        """Get the host port mapped to a container port.
+
+        Args:
+            container_port: The container port to look up.
+
+        Returns:
+            The host port mapped to the container port, or None if not mapped.
+        """
+        if self.container is None:
+            raise KISSError("No container is open. Please call open() first.")
+
+        self.container.reload() 
+        port_bindings = self.container.attrs.get("NetworkSettings", {}).get("Ports", {})
+        port_key = f"{container_port}/tcp"
+        if port_key in port_bindings and port_bindings[port_key]:
+            return int(port_bindings[port_key][0]["HostPort"])
+        return None
 
     def close(self) -> None:
         """Stop and remove the Docker container."""
