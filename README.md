@@ -281,7 +281,7 @@ print(f"Budget used: ${agent.budget_used:.4f}")
 
 > 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
-KISS a fresh implementation of GEPA with some improvement.  GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
+KISS has a fresh implementation of GEPA with some improvements.  GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
 
 For usage examples, API reference, and configuration options, please see the [GEPA README](src/kiss/agents/gepa/README.md).
 

@@ -53,7 +53,6 @@ class KISSAgent:
     def _reset(self) -> None:
         """Resets the agent's state."""
         self.messages: list[dict[str, Any]] = []
-        self.function_calls_as_str: list[str] = []
         self.run_start_timestamp = int(time.time())
         self.function_map: dict[str, Callable[..., Any]] = {}
         self.total_tokens_used = 0
@@ -66,7 +65,6 @@ class KISSAgent:
         self.prompt_template = prompt_template
         full_prompt = self.prompt_template.format(**self.arguments)
 
-        # self._update_model_usage_info()
         self._add_message("user", full_prompt, location=0)
         self.model.initialize(full_prompt)
 
@@ -138,7 +136,6 @@ class KISSAgent:
                 if self.step_count == 1:
                     trajectory_list = json.loads(self.get_trajectory())
                     self.formatter.print_messages(trajectory_list)
-                self.function_calls_as_str = []
                 try:
                     self.formatter.print_status(f"Asking {self.model.model_name}...\n")
                     if not self.is_agentic:
@@ -179,22 +176,22 @@ class KISSAgent:
 
                             try:
                                 if function_name not in self.function_map:
-                                    raise KISSError(f"Function {function_name} is not a registered tool")
+                                    raise KISSError(
+                                        f"Function {function_name} is not a registered tool"
+                                    )
                                 args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
                                 call_repr = f"```python\n{function_name}({args_str})\n```"
-                                self.function_calls_as_str.append(call_repr)
                                 result_raw = self.function_map[function_name](**function_args)
                                 function_response = str(result_raw)
                             except Exception as e:
                                 args_str = str(function_args)
                                 function_response = (
-                                    f"Failed to call {function_name} with {args_str}: {e}\n{traceback.format_exc()}"
+                                    f"Failed to call {function_name} with {args_str}: {e}\n"
                                 )
 
-                            function_calls_str = "\n".join(self.function_calls_as_str)
                             usage_info_str = self._get_usage_info_string()
                             model_content = (
-                                response_text + "\n" + function_calls_str + "\n" + usage_info_str
+                                response_text + "\n" + call_repr + "\n" + usage_info_str
                             )
                             self._add_and_print_message("model", model_content)
 
