@@ -88,6 +88,7 @@ GEPA(
 ```
 
 **Parameters:**
+
 - `agent_wrapper`: Function `(prompt_template, arguments) -> (result, trajectory)`
 - `initial_prompt_template`: Initial prompt to optimize
 - `evaluation_fn`: Function `result -> {metric: score}` (higher is better)
@@ -112,6 +113,7 @@ optimize(
 ```
 
 **Parameters:**
+
 - `train_examples`: Training examples (split into dev/val)
 - `dev_minibatch_size`: Dev examples per evaluation (default: all)
 
@@ -142,21 +144,23 @@ class PromptCandidate:
 ## How It Works
 
 ### Phase 1: Reflective Mutation
+
 1. **Split** training examples into dev (feedback) and val (selection) sets
-2. **Evaluate** candidates on dev minibatch, collect trajectories
-3. **Skip** mutation if candidate achieves perfect score
-4. **Reflect** using LLM to propose improved prompt based on trajectories and feedback
-5. **Gate**: accept only if not worse than parent on dev
-6. **Evaluate** on val set for selection
-7. **Update** instance-level Pareto frontier
+1. **Evaluate** candidates on dev minibatch, collect trajectories
+1. **Skip** mutation if candidate achieves perfect score
+1. **Reflect** using LLM to propose improved prompt based on trajectories and feedback
+1. **Gate**: accept only if not worse than parent on dev
+1. **Evaluate** on val set for selection
+1. **Update** instance-level Pareto frontier
 
 ### Phase 2: Structural Merge (per generation)
+
 8. **Find merge candidates**: Pareto frontier pairs with common ancestor and sufficient validation overlap
-9. **Score complementarity**: Prioritize pairs excelling on different instances
-10. **3-way merge**: Use ancestry to determine merged prompt (prefer changed prompts, resolve conflicts by score)
-11. **Gate on overlap**: Evaluate merged prompt on shared validation instances
-12. **Accept if improved**: Add to frontier if merge doesn't degrade (within 5% tolerance)
-13. **Repeat** for specified generations
+1. **Score complementarity**: Prioritize pairs excelling on different instances
+1. **3-way merge**: Use ancestry to determine merged prompt (prefer changed prompts, resolve conflicts by score)
+1. **Gate on overlap**: Evaluate merged prompt on shared validation instances
+1. **Accept if improved**: Add to frontier if merge doesn't degrade (within 5% tolerance)
+1. **Repeat** for specified generations
 
 ## Configuration
 

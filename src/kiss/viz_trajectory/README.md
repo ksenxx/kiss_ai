@@ -21,6 +21,7 @@ uv run python src/kiss/viz_trajectory/server.py <artifact_directory>
 ```
 
 **Options:**
+
 - `--host HOST`: Host to bind to (default: 127.0.0.1)
 - `--port PORT`: Port to bind to (default: 5050)
 
@@ -44,6 +45,7 @@ Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
 ## Trajectory Format
 
 Trajectories are automatically saved by KISSAgent instances to the artifacts directory. Each trajectory file contains:
+
 - Complete message history with token usage and budget information
 - Tool calls and results
 - Configuration used
@@ -55,4 +57,3 @@ The visualizer reads these YAML trajectory files and displays them in an interac
 ## Authors
 
 - Koushik Sen (ksen@berkeley.edu)
-

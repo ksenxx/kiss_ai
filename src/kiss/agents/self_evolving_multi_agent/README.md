@@ -114,8 +114,8 @@ run_tests("test_calculator.py")
 The `AgentEvolver` uses KISSEvolve to optimize the multi-agent system for:
 
 1. **Fewer LLM calls** - Reduce API costs and latency
-2. **Lower budget consumption** - Efficient resource usage
-3. **Accurate completion** - Maintain correctness on long-horizon tasks
+1. **Lower budget consumption** - Efficient resource usage
+1. **Accurate completion** - Maintain correctness on long-horizon tasks
 
 ### Running the Evolver
 
@@ -199,6 +199,7 @@ All settings can be configured via the `SelfEvolvingMultiAgentConfig` class or C
 | `evolver_model` | `gemini-3-flash-preview` | Model for evolution |
 
 Evolution parameters are inherited from `DEFAULT_CONFIG.kiss_evolve`:
+
 - `population_size`, `max_generations`, `mutation_rate`, `elite_size`
 
 ### CLI Configuration
@@ -272,26 +273,26 @@ class AgentEvolver:
 ### Planning Phase
 
 1. The orchestrator receives a task description
-2. It uses `plan_task` to break down the task into todo items
-3. Each todo item is tracked with status: pending → in_progress → completed/failed
+1. It uses `plan_task` to break down the task into todo items
+1. Each todo item is tracked with status: pending → in_progress → completed/failed
 
 ### Execution Phase
 
 1. The orchestrator calls `execute_todo` for each pending item
-2. A sub-agent is spawned to handle each todo
-3. Sub-agents have access to `run_bash`, `read_file`, and `write_file`
-4. Results are captured and status is updated
+1. A sub-agent is spawned to handle each todo
+1. Sub-agents have access to `run_bash`, `read_file`, and `write_file`
+1. Results are captured and status is updated
 
 ### Error Recovery
 
 1. When a sub-agent fails, the error is recorded
-2. If retries remain, the todo is reset to pending
-3. The orchestrator can adjust its approach based on the error message
+1. If retries remain, the todo is reset to pending
+1. The orchestrator can adjust its approach based on the error message
 
 ### Dynamic Tool Creation
 
 1. The orchestrator can choose to create reusable tools with `create_tool`
-2. New tools are added to its available tool set
+1. New tools are added to its available tool set
 
 ## Files
 

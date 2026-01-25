@@ -5,11 +5,12 @@ KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided
 ## Overview
 
 KISSEvolve evolves code variants through:
+
 1. **Initial population generation** from starting code
-2. **Evaluation** of each variant using a fitness function
-3. **Selection** of promising variants using various sampling methods
-4. **Mutation/crossover** to create new variants using LLM guidance
-5. **Iteration** until convergence or max generations
+1. **Evaluation** of each variant using a fitness function
+1. **Selection** of promising variants using various sampling methods
+1. **Mutation/crossover** to create new variants using LLM guidance
+1. **Iteration** until convergence or max generations
 
 ## Key Features
 
@@ -136,6 +137,7 @@ KISSEvolve(
 ```
 
 **Parameters:**
+
 - `code_agent_wrapper`: Function that accepts `model_name`, `prompt_template`, and `arguments` and returns generated code as a string
 - `initial_code`: The initial code to evolve
 - `evaluation_fn`: Function that takes code string and returns dict with:
@@ -223,8 +225,8 @@ optimizer = KISSEvolve(
 KISSEvolve supports three parent sampling methods:
 
 1. **Tournament Selection** (default): Randomly selects parents from top performers
-2. **Power-Law Sampling**: Uses rank-based power-law distribution (α parameter controls exploration vs exploitation)
-3. **Performance-Novelty Sampling**: Balances performance and novelty using a sigmoid function (λ parameter controls selection pressure)
+1. **Power-Law Sampling**: Uses rank-based power-law distribution (α parameter controls exploration vs exploitation)
+1. **Performance-Novelty Sampling**: Balances performance and novelty using a sigmoid function (λ parameter controls selection pressure)
 
 ```python
 optimizer = KISSEvolve(
@@ -255,4 +257,3 @@ See `src/kiss/scripts/kissevolve_bubblesort.py` for a complete example that evol
 ## Authors
 
 - Koushik Sen (ksen@berkeley.edu)
-

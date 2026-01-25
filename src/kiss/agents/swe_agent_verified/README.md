@@ -7,6 +7,7 @@ This module provides integration with the [SWE-bench Verified](https://www.swebe
 SWE-bench (Software Engineering Benchmark) evaluates language models on their ability to resolve real-world GitHub issues. Given a codebase and an issue description, the model must generate a patch that resolves the described problem.
 
 **Key Features:**
+
 - **500 Verified Instances**: Human-validated samples ensuring solvability
 - **Real-World Issues**: Actual GitHub issues from popular Python repositories
 - **Docker-Based Evaluation**: Consistent, reproducible evaluation environment
@@ -77,10 +78,12 @@ run_swebench(
 Main entry point for running the SWE-bench Verified benchmark.
 
 **Parameters:**
+
 - `config`: Configuration settings. If None, uses defaults.
 - `**kwargs`: Override any configuration setting.
 
 **Returns:**
+
 - `total_instances`: Number of instances processed
 - `total_samples`: Total number of samples (instances × num_samples)
 - `successful`: Number of successfully solved samples
@@ -103,12 +106,14 @@ solve_instance(
 Solve a single SWE-bench instance using a KISS agent.
 
 **Parameters:**
+
 - `instance`: SWE-bench instance dictionary
 - `config`: Configuration settings
 - `sample_idx`: Sample index for pass@k evaluation
 - `prompt_template`: Custom prompt template (optional)
 
 **Returns:**
+
 - `instance_id`: The instance ID
 - `model_patch`: Generated patch (if successful)
 - `model_name_or_path`: Solution identifier
@@ -257,9 +262,9 @@ Each SWE-bench Verified instance contains:
 The module integrates with the official SWE-bench evaluation harness. After generating patches, it:
 
 1. Applies the patch to the repository
-2. Runs the test suite
-3. Checks if `FAIL_TO_PASS` tests now pass
-4. Verifies `PASS_TO_PASS` tests still pass
+1. Runs the test suite
+1. Checks if `FAIL_TO_PASS` tests now pass
+1. Verifies `PASS_TO_PASS` tests still pass
 
 ### Evaluation Metrics
 

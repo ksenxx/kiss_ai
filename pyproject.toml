@@ -65,6 +65,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
+    "mdformat>=1.0.0",
 ]
 
 [tool.pytest.ini_options]

@@ -5,6 +5,7 @@ This module provides a HotPotQA benchmark integration for GEPA (Genetic-Pareto) 
 ## Overview
 
 HotPotQA challenges models to perform multi-hop reasoning by:
+
 - Connecting information across multiple paragraphs
 - Handling comparison questions between entities
 - Supporting both "bridge" questions (chaining facts) and "comparison" questions
@@ -44,6 +45,7 @@ print(f"Average scores: {avg_scores}")
 ## Dataset Structure
 
 Each HotPotQA example contains:
+
 - `id`: Unique identifier
 - `question`: The multi-hop question
 - `answer`: Expected answer (usually a short phrase)
@@ -57,8 +59,8 @@ Each HotPotQA example contains:
 The benchmark evaluates three metrics:
 
 1. **success**: 1.0 if the agent reports success, 0.0 otherwise
-2. **exact_match**: 1.0 if normalized answer matches exactly
-3. **f1**: Token-level F1 score between prediction and ground truth
+1. **exact_match**: 1.0 if normalized answer matches exactly
+1. **f1**: Token-level F1 score between prediction and ground truth
 
 ## API Reference
 

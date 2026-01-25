@@ -24,6 +24,7 @@ PUBLIC_REMOTE="public"
 PUBLIC_REPO_URL="https://github.com/ksenxx/kiss_ai.git"
 PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/_version.py"
+README_FILE="README.md"
 RELEASE_BRANCH="release-staging"
 
 # Colors for output
@@ -86,6 +87,24 @@ tag_exists_on_remote() {
         return 0  # Tag exists
     else
         return 1  # Tag does not exist
+    fi
+}
+
+# Update version in README.md
+update_readme_version() {
+    local version="$1"
+    if [[ ! -f "$README_FILE" ]]; then
+        print_warn "README file not found: $README_FILE - skipping version update"
+        return
+    fi
+    
+    # Update the **Version:** line in README.md
+    if grep -q '^\*\*Version:\*\*' "$README_FILE"; then
+        sed -i.bak "s/^\*\*Version:\*\* .*/\*\*Version:\*\* $version/" "$README_FILE"
+        rm -f "${README_FILE}.bak"
+        print_info "Updated version in $README_FILE to $version"
+    else
+        print_warn "Version line not found in $README_FILE - skipping update"
     fi
 }
 
@@ -176,7 +195,38 @@ main() {
     if tag_exists_on_remote "$TAG_NAME"; then
         print_info "Tag '$TAG_NAME' already exists on public remote - skipping"
     else
-        print_info "Creating and pushing tag '$TAG_NAME'..."
+        print_info "Version bump detected - creating tag '$TAG_NAME'..."
+        
+        # Update version in README.md
+        update_readme_version "$VERSION"
+        
+        # Commit README version update if there are changes
+        if ! git diff --quiet "$README_FILE" 2>/dev/null; then
+            git add "$README_FILE"
+            git commit -m "Update version to $VERSION in README.md"
+            print_info "Committed README version update"
+            
+            # Re-push the branch with the version update
+            print_step "Re-pushing branch with version update..."
+            if [[ ${#PRIVATE_FILES[@]} -eq 0 ]]; then
+                git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force-with-lease
+            else
+                # Need to recreate the filtered branch with the new commit
+                git branch -D "$RELEASE_BRANCH" 2>/dev/null || true
+                git checkout -b "$RELEASE_BRANCH"
+                for file in "${PRIVATE_FILES[@]}"; do
+                    if [[ -e "$file" ]]; then
+                        git rm -rf --cached "$file" 2>/dev/null || true
+                    fi
+                done
+                if ! git diff-index --quiet HEAD --; then
+                    git commit -m "Release $VERSION - remove private files"
+                fi
+                git push "$PUBLIC_REMOTE" "$RELEASE_BRANCH:main" --force-with-lease
+                git checkout "$CURRENT_BRANCH"
+                git branch -D "$RELEASE_BRANCH"
+            fi
+        fi
         
         # Create tag locally if it doesn't exist
         if ! git tag -l "$TAG_NAME" | grep -q "$TAG_NAME"; then

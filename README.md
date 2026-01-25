@@ -1,12 +1,12 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.2
+**Version:** 0.1.5
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
----
+______________________________________________________________________
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
@@ -19,7 +19,6 @@ Every week brings a new framework promising to revolutionize how we build AI age
 What if building AI agents could be as straightforward as the name suggests?
 
 Enter **KISS** — the *Keep It Simple, Stupid* Agent Framework.
-
 
 ## 🚀 Your First Agent in 30 Seconds
 
@@ -94,14 +93,13 @@ export OPENROUTER_API_KEY="your-key-here"
 
 ## Output Formatting
 
-Unlike other agentic systems, you do not need to specify the output schema for the agent.  Just create
-a suitable "finish" function with parameters.  The parameters could be treated as the top level keys
-in a json format.  
+Unlike other agentic systems, you do not need to specify the output schema for the agent. Just create
+a suitable "finish" function with parameters. The parameters could be treated as the top level keys
+in a json format.
 
 ### KISSAgent API Reference
 
 > 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
-
 
 ## 🤝 Multi-Agent Orchestration
 
@@ -180,8 +178,8 @@ for iteration in range(max_iterations):
 **What's happening here?**
 
 1. **Coding Agent** ['get_run_simple_coding_agent'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Generates code and validates it against test cases
-2. **Prompt Refiner Agent** ['refine_prompt_template'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and evolves the prompt
-3. **Orchestration**: A simple Python loop (not to be confused with the ReAct loop) coordinates the agents
+1. **Prompt Refiner Agent** ['refine_prompt_template'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and evolves the prompt
+1. **Orchestration**: A simple Python loop (not to be confused with the ReAct loop) coordinates the agents
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
 
@@ -214,7 +212,7 @@ Each agent can use a different model. Each agent has its own budget. Each agent 
 
 > 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
-KISS has a fresh implementation of GEPA with some improvements.  GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
+KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
 
 For usage examples, API reference, and configuration options, please see the [GEPA README](src/kiss/agents/gepa/README.md).
 
@@ -264,7 +262,7 @@ For usage examples, API reference, and configuration options, please see the [Se
 The Claude Coding Agent uses the Claude Agent SDK to generate tested Python programs with file system access controls:
 
 ```python
-from kiss.agents.claudecodingagent import ClaudeCodingAgent
+from kiss.core.claude_coding_agent import ClaudeCodingAgent
 import anyio
 
 # Create agent with a name
@@ -273,11 +271,11 @@ agent = ClaudeCodingAgent(name="My Coding Agent")
 async def main():
     # Run a coding task with path restrictions
     result = await agent.run(
-        task="""
+        model_name="claude-sonnet-4-5",
+        prompt_template="""
             Write, test, and optimize a fibonacci function in Python
             that is efficient and correct.
         """,
-        model_name="claude-sonnet-4-5",
         readable_paths=["src/"],  # Allowed read paths
         writable_paths=["output/"],  # Allowed write paths
         base_dir="workdir"  # Base working directory
@@ -290,6 +288,7 @@ anyio.run(main)
 ```
 
 **Built-in Tools Available:**
+
 - `Read`, `Write`, `Edit`, `MultiEdit`: File operations
 - `Glob`, `Grep`: File search and content search
 - `Bash`: Shell command execution
@@ -298,11 +297,13 @@ anyio.run(main)
 ### Running Agent Examples
 
 **Vulnerability Detector Agent (ARVO):**
+
 ```bash
 uv run python -m kiss.agents.arvo_agent.arvo_agent
 ```
 
 The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discover security vulnerabilities in C/C++ code:
+
 - Runs in a Docker container with Arvo fuzzing framework
 - Analyzes code to create hypotheses for potential vulnerabilities
 - Generates Python scripts to create test inputs for fuzzing
@@ -310,6 +311,7 @@ The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discove
 - Automatically refines prompts when vulnerabilities are not found
 
 **Programmatic Usage:**
+
 ```python
 from kiss.agents.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
 
@@ -331,11 +333,13 @@ else:
 ```
 
 **SWE-bench Verified Agent:**
+
 ```bash
 uv run src/kiss/agents/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-3-flash-preview --swebench_verified.instance_id "django__django-11099"
 ```
 
 The SWE-bench Verified agent is a Software Engineering agent that:
+
 - Runs in pre-built SWE-bench Docker containers with repositories pre-installed
 - Executes bash commands to solve real-world GitHub issues
 - Can read, edit, and create files in the `/testbed` directory
@@ -344,9 +348,6 @@ The SWE-bench Verified agent is a Software Engineering agent that:
 - Supports command-line configuration for model, instance selection, budget, and more
 
 See the [SWE-bench Verified README](src/kiss/agents/swe_agent_verified/README.md) for detailed documentation.
-
-
-
 
 ### Using SimpleRAG for Retrieval-Augmented Generation
 
@@ -414,6 +415,7 @@ rag.clear_collection()
 The framework includes pre-built utility agents for common tasks:
 
 **Prompt Refinement Agent:**
+
 ```python
 from kiss.agents.kiss import refine_prompt_template
 
@@ -426,6 +428,7 @@ refined_prompt = refine_prompt_template(
 ```
 
 **General Bash Agent:**
+
 ```python
 from kiss.agents.kiss import run_bash_task_in_sandboxed_ubuntu_latest
 
@@ -436,6 +439,7 @@ result = run_bash_task_in_sandboxed_ubuntu_latest(
 ```
 
 **Simple Coding Agent:**
+
 ```python
 from kiss.agents.kiss import get_run_simple_coding_agent
 
@@ -486,8 +490,6 @@ kiss/
 │   │   │       ├── run_algotune.py # AlgoTune task evolution
 │   │   │       └── config.py       # AlgoTune configuration
 │   │   ├── kiss.py                 # Utility agents (prompt refiner, bash agent)
-│   │   ├── claudecodingagent/      # Claude Coding Agent using Claude Agent SDK
-│   │   │   └── claude_coding_agent.py
 │   │   ├── swe_agent_verified/     # SWE-bench Verified benchmark integration
 │   │   │   ├── run_swebench.py     # Main runner with CLI support
 │   │   │   ├── config.py           # Configuration for SWE-bench runs
@@ -500,7 +502,9 @@ kiss/
 │   │       ├── arvo_agent.py       # Arvo-based vulnerability detector
 │   │       └── arvo_tags.json      # Docker image tags for Arvo
 │   ├── core/            # Core framework components
+│   │   ├── base_agent.py      # Base agent class with common functionality
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
+│   │   ├── claude_coding_agent.py # Claude Coding Agent using Claude Agent SDK
 │   │   ├── formatter.py       # Output formatting base class
 │   │   ├── simple_formatter.py # Rich-formatted output
 │   │   ├── config.py          # Configuration
@@ -551,12 +555,14 @@ The project uses semantic versioning (MAJOR.MINOR.PATCH). The version is defined
 - **Build system**: `pyproject.toml` automatically reads the version from `_version.py` using dynamic versioning
 
 Example:
+
 ```python
 from kiss import __version__
 print(f"KISS version: {__version__}")
 ```
 
 To update the version, simply edit `src/kiss/_version.py`:
+
 ```python
 __version__ = "0.2.0"  # Update to new version
 ```
@@ -628,6 +634,7 @@ find . -type f -name "*.pyc" -delete
 ## Trajectory Saving and Visualization
 
 Agent trajectories are automatically saved to the artifacts directory (default: `artifacts/`). Each trajectory includes:
+
 - Complete message history with token usage and budget information appended to each message
 - Tool calls and results
 - Configuration used
@@ -649,6 +656,7 @@ uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 50
 Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
 
 The visualizer provides:
+
 - **Modern UI**: Dark theme with smooth animations
 - **Sidebar Navigation**: List of all trajectories sorted by start time
 - **Markdown Rendering**: Full markdown support for message content
@@ -658,10 +666,10 @@ The visualizer provides:
 
 > 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
-
 **Supported Models**: The framework includes context length, pricing, and capability flags for:
 
 **Generation Models** (text generation with function calling support):
+
 - **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5, gpt-5.1, gpt-5.2
 - **Anthropic**: claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
 - **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
@@ -687,11 +695,13 @@ The visualizer provides:
   - And many more (nvidia, z-ai/glm, inception, arcee-ai, etc.)
 
 **Embedding Models** (for RAG and semantic search):
+
 - **OpenAI**: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
 - **Google**: text-embedding-004
 - **Together AI**: BAAI/bge-large-en-v1.5, BAAI/bge-base-en-v1.5, m2-bert-80M-32k-retrieval, multilingual-e5-large-instruct, gte-modernbert-base
 
 Each model in `MODEL_INFO` includes capability flags:
+
 - `is_function_calling_supported`: Whether the model reliably supports tool/function calling
 - `is_generation_supported`: Whether the model supports text generation
 - `is_embedding_supported`: Whether the model is an embedding model
@@ -720,6 +730,7 @@ Embeddings are primarily used by the `SimpleRAG` system for document retrieval. 
 ## Contributing
 
 Contributions are welcome! Please ensure your code:
+
 - Follows the KISS principle
 - Passes all tests (`uv run pytest`)
 - Passes linting (`uv run ruff check src/`)
