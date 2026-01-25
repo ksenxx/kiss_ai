@@ -15,10 +15,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.claudecodingagent import (
+from kiss.core import DEFAULT_CONFIG
+from kiss.core.claude_coding_agent import (
     ClaudeCodingAgent,
 )
-from kiss.core import DEFAULT_CONFIG
 
 
 class TestClaudeCodingAgentPermissions(unittest.TestCase):
@@ -37,7 +37,9 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
             model_name="claude-sonnet-4-5",
             readable_paths=[str(self.readable_dir)],
             writable_paths=[str(self.writable_dir)],
-            base_dir=str(self.temp_dir)
+            base_dir=str(self.temp_dir),
+            max_steps=DEFAULT_CONFIG.agent.max_steps,
+            max_budget=DEFAULT_CONFIG.agent.max_agent_budget,
         )
 
     def tearDown(self):
@@ -235,8 +237,8 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
         task = """Write a simple Python function that adds two numbers."""
 
         result = asyncio.run(agent.run(
-            task,
             model_name="claude-sonnet-4-5",
+            prompt_template=task,
             readable_paths=[str(self.project_root / "src")],
             writable_paths=[str(self.output_dir)],
             base_dir=str(self.temp_dir)
@@ -257,8 +259,8 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
         task = "Write a simple factorial function, test it, and mke it efficient."
 
         result = asyncio.run(agent.run(
-            task,
             model_name="claude-sonnet-4-5",
+            prompt_template=task,
             readable_paths=[str(self.project_root / "src")],
             writable_paths=[str(self.output_dir)],
             base_dir=str(self.temp_dir)
