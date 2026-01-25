@@ -84,6 +84,7 @@ GEPA(
     use_merge: bool = True,
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 2,
+    feedback_hints_fn: Callable[[dict, str, dict, list | None, str | None], str] | None = None,
 )
 ```
 
@@ -101,6 +102,11 @@ GEPA(
 - `use_merge`: Enable structural merge from Pareto frontier (default: True)
 - `max_merge_invocations`: Maximum merge attempts per optimization run (default: 5)
 - `merge_val_overlap_floor`: Minimum shared validation instances for merge (default: 2)
+- `feedback_hints_fn`: Optional function to generate module-specific feedback hints.
+    Signature: `(example, result, score, trajectory, module_context) -> str`
+    Useful for composite systems where different modules need different feedback guidance.
+    The returned string will be included in the reflection prompt to provide context-specific
+    guidance to the reflection LLM.
 
 ### `GEPA.optimize`
 
@@ -138,6 +144,7 @@ class PromptCandidate:
 - **Weighted Selection**: Parents selected by number of instance wins
 - **Trajectory-Based Reflection**: Uses agent trajectories (tool calls, reasoning steps) to guide prompt improvements
 - **Structural 3-Way Merge**: Combines complementary candidates using ancestry tracking and conflict resolution
+- **Module-Specific Feedback**: Supports custom feedback hints for composite systems (e.g., multi-agent architectures)
 
 ## How It Works
 
@@ -157,6 +164,44 @@ class PromptCandidate:
 11. **Gate on overlap**: Evaluate merged prompt on shared validation instances
 12. **Accept if improved**: Add to frontier if merge doesn't degrade (within 5% tolerance)
 13. **Repeat** for specified generations
+
+## Module-Specific Feedback for Composite Systems
+
+When optimizing composite systems (e.g., multi-agent architectures with multiple modules), you can provide module-specific feedback hints to guide the reflection process. This is particularly useful when different modules have different responsibilities and require different optimization guidance.
+
+**Example: Module-Specific Feedback Function**
+
+```python
+def create_module_feedback_hints(example, result, score, trajectory, module_context):
+    """Generate module-specific feedback based on context."""
+    if module_context == "context_module":
+        # Provide context-specific guidance
+        if "no_lookup" not in result.lower():
+            return (
+                "This module should determine if context lookup is needed. "
+                "Review the user query and past context to decide the appropriate lookup action."
+            )
+    elif module_context == "functional_module":
+        # Provide functional module guidance
+        return (
+            "This module should extract entities and select the appropriate tool. "
+            "Ensure tool arguments are correctly formatted and match the expected schema."
+        )
+    return ""  # No additional hints for other modules
+
+# Use with GEPA
+gepa = GEPA(
+    agent_wrapper=agent_wrapper,
+    initial_prompt_template="...",
+    evaluation_fn=evaluate,
+    feedback_hints_fn=create_module_feedback_hints,
+)
+
+# When optimizing a specific module, you can pass module_context
+# (Note: module_context is currently passed internally during optimization)
+```
+
+This feature is inspired by best practices for optimizing composite systems, as described in [experiences building enterprise agents with GEPA](https://slavozard.bearblog.dev/experiences-from-building-enterprise-agents-with-dspy-and-gepa/).
 
 ## Configuration
 

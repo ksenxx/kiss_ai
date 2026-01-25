@@ -75,6 +75,10 @@ class GEPA:
         use_merge: bool = True,
         max_merge_invocations: int = 5,
         merge_val_overlap_floor: int = 2,
+        feedback_hints_fn: Callable[
+            [dict[str, str], str, dict[str, float], list | None, str | None], str
+        ]
+        | None = None,
     ):
         """Initialize GEPA optimizer.
 
@@ -89,12 +93,17 @@ class GEPA:
             reflection_model: Model for reflection
             dev_val_split: Fraction for dev set (default: 0.5)
             perfect_score: Score threshold to skip mutation (default: 1.0)
+            feedback_hints_fn: Optional function to generate module-specific feedback hints.
+                Signature: (example, result, score, trajectory, module_context) -> str
+                This is useful for composite systems where different modules need different
+                feedback. If provided, this custom feedback will be included in the reflection.
         """
         self.agent_wrapper = agent_wrapper
         self.evaluation_fn = evaluation_fn or (
             lambda r: {"success": 1.0 if "success" in r.lower() else 0.0}
         )
         self.perfect_score = perfect_score
+        self.feedback_hints_fn = feedback_hints_fn
 
         cfg = config_module.DEFAULT_CONFIG.gepa  # type: ignore[attr-defined]
         self.max_generations = get_config_value(max_generations, cfg, "max_generations")
@@ -161,6 +170,7 @@ class GEPA:
             "Based on the feedback AND the agent trajectories, identify what the "
             "assistant is doing wrong or could do better, and incorporate specific "
             "guidance to address these issues in the new instruction.\n\n"
+            "{module_context}\n\n"
             "Important constraints:\n"
             "- The instruction must keep these exact placeholders intact: {placeholders}\n"
             "- Do not add new placeholders or remove existing ones\n"
@@ -231,6 +241,7 @@ class GEPA:
         results: list[str],
         scores: list[dict[str, float]],
         trajectories: list[list] | None = None,
+        module_context: str | None = None,
     ) -> str:
         """Format examples with inputs, outputs, trajectories, and feedback for reflection.
 
@@ -239,6 +250,7 @@ class GEPA:
             results: List of agent results
             scores: List of score dictionaries
             trajectories: Optional list of agent trajectories (tool calls, reasoning, etc.)
+            module_context: Optional module name/context for module-specific feedback
         """
         formatted_parts = []
 
@@ -249,17 +261,27 @@ class GEPA:
             # Format feedback based on average score ratio
             avg_score = sum(score.values()) / len(score) if score else 0.0
             if avg_score >= self.perfect_score:
-                feedback = f"Good response. Scores: {score_details}"
+                base_feedback = f"Good response. Scores: {score_details}"
             elif avg_score >= self.perfect_score * 0.5:
-                feedback = (
+                base_feedback = (
                     f"Partial success. Scores: {score_details}. "
                     "Consider how to improve the weaker aspects."
                 )
             else:
-                feedback = (
+                base_feedback = (
                     f"Needs improvement. Scores: {score_details}. "
                     "The response did not fully address the task requirements."
                 )
+
+            # Add module-specific feedback hints if provided
+            feedback = base_feedback
+            if self.feedback_hints_fn:
+                trajectory = trajectories[i] if trajectories and i < len(trajectories) else None
+                custom_hints = self.feedback_hints_fn(
+                    example, result, score, trajectory, module_context
+                )
+                if custom_hints:
+                    feedback = f"{base_feedback}\n\n**Module-Specific Guidance:**\n{custom_hints}"
 
             truncated = result[:1000] + "..." if len(result) > 1000 else result
 
@@ -296,6 +318,7 @@ class GEPA:
         results: list[str],
         scores: list[dict[str, float]],
         trajectories: list[list] | None = None,
+        module_context: str | None = None,
     ) -> str:
         """Generate improved prompt via reflection.
 
@@ -305,20 +328,33 @@ class GEPA:
             results: Agent results for each example
             scores: Scores for each example
             trajectories: Agent trajectories showing reasoning and tool calls
+            module_context: Optional module name/context for module-specific feedback
         """
         inputs_outputs_feedback = self._format_inputs_outputs_feedback(
-            examples, results, scores, trajectories
+            examples, results, scores, trajectories, module_context
         )
+
+        # Build reflection arguments
+        reflection_args = {
+            "prompt_template": prompt,
+            "inputs_outputs_feedback": inputs_outputs_feedback,
+            "placeholders": ", ".join(self.valid_placeholders),
+        }
+        
+        # Add module context if provided
+        if module_context:
+            reflection_args["module_context"] = (
+                f"\n\n**Note:** You are optimizing the '{module_context}' module. "
+                "Pay special attention to the module-specific guidance in the feedback above."
+            )
+        else:
+            reflection_args["module_context"] = ""
 
         agent = KISSAgent("GEPA Reflection")
         result = agent.run(
             model_name=self.reflection_model,
             prompt_template=self.reflection_prompt,
-            arguments={
-                "prompt_template": prompt,
-                "inputs_outputs_feedback": inputs_outputs_feedback,
-                "placeholders": ", ".join(self.valid_placeholders),
-            },
+            arguments=reflection_args,
         )
         return result
 
