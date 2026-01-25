@@ -125,7 +125,7 @@ class KISSEvolve:
 
         Args:
             code_agent_wrapper (Callable[..., str]): The code generation agent
-                wrapper. Should accept keyword arguments: model (Model),
+                wrapper. Should accept keyword arguments: model_name (str),
                 prompt_template (str), and arguments (dict[str, str]).
             initial_code (str): The initial code to evolve.
             evaluation_fn (Callable[[str], dict[str, Any]]): Function that takes

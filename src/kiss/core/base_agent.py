@@ -35,6 +35,7 @@ class BaseAgent:
         self.name = name
         self.id = BaseAgent.agent_counter
         BaseAgent.agent_counter += 1
+        self.base_dir = ""
 
     def _init_run_state(self, model_name: str, function_map: list[str]) -> None:
         """Initialize common run state variables."""
@@ -99,3 +100,15 @@ class BaseAgent:
             "content": content,
             "timestamp": timestamp if timestamp is not None else int(time.time()),
         })
+
+    def _resolve_path(self, p: str) -> Path:
+        """Resolve a path relative to base_dir if not absolute."""
+        path = Path(p)
+        if not path.is_absolute():
+            return (Path(self.base_dir) / path).resolve()
+        return path.resolve()
+
+    def _is_subpath(self, target: Path, whitelist: list[Path]) -> bool:
+        """Check if target has any prefix in whitelist."""
+        target = Path(target).resolve()
+        return any(target.is_relative_to(p) for p in whitelist)

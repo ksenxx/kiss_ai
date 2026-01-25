@@ -244,16 +244,14 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
             base_dir=str(self.temp_dir)
         ))
 
-        # Result should have the expected structure
+        # Result should be a string summary
         self.assertIsNotNone(result)
         if result:
-            print(result.get("success"))
-            print(result.get("result"))
-            self.assertIn("success", result)
-            self.assertIn("result", result)
+            print(result)
+            self.assertIsInstance(result, str)
 
-    def test_agent_run_returns_dict_with_success(self):
-        """Test that agent run returns dict with success field."""
+    def test_agent_run_returns_string_summary(self):
+        """Test that agent run returns a string summary."""
         agent = ClaudeCodingAgent("test-agent")
 
         task = "Write a simple factorial function, test it, and mke it efficient."
@@ -268,9 +266,8 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
 
         self.assertIsNotNone(result)
         if result:
-            print(result.get("success"))
-            print(result.get("result"))
-            self.assertIsInstance(result.get("success"), bool)
+            print(result)
+            self.assertIsInstance(result, str)
 
 if __name__ == "__main__":
     unittest.main()

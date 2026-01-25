@@ -281,8 +281,7 @@ async def main():
         base_dir="workdir"  # Base working directory
     )
     if result:
-        print(f"Success: {result['success']}")
-        print(f"Result: {result['result']}")
+        print(f"Result: {result}")
 
 anyio.run(main)
 ```
@@ -293,6 +292,55 @@ anyio.run(main)
 - `Glob`, `Grep`: File search and content search
 - `Bash`: Shell command execution
 - `WebSearch`, `WebFetch`: Web access
+
+### Using Gemini CLI Agent
+
+The Gemini CLI Agent uses the Google ADK (Agent Development Kit) to generate tested Python programs:
+
+```python
+from kiss.core.gemini_cli_agent import GeminiCliAgent
+import anyio
+
+# Create agent with a name (must be a valid identifier - use underscores, not hyphens)
+agent = GeminiCliAgent(name="my_coding_agent")
+
+async def main():
+    result = await agent.run(
+        model_name="gemini-2.5-flash",
+        prompt_template="Write a fibonacci function with tests",
+        readable_paths=["src/"],
+        writable_paths=["output/"],
+        base_dir="workdir"
+    )
+    if result:
+        print(f"Result: {result}")
+
+anyio.run(main)
+```
+
+### Using OpenAI Codex Agent
+
+The OpenAI Codex Agent uses the OpenAI Agents SDK to generate tested Python programs:
+
+```python
+from kiss.core.openai_codex_agent import OpenAICodexAgent
+import anyio
+
+agent = OpenAICodexAgent(name="My Coding Agent")
+
+async def main():
+    result = await agent.run(
+        model_name="gpt-5.2-codex",
+        prompt_template="Write a fibonacci function with tests",
+        readable_paths=["src/"],
+        writable_paths=["output/"],
+        base_dir="workdir"
+    )
+    if result:
+        print(f"Result: {result}")
+
+anyio.run(main)
+```
 
 ### Running Agent Examples
 
@@ -477,6 +525,11 @@ print(result)
 kiss/
 ├── src/kiss/
 │   ├── agents/          # Example agents
+│   │   ├── agent_creator/          # Agent evolution and improvement
+│   │   │   ├── agent_evolver.py    # Evolutionary agent optimization
+│   │   │   ├── improver_agent.py   # Agent improvement through generations
+│   │   │   ├── config.py           # Agent creator configuration
+│   │   │   └── README.md           # Agent creator documentation
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
 │   │   │   ├── gepa.py
 │   │   │   ├── config.py           # GEPA configuration
@@ -505,6 +558,8 @@ kiss/
 │   │   ├── base_agent.py      # Base agent class with common functionality
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
 │   │   ├── claude_coding_agent.py # Claude Coding Agent using Claude Agent SDK
+│   │   ├── gemini_cli_agent.py    # Gemini CLI Agent using Google ADK
+│   │   ├── openai_codex_agent.py  # OpenAI Codex Agent using OpenAI Agents SDK
 │   │   ├── formatter.py       # Output formatting base class
 │   │   ├── simple_formatter.py # Rich-formatted output
 │   │   ├── config.py          # Configuration
@@ -536,7 +591,10 @@ kiss/
 │   │   ├── run_all_models_test.py # Comprehensive tests for all models
 │   │   ├── test_multiprocess.py
 │   │   ├── test_internal.py
-│   │   └── test_claude_coding_agent.py # Tests for Claude Coding Agent
+│   │   ├── test_claude_coding_agent.py  # Tests for Claude Coding Agent
+│   │   ├── test_gemini_cli_agent.py     # Tests for Gemini CLI Agent
+│   │   ├── test_openai_codex_agent.py   # Tests for OpenAI Codex Agent
+│   │   └── test_agent_creator.py        # Tests for Agent Creator
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
 │       ├── README.md                    # Trajectory visualizer documentation

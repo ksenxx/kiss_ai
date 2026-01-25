@@ -89,6 +89,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5-codex": _mi(400000, 1.50, 12.00),
     "gpt-5.1-codex": _mi(400000, 1.50, 12.00),
     "gpt-5.1-codex-max": _mi(400000, 3.00, 24.00),
+    "gpt-5.2-codex": _mi(400000, 1.75, 14.00),  # Latest Codex model (Dec 2025)
+    "gpt-5.2-codex-max": _mi(400000, 3.50, 28.00),  # Max version with extended context
     "codex-mini": _mi(200000, 1.50, 6.00),
     # OpenAI o-series reasoning models
     "o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model

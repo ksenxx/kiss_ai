@@ -5,8 +5,6 @@
 
 """Claude Coding Agent using the Claude Agent SDK."""
 
-import json
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -25,7 +23,6 @@ from claude_agent_sdk import (
     UserMessage,
     query,
 )
-from pydantic import BaseModel, Field
 
 from kiss.core import DEFAULT_CONFIG
 from kiss.core.base_agent import BaseAgent
@@ -74,35 +71,7 @@ Use these tools when you need to:
 - Look up API documentation or library usage
 - Find examples of similar implementations
 - Understand existing code in the project
-
-## Output Format
-Return a dict of the form by carefully and rigorously introspecting on your work.
-```json
-{
-    "success": bool,
-    "result": str,
-}
-```
-result should be a yaml string in the following format:
-```yaml
-created:
-  - file1.py
-  - file2.md
-modified:
-  - file3.ts
-  - file4.py
-deleted:
-  - file5.py
-  - file6.py
-summary: >
-  A summary of the execution of the task.
-```
 """
-
-
-class TaskResult(BaseModel):
-    success: bool = Field(description="True if the agent successfully completed the task.")
-    result: str = Field(description="The result of the task.")
 
 
 class ClaudeCodingAgent(BaseAgent):
@@ -122,19 +91,16 @@ class ClaudeCodingAgent(BaseAgent):
         self._init_run_state(model_name, BUILTIN_TOOLS)
         Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = base_dir
-        self.readable_paths = {Path(p).resolve() for p in (readable_paths or [])}
-        self.writable_paths = {Path(p).resolve() for p in (writable_paths or [])}
+
+        self.readable_paths = [self._resolve_path(p) for p in readable_paths or []]
+        self.writable_paths = [self._resolve_path(p) for p in writable_paths or []]
         self.max_tokens = get_max_context_length(model_name)
         self.is_agentic = True
         self.max_steps = max_steps
         self.max_budget = max_budget
 
-    def _is_subpath(self, target: Path, whitelist: set[Path]) -> bool:
-        """Check if target is inside any whitelisted path."""
-        return any(target == p or p in target.parents for p in whitelist)
-
     def _check_path_permission(
-        self, path_str: str, allowed_paths: set[Path]
+        self, path_str: str, allowed_paths: list[Path]
     ) -> PermissionResultAllow | PermissionResultDeny:
         """Check if path is allowed, return appropriate permission result."""
         if not allowed_paths or self._is_subpath(Path(path_str).resolve(), allowed_paths):
@@ -197,20 +163,14 @@ class ClaudeCodingAgent(BaseAgent):
 
     def _process_result_message(
         self, message: ResultMessage, timestamp: int
-    ) -> dict[str, object] | None:
-        """Process final result message and return parsed result."""
+    ) -> str | None:
+        """Process final result message and return the result."""
         self._update_token_usage(message)
         if hasattr(message, "cost") and message.cost:
             self.budget_used += message.cost
             BaseAgent.global_budget_used += message.cost
 
-        if message.structured_output is not None:
-            final_result: dict[str, object] | None = message.structured_output  # type: ignore[assignment]
-        elif message.result:
-            final_result = self._parse_result_json(message.result)
-        else:
-            final_result = None
-
+        final_result = message.result
         self._add_message("model", final_result, timestamp)
         return final_result
 
@@ -226,8 +186,23 @@ class ClaudeCodingAgent(BaseAgent):
         ),
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-    ) -> dict[str, object] | None:
-        """Run the claude coding agent for a given task."""
+    ) -> str | None:
+        """Run the claude coding agent for a given task.
+
+        Args:
+            model_name: The name of the model to use.
+            prompt_template: The prompt template for the task.
+            arguments: The arguments for the task.
+            max_steps: The maximum number of steps to take.
+            max_budget: The maximum budget in USD to spend.
+            base_dir: The base directory relative to which readable and writable
+                paths are resolved if they are not absolute.
+            readable_paths: The paths from which the agent is allowed to read from.
+            writable_paths: The paths to which the agent is allowed to write to.
+
+        Returns:
+            The result of the task.
+        """
         self._reset(model_name, readable_paths, writable_paths, base_dir, max_steps, max_budget)
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
@@ -235,7 +210,6 @@ class ClaudeCodingAgent(BaseAgent):
         options = ClaudeAgentOptions(
             model=model_name,
             system_prompt=SYSTEMS_PROMPT,
-            output_format=TaskResult.model_json_schema(),
             can_use_tool=self.permission_handler,
             permission_mode="default",
             allowed_tools=BUILTIN_TOOLS,
@@ -247,7 +221,7 @@ class ClaudeCodingAgent(BaseAgent):
             yield {"type": "user", "message": {"role": "user", "content": task}}
 
         timestamp = int(time.time())
-        final_result: dict[str, object] | None = None
+        final_result: str | None = None
 
         async for message in query(prompt=prompt_stream(), options=options):
             if isinstance(message, AssistantMessage):
@@ -261,20 +235,6 @@ class ClaudeCodingAgent(BaseAgent):
         self._save()
         return final_result
 
-    def _parse_result_json(self, result: str) -> dict[str, object] | None:
-        """Parse JSON from result text, handling markdown code blocks."""
-        json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", result, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1).strip())  # type: ignore[return-value, no-any-return]
-            except json.JSONDecodeError:
-                pass
-        try:
-            return json.loads(result.strip())  # type: ignore[return-value, no-any-return]
-        except json.JSONDecodeError:
-            pass
-        return {"success": True, "result": result}
-
 
 async def main() -> None:
     agent = ClaudeCodingAgent("Example agent")
@@ -285,8 +245,7 @@ async def main() -> None:
 
     if result:
         print("\n--- FINAL AGENT REPORT ---")
-        print(f"SUCCESS: {result['success']}")
-        print(f"RESULT:\n{result['result']}")
+        print(f"RESULT:\n{result}")
 
 
 if __name__ == "__main__":

@@ -91,3 +91,11 @@ class SimpleFormatter(Formatter):
                 self._console.print(message, style="yellow")
             else:
                 print(message)
+
+    def print_label_and_value(self, label: str, value: str) -> None:
+        if DEFAULT_CONFIG.agent.verbose:
+            if self._console:
+                # Use distinct colors: label in cyan, value in bold white for contrast
+                self._console.print(f"[cyan]{label}[/cyan]: [bold white]{value}[/bold white]")
+            else:
+                print(f"{label}: {value}")

@@ -4,6 +4,8 @@
 
 - [KISSAgent](#kissagent) - Core agent class with function calling
 - [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
+- [GeminiCliAgent](#geminicliagent) - Google ADK-based coding agent
+- [OpenAICodexAgent](#openaicodexagent) - OpenAI Agents SDK-based coding agent
 - [DockerManager](#dockermanager) - Docker container management
 - [Multiprocessing](#multiprocessing) - Parallel execution utilities
 - [SimpleRAG](#simplerag) - Simple RAG system for document retrieval
@@ -43,7 +45,7 @@ def run(
     formatter: Formatter | None = None,
     is_agentic: bool = True,
     max_steps: int = 100,
-    max_budget: float = 1.0,
+    max_budget: float = 10.0,
     model_config: dict[str, Any] | None = None,
 ) -> str
 ```
@@ -55,7 +57,7 @@ Runs the agent's main ReAct loop to solve the task.
 - `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-3-pro-preview", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "openrouter/anthropic/claude-3.5-sonnet")
 - `prompt_template` (str): The prompt template for the agent. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_google_search` is enabled in config, `search_web` is also automatically added. Default is None.
+- `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web_search` is enabled in config, `search_web` is also automatically added. Default is None.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
 - `is_agentic` (bool): If True, runs in agentic mode with tools. If False, returns raw LLM response. Default is True.
 - `max_steps` (int): Maximum number of ReAct loop iterations. Default is 100.
@@ -167,7 +169,7 @@ async def run(
     base_dir: str = "<artifact_dir>/claude_workdir",
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-) -> dict[str, object] | None
+) -> str | None
 ```
 
 Run the Claude coding agent for a given task.
@@ -179,15 +181,13 @@ Run the Claude coding agent for a given task.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `max_steps` (int): Maximum number of steps. Default is from config.
 - `max_budget` (float): Maximum budget in USD for this run. Default is from config.
-- `base_dir` (str): The base directory to use for the agent's working files.
-- `readable_paths` (list[str] | None): The paths the agent can read from. If None, no path restrictions.
-- `writable_paths` (list[str] | None): The paths the agent can write to. If None, no path restrictions.
+- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no path restrictions.
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no path restrictions.
 
 **Returns:**
 
-- `dict | None`: The result of the Claude coding agent's task containing:
-  - `"success"` (bool): Whether the task was successful
-  - `"result"` (str): YAML string with created/modified/deleted files and summary
+- `str | None`: The result of the task, or None if no result.
 
 #### `get_trajectory()`
 
@@ -213,8 +213,8 @@ Returns the agent's conversation trajectory as a JSON string.
 - `budget_used` (float): Budget used in this run.
 - `run_start_timestamp` (int): Unix timestamp when the run started.
 - `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (set[Path]): Set of paths the agent can read from.
-- `writable_paths` (set[Path]): Set of paths the agent can write to.
+- `readable_paths` (list[Path]): List of paths the agent can read from.
+- `writable_paths` (list[Path]): List of paths the agent can write to.
 - `max_steps` (int): Maximum number of steps allowed.
 - `max_budget` (float): Maximum budget allowed for this run.
 
@@ -245,8 +245,227 @@ async def main():
         prompt_template="Write a fibonacci function with tests"
     )
     if result:
-        print(f"Success: {result['success']}")
-        print(f"Result: {result['result']}")
+        print(f"Result: {result}")
+
+anyio.run(main)
+```
+
+______________________________________________________________________
+
+## GeminiCliAgent
+
+A coding agent that uses the Google ADK (Agent Development Kit) to generate tested Python programs with file system access controls.
+
+### Constructor
+
+```python
+GeminiCliAgent(name: str)
+```
+
+**Parameters:**
+
+- `name` (str): Name of the agent. Used for identification and artifact naming.
+
+### Methods
+
+#### `run()`
+
+```python
+async def run(
+    self,
+    model_name: str = "gemini-2.5-flash",
+    prompt_template: str = "",
+    arguments: dict[str, str] | None = None,
+    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
+    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+    base_dir: str = "<artifact_dir>/gemini_workdir",
+    readable_paths: list[str] | None = None,
+    writable_paths: list[str] | None = None,
+    formatter: Formatter | None = None,
+) -> str | None
+```
+
+Run the Gemini CLI agent for a given task.
+
+**Parameters:**
+
+- `model_name` (str): The name of the model to use. Default is "gemini-2.5-flash".
+- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
+- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
+- `max_steps` (int): Maximum number of steps. Default is from config.
+- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
+- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
+- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
+
+**Returns:**
+
+- `str | None`: The result of the task, or None if no result.
+
+#### `get_trajectory()`
+
+```python
+def get_trajectory(self) -> str
+```
+
+Returns the agent's conversation trajectory as a JSON string.
+
+**Returns:**
+
+- `str`: JSON-formatted string containing the list of messages.
+
+### Instance Attributes (after `run()`)
+
+- `id` (int): Unique identifier for this agent instance.
+- `name` (str): The agent's name.
+- `model_name` (str): The name of the model being used.
+- `function_map` (list[str]): List of built-in tools available (read_file, write_file, etc.).
+- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
+- `step_count` (int): Current step number.
+- `total_tokens_used` (int): Total tokens used in this run.
+- `budget_used` (float): Budget used in this run.
+- `run_start_timestamp` (int): Unix timestamp when the run started.
+- `base_dir` (str): The base directory for the agent's working files.
+- `readable_paths` (list[Path]): List of paths the agent can read from.
+- `writable_paths` (list[Path]): List of paths the agent can write to.
+- `max_steps` (int): Maximum number of steps allowed.
+- `max_budget` (float): Maximum budget allowed for this run.
+
+### Available Built-in Tools
+
+The agent has access to these built-in tools:
+
+- `read_file`: Read file contents from the working directory
+- `write_file`: Create or overwrite files
+- `list_dir`: List directory contents
+- `run_shell`: Execute shell commands with timeout
+- `web_search`: Search the web for information (placeholder)
+
+### Example
+
+```python
+import anyio
+from kiss.core.gemini_cli_agent import GeminiCliAgent
+
+async def main():
+    agent = GeminiCliAgent("my_agent")
+    result = await agent.run(
+        model_name="gemini-2.5-flash",
+        prompt_template="Write a fibonacci function with tests"
+    )
+    if result:
+        print(f"Result: {result}")
+
+anyio.run(main)
+```
+
+______________________________________________________________________
+
+## OpenAICodexAgent
+
+A coding agent that uses the OpenAI Agents SDK to generate tested Python programs with file system access controls.
+
+### Constructor
+
+```python
+OpenAICodexAgent(name: str)
+```
+
+**Parameters:**
+
+- `name` (str): Name of the agent. Used for identification and artifact naming.
+
+### Methods
+
+#### `run()`
+
+```python
+async def run(
+    self,
+    model_name: str = "gpt-5.2-codex",
+    prompt_template: str = "",
+    arguments: dict[str, str] | None = None,
+    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
+    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+    base_dir: str = "<artifact_dir>/codex_workdir",
+    readable_paths: list[str] | None = None,
+    writable_paths: list[str] | None = None,
+    formatter: Formatter | None = None,
+) -> str | None
+```
+
+Run the OpenAI Codex agent for a given task.
+
+**Parameters:**
+
+- `model_name` (str): The name of the model to use. Default is "gpt-5.2-codex".
+- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
+- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
+- `max_steps` (int): Maximum number of steps. Default is from config.
+- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
+- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
+- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
+
+**Returns:**
+
+- `str | None`: The result of the task, or None if no result.
+
+#### `get_trajectory()`
+
+```python
+def get_trajectory(self) -> str
+```
+
+Returns the agent's conversation trajectory as a JSON string.
+
+**Returns:**
+
+- `str`: JSON-formatted string containing the list of messages.
+
+### Instance Attributes (after `run()`)
+
+- `id` (int): Unique identifier for this agent instance.
+- `name` (str): The agent's name.
+- `model_name` (str): The name of the model being used.
+- `function_map` (list[str]): List of built-in tools available (read_file, write_file, etc.).
+- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
+- `step_count` (int): Current step number.
+- `total_tokens_used` (int): Total tokens used in this run.
+- `budget_used` (float): Budget used in this run.
+- `run_start_timestamp` (int): Unix timestamp when the run started.
+- `base_dir` (str): The base directory for the agent's working files.
+- `readable_paths` (list[Path]): List of paths the agent can read from.
+- `writable_paths` (list[Path]): List of paths the agent can write to.
+- `max_steps` (int): Maximum number of steps allowed.
+- `max_budget` (float): Maximum budget allowed for this run.
+
+### Available Built-in Tools
+
+The agent has access to these built-in tools:
+
+- `read_file`: Read file contents from the working directory
+- `write_file`: Create or overwrite files
+- `list_dir`: List directory contents
+- `run_shell`: Execute shell commands with timeout
+- `web_search`: Search the web for information (via OpenAI SDK WebSearchTool)
+
+### Example
+
+```python
+import anyio
+from kiss.core.openai_codex_agent import OpenAICodexAgent
+
+async def main():
+    agent = OpenAICodexAgent("My Agent")
+    result = await agent.run(
+        model_name="gpt-5.2-codex",
+        prompt_template="Write a fibonacci function with tests"
+    )
+    if result:
+        print(f"Result: {result}")
 
 anyio.run(main)
 ```
@@ -1059,6 +1278,19 @@ Print a warning message in yellow. No output if verbose mode is disabled.
 **Parameters:**
 
 - `message` (str): The warning message to print.
+
+#### `print_label_and_value()`
+
+```python
+def print_label_and_value(self, label: str, value: str) -> None
+```
+
+Print a label and value pair with distinct colors. No output if verbose mode is disabled.
+
+**Parameters:**
+
+- `label` (str): The label to print (displayed in cyan).
+- `value` (str): The value to print (displayed in bold white).
 
 ______________________________________________________________________
 

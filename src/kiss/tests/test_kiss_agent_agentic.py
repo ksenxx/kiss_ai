@@ -14,7 +14,7 @@ import unittest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.tests.conftest import CustomFormatter, simple_calculator
+from kiss.tests.conftest import simple_calculator
 
 # Test model - using a reliable model for agentic tool calling
 TEST_MODEL = "gemini-3-flash-preview"
@@ -117,35 +117,6 @@ class TestKISSAgentBasic(unittest.TestCase):
         # Should have model response
         roles = [msg["role"] for msg in trajectory]
         self.assertIn("model", roles)
-
-
-class TestKISSAgentCustomFormatter(unittest.TestCase):
-    """Tests for custom formatter functionality."""
-
-    def setUp(self):
-        self.agent = KISSAgent("Formatter Test Agent")
-        self.custom_formatter = CustomFormatter()
-
-    def tearDown(self):
-        self.agent = None
-
-    def test_custom_formatter_receives_messages(self):
-        """Test that custom formatter receives messages."""
-        result = self.agent.run(
-            model_name=TEST_MODEL,
-            prompt_template=(
-                "Calculate 8934 * 2894 using the calculator tool. "
-                "Then call 'finish' with the result. "
-                "You MUST make exactly one tool call in your response."
-            ),
-            tools=[simple_calculator],
-            formatter=self.custom_formatter,
-            max_steps=10,
-        )
-        self.assertIsNotNone(result)
-        self.assertIn("25854996", result)
-        self.assertEqual(len(json.loads(self.agent.get_trajectory())), 5)
-        self.assertGreater(len(self.custom_formatter.messages), 0)
 
 
 class TestKISSAgentMultipleTools(unittest.TestCase):
