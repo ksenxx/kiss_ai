@@ -3,22 +3,15 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Claude Coding Agent using the Claude Agent SDK.
-
-This module provides a coding agent that uses the Claude Agent SDK to generate
-tested Python programs. The agent can use various built-in tools (Read, Bash,
-WebSearch, etc.) and custom tools like read_project_file.
-"""
+"""Claude Coding Agent using the Claude Agent SDK."""
 
 import json
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import anyio
-import yaml
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -35,22 +28,15 @@ from claude_agent_sdk import (
 from pydantic import BaseModel, Field
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.kiss_agent import KISSAgent
+from kiss.core.base_agent import BaseAgent
 from kiss.core.models.model_info import get_max_context_length
-from kiss.core.utils import config_to_dict
 
-BUILTIN_TOOLS = {
-    "Read": "Read files from the working directory",
-    "Write": "Create or overwrite files",
-    "Edit": "Make precise string-based edits to files",
-    "MultiEdit": "Make multiple precise string-based edits to files",
-    "Glob": "Find files by glob pattern (e.g., **/*.py)",
-    "Grep": "Search file contents with regex",
-    "Bash": "Run shell commands",
-    "WebSearch": "Search the web for information",
-    "WebFetch": "Fetch and process content from a URL",
-}
+BUILTIN_TOOLS = [
+    "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"
+]
 
+READ_TOOLS = {"Read", "Grep", "Glob"}
+WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 
 SYSTEMS_PROMPT = """You are an expert Python programmer who writes clean, simple, \
 and robust code.
@@ -113,23 +99,16 @@ summary: >
 ```
 """
 
-class TaskResult(BaseModel):
-    success: bool = Field(
-        description=(
-            "True if the agent successfully completed the task. "
-            "Please introspect on your work to generate the success value."
-        )
-    )
-    result: str = Field(
-        description=(
-            "The result of the task."
-        )
-    )
 
-class ClaudeCodingAgent:
+class TaskResult(BaseModel):
+    success: bool = Field(description="True if the agent successfully completed the task.")
+    result: str = Field(description="The result of the task.")
+
+
+class ClaudeCodingAgent(BaseAgent):
 
     def __init__(self, name: str) -> None:
-        self.name = name
+        super().__init__(name)
 
     def _reset(
         self,
@@ -140,31 +119,29 @@ class ClaudeCodingAgent:
         max_steps: int,
         max_budget: float,
     ) -> None:
-        if readable_paths is None:
-            readable_paths = []
-        if writable_paths is None:
-            writable_paths = []
+        self._init_run_state(model_name, BUILTIN_TOOLS)
+        Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = base_dir
-        Path(self.base_dir).mkdir(parents=True, exist_ok=True)
-
-        self.id = KISSAgent.agent_counter
-        KISSAgent.agent_counter += 1
-        self.model_name = model_name
-        self.readable_paths = {Path(p).resolve() for p in readable_paths}
-        self.writable_paths = {Path(p).resolve() for p in writable_paths}
-        self.messages: list[dict[str, object]] = []
-        self.step_count = 0
-        self.total_tokens_used = 0
-        self.budget_used = 0.0
-        self.run_start_timestamp = int(time.time())
+        self.readable_paths = {Path(p).resolve() for p in (readable_paths or [])}
+        self.writable_paths = {Path(p).resolve() for p in (writable_paths or [])}
         self.max_tokens = get_max_context_length(model_name)
         self.is_agentic = True
         self.max_steps = max_steps
         self.max_budget = max_budget
 
     def _is_subpath(self, target: Path, whitelist: set[Path]) -> bool:
-        """Checks if the target path is or is inside any of the whitelisted paths."""
+        """Check if target is inside any whitelisted path."""
         return any(target == p or p in target.parents for p in whitelist)
+
+    def _check_path_permission(
+        self, path_str: str, allowed_paths: set[Path]
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        """Check if path is allowed, return appropriate permission result."""
+        if not allowed_paths or self._is_subpath(Path(path_str).resolve(), allowed_paths):
+            return PermissionResultAllow(behavior="allow")
+        return PermissionResultDeny(
+            behavior="deny", message=f"Access Denied: {path_str} is not in whitelist."
+        )
 
     async def permission_handler(
         self,
@@ -173,35 +150,69 @@ class ClaudeCodingAgent:
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
         path_str = tool_input.get("file_path") or tool_input.get("path")
-
         if not path_str:
             return PermissionResultAllow(behavior="allow")
 
-        target_path = Path(path_str).resolve()
-
-        if tool_name in ["Read", "Grep", "Glob"]:
-            if len(self.readable_paths) == 0 or self._is_subpath(
-                target_path, self.readable_paths
-            ):
-                return PermissionResultAllow(behavior="allow")
-            msg = f"Access Denied: {path_str} is not in readable whitelist."
-            return PermissionResultDeny(behavior="deny", message=msg)
-
-        if tool_name in ["Write", "Edit", "MultiEdit"]:
-            if len(self.writable_paths) == 0 or self._is_subpath(
-                target_path, self.writable_paths
-            ):
-                return PermissionResultAllow(behavior="allow")
-            msg = f"Access Denied: {path_str} is not in writable whitelist."
-            return PermissionResultDeny(behavior="deny", message=msg)
-
+        if tool_name in READ_TOOLS:
+            return self._check_path_permission(path_str, self.readable_paths)
+        if tool_name in WRITE_TOOLS:
+            return self._check_path_permission(path_str, self.writable_paths)
         return PermissionResultAllow(behavior="allow")
 
-    async def _prompt_stream(self, task: str) -> Any:
-        yield {
-            "type": "user",
-            "message": {"role": "user", "content": task}
-        }
+    def _update_token_usage(self, message: Any) -> None:
+        """Update token counts from message usage."""
+        if hasattr(message, "usage") and message.usage:
+            self.total_tokens_used += getattr(message.usage, "input_tokens", 0)
+            self.total_tokens_used += getattr(message.usage, "output_tokens", 0)
+
+    def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> None:
+        """Process assistant message and update state."""
+        self.step_count += 1
+        self._update_token_usage(message)
+
+        thought, tool_call = "", ""
+        for block in message.content:
+            if isinstance(block, ToolUseBlock):
+                args_str = ", ".join(f"{k}={repr(v)[:50]}" for k, v in block.input.items())
+                tool_call += f"```python\n{block.name}({args_str})\n```\n"
+                print(f"[TOOL] {block.name}({args_str})")
+            elif isinstance(block, TextBlock):
+                thought += block.text
+                print(f"[THOUGHT] {block.text}")
+
+        self._add_message("model", thought + tool_call, timestamp)
+
+    def _process_user_message(self, message: UserMessage, timestamp: int) -> None:
+        """Process user message (tool results) and update state."""
+        result = ""
+        for block in message.content:
+            if isinstance(block, ToolResultBlock):
+                content = block.content if isinstance(block.content, str) else str(block.content)
+                display = f"{content[:100]}...{content[-100:]}" if len(content) > 200 else content
+                status = "Tool Call Failed" if block.is_error else "Tool Call Succeeded"
+                print(f"[TOOL RESULT] {status}: {display.replace(chr(10), chr(92) + 'n')}")
+                result += f"{status}\n{content}\n"
+
+        self._add_message("user", result, timestamp)
+
+    def _process_result_message(
+        self, message: ResultMessage, timestamp: int
+    ) -> dict[str, object] | None:
+        """Process final result message and return parsed result."""
+        self._update_token_usage(message)
+        if hasattr(message, "cost") and message.cost:
+            self.budget_used += message.cost
+            BaseAgent.global_budget_used += message.cost
+
+        if message.structured_output is not None:
+            final_result: dict[str, object] | None = message.structured_output  # type: ignore[assignment]
+        elif message.result:
+            final_result = self._parse_result_json(message.result)
+        else:
+            final_result = None
+
+        self._add_message("model", final_result, timestamp)
+        return final_result
 
     async def run(
         self,
@@ -216,167 +227,39 @@ class ClaudeCodingAgent:
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
     ) -> dict[str, object] | None:
-        """Run the claude coding agent for a given task.
-
-        Args:
-            task: The task to run the claude coding agent for.
-            model_name: The name of the model to use for the agent.
-            base_dir: The base directory to use for the agent.
-            readable_paths: The paths to read from.
-            writable_paths: The paths to write to.
-
-        Returns:
-            The result of the claude coding agent's task.
-        """
+        """Run the claude coding agent for a given task."""
         self._reset(model_name, readable_paths, writable_paths, base_dir, max_steps, max_budget)
+        self.prompt_template = prompt_template
+        self.arguments = arguments or {}
+
         options = ClaudeAgentOptions(
             model=model_name,
             system_prompt=SYSTEMS_PROMPT,
             output_format=TaskResult.model_json_schema(),
             can_use_tool=self.permission_handler,
             permission_mode="default",
-            allowed_tools=list(BUILTIN_TOOLS.keys()),
-            cwd=str(self.base_dir)
+            allowed_tools=BUILTIN_TOOLS,
+            cwd=str(self.base_dir),
         )
+
+        async def prompt_stream() -> Any:
+            task = self.prompt_template.format(**self.arguments)
+            yield {"type": "user", "message": {"role": "user", "content": task}}
 
         timestamp = int(time.time())
         final_result: dict[str, object] | None = None
-        self.prompt_template = prompt_template
-        self.arguments = arguments or {}
-        task = self.prompt_template.format(**self.arguments)
 
-        async for message in query(prompt=self._prompt_stream(task), options=options):
+        async for message in query(prompt=prompt_stream(), options=options):
             if isinstance(message, AssistantMessage):
-                self.step_count += 1
-                # Update token usage if available
-                if hasattr(message, "usage") and message.usage is not None:
-                    if hasattr(message.usage, "input_tokens"):
-                        self.total_tokens_used += message.usage.input_tokens
-                    if hasattr(message.usage, "output_tokens"):
-                        self.total_tokens_used += message.usage.output_tokens
-                thought = ""
-                tool_call = ""
-                for block in message.content:
-                    if isinstance(block, ToolUseBlock):
-                        args_str = ", ".join(
-                            f"{k}={repr(v)[:50]}" for k, v in block.input.items()
-                        )
-                        tool_call += f"```python\n{block.name}({args_str})\n```\n"
-                        print(f"[TOOL] {block.name}({args_str})")
-                    elif isinstance(block, TextBlock):
-                        thought += f"{block.text}"
-                        print(f"[THOUGHT] {block.text}")
-                msg: dict[str, object] = {
-                    "role": "model",
-                    "content": thought + tool_call,
-                    "timestamp": timestamp,
-                    "unique_id": len(self.messages),
-                }
-                self.messages.append(msg)
+                self._process_assistant_message(message, timestamp)
             elif isinstance(message, UserMessage):
-                result = ""
-                full = ""
-                for content_block in message.content:
-                    if isinstance(content_block, ToolResultBlock):
-                        content = content_block.content
-                        if isinstance(content, str):
-                            if len(content) > 200:
-                                display = content[:100] + "..." + content[-100:]
-                            else:
-                                display = content
-                            full = full + content
-                            display = display.replace("\n", "\\n")
-                        else:
-                            content_str = str(content)
-                            display = content_str[:100] + "..." + content_str[-100:]
-                            full = full + content_str
-                        if content_block.is_error:
-                            status = "Tool Call Failed"
-                        else:
-                            status = "Tool Call Succeeded"
-                        print(f"[TOOL RESULT] {status}: {display}")
-                        result += f"{status}\n{full}\n"
-                msg = {
-                    "role": "user",
-                    "content": result,
-                    "timestamp": timestamp,
-                    "unique_id": len(self.messages),
-                }
-                self.messages.append(msg)
+                self._process_user_message(message, timestamp)
             elif isinstance(message, ResultMessage):
-                # Update token usage from final result if available
-                if hasattr(message, "usage") and message.usage is not None:
-                    if hasattr(message.usage, "input_tokens"):
-                        self.total_tokens_used += message.usage.input_tokens
-                    if hasattr(message.usage, "output_tokens"):
-                        self.total_tokens_used += message.usage.output_tokens
-                # Update budget_used if cost info is available
-                if hasattr(message, "cost") and message.cost is not None:
-                    self.budget_used += message.cost
-                    KISSAgent.global_budget_used += message.cost
-                if message.structured_output is not None:
-                    final_result = message.structured_output  # type: ignore[assignment]
-                elif message.result:
-                    final_result = self._parse_result_json(message.result)
-                msg = {
-                    "role": "model",
-                    "content": final_result,
-                    "timestamp": timestamp,
-                    "unique_id": len(self.messages),
-                }
-                self.messages.append(msg)
+                final_result = self._process_result_message(message, timestamp)
             timestamp = int(time.time())
+
         self._save()
         return final_result
-
-
-    def _build_state_dict(self) -> dict[str, Any]:
-        """Builds the state dictionary for saving."""
-        try:
-            max_tokens = get_max_context_length(self.model_name)
-        except Exception:
-            max_tokens = None
-
-        return {
-            "name": self.name,
-            "id": self.id,
-            "messages": self.messages,
-            "function_map": list(BUILTIN_TOOLS.keys()),
-            "run_start_timestamp": self.run_start_timestamp,
-            "run_end_timestamp": int(time.time()),
-            "config": config_to_dict(),
-            "arguments": self.arguments,
-            "prompt_template": self.prompt_template,
-            "is_agentic": self.is_agentic,
-            "model": self.model_name,
-            "budget_used": self.budget_used,
-            "total_budget": self.max_budget,
-            "global_budget_used": KISSAgent.global_budget_used,
-            "global_max_budget": DEFAULT_CONFIG.agent.global_max_budget,
-            "tokens_used": self.total_tokens_used,
-            "max_tokens": max_tokens,
-            "step_count": self.step_count,
-            "max_steps": self.max_steps,
-            "command": " ".join(sys.argv),
-        }
-
-    def _save(self) -> None:
-        """Save the agent's state to a file."""
-        state = self._build_state_dict()
-        folder_path = Path(DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
-        folder_path.mkdir(parents=True, exist_ok=True)
-        name_safe = self.name.replace(" ", "_").replace("/", "_")
-        filename = folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
-        with filename.open("w", encoding="utf-8") as f:
-            yaml.dump(state, f, indent=2)
-
-
-    def get_trajectory(self) -> str:
-        """Returns the trajectory of the agent in standard JSON format for visualization."""
-        trajectory = []
-        for message in self.messages:
-            trajectory.append(message)
-        return json.dumps(trajectory, indent=2)
 
     def _parse_result_json(self, result: str) -> dict[str, object] | None:
         """Parse JSON from result text, handling markdown code blocks."""
@@ -386,13 +269,12 @@ class ClaudeCodingAgent:
                 return json.loads(json_match.group(1).strip())  # type: ignore[return-value, no-any-return]
             except json.JSONDecodeError:
                 pass
-
         try:
             return json.loads(result.strip())  # type: ignore[return-value, no-any-return]
         except json.JSONDecodeError:
             pass
-
         return {"success": True, "result": result}
+
 
 async def main() -> None:
     agent = ClaudeCodingAgent("Example agent")
@@ -406,8 +288,6 @@ async def main() -> None:
         print(f"SUCCESS: {result['success']}")
         print(f"RESULT:\n{result['result']}")
 
+
 if __name__ == "__main__":
     anyio.run(main)
-
-
-

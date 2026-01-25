@@ -1,6 +1,6 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.2
+**Version:** 0.1.4
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
@@ -262,7 +262,7 @@ For usage examples, API reference, and configuration options, please see the [Se
 The Claude Coding Agent uses the Claude Agent SDK to generate tested Python programs with file system access controls:
 
 ```python
-from kiss.agents.claudecodingagent import ClaudeCodingAgent
+from kiss.core.claude_coding_agent import ClaudeCodingAgent
 import anyio
 
 # Create agent with a name
@@ -271,11 +271,11 @@ agent = ClaudeCodingAgent(name="My Coding Agent")
 async def main():
     # Run a coding task with path restrictions
     result = await agent.run(
-        task="""
+        model_name="claude-sonnet-4-5",
+        prompt_template="""
             Write, test, and optimize a fibonacci function in Python
             that is efficient and correct.
         """,
-        model_name="claude-sonnet-4-5",
         readable_paths=["src/"],  # Allowed read paths
         writable_paths=["output/"],  # Allowed write paths
         base_dir="workdir"  # Base working directory
@@ -490,8 +490,6 @@ kiss/
 │   │   │       ├── run_algotune.py # AlgoTune task evolution
 │   │   │       └── config.py       # AlgoTune configuration
 │   │   ├── kiss.py                 # Utility agents (prompt refiner, bash agent)
-│   │   ├── claudecodingagent/      # Claude Coding Agent using Claude Agent SDK
-│   │   │   └── claude_coding_agent.py
 │   │   ├── swe_agent_verified/     # SWE-bench Verified benchmark integration
 │   │   │   ├── run_swebench.py     # Main runner with CLI support
 │   │   │   ├── config.py           # Configuration for SWE-bench runs
@@ -504,7 +502,9 @@ kiss/
 │   │       ├── arvo_agent.py       # Arvo-based vulnerability detector
 │   │       └── arvo_tags.json      # Docker image tags for Arvo
 │   ├── core/            # Core framework components
+│   │   ├── base_agent.py      # Base agent class with common functionality
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
+│   │   ├── claude_coding_agent.py # Claude Coding Agent using Claude Agent SDK
 │   │   ├── formatter.py       # Output formatting base class
 │   │   ├── simple_formatter.py # Rich-formatted output
 │   │   ├── config.py          # Configuration

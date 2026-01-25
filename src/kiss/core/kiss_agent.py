@@ -5,58 +5,29 @@
 
 """Core KISS agent implementation with native function calling support."""
 
-import json
-import sys
 import time
 import traceback
 from collections.abc import Callable
-from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
-import yaml
-
+from kiss.core.base_agent import BaseAgent
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.simple_formatter import SimpleFormatter
-from kiss.core.utils import config_to_dict, search_web
+from kiss.core.utils import search_web
 
 
-def _str_presenter(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+class KISSAgent(BaseAgent):
+    """A KISS agent using native function calling."""
 
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
 
-yaml.add_representer(str, _str_presenter)
-
-
-class KISSAgent:
-    """
-    A KISS agent using native function calling.
-    """
-
-    agent_counter: ClassVar[int] = 1
-    global_budget_used: ClassVar[float] = 0.0
-
-    def __init__(
-        self,
-        name: str,
-    ):
-        """Initializes a KISS Agent.
-
-        Args:
-            name: The name of the agent.
-        """
-        self.id = KISSAgent.agent_counter
-        KISSAgent.agent_counter += 1
-        self.name = name
-
-    def _reset(self) -> None:
+    def _reset(self, model_name: str) -> None:
         """Resets the agent's state."""
-        self.messages: list[dict[str, Any]] = []
-        self.run_start_timestamp = int(time.time())
-        self._function_map: dict[str, Callable[..., Any]] = {}
-        self.total_tokens_used = 0
-        self.budget_used = 0.0
+        self._tool_map: dict[str, Callable[..., Any]] = {}
+        self._init_run_state(model_name, [])
 
     def _set_prompt(self, prompt_template: str, arguments: dict[str, str] | None = None) -> None:
         """Sets the prompt for the agent."""
@@ -65,7 +36,7 @@ class KISSAgent:
         self.prompt_template = prompt_template
         full_prompt = self.prompt_template.format(**self.arguments)
 
-        self._add_message("user", full_prompt)
+        self._add_message_with_formatter("user", full_prompt)
         self.model.initialize(full_prompt)
 
     def run(
@@ -113,8 +84,9 @@ class KISSAgent:
                     f"{self.name} with id {self.id}."
                 )
 
-            self._reset()
+            self._reset(model_name)
             self._setup_tools(tools)
+            self.function_map = list(self._tool_map.keys())
             self._set_prompt(prompt_template, arguments)
 
             # Non-agentic mode: single generation, no tool loop
@@ -141,7 +113,6 @@ class KISSAgent:
         self._formatter = formatter or SimpleFormatter()
         self.is_agentic = is_agentic
         self.max_steps = max_steps
-        self.step_count = 0
         self.max_budget = max_budget
 
     def _setup_tools(self, tools: list[Callable[..., Any]] | None) -> None:
@@ -169,7 +140,9 @@ class KISSAgent:
         response_text, response = self.model.generate()
         self._update_tokens_and_budget_from_response(response)
         usage_info_str = self._get_usage_info_string()
-        self._add_message("model", response_text + "\n" + usage_info_str + "\n", start_timestamp)
+        self._add_message_with_formatter(
+            "model", response_text + "\n" + usage_info_str + "\n", start_timestamp
+        )
 
         return response_text
 
@@ -184,7 +157,7 @@ class KISSAgent:
             except (KISSError, RuntimeError) as e:
                 content = f"Failed to get response from Model: {e}.\nPlease try again.\n"
                 self.model.add_message_to_conversation("user", content)
-                self._add_message("model", content)
+                self._add_message_with_formatter("model", content)
 
             self._check_limits()
 
@@ -197,15 +170,17 @@ class KISSAgent:
         start_timestamp = int(time.time())
 
         function_calls, response_text, response = (
-            self.model.generate_and_process_with_tools(self._function_map)
+            self.model.generate_and_process_with_tools(self._tool_map)
         )
         self._update_tokens_and_budget_from_response(response)
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
 
         if len(function_calls) != 1:
-            self._add_message("model", response_text + "\n" + usage_info, start_timestamp)
-            self._add_message(
+            self._add_message_with_formatter(
+                "model", response_text + "\n" + usage_info, start_timestamp
+            )
+            self._add_message_with_formatter(
                 "user",
                 f"**Your response MUST have exactly one function call. "
                 f"Your response has {len(function_calls)} function calls.**",
@@ -226,13 +201,13 @@ class KISSAgent:
         function_args = function_call.get("arguments", {})
 
         try:
-            if function_name not in self._function_map:
+            if function_name not in self._tool_map:
                 raise KISSError(f"Function {function_name} is not a registered tool")
 
             args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
             call_repr = f"```python\n{function_name}({args_str})\n```"
             tool_call_timestamp = int(time.time())
-            result_raw = self._function_map[function_name](**function_args)
+            result_raw = self._tool_map[function_name](**function_args)
             function_response = str(result_raw)
         except Exception as e:
             call_repr = f"```python\n{function_name}({function_args})\n```"
@@ -240,9 +215,9 @@ class KISSAgent:
             function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
 
         model_content = response_text + "\n" + call_repr + "\n" + usage_info
-        self._add_message("model", model_content, start_timestamp)
+        self._add_message_with_formatter("model", model_content, start_timestamp)
         user_content = f"Tools call(s) successful.\nResult(s):\n{function_response}"
-        self._add_message("user", user_content, tool_call_timestamp)
+        self._add_message_with_formatter("user", user_content, tool_call_timestamp)
 
         if function_name == "finish":
             return function_response
@@ -256,37 +231,24 @@ class KISSAgent:
         """Check budget and step limits, raise KISSError if exceeded."""
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if KISSAgent.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
+        if BaseAgent.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
-    def get_trajectory(self) -> str:
-        """Returns the trajectory of the agent in standard JSON format for visualization."""
-        trajectory = [
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in self.messages
-            if msg["content"]
-        ]
-        return json.dumps(trajectory, indent=2)
-
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:
         """Adds callable tools to the agent's function map."""
         for tool in tools:
-            if tool.__name__ in self._function_map:
+            if tool.__name__ in self._tool_map:
                 error_msg = (
                     f"Tool {tool.__name__} already registered for agent "
                     f"{self.name} with id {self.id}."
                 )
                 raise KISSError(error_msg)
-            self._function_map[tool.__name__] = tool
+            self._tool_map[tool.__name__] = tool
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
-        """Updates token counter and budget from API response.
-
-        Args:
-            response: The API response object.
-        """
+        """Updates token counter and budget from API response."""
         try:
             input_tokens, output_tokens = (
                 self.model.extract_input_output_token_counts_from_response(response)
@@ -294,33 +256,24 @@ class KISSAgent:
             self.total_tokens_used += input_tokens + output_tokens
             cost = calculate_cost(self.model.model_name, input_tokens, output_tokens)
             self.budget_used += cost
-            KISSAgent.global_budget_used += cost
+            BaseAgent.global_budget_used += cost
         except Exception as e:
             print(f"Error updating tokens and budget from response: {e} {traceback.format_exc()}")
 
     def _get_usage_info_string(self) -> str:
-        """Returns the token usage and budget information string.
-
-        Returns:
-            str: Token and budget usage string in format
-                "[Token usage: {used}/{max}] [Budget usage: ${spent}/${total}]",
-                or empty string if unavailable.
-        """
+        """Returns the token usage and budget information string."""
         step_info = f"[Step {self.step_count}/{self.max_steps}]"
         if self.model is None:
             return step_info
         try:
             max_tokens = get_max_context_length(self.model.model_name)
-            total_budget = self.max_budget
-            agent_budget_used = self.budget_used
-            global_budget_used = KISSAgent.global_budget_used
-            global_max_budget = DEFAULT_CONFIG.agent.global_max_budget
             token_info = f"[Token usage: {self.total_tokens_used}/{max_tokens}]"
-            budget_info = f"[Agent budget usage: ${agent_budget_used:.4f}/${total_budget:.2f}]"
+            budget_info = f"[Agent budget usage: ${self.budget_used:.4f}/${self.max_budget:.2f}]"
             global_budget_info = (
-                f"[Global budget usage: ${global_budget_used:.4f}/${global_max_budget:.2f}]"
+                f"[Global budget usage: ${BaseAgent.global_budget_used:.4f}/"
+                f"${DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
             )
-            return_info = (
+            return (
                 "#### Usage Information\n"
                 f"  - {token_info}\n"
                 f"  - {budget_info}\n"
@@ -330,63 +283,14 @@ class KISSAgent:
         except Exception:
             if DEFAULT_CONFIG.agent.verbose:
                 self._formatter.print_error(f"Error getting usage info: {traceback.format_exc()}")
-            return_info = f"#### Usage Information\n  - {step_info}\n"
+            return f"#### Usage Information\n  - {step_info}\n"
 
-        return return_info
-
-    def _add_message(self, role: str, content: str, timestamp: int = -1) -> None:
-        """Method to create and add a message to the history tree."""
-        unique_id = len(self.messages)
-        message = {
-            "unique_id": unique_id,
-            "role": role,
-            "content": content,
-            "timestamp": timestamp if timestamp != -1 else int(time.time()),
-        }
-        self.messages.append(message)
-        self._formatter.print_message(message)
-
-    def _build_state_dict(self) -> dict[str, Any]:
-        """Builds the state dictionary for saving."""
-        assert self.model is not None
-
-        try:
-            max_tokens = get_max_context_length(self.model.model_name)
-        except Exception:
-            max_tokens = None
-
-        return {
-            "name": self.name,
-            "id": self.id,
-            "messages": self.messages,
-            "function_map": list(self._function_map.keys()),
-            "run_start_timestamp": self.run_start_timestamp,
-            "run_end_timestamp": int(time.time()),
-            "config": config_to_dict(),
-            "arguments": getattr(self, "arguments", {}),
-            "prompt_template": getattr(self, "prompt_template", ""),
-            "is_agentic": self.is_agentic,
-            "model": self.model.model_name,
-            "budget_used": self.budget_used,
-            "total_budget": self.max_budget,
-            "global_budget_used": KISSAgent.global_budget_used,
-            "global_max_budget": DEFAULT_CONFIG.agent.global_max_budget,
-            "tokens_used": self.total_tokens_used,
-            "max_tokens": max_tokens,
-            "step_count": self.step_count,
-            "max_steps": self.max_steps,
-            "command": " ".join(sys.argv),
-        }
-
-    def _save(self) -> None:
-        """Save the agent's state to a file."""
-        state = self._build_state_dict()
-        folder_path = Path(DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
-        folder_path.mkdir(parents=True, exist_ok=True)
-        name_safe = self.name.replace(" ", "_").replace("/", "_")
-        filename = folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
-        with filename.open("w", encoding="utf-8") as f:
-            yaml.dump(state, f, indent=2)
+    def _add_message_with_formatter(
+        self, role: str, content: str, timestamp: int | None = None
+    ) -> None:
+        """Add a message and print it using the formatter."""
+        self._add_message(role, content, timestamp)
+        self._formatter.print_message(self.messages[-1])
 
     def finish(self, result: str) -> str:
         """
@@ -399,3 +303,5 @@ class KISSAgent:
             Returns the result of the agent's task.
         """
         return result
+
+

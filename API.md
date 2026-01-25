@@ -2,15 +2,14 @@
 
 ## Table of Contents
 
-- [KISSAgent](#kissagent) - Core agent class
+- [KISSAgent](#kissagent) - Core agent class with function calling
+- [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
 - [DockerManager](#dockermanager) - Docker container management
 - [Multiprocessing](#multiprocessing) - Parallel execution utilities
 - [SimpleRAG](#simplerag) - Simple RAG system for document retrieval
 - [GEPA](#gepa) - Genetic-Pareto prompt optimizer
-- [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
 - [KISSEvolve](#kissevolve) - Evolutionary algorithm discovery
 - [Utility Functions](#utility-functions) - Helper functions
-- [Formatter](#formatter) - Abstract formatter interface
 - [SimpleFormatter](#simpleformatter) - Terminal output formatting
 - [Pre-built Agents](#pre-built-agents) - Ready-to-use agents
 
@@ -18,7 +17,7 @@ ______________________________________________________________________
 
 ## KISSAgent
 
-The framework centers around the `KISSAgent` class, which implements a ReAct agent using native function calling of LLMs.
+The core agent class implementing a ReAct agent using native function calling of LLMs.
 
 ### Constructor
 
@@ -100,20 +99,21 @@ The tool is added by default to any KISSAgent.
 
 - `str`: The same result string passed in.
 
-### Class Attributes
-
-- `global_budget_used` (float): Total budget used across all agent instances.
-- `agent_counter` (int): Counter for unique agent IDs.
-
 ### Instance Attributes (after `run()`)
 
 - `id` (int): Unique identifier for this agent instance.
 - `name` (str): The agent's name.
+- `model_name` (str): The name of the model being used.
 - `model`: The model instance being used.
-- `step_count` (int): Current step number in the ReAct loop.
+- `function_map` (list[str]): List of function/tool names available to this agent.
+- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
+- `step_count` (int): Current step number.
 - `total_tokens_used` (int): Total tokens used in this run.
 - `budget_used` (float): Budget used in this run.
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
+- `run_start_timestamp` (int): Unix timestamp when the run started.
+- `is_agentic` (bool): Whether the agent is running in agentic mode.
+- `max_steps` (int): Maximum number of steps allowed.
+- `max_budget` (float): Maximum budget allowed for this run.
 
 ### Tool Definition
 
@@ -135,6 +135,121 @@ def my_tool(param1: str, param2: int = 10) -> str:
 ```
 
 The framework automatically extracts the function signature, type hints, and docstring to generate the tool schema for the LLM.
+
+______________________________________________________________________
+
+## ClaudeCodingAgent
+
+A coding agent that uses the Claude Agent SDK to generate tested Python programs with file system access controls.
+
+### Constructor
+
+```python
+ClaudeCodingAgent(name: str)
+```
+
+**Parameters:**
+
+- `name` (str): Name of the agent. Used for identification and artifact naming.
+
+### Methods
+
+#### `run()`
+
+```python
+async def run(
+    self,
+    model_name: str,
+    prompt_template: str,
+    arguments: dict[str, str] | None = None,
+    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
+    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+    base_dir: str = "<artifact_dir>/claude_workdir",
+    readable_paths: list[str] | None = None,
+    writable_paths: list[str] | None = None,
+) -> dict[str, object] | None
+```
+
+Run the Claude coding agent for a given task.
+
+**Parameters:**
+
+- `model_name` (str): The name of the model to use (e.g., "claude-sonnet-4-5").
+- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
+- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
+- `max_steps` (int): Maximum number of steps. Default is from config.
+- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
+- `base_dir` (str): The base directory to use for the agent's working files.
+- `readable_paths` (list[str] | None): The paths the agent can read from. If None, no path restrictions.
+- `writable_paths` (list[str] | None): The paths the agent can write to. If None, no path restrictions.
+
+**Returns:**
+
+- `dict | None`: The result of the Claude coding agent's task containing:
+  - `"success"` (bool): Whether the task was successful
+  - `"result"` (str): YAML string with created/modified/deleted files and summary
+
+#### `get_trajectory()`
+
+```python
+def get_trajectory(self) -> str
+```
+
+Returns the agent's conversation trajectory as a JSON string.
+
+**Returns:**
+
+- `str`: JSON-formatted string containing the list of messages.
+
+### Instance Attributes (after `run()`)
+
+- `id` (int): Unique identifier for this agent instance.
+- `name` (str): The agent's name.
+- `model_name` (str): The name of the model being used.
+- `function_map` (list[str]): List of built-in tools available (Read, Write, Edit, etc.).
+- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
+- `step_count` (int): Current step number.
+- `total_tokens_used` (int): Total tokens used in this run.
+- `budget_used` (float): Budget used in this run.
+- `run_start_timestamp` (int): Unix timestamp when the run started.
+- `base_dir` (str): The base directory for the agent's working files.
+- `readable_paths` (set[Path]): Set of paths the agent can read from.
+- `writable_paths` (set[Path]): Set of paths the agent can write to.
+- `max_steps` (int): Maximum number of steps allowed.
+- `max_budget` (float): Maximum budget allowed for this run.
+
+### Available Built-in Tools
+
+The agent has access to these built-in tools from Claude Agent SDK:
+
+- `Read`: Read files from the working directory
+- `Write`: Create or overwrite files
+- `Edit`: Make precise string-based edits to files
+- `MultiEdit`: Make multiple precise string-based edits to files
+- `Glob`: Find files by glob pattern
+- `Grep`: Search file contents with regex
+- `Bash`: Run shell commands
+- `WebSearch`: Search the web for information
+- `WebFetch`: Fetch and process content from a URL
+
+### Example
+
+```python
+import anyio
+from kiss.core.claude_coding_agent import ClaudeCodingAgent
+
+async def main():
+    agent = ClaudeCodingAgent("My Agent")
+    result = await agent.run(
+        model_name="claude-sonnet-4-5",
+        prompt_template="Write a fibonacci function with tests"
+    )
+    if result:
+        print(f"Success: {result['success']}")
+        print(f"Result: {result['result']}")
+
+anyio.run(main)
+```
 
 ______________________________________________________________________
 
@@ -581,98 +696,6 @@ class PromptCandidate:
 
 ______________________________________________________________________
 
-## ClaudeCodingAgent
-
-A coding agent that uses the Claude Agent SDK to generate tested Python programs.
-
-### Constructor
-
-```python
-ClaudeCodingAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent.
-
-### Methods
-
-#### `run()`
-
-```python
-async def run(
-    self,
-    task: str,
-    model_name: str = "claude-sonnet-4-5",
-    base_dir: str = "<artifact_dir>/claude_workdir",
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-) -> dict[str, object] | None
-```
-
-Run the Claude coding agent for a given task.
-
-**Parameters:**
-
-- `task` (str): The task to run the Claude coding agent for.
-- `model_name` (str): The name of the model to use. Default is "claude-sonnet-4-5".
-- `base_dir` (str): The base directory to use for the agent.
-- `readable_paths` (list[str] | None): The paths the agent can read from.
-- `writable_paths` (list[str] | None): The paths the agent can write to.
-
-**Returns:**
-
-- `dict | None`: The result of the Claude coding agent's task containing:
-  - `"success"` (bool): Whether the task was successful
-  - `"result"` (str): YAML string with created/modified/deleted files and summary
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the trajectory of the agent in standard JSON format for visualization.
-
-**Returns:**
-
-- `str`: JSON-formatted trajectory string.
-
-### Available Built-in Tools
-
-The agent has access to these built-in tools from Claude Agent SDK:
-
-- `Read`: Read files from the working directory
-- `Write`: Create or overwrite files
-- `Edit`: Make precise string-based edits to files
-- `MultiEdit`: Make multiple precise string-based edits to files
-- `Glob`: Find files by glob pattern
-- `Grep`: Search file contents with regex
-- `Bash`: Run shell commands
-- `WebSearch`: Search the web for information
-- `WebFetch`: Fetch and process content from a URL
-
-### Example
-
-```python
-import anyio
-from kiss.agents.claudecodingagent import ClaudeCodingAgent
-
-async def main():
-    agent = ClaudeCodingAgent("My Agent")
-    result = await agent.run(
-        "Write a fibonacci function with tests",
-        model_name="claude-sonnet-4-5"
-    )
-    if result:
-        print(f"Success: {result['success']}")
-        print(f"Result: {result['result']}")
-
-anyio.run(main)
-```
-
-______________________________________________________________________
-
 ## KISSEvolve
 
 Evolutionary algorithm discovery using LLMs. Evolves code variants through selection, mutation, and crossover.
@@ -933,116 +956,9 @@ Perform a web search and return the top search results with page contents.
 
 ______________________________________________________________________
 
-## Formatter
-
-Abstract base class defining the interface for message formatting and printing. Custom formatters should inherit from this class.
-
-### Methods (Abstract)
-
-#### `format_message()`
-
-```python
-@abstractmethod
-def format_message(self, message: dict[str, Any]) -> str
-```
-
-Format a single message as a string.
-
-**Parameters:**
-
-- `message` (dict): Message dictionary with 'role' and 'content' keys.
-
-**Returns:**
-
-- `str`: Formatted message string.
-
-#### `format_messages()`
-
-```python
-@abstractmethod
-def format_messages(self, messages: list[dict[str, Any]]) -> str
-```
-
-Format a list of messages as a string.
-
-**Parameters:**
-
-- `messages` (list[dict]): List of message dictionaries.
-
-**Returns:**
-
-- `str`: Formatted messages string.
-
-#### `print_message()`
-
-```python
-@abstractmethod
-def print_message(self, message: dict[str, Any]) -> None
-```
-
-Print a single message.
-
-**Parameters:**
-
-- `message` (dict): Message dictionary with 'role' and 'content' keys.
-
-#### `print_messages()`
-
-```python
-@abstractmethod
-def print_messages(self, messages: list[dict[str, Any]]) -> None
-```
-
-Print a list of messages.
-
-**Parameters:**
-
-- `messages` (list[dict]): List of message dictionaries.
-
-#### `print_status()`
-
-```python
-@abstractmethod
-def print_status(self, message: str) -> None
-```
-
-Print a status message.
-
-**Parameters:**
-
-- `message` (str): The status message to print.
-
-#### `print_error()`
-
-```python
-@abstractmethod
-def print_error(self, message: str) -> None
-```
-
-Print an error message.
-
-**Parameters:**
-
-- `message` (str): The error message to print.
-
-#### `print_warning()`
-
-```python
-@abstractmethod
-def print_warning(self, message: str) -> None
-```
-
-Print a warning message.
-
-**Parameters:**
-
-- `message` (str): The warning message to print.
-
-______________________________________________________________________
-
 ## SimpleFormatter
 
-Simple formatter implementation using Rich for terminal output. Implements the `Formatter` interface. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting - when verbose is False, no output is produced.
+Simple formatter implementation using Rich for terminal output. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting - when verbose is False, no output is produced.
 
 ### Constructor
 
