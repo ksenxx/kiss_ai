@@ -36,6 +36,7 @@ and robust code.
 - Use clear, descriptive names
 
 ## Testing Requirements
+- Run lint and fix any lint errors
 - Generate comprehensive tests for EVERY function and feature
 - Tests MUST NOT use mocks, patches, or any form of test doubles
 - Test with real inputs and verify real outputs
@@ -54,7 +55,7 @@ and robust code.
 - Understand existing code in the project
 
 ## After you have implemented the task, simplify the code
- - Remove unnessary object/struct attributes, variables, config variables  
+ - Remove unnessary object/struct attributes, variables, config variables
  - Remove redundant and duplicate code
  - Remove unnecessary comments
  - Make sure that the code is still working correctly

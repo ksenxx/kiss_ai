@@ -10,7 +10,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from kiss.core.base_agent import BaseAgent
+from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
@@ -19,7 +19,7 @@ from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.utils import search_web
 
 
-class KISSAgent(BaseAgent):
+class KISSAgent(Base):
     """A KISS agent using native function calling."""
 
     def __init__(self, name: str) -> None:
@@ -232,7 +232,7 @@ class KISSAgent(BaseAgent):
         """Check budget and step limits, raise KISSError if exceeded."""
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if BaseAgent.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
+        if Base.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -257,7 +257,7 @@ class KISSAgent(BaseAgent):
             self.total_tokens_used += input_tokens + output_tokens
             cost = calculate_cost(self.model.model_name, input_tokens, output_tokens)
             self.budget_used += cost
-            BaseAgent.global_budget_used += cost
+            Base.global_budget_used += cost
         except Exception as e:
             print(f"Error updating tokens and budget from response: {e} {traceback.format_exc()}")
 
@@ -271,7 +271,7 @@ class KISSAgent(BaseAgent):
             token_info = f"[Token usage: {self.total_tokens_used}/{max_tokens}]"
             budget_info = f"[Agent budget usage: ${self.budget_used:.4f}/${self.max_budget:.2f}]"
             global_budget_info = (
-                f"[Global budget usage: ${BaseAgent.global_budget_used:.4f}/"
+                f"[Global budget usage: ${Base.global_budget_used:.4f}/"
                 f"${DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
             )
             return (

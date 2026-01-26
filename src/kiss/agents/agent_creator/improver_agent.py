@@ -23,7 +23,6 @@ import kiss.agents.agent_creator.config  # noqa: F401
 from kiss.core.claude_coding_agent import ClaudeCodingAgent
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.gemini_cli_agent import GeminiCliAgent
-from kiss.core.kiss_error import KISSError
 from kiss.core.openai_codex_agent import OpenAICodexAgent
 from kiss.core.utils import get_config_value
 

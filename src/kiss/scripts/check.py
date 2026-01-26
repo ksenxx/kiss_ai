@@ -30,7 +30,7 @@ def run_command(cmd: list[str], description: str) -> bool:
 def find_markdown_files() -> list[str]:
     """Find all markdown files in the project."""
     project_root = Path(__file__).parent.parent.parent.parent
-    skip_dirs = {"node_modules", "venv", "__pycache__"}
+    skip_dirs = {"node_modules", "venv", "__pycache__", "artifacts"}
     md_files = []
     for md_file in project_root.rglob("*.md"):
         # Skip hidden directories and common non-project directories

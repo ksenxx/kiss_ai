@@ -5,7 +5,7 @@
 
 """Core module for the KISS agent framework."""
 
-from kiss.core.base_agent import BaseAgent
+from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG, AgentConfig, Config
 from kiss.core.gemini_cli_agent import GeminiCliAgent
 from kiss.core.kiss_agent import KISSAgent
@@ -16,7 +16,7 @@ from kiss.core.openai_codex_agent import OpenAICodexAgent
 __all__ = [
     "AgentConfig",
     "AnthropicModel",
-    "BaseAgent",
+    "Base",
     "Config",
     "DEFAULT_CONFIG",
     "GeminiCliAgent",
