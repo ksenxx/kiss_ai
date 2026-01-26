@@ -48,14 +48,21 @@ and robust code.
 - Test code in a separate section using unittest or pytest
 - Include a __main__ block to run tests
 
-Use tools when you need to:
+## Use tools when you need to:
 - Look up API documentation or library usage
 - Find examples of similar implementations
 - Understand existing code in the project
+
+## After you have implemented the task, simplify the code
+ - Remove unnessary object/struct attributes, variables, config variables  
+ - Remove redundant and duplicate code
+ - Remove unnecessary comments
+ - Make sure that the code is still working correctly
+
 """
 
 
-class BaseAgent:
+class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
     agent_counter: ClassVar[int] = 1
@@ -63,8 +70,8 @@ class BaseAgent:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self.id = BaseAgent.agent_counter
-        BaseAgent.agent_counter += 1
+        self.id = Base.agent_counter
+        Base.agent_counter += 1
         self.base_dir = ""
 
     def _init_run_state(self, model_name: str, function_map: list[str]) -> None:
@@ -98,7 +105,7 @@ class BaseAgent:
             "model": self.model_name,
             "budget_used": self.budget_used,
             "total_budget": getattr(self, "max_budget", DEFAULT_CONFIG.agent.max_agent_budget),
-            "global_budget_used": BaseAgent.global_budget_used,
+            "global_budget_used": Base.global_budget_used,
             "global_max_budget": DEFAULT_CONFIG.agent.global_max_budget,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,

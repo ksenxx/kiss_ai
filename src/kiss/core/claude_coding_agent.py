@@ -25,7 +25,7 @@ from claude_agent_sdk import (
 )
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base_agent import DEFAULT_SYSTEM_PROMPT, BaseAgent
+from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
 from kiss.core.models.model_info import get_max_context_length
 
 BUILTIN_TOOLS = [
@@ -36,7 +36,7 @@ READ_TOOLS = {"Read", "Grep", "Glob"}
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 
 
-class ClaudeCodingAgent(BaseAgent):
+class ClaudeCodingAgent(Base):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -130,7 +130,7 @@ class ClaudeCodingAgent(BaseAgent):
         self._update_token_usage(message)
         if hasattr(message, "cost") and message.cost:
             self.budget_used += message.cost
-            BaseAgent.global_budget_used += message.cost
+            Base.global_budget_used += message.cost
 
         final_result = message.result
         self._add_message("model", final_result, timestamp)

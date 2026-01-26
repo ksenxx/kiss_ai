@@ -144,51 +144,8 @@ Your task is to create an initial agent implementation based on the following re
 ## Agent Requirements
 
 The agent must be designed for **long-running, complex tasks** using
-the Agent API available at {kiss_folder}/API.md and should implement:
-
-### 1. Orchestrator Pattern
-- Creates a workflow for the agent to follow.
-- Central coordinator that manages the overall workflow
-- Maintains high-level state and progress tracking
-- Delegates subtasks to specialized sub-agents
-- Handles error recovery and retries
-- Create informative and concise contexts (prompts) for the sub-agents.
-
-### 2. Dynamic To-Do List
-- Maintain a structured task list that evolves during execution
-- Support for task dependencies and priorities
-- Ability to add, modify, and complete tasks dynamically
-- Progress tracking and reporting
-
-### 3. Dynamic Tool Creation
-- Create specialized tools on-the-fly for specific subtasks
-- Register and manage tool availability
-- Tools should be reusable across the execution
-
-### 4. Checkpointing
-- Save state periodically to enable recovery
-- Support for resuming from checkpoints
-- Track what has been completed vs pending
-
-### 5. Sub-Agent Delegation
-- Create specialized sub-agents for complex subtasks
-- Sub-agents should be lightweight and focused
-- Results aggregation from sub-agents
-
-### 6. Efficiency Patterns
-- Minimize token usage through concise prompts
-- Batch operations where possible
-- Early termination when goals are achieved
-- Caching of intermediate results
-
-## 7. Search the web for information about
-- patterns that solve long-horizon tasks scalably, efficiently and accurately.
-- patterns that makes Python code faster
-- patterns that make bash commands faster
-
-## Output Structure
-
-Create the following files in {target_folder}:
+the Agent API available at {kiss_folder}/API.md and should implement
+a simple KISSAgent to solve the task.  Create the following files in {target_folder}:
 
 1. `agent.py` - Main agent implementation with:
 2. `config.py` - Agent configuration

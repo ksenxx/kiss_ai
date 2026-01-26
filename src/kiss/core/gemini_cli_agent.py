@@ -17,7 +17,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base_agent import DEFAULT_SYSTEM_PROMPT, BaseAgent
+from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
 from kiss.core.formatter import Formatter
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
@@ -25,7 +25,7 @@ from kiss.core.simple_formatter import SimpleFormatter
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
-class GeminiCliAgent(BaseAgent):
+class GeminiCliAgent(Base):
     """Gemini CLI Agent using the Google ADK (Agent Development Kit)."""
 
     def __init__(self, name: str) -> None:

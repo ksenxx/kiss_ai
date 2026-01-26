@@ -45,8 +45,6 @@ def create_coding_agent(
         return GeminiCliAgent(name)
     elif coding_agent_type == "openai codex":
         return OpenAICodexAgent(name)
-    else:
-        raise KISSError(f"Unknown coding agent type: {coding_agent_type}")
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -140,7 +138,7 @@ Your goal is to improve this agent to:
 - patterns that solve long-horizon tasks scalably, efficiently and accurately.
 - patterns that makes Python code faster
 - patterns that make bash commands faster
-- implement these patterns in the agent's code
+- implement these patterns in the agent's code if necessary
 
 ## Previous Improvement Report
 
