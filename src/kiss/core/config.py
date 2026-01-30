@@ -73,7 +73,7 @@ class KISSCodingAgentConfig(BaseModel):
         default="claude-opus-4-5",
         description="LLM model to use for subtask generation and execution",
     )
-    refiner_model_name: str = Field(
+    dynamic_gepa_model_name: str = Field(
         default="claude-sonnet-4-5",
         description="LLM model to use for prompt refinement of failed tasks",
     )

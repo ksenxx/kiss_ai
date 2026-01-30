@@ -101,8 +101,7 @@ Returns the agent's conversation trajectory as a JSON string.
 def finish(self, result: str) -> str
 ```
 
-Built-in tool that the agent must call to complete its task and return the final answer.
-The tool is added by default to any KISSAgent.
+Built-in method that serves as the default finish tool for the agent. This method is automatically added as a tool for all KISSAgent instances.
 
 **Parameters:**
 
@@ -111,6 +110,8 @@ The tool is added by default to any KISSAgent.
 **Returns:**
 
 - `str`: The same result string passed in.
+
+**Note:** This is a simpler version than the utility function `kiss.core.utils.finish()`. If you want structured output with status and analysis, you can provide the utility version as a custom tool instead.
 
 ### Instance Attributes (after `run()`)
 
@@ -156,7 +157,7 @@ ______________________________________________________________________
 A multi-agent coding system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks through a multi-agent architecture with:
 - **Orchestrator Agent**: Manages overall task execution and delegates to sub-tasks
 - **Executor Agents**: Handle specific sub-tasks independently
-- **Refiner Agent**: Refines prompts on failures for improved retry attempts
+- **Dynamic GEPA**: Automatically refines prompts on failures using trajectory analysis for improved retry attempts
 
 The system supports recursive sub-task delegation where any agent can call `perform_subtask()` to further decompose work.
 
@@ -197,7 +198,7 @@ def run(
     arguments: dict[str, str] | None = None,
     orchestrator_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name,
     subtasker_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
-    refiner_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name,
+    dynamic_gepa_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.dynamic_gepa_model_name,
     trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
@@ -213,9 +214,9 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `orchestrator_model_name` (str): Model for the main orchestrator agent. Default is from config (claude-sonnet-4-5).
-- `subtasker_model_name` (str): Model for executor sub-task agents. Default is from config (claude-opus-4-5).
-- `refiner_model_name` (str): Model for prompt refinement on failures. Default is from config (claude-sonnet-4-5).
+- `orchestrator_model_name` (str): Model for the main orchestrator agent and executor agents. Default is from config (claude-sonnet-4-5).
+- `subtasker_model_name` (str): Reserved for future use. Currently orchestrator_model_name is used for all agents.
+- `dynamic_gepa_model_name` (str): Model for dynamic prompt refinement when tasks fail. Default is from config (claude-sonnet-4-5).
 - `trials` (int): Number of retry attempts for each task/subtask. Default is 3.
 - `max_steps` (int): Maximum number of steps per agent. Default is from config.
 - `max_budget` (float): Maximum budget in USD for this run. Default is from config.
@@ -296,14 +297,15 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 - Automatically parses commands to detect file operations
 - Enforces readable_paths and writable_paths restrictions
 - Returns descriptive error messages for permission violations
+- Uses subprocess.run() with shell=True for command execution
 
 ### Instance Attributes (after `run()`)
 
 - `id` (int): Unique identifier for this agent instance.
 - `name` (str): The agent's name.
 - `orchestrator_model_name` (str): Model name for orchestrator agent.
-- `subtasker_model_name` (str): Model name for executor agents.
-- `refiner_model_name` (str): Model name for prompt refinement.
+- `subtasker_model_name` (str): Model name for executor agents (reserved, currently uses orchestrator_model_name).
+- `dynamic_gepa_model_name` (str): Model name for dynamic prompt refinement.
 - `task_description` (str): The formatted task description.
 - `messages` (list\[dict[str, Any]\]): List of messages in the trajectory (aggregated from all sub-agents).
 - `total_tokens_used` (int): Total tokens used across all agents in this run.
@@ -315,18 +317,19 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 - `max_steps` (int): Maximum number of steps per agent.
 - `max_budget` (float): Maximum total budget allowed for this run.
 - `trials` (int): Number of retry attempts for each task/subtask.
+- `max_tokens` (int): Maximum context length across all models used.
 
 ### Key Features
 
 - **Multi-Agent Architecture**: Orchestrator delegates to executor agents; supports recursive sub-task decomposition
-- **Three-Model Strategy**:
-  - Orchestrator (default: claude-sonnet-4-5) for high-level coordination
-  - Subtasker (default: claude-opus-4-5) for complex sub-task execution
-  - Refiner (default: claude-sonnet-4-5) for prompt improvement on failures
+- **Dynamic GEPA (Genetic-Pareto) Refinement**:
+  - Automatically refines prompts when tasks fail using trajectory analysis
+  - Uses dynamic_gepa_model_name (default: claude-sonnet-4-5) for non-agentic prompt improvement
+  - Analyzes original prompt, previous prompt, and agent trajectory to generate refined prompts
+  - Retries tasks with refined prompts up to `trials` times
 - **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
 - **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
-- **Retry Logic with Refinement**: On failure, refines prompts using trajectory analysis for improved retry attempts (configurable trials)
 - **Built-in Tools**: Each agent has access to `finish()`, `run_bash_command()`, and `perform_subtask()`
 - **Recursive Delegation**: Sub-tasks can spawn further sub-tasks as needed
 
@@ -343,8 +346,7 @@ result = agent.run(
         that is efficient and correct. Save it to fibonacci.py.
     """,
     orchestrator_model_name="claude-sonnet-4-5",
-    subtasker_model_name="claude-opus-4-5",
-    refiner_model_name="claude-sonnet-4-5",
+    dynamic_gepa_model_name="claude-sonnet-4-5",
     readable_paths=["src/"],
     writable_paths=["output/"],
     base_dir="workdir",
@@ -1577,7 +1579,7 @@ Reads a file and returns the content.
 
 - `str`: The content of the file.
 
-### `finish()` (for KISSAgent)
+### `finish()` (for KISSAgent in utils.py)
 
 ```python
 def finish(
@@ -1587,7 +1589,9 @@ def finish(
 ) -> str
 ```
 
-The agent must call this function with the final status, analysis, and result when it has solved the given task. This is automatically added as a tool for KISSAgent instances.
+A utility function from `kiss.core.utils` that can be used as a finish tool for KISSAgent instances. Returns a YAML-formatted result string.
+
+**Location:** `kiss.core.utils`
 
 **Parameters:**
 
@@ -1599,13 +1603,17 @@ The agent must call this function with the final status, analysis, and result wh
 
 - `str`: A YAML string containing the status, analysis, and result.
 
+**Note:** KISSAgent has its own built-in `finish(result: str) -> str` method that takes only a result parameter and returns it directly. The utility function version is optional and provides more structured output.
+
 ### `finish()` (for KISSCodingAgent)
 
 ```python
 def finish(success: bool, summary: str) -> str
 ```
 
-Used by KISSCodingAgent and its sub-agents to complete task execution. This is a different signature than the KISSAgent finish() function.
+Used by KISSCodingAgent and its sub-agents to complete task execution. This is defined in `kiss.core.kiss_coding_agent` and has a different signature than the utility version.
+
+**Location:** `kiss.core.kiss_coding_agent`
 
 **Parameters:**
 
@@ -1658,11 +1666,12 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
 Parse a bash command to extract readable and writable directory paths.
 
 This function analyzes bash commands to intelligently determine which directories are being read from and which are being written to. It handles:
-- Common read commands: cat, grep, find, ls, python, gcc, etc.
-- Common write commands: touch, mkdir, rm, mv, cp, etc.
+- Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
+- Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
 - Output redirection: >, >>, &>, 2>, etc.
 - Pipe chains with multiple commands
 - Flags and arguments parsing
+- Special commands like tee (reads stdin and writes to file)
 
 **Parameters:**
 
@@ -1675,7 +1684,7 @@ This function analyzes bash commands to intelligently determine which directorie
 **Example:**
 
 ```python
-from kiss.core.utils import parse_bash_command_paths
+from kiss.core.kiss_coding_agent import parse_bash_command_paths
 
 # Reading and writing
 readable, writable = parse_bash_command_paths("cat input.txt > output.txt")
@@ -1692,7 +1701,7 @@ readable, writable = parse_bash_command_paths("cp -r src/ dest/")
 
 **Note:**
 
-This function is used internally by KISSCodingAgent.run_bash_command() to automatically determine which paths need read/write permissions before executing bash commands.
+This function is defined in `kiss.core.kiss_coding_agent` and is used internally by KISSCodingAgent.run_bash_command() to automatically determine which paths need read/write permissions before executing bash commands.
 
 ______________________________________________________________________
 
@@ -1858,9 +1867,9 @@ DEFAULT_CONFIG.agent.use_web_search = True
 
 #### `agent.kiss_coding_agent`
 
-- `orchestrator_model_name` (str): Model for main orchestration (default: "claude-sonnet-4-5")
-- `subtasker_model_name` (str): Model for executor sub-agents (default: "claude-opus-4-5")
-- `refiner_model_name` (str): Model for prompt refinement (default: "claude-sonnet-4-5")
+- `orchestrator_model_name` (str): Model for main orchestration and executor agents (default: "claude-sonnet-4-5")
+- `subtasker_model_name` (str): Reserved for future use (default: "claude-opus-4-5")
+- `dynamic_gepa_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
 - `trials` (int): Retry attempts per task/subtask (default: 3)
 - `max_steps` (int): Maximum steps per agent (default: 50)
 - `max_budget` (float): Maximum total budget in USD (default: 100.0)
@@ -1873,6 +1882,55 @@ DEFAULT_CONFIG.agent.use_web_search = True
 #### `gepa`, `kiss_evolve`, `agent_creator`
 
 Configuration sections for evolutionary optimization systems. See respective classes for details.
+
+______________________________________________________________________
+
+## Constants
+
+### `DEFAULT_SYSTEM_PROMPT`
+
+A system prompt constant defined in `kiss.core.base` that provides coding guidelines for agents. Used by KISSCodingAgent and ClaudeCodingAgent.
+
+**Location:** `kiss.core.base.DEFAULT_SYSTEM_PROMPT`
+
+**Content:**
+
+```python
+DEFAULT_SYSTEM_PROMPT = """
+## Code Style Guidelines
+- Write simple, readable code with minimal indirection
+- Avoid unnecessary object attributes and local variables
+- No redundant abstractions or duplicate code
+- Each function should do one thing well
+- Use clear, descriptive names
+- NO need to write documentations or comments unless absolutely necessary
+
+## Testing Requirements
+- Run lint and fix any lint errors
+- Generate comprehensive tests for EVERY function and feature
+- Tests MUST NOT use mocks, patches, or any form of test doubles
+- Test with real inputs and verify real outputs
+- Test edge cases: empty inputs, None values, boundary conditions
+- Test error conditions with actual invalid inputs
+- Each test should be independent and verify actual behavior
+
+## Code Structure
+- Main implementation code first
+- Test code in a separate section using unittest or pytest
+- Include a __main__ block to run tests
+
+## Use tools when you need to:
+- Look up API documentation or library usage
+- Find examples of similar implementations
+- Understand existing code in the project
+
+## After you have implemented the task, simplify the code
+ - Remove unnessary object/struct attributes, variables, config variables
+ - Remove redundant and duplicate code
+ - Remove unnecessary comments
+ - Make sure that the code is still working correctly
+"""
+```
 
 ______________________________________________________________________
 

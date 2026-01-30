@@ -3,15 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Multi-agent coding system with planning, orchestration, and sub-agents using KISSAgent.
-
-This module implements an efficient multi-agent system that:
-1. Uses a planner agent to break down tasks into sub-tasks
-2. Uses executor agents to handle specific sub-tasks
-3. Keeps total steps below 30 through efficient orchestration
-4. Minimizes token usage through targeted prompts and result caching
-5. Parses bash commands to determine readable/writable directories
-"""
+"""Multi-agent coding system with orchestration, and sub-agents using KISSAgent."""
 
 import re
 import shlex
@@ -63,10 +55,9 @@ This is the relevant context for this sub-task:
 
 {coding_instructions}
 
-** You can call do_subtask() to delegate sub-tasks if needed (even from a sub task). **
 """
 
-PROMPT_TEMPLATE_REFINER = """
+PROMPT_TEMPLATE_DYNAMIC_GEPA = """
 ## Role ##
 You are a neutral evaluator. Your sole task is to refine an agent's prompt template based on
 the agent's trajectory summary and return it.
@@ -353,7 +344,7 @@ class KISSCodingAgent(Base):
         self,
         orchestrator_model_name: str,
         subtasker_model_name: str,
-        refiner_model_name: str,
+        dynamic_gepa_model_name: str,
         trials: int,
         max_steps: int,
         max_budget: float,
@@ -372,11 +363,11 @@ class KISSCodingAgent(Base):
         self.max_budget = max_budget
         self.orchestrator_model_name = orchestrator_model_name
         self.subtasker_model_name = subtasker_model_name
-        self.refiner_model_name = refiner_model_name
+        self.dynamic_gepa_model_name = dynamic_gepa_model_name
         self.max_tokens = max(
             get_max_context_length(orchestrator_model_name),
             get_max_context_length(subtasker_model_name),
-            get_max_context_length(refiner_model_name),
+            get_max_context_length(dynamic_gepa_model_name),
         )
 
         self.budget_used: float = 0.0
@@ -432,7 +423,7 @@ class KISSCodingAgent(Base):
                 arguments={
                     "task_description": self.task_description,
                 },
-                tools=[finish, self.run_bash_command, self.perform_subtask],
+                tools=[finish, self.perform_subtask],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
             )
@@ -443,10 +434,10 @@ class KISSCodingAgent(Base):
             success = ret.get("success", False)
             if not success:
                 print("Task failed, refining prompt and retrying...")
-                refiner = KISSAgent(f"{self.name} Prompt Refiner")
-                task_prompt_template = refiner.run(
-                    model_name=self.refiner_model_name,
-                    prompt_template=PROMPT_TEMPLATE_REFINER,
+                dynamic_gepa = KISSAgent(f"{self.name} Dynamic GEPA")
+                task_prompt_template = dynamic_gepa.run(
+                    model_name=self.dynamic_gepa_model_name,
+                    prompt_template=PROMPT_TEMPLATE_DYNAMIC_GEPA,
                     arguments={
                         "original_prompt_template": TASKING_PROMPT,
                         "previous_prompt_template": task_prompt_template,
@@ -454,8 +445,8 @@ class KISSCodingAgent(Base):
                     },
                     is_agentic=False,
                 )
-                self.budget_used += refiner.budget_used  # type: ignore
-                self.total_tokens_used += refiner.total_tokens_used  # type: ignore
+                self.budget_used += dynamic_gepa.budget_used  # type: ignore
+                self.total_tokens_used += dynamic_gepa.total_tokens_used  # type: ignore
                 continue
             return result
         raise KISSError(f"Task {self.task_description} failed after {self.trials} trials")
@@ -493,7 +484,7 @@ class KISSCodingAgent(Base):
                     "max_steps": str(self.max_steps),
                     "coding_instructions": DEFAULT_SYSTEM_PROMPT,
                 },
-                tools=[finish, self.run_bash_command, self.perform_subtask],
+                tools=[finish, self.run_bash_command],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
             )
@@ -504,10 +495,10 @@ class KISSCodingAgent(Base):
             success = ret.get("success", False)
             if not success:
                 print(f"Subtask {subtask.name} failed, refining prompt and retrying...")
-                refiner = KISSAgent(f"{self.name} Prompt Refiner")
-                task_prompt_template = refiner.run(
-                    model_name=self.refiner_model_name,
-                    prompt_template=PROMPT_TEMPLATE_REFINER,
+                dynamic_gepa = KISSAgent(f"{self.name} dynamic gepa")
+                task_prompt_template = dynamic_gepa.run(
+                    model_name=self.dynamic_gepa_model_name,
+                    prompt_template=PROMPT_TEMPLATE_DYNAMIC_GEPA,
                     arguments={
                         "original_prompt_template": TASKING_PROMPT,
                         "previous_prompt_template": task_prompt_template,
@@ -515,8 +506,8 @@ class KISSCodingAgent(Base):
                     },
                     is_agentic=False,
                 )
-                self.budget_used += refiner.budget_used  # type: ignore
-                self.total_tokens_used += refiner.total_tokens_used  # type: ignore
+                self.budget_used += dynamic_gepa.budget_used  # type: ignore
+                self.total_tokens_used += dynamic_gepa.total_tokens_used  # type: ignore
                 continue
             return result
         raise KISSError(f"Subtask {subtask.name} failed after {self.trials} trials")
@@ -528,8 +519,12 @@ class KISSCodingAgent(Base):
         orchestrator_model_name: str = (
             DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name
         ),
-        subtasker_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
-        refiner_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name,
+        subtasker_model_name: str = (
+            DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name
+        ),
+        dynamic_gepa_model_name: str = (
+            DEFAULT_CONFIG.agent.kiss_coding_agent.dynamic_gepa_model_name
+        ),
         trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
         max_steps: int = DEFAULT_CONFIG.agent.max_steps,
         max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
@@ -544,7 +539,7 @@ class KISSCodingAgent(Base):
         Args:
             orchestrator_model_name: The name of the orchestrator model to use.
             subtasker_model_name: The name of the subtasker model to use.
-            refiner_model_name: The name of the refiner model to use.
+            dynamic_gepa_model_name: The name of the dynamic_gepa model to use.
             trials: The number of trials to attempt for each subtask.
             prompt_template: The prompt template for the task.
             arguments: The arguments for the task.
@@ -562,7 +557,7 @@ class KISSCodingAgent(Base):
         self._reset(
             orchestrator_model_name,
             subtasker_model_name,
-            refiner_model_name,
+            dynamic_gepa_model_name,
             trials,
             max_steps,
             max_budget,
@@ -572,7 +567,6 @@ class KISSCodingAgent(Base):
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
-
         self.task_description = prompt_template.format(**self.arguments)
         return self.perform_task()
 
