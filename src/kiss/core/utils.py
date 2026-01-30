@@ -95,9 +95,9 @@ def config_to_dict() -> dict[Any, Any]:
 
     def convert_to_json(obj: Any) -> Any:
         if isinstance(obj, dict):
-            return {k: convert_to_json(v) for k, v in obj.items() if "API_KEY" not in k}
+            return {k: convert_to_json(v) for k, v in obj.items() if "API_KEY" not in k}  # type: ignore[misc]
         if isinstance(obj, list):
-            return [convert_to_json(item) for item in obj]
+            return [convert_to_json(item) for item in obj]. # type: ignore[misc]
         if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
         # For classes/objects, recursively convert fields, skipping any that end with API_KEY
@@ -151,7 +151,7 @@ def finish(
         indent=2,
         sort_keys=False,
     )
-    return cast(str, result_str)
+    return result_str
 
 
 def read_project_file(file_path_relative_to_project_root: str) -> str:
@@ -190,7 +190,8 @@ def read_project_file(file_path_relative_to_project_root: str) -> str:
             return importlib.resources.read_text(pkg, file, encoding="utf-8")
         else:
             # If no package, try relative to this module's package
-            return importlib.resources.read_text(__package__, file, encoding="utf-8")
+            package = __package__ or "kiss.core"
+            return importlib.resources.read_text(package, file, encoding="utf-8")
     except Exception as e:
         raise KISSError(
             f"Could not find '{file_path_relative_to_project_root}' "
@@ -210,8 +211,9 @@ def read_project_file_from_package(file_name_as_python_package: str) -> str:
     import importlib.resources
 
     try:
+        package = __package__ or "kiss.core"
         return importlib.resources.read_text(
-            __package__, file_name_as_python_package, encoding="utf-8"
+            package, file_name_as_python_package, encoding="utf-8"
         )
     except Exception as e:
         raise KISSError(
@@ -393,7 +395,7 @@ def search_web(query: str, max_results: int = 5) -> str:
             results = _extract_search_results(soup, selector, max_results)
 
             if results:
-                formatted_results = []
+                formatted_results: list[str] = []
                 for title, result_url in results:
                     content = _fetch_page_content(result_url, SAFARI_HEADERS)
                     result_text = f"Title: {title}\nURL: {result_url}\nContent:\n{content}\n"

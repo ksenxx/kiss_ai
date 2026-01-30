@@ -22,6 +22,11 @@ from kiss.core.utils import search_web
 class KISSAgent(Base):
     """A KISS agent using native function calling."""
 
+    # Instance attributes initialized in _init_run_state
+    budget_used: float
+    step_count: int
+    total_tokens_used: int
+
     def __init__(self, name: str) -> None:
         super().__init__(name)
 
@@ -265,8 +270,6 @@ class KISSAgent(Base):
     def _get_usage_info_string(self) -> str:
         """Returns the token usage and budget information string."""
         step_info = f"[Step {self.step_count}/{self.max_steps}]"
-        if self.model is None:
-            return step_info
         try:
             max_tokens = get_max_context_length(self.model.model_name)
             token_info = f"[Token usage: {self.total_tokens_used}/{max_tokens}]"

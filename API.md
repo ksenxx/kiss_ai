@@ -1753,6 +1753,7 @@ DEFAULT_CONFIG.agent.use_web_search = True
 ### Configuration Sections
 
 #### `api_keys`
+
 - `openai_api_key` (str): OpenAI API key
 - `anthropic_api_key` (str): Anthropic API key
 - `google_api_key` (str): Google API key
@@ -1761,6 +1762,7 @@ DEFAULT_CONFIG.agent.use_web_search = True
 - `serper_api_key` (str): Serper API key for web search
 
 #### `agent`
+
 - `max_steps` (int): Maximum steps per agent run (default: 100)
 - `max_agent_budget` (float): Maximum budget per agent in USD (default: 10.0)
 - `global_budget` (float): Global budget limit in USD (default: 200.0)
@@ -1769,10 +1771,12 @@ DEFAULT_CONFIG.agent.use_web_search = True
 - `model_name` (str): Default model name (default: "gpt-4o")
 
 #### `docker`
+
 - `default_image` (str): Default Docker image (default: "ubuntu:latest")
 - `default_workdir` (str): Default working directory in container (default: "/workspace")
 
 #### `gepa`, `kiss_evolve`, `agent_creator`
+
 Configuration sections for evolutionary optimization systems. See respective classes for details.
 
 ______________________________________________________________________

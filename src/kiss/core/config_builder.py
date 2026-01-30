@@ -6,7 +6,7 @@
 """Configuration builder for KISS agent settings with CLI support."""
 
 from argparse import ArgumentParser
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 from pydantic import BaseModel, Field, create_model
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -52,7 +52,13 @@ def _add_model_arguments(parser: ArgumentParser, model: type[BaseModel], prefix:
                 help=f"Disable {field_name}",
             )
         else:
-            arg_type = {int: int, float: float}.get(field_type, str)  # type: ignore[arg-type]
+            # Determine the argument type for argparse
+            if field_type is int:
+                arg_type: type[int] | type[float] | type[str] = int
+            elif field_type is float:
+                arg_type = float
+            else:
+                arg_type = str
             help_text = f"{field_info.description or field_name} (default: {field_info.default})"
             parser.add_argument(
                 f"--{arg_name}",
@@ -104,9 +110,9 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
     if current_config is not None:
         # Get all fields that are not part of the base Config class
         base_fields = set(Config.model_fields.keys())
-        for field_name in type(current_config).model_fields:
+        for field_name in current_config.model_fields.keys():
             if field_name not in base_fields:
-                field_info = type(current_config).model_fields[field_name]
+                field_info = current_config.model_fields[field_name]
                 field_type = field_info.annotation
                 # Get the current value as default
                 current_value = getattr(current_config, field_name, None)
@@ -114,19 +120,23 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
                     existing_fields[field_name] = (
                         field_type,
                         Field(
-                            default_factory=lambda v=current_value: (
-                                v.model_copy() if hasattr(v, "model_copy") else v
+                            default_factory=lambda v=current_value: (  # type: ignore[misc]
+                                v.model_copy() if hasattr(v, "model_copy") else v  # type: ignore[union-attr]
                             )
                         ),
                     )
                 else:
+                    # For None values, create a lambda that calls the type constructor
                     existing_fields[field_name] = (
                         field_type,
-                        Field(default_factory=field_type),  # type: ignore[arg-type]
+                        Field(default_factory=lambda ft=field_type: ft()),  # type: ignore[misc]
                     )
 
     # Add the new config field
-    all_fields = {**existing_fields, name: (config_class, Field(default_factory=config_class))}
+    all_fields: dict[str, Any] = {
+        **existing_fields,
+        name: (config_class, Field(default_factory=config_class)),
+    }
 
     # Create BaseModel subclass dynamically using create_model
     config_with_name = create_model(  # type: ignore[call-overload]
@@ -154,11 +164,11 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
         defaults = dynamic_config().model_dump()
 
         # Recursive merge: override values take precedence, nested dicts are merged
-        def merge(base: dict, override: dict) -> dict:
+        def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
             result = base.copy()
             for k, v in override.items():
                 if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-                    result[k] = merge(result[k], v)
+                    result[k] = merge(cast(dict[str, Any], result[k]), cast(dict[str, Any], v))
                 else:
                     result[k] = v
             return result

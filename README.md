@@ -430,6 +430,7 @@ agent.run(
 ```
 
 Global budget in config:
+
 ```python
 DEFAULT_CONFIG.agent.global_budget = 100.0
 ```
@@ -534,9 +535,9 @@ kiss/
 Contributions are welcome! Please:
 
 1. Follow the KISS philosophy - simplicity over complexity
-2. Add tests for new features
-3. Update documentation
-4. Ensure backwards compatibility
+1. Add tests for new features
+1. Update documentation
+1. Ensure backwards compatibility
 
 ## License
 
@@ -564,6 +565,7 @@ If you use KISS in your research, please cite:
 ## Acknowledgments
 
 KISS builds on ideas from:
+
 - ReAct: Reasoning and Acting in Language Models
 - GEPA: Reflective Prompt Evolution
 - Evolutionary Algorithms and Genetic Programming
