@@ -20,7 +20,7 @@ class ImproverConfig(BaseModel):
         description="LLM model to use for the improver agent",
     )
     max_steps: int = Field(
-        default=150,
+        default=50,
         description="Maximum steps for the improver agent",
     )
     max_budget: float = Field(
@@ -39,6 +39,10 @@ class EvolverConfig(BaseModel):
     max_generations: int = Field(
         default=10,
         description="Maximum number of improvement generations",
+    )
+    initial_frontier_size: int = Field(
+        default=4,
+        description="Initial size of the Pareto frontier",
     )
     max_frontier_size: int = Field(
         default=6,

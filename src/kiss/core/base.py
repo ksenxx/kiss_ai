@@ -25,15 +25,14 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
 yaml.add_representer(str, _str_presenter)
 
 
-DEFAULT_SYSTEM_PROMPT = """You are an expert SWE who writes clean, simple, \
-and robust code.
-
+DEFAULT_SYSTEM_PROMPT = """
 ## Code Style Guidelines
 - Write simple, readable code with minimal indirection
 - Avoid unnecessary object attributes and local variables
 - No redundant abstractions or duplicate code
 - Each function should do one thing well
 - Use clear, descriptive names
+- NO need to write documentations or comments unless absolutely necessary
 
 ## Testing Requirements
 - Run lint and fix any lint errors

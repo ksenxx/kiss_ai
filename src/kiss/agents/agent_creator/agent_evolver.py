@@ -117,42 +117,21 @@ class AgentVariant:
     parent_ids: list[int] = field(default_factory=list)
     feedback: str = ""
 
-    def dominates(self, other: "AgentVariant", minimize: set[str] | None = None) -> bool:
-        """Check if this variant Pareto-dominates another.
-
-        A variant dominates another if it is at least as good in all metrics
-        and strictly better in at least one.
-
-        Args:
-            minimize: Set of metric names to minimize. Metrics not in this set
-                     are maximized. Defaults to {"tokens_used", "execution_time"}.
-        """
-        if minimize is None:
-            minimize = {"tokens_used", "execution_time"}
-
+    def dominates(self, other: "AgentVariant") -> bool:
+        """Check if this variant Pareto-dominates another."""
         all_metrics = set(self.metrics.keys()) | set(other.metrics.keys())
 
-        at_least_as_good = True
         strictly_better = False
 
         for metric in all_metrics:
-            self_val = self.metrics.get(metric, 0)
-            other_val = other.metrics.get(metric, 0)
+            self_val = self.metrics.get(metric, sys.maxsize)
+            other_val = other.metrics.get(metric, sys.maxsize)
 
-            if metric in minimize:
-                # Lower is better
-                if self_val > other_val:
-                    at_least_as_good = False
-                if self_val < other_val:
-                    strictly_better = True
-            else:
-                # Higher is better
-                if self_val < other_val:
-                    at_least_as_good = False
-                if self_val > other_val:
-                    strictly_better = True
-
-        return at_least_as_good and strictly_better
+            if self_val > other_val:
+                return False
+            if self_val < other_val:
+                strictly_better = True
+        return strictly_better
 
     def score(self, weights: dict[str, float] | None = None) -> float:
         """Combined score for ranking (lower is better).
@@ -165,7 +144,7 @@ class AgentVariant:
             # Default weights: prioritize success (maximize), then minimize tokens and time
             # success is 0 or 1, tokens_used count, execution_time in seconds
             weights = {
-                "success": -1000000,      # Maximize success (most important)
+                "success": 1000000,       # Minimize success (0 is best)
                 "tokens_used": 1,         # Minimize token usage
                 "execution_time": 1000,   # Minimize execution time
             }
@@ -235,7 +214,7 @@ Create the following files in {target_folder}:
    - "metrics": dict[str, Any] - Metrics from the agent on the task
      - "tokens_used": int - Number of tokens used by the agent
      - "execution_time": float - Time taken to run the agent on the task in seconds
-     - "success": int - 1 if the agent completed successfully, 0 otherwise
+     - "success": int - 0 if the agent completed successfully, 1 otherwise
 2. `config.py` - Agent configuration
 3. `__init__.py` - Agent package initialization
 4. `README.md` - Agent documentation
@@ -261,6 +240,7 @@ class AgentEvolver:
         task_description: str,
         model_name: str | None = None,
         max_generations: int | None = None,
+        initial_frontier_size: int | None = None,
         max_frontier_size: int | None = None,
         mutation_probability: float | None = None,
         coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] | None = None,
@@ -282,6 +262,9 @@ class AgentEvolver:
         self.task_description = task_description
         self.model_name = get_config_value(model_name, evolver_cfg, "model_name")
         self.max_generations = get_config_value(max_generations, evolver_cfg, "max_generations")
+        self.initial_frontier_size = get_config_value(
+            initial_frontier_size, evolver_cfg, "initial_frontier_size"
+        )
         self.max_frontier_size = get_config_value(
             max_frontier_size, evolver_cfg, "max_frontier_size"
         )
@@ -319,9 +302,8 @@ class AgentEvolver:
         report = str(self.work_dir / f"variant_{variant_id}" / "improvement_report.json")
         return folder, report
 
-    def _create_initial_agent(self) -> AgentVariant | None:
+    def _create_initial_agent(self, variant_id: int) -> AgentVariant:
         """Create the initial agent from scratch."""
-        variant_id = self._next_variant_id()
         target_folder, report_path = self._get_variant_paths(variant_id)
         Path(target_folder).mkdir(parents=True, exist_ok=True)
 
@@ -367,24 +349,7 @@ class AgentEvolver:
     def _evaluate_variant(
         self, variant: AgentVariant,
     ) -> dict[str, Any]:
-        """Run the agent on the long-running task and collect metrics.
-
-        Dynamically imports the agent from folder_path and calls the agent_run(task)
-        function with self.task_description. The agent runs in a temporary directory
-        which is cleaned up before this method returns.
-
-        The agent.py is expected to have an `agent_run(task: str)` function that
-        runs the agent on the given task and returns a result.
-
-        Args:
-            variant: The variant to evaluate.
-
-        Returns:
-            Dictionary containing the following keys:
-            - "success": int - 1 if the agent completed successfully, 0 otherwise
-            - "tokens_used": int - Number of tokens used by the agent
-            - "execution_time": float - Time taken to run the agent on the task in seconds
-        """
+        """Run the agent on the long-running task and collect metrics."""
         print(f"Evaluating variant {variant.id}...")
 
         # Create a temporary directory and copy the variant's code into it
@@ -404,14 +369,14 @@ class AgentEvolver:
                     print(f"Failed to load module from {agent_file}")
                     return {
                         "feedback": "Failed to load module from agent.py",
-                        "metrics": {"success": 0, "tokens_used": 0, "execution_time": 0.0},
+                        "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
                     }
                 result: dict[str, Any] = agent_module.agent_run(self.task_description)
                 return result
             except Exception:
                 return {
                     "feedback": "Failed to run agent.py",
-                    "metrics": {"success": 0, "tokens_used": 0, "execution_time": 0.0},
+                    "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
                 }
             finally:
                 os.chdir(old_cwd)
@@ -560,16 +525,17 @@ class AgentEvolver:
             print(f"Max frontier size: {self.max_frontier_size}, Task: {self.task_description}")
 
             # Initialize with first agent
-            print("\nInitializing...")
-            initial = self._create_initial_agent()
-            if initial is None:
-                raise RuntimeError("Failed to create initial agent")
-
-            eval_result = self._evaluate_variant(initial)
-            initial.metrics = eval_result["metrics"]
-            self._update_pareto_frontier(initial)
-            print(f"Initial agent: {self._format_metrics(initial.metrics)}")
-            self._copy_best_to_optimal(initial)
+            # while pareto frontier size is less that self.initial_frontier_size:
+            while len(self.pareto_frontier) < self.initial_frontier_size:
+                variant_id = self._next_variant_id()
+                print(f"\nInitializing variant_{variant_id} agent")
+                initial = self._create_initial_agent(variant_id=variant_id)
+                eval_result = self._evaluate_variant(initial)
+                initial.metrics = eval_result["metrics"]
+                self._update_pareto_frontier(initial)
+                metrics_str = self._format_metrics(initial.metrics)
+                print(f"Initial agent variant_{variant_id} metrics: {metrics_str}")
+                self._copy_best_to_optimal(initial)
 
             # Evolution loop
             for gen in range(1, self.max_generations + 1):
@@ -694,7 +660,8 @@ def main() -> None:
     """Run the AgentEvolver on a long-running task."""
     evolver = AgentEvolver(
         task_description=LONG_RUNNING_TASK,
-        max_generations=20,  # Reduced for testing
+        max_generations=20,
+        initial_frontier_size=4,
         max_frontier_size=6,
         mutation_probability=0.8,
     )

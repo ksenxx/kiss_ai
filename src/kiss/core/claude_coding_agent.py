@@ -53,7 +53,7 @@ class ClaudeCodingAgent(Base):
     ) -> None:
         self._init_run_state(model_name, BUILTIN_TOOLS)
         Path(base_dir).mkdir(parents=True, exist_ok=True)
-        self.base_dir = Path(base_dir).resolve()
+        self.base_dir = str(Path(base_dir).resolve())
         self.readable_paths = [self._resolve_path(p) for p in readable_paths or []]
         self.writable_paths = [self._resolve_path(p) for p in writable_paths or []]
         self.max_tokens = get_max_context_length(model_name)
