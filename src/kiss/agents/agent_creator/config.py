@@ -60,8 +60,8 @@ class EvolverConfig(BaseModel):
         default=5.0,
         description="Maximum budget in USD for creating the initial agent",
     )
-    coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] = Field(
-        default="claude code",
+    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"] = Field(
+        default="kiss code",
         description="Type of coding agent to use for the improver agent",
     )
 

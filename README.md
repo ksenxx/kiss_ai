@@ -33,7 +33,7 @@ def calculate(expression: str) -> str:
 
 agent = KISSAgent(name="Math Buddy")
 result = agent.run(
-    model_name="gemini-3-flash-preview",
+    model_name="gemini-2.5-flash",
     prompt_template="Calculate: {question}",
     arguments={"question": "What is 15% of 847?"},
     tools=[calculate]
@@ -54,16 +54,17 @@ KISS uses **native function calling** from the LLM providers. Your Python functi
 
 KISS is a lightweight agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
 
-- **Simple Architecture**: Clean, minimal core that's easy to understand and extend
+- **Simple Architecture**: Clean, minimal core with a unified `Base` class that's easy to understand and extend
+- **Multi-Agent Coding System**: KISSCodingAgent with planning, orchestration, and sub-agent management
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
 - **Native Function Calling**: Seamless tool integration using native function calling APIs (OpenAI, Anthropic, Gemini, Together AI, and OpenRouter)
 - **Docker Integration**: Built-in Docker manager for running agents in isolated environments
-- **Trajectory Tracking**: Automatic saving of agent execution trajectories
+- **Trajectory Tracking**: Automatic saving of agent execution trajectories with unified state management
 - **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
 - **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
-- **Self-Evolution**: Framework for agents to evolve and refine other multi agents.
+- **Self-Evolution**: Framework for agents to evolve and refine other multi agents
 - **SWE-bench Dataset Support**: Built-in support for downloading and working with SWE-bench Verified dataset
 - **RAG Support**: Simple retrieval-augmented generation system with in-memory vector store
 - **Useful Agents**: Pre-built utility agents including prompt refinement and general bash execution agents
@@ -175,7 +176,7 @@ for iteration in range(max_iterations):
             original_prompt_template=original_prompt,
             previous_prompt_template=current_prompt,
             agent_trajectory=trajectory,
-            model_name="gpt-4o"
+            model_name="gemini-2.5-flash"
         )
         print(f"📝 New prompt:\n{current_prompt[:200]}...")
 ```
@@ -205,7 +206,7 @@ draft = writer_agent.run(
 
 # Agent 3: Edit (uses draft)
 final = editor_agent.run(
-    model_name="gemini-3-pro-preview", 
+    model_name="gemini-2.5-flash",
     arguments={"draft": draft},
     # ...
 )
@@ -348,6 +349,40 @@ print(f"Stats: {result['stats']}")
 
 For usage examples, API reference, and configuration options, please see the [Self-Evolving Multi-Agent README](src/kiss/agents/self_evolving_multi_agent/README.md).
 
+### Using KISS Coding Agent
+
+The KISS Coding Agent is a multi-agent system with planning, orchestration, and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks:
+
+```python
+from kiss.core.kiss_coding_agent import KISSCodingAgent
+
+# Create agent with a name
+agent = KISSCodingAgent(name="My Coding Agent")
+
+# Run a coding task with path restrictions
+result = agent.run(
+    model_name="gpt-4o",
+    prompt_template="""
+        Write, test, and optimize a fibonacci function in Python
+        that is efficient and correct.
+    """,
+    readable_paths=["src/"],  # Allowed read paths
+    writable_paths=["output/"],  # Allowed write paths
+    base_dir="workdir",  # Base working directory
+    max_steps=30,  # Maximum orchestration steps
+    trials=3  # Number of retry attempts
+)
+print(f"Result: {result}")
+```
+
+**Key Features:**
+
+- **Multi-Agent Architecture**: Uses a planner agent to break down tasks, and executor sub-agents for specific tasks
+- **Token Optimization**: Uses smaller models for simple tasks to minimize costs
+- **Efficient Orchestration**: Keeps total steps below 30 through smart task management
+- **Bash Command Parsing**: Automatically extracts readable/writable directories from bash commands
+- **Path Access Control**: Enforces read/write permissions on file system paths
+
 ### Using Claude Coding Agent
 
 The Claude Coding Agent uses the Claude Agent SDK to generate tested Python programs with file system access controls:
@@ -459,7 +494,7 @@ tags = get_all_arvo_tags("n132/arvo")
 
 # Find vulnerabilities in a specific Docker image
 result = find_vulnerability(
-    model_name="gemini-3-flash-preview",
+    model_name="gemini-2.5-flash",
     image_name="n132/arvo:tag-name",
     num_trials=10,  # Number of attempts to find a vulnerability
     location="/src"  # Location of the source code in the container
@@ -474,7 +509,7 @@ else:
 **SWE-bench Verified Agent:**
 
 ```bash
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-3-flash-preview --swebench_verified.instance_id "django__django-11099"
+uv run src/kiss/agents/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-2.5-flash --swebench_verified.instance_id "django__django-11099"
 ```
 
 The SWE-bench Verified agent is a Software Engineering agent that:
@@ -562,7 +597,7 @@ refined_prompt = refine_prompt_template(
     original_prompt_template="Original prompt...",
     previous_prompt_template="Previous version...",
     agent_trajectory=agent.get_trajectory(),  # Returns JSON string
-    model_name="gemini-3-pro-preview"
+    model_name="gemini-2.5-flash"
 )
 ```
 
@@ -573,7 +608,7 @@ from kiss.agents.kiss import run_bash_task_in_sandboxed_ubuntu_latest
 
 result = run_bash_task_in_sandboxed_ubuntu_latest(
     task="Install and configure nginx",
-    model_name="gemini-3-pro-preview"
+    model_name="gemini-2.5-flash"
 )
 ```
 
@@ -605,7 +640,7 @@ run_simple_coding_agent = get_run_simple_coding_agent(test_fn)
 result = run_simple_coding_agent(
     prompt_template=prompt_template,
     arguments={},
-    model_name="gemini-3-pro-preview"
+    model_name="gemini-2.5-flash"
 )
 print(result)
 ```
@@ -646,8 +681,9 @@ kiss/
 │   │       ├── arvo_agent.py       # Arvo-based vulnerability detector
 │   │       └── arvo_tags.json      # Docker image tags for Arvo
 │   ├── core/            # Core framework components
-│   │   ├── base_agent.py      # Base agent class with common functionality
+│   │   ├── base.py            # Base class with common functionality for all KISS agents
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
+│   │   ├── kiss_coding_agent.py   # Multi-agent coding system with planning and orchestration
 │   │   ├── claude_coding_agent.py # Claude Coding Agent using Claude Agent SDK
 │   │   ├── gemini_cli_agent.py    # Gemini CLI Agent using Google ADK
 │   │   ├── openai_codex_agent.py  # OpenAI Codex Agent using OpenAI Agents SDK

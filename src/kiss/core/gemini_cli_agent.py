@@ -12,6 +12,7 @@ from typing import Any
 
 import anyio
 from google.adk.agents import Agent
+from google.adk.events.event import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -54,6 +55,7 @@ class GeminiCliAgent(Base):
         self.max_steps = max_steps
         self.max_budget = max_budget
         self._formatter = formatter or SimpleFormatter()
+        self.step_count: int = 0
 
     def _create_tools(self) -> list[Any]:
         """Create tools with path restrictions for the Gemini agent."""
@@ -290,7 +292,7 @@ class GeminiCliAgent(Base):
 
                 # Run the agent and collect events
                 final_result: str | None = None
-                events_list = []
+                events_list: list[Event] = []
 
                 async for event in runner.run_async(
                     user_id=user_id, session_id=session.id, new_message=content

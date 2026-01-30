@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [KISSAgent](#kissagent) - Core agent class with function calling
+- [KISSCodingAgent](#kisscodingagent) - Multi-agent coding system with planning and orchestration
 - [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
 - [GeminiCliAgent](#geminicliagent) - Google ADK-based coding agent
 - [OpenAICodexAgent](#openaicodexagent) - OpenAI Agents SDK-based coding agent
@@ -56,7 +57,7 @@ Runs the agent's main ReAct loop to solve the task.
 
 **Parameters:**
 
-- `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-3-pro-preview", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "openrouter/anthropic/claude-3.5-sonnet")
+- `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-2.5-flash", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "openrouter/anthropic/claude-3.5-sonnet")
 - `prompt_template` (str): The prompt template for the agent. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web_search` is enabled in config, `search_web` is also automatically added. Default is None.
@@ -139,6 +140,157 @@ def my_tool(param1: str, param2: int = 10) -> str:
 ```
 
 The framework automatically extracts the function signature, type hints, and docstring to generate the tool schema for the LLM.
+
+______________________________________________________________________
+
+## KISSCodingAgent
+
+A multi-agent coding system with planning, orchestration, and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks through a planner agent, then coordinates executor agents to complete each sub-task.
+
+### Constructor
+
+```python
+KISSCodingAgent(name: str)
+```
+
+**Parameters:**
+
+- `name` (str): Name of the agent. Used for identification and artifact naming.
+
+### Methods
+
+#### `run()`
+
+```python
+def run(
+    self,
+    model_name: str,
+    prompt_template: str,
+    arguments: dict[str, str] | None = None,
+    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
+    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+    base_dir: str = "<artifact_dir>/kiss_workdir",
+    readable_paths: list[str] | None = None,
+    writable_paths: list[str] | None = None,
+    trials: int = 3,
+) -> str
+```
+
+Run the multi-agent coding system with planning and orchestration.
+
+**Parameters:**
+
+- `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-2.5-flash").
+- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
+- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
+- `max_steps` (int): Maximum number of total orchestration steps. Default is from config.
+- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
+- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no path restrictions.
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no path restrictions.
+- `trials` (int): The number of retry attempts for each subtask. Default is 3.
+
+**Returns:**
+
+- `str`: The result of the task.
+
+#### `get_trajectory()`
+
+```python
+def get_trajectory(self) -> str
+```
+
+Returns the agent's conversation trajectory as a JSON string.
+
+**Returns:**
+
+- `str`: JSON-formatted string containing the list of messages.
+
+#### `plan_tasks()`
+
+```python
+def plan_tasks(
+    self,
+    task_description: str,
+    model_name: str,
+) -> list[SubTask]
+```
+
+Use planner agent to create an execution plan by breaking down the task into sub-tasks.
+
+**Parameters:**
+
+- `task_description` (str): The description of the task to plan.
+- `model_name` (str): The model to use for planning.
+
+**Returns:**
+
+- `list[SubTask]`: List of SubTask objects representing the execution plan.
+
+#### `run_bash_command()`
+
+```python
+def run_bash_command(self, command: str, description: str) -> str
+```
+
+Run a bash command with automatic path permission checks. Parses the command to extract readable and writable paths, then validates permissions before execution.
+
+**Parameters:**
+
+- `command` (str): The bash command to execute.
+- `description` (str): A description of what the command does.
+
+**Returns:**
+
+- `str`: The command output (stdout), or an error message if permission denied or execution failed.
+
+### Instance Attributes (after `run()`)
+
+- `id` (int): Unique identifier for this agent instance.
+- `name` (str): The agent's name.
+- `model_name` (str): The name of the model being used.
+- `function_map` (list[str]): List of tools available to executor agents.
+- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
+- `step_count` (int): Current step number.
+- `total_tokens_used` (int): Total tokens used in this run.
+- `budget_used` (float): Budget used in this run.
+- `run_start_timestamp` (int): Unix timestamp when the run started.
+- `base_dir` (str): The base directory for the agent's working files.
+- `readable_paths` (list[Path]): List of paths the agent can read from.
+- `writable_paths` (list[Path]): List of paths the agent can write to.
+- `max_steps` (int): Maximum number of steps allowed.
+- `max_budget` (float): Maximum budget allowed for this run.
+
+### Key Features
+
+- **Multi-Agent Architecture**: Uses a planner agent to break down tasks into sub-tasks, and executor KISSAgents to handle each sub-task
+- **Token Optimization**: Uses smaller models for simple tasks to minimize costs
+- **Efficient Orchestration**: Keeps total steps below configured maximum through smart task management
+- **Bash Command Parsing**: Automatically extracts readable/writable directories from bash commands using `parse_bash_command_paths()`
+- **Path Access Control**: Enforces read/write permissions on file system paths
+- **Retry Logic**: Supports multiple retry attempts for each subtask to improve reliability
+
+### Example
+
+```python
+from kiss.core.kiss_coding_agent import KISSCodingAgent
+
+agent = KISSCodingAgent("My Coding Agent")
+
+result = agent.run(
+    model_name="gpt-4o",
+    prompt_template="""
+        Write, test, and optimize a fibonacci function in Python
+        that is efficient and correct. Save it to fibonacci.py.
+    """,
+    readable_paths=["src/"],
+    writable_paths=["output/"],
+    base_dir="workdir",
+    max_steps=30,
+    trials=3
+)
+print(f"Result: {result}")
+```
 
 ______________________________________________________________________
 
@@ -827,7 +979,7 @@ AgentEvolver(
     max_generations: int | None = None,
     max_frontier_size: int | None = None,
     mutation_probability: float | None = None,
-    coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] | None = None,
+    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"] | None = None,
 )
 ```
 
@@ -839,7 +991,7 @@ AgentEvolver(
 - `max_generations` (int | None): Maximum number of improvement generations. Uses config default if None.
 - `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
 - `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
-- `coding_agent_type` (Literal | None): Which coding agent to use: `"claude code"`, `"gemini cli"`, or `"openai codex"`. Uses config default if None.
+- `coding_agent_type` (Literal | None): Which coding agent to use: `"kiss code"`, `"claude code"`, `"gemini cli"`, or `"openai codex"`. Uses config default if None.
 
 ### Methods
 
@@ -962,7 +1114,7 @@ ImproverAgent(
     model_name: str | None = None,
     max_steps: int | None = None,
     max_budget: float | None = None,
-    coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] | None = None,
+    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"] | None = None,
 )
 ```
 
@@ -971,7 +1123,7 @@ ImproverAgent(
 - `model_name` (str | None): LLM model to use for improvement. Uses config default if None.
 - `max_steps` (int | None): Maximum steps for the coding agent. Uses config default if None.
 - `max_budget` (float | None): Maximum budget in USD for the coding agent. Uses config default if None.
-- `coding_agent_type` (Literal | None): Which coding agent to use. Defaults to `"claude code"` if None.
+- `coding_agent_type` (Literal | None): Which coding agent to use: `"kiss code"`, `"claude code"`, `"gemini cli"`, or `"openai codex"`. Defaults to `"claude code"` if None.
 
 ### Methods
 

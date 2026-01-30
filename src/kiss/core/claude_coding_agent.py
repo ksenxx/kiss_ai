@@ -60,6 +60,8 @@ class ClaudeCodingAgent(Base):
         self.is_agentic = True
         self.max_steps = max_steps
         self.max_budget = max_budget
+        self.budget_used: float = 0.0
+        self.total_tokens_used: int = 0
 
     def _check_path_permission(
         self, path_str: str, allowed_paths: list[Path]
@@ -128,9 +130,10 @@ class ClaudeCodingAgent(Base):
     ) -> str | None:
         """Process final result message and return the result."""
         self._update_token_usage(message)
-        if hasattr(message, "cost") and message.cost:
-            self.budget_used += message.cost
-            Base.global_budget_used += message.cost
+        if hasattr(message, "cost") and message.total_cost_usd:
+            cost = message.total_cost_usd
+            self.budget_used += cost
+            Base.global_budget_used += cost
 
         final_result = message.result
         self._add_message("model", final_result, timestamp)

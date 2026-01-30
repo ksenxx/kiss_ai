@@ -13,7 +13,6 @@ or OpenAI Codex) to improve the code to reduce token usage and execution time.
 import json
 import shutil
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -21,22 +20,26 @@ import kiss.agents.agent_creator.config  # noqa: F401
 from kiss.core.claude_coding_agent import ClaudeCodingAgent
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.gemini_cli_agent import GeminiCliAgent
+from kiss.core.kiss_coding_agent import KISSCodingAgent
 from kiss.core.openai_codex_agent import OpenAICodexAgent
 from kiss.core.utils import get_config_value
 
 
 def create_coding_agent(
-    coding_agent_type: Literal["claude code", "gemini cli", "openai codex"], name: str
-) -> ClaudeCodingAgent | GeminiCliAgent | OpenAICodexAgent:
-    """Create a Claude coding agent.
+    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"], name: str
+) -> KISSCodingAgent | ClaudeCodingAgent | GeminiCliAgent | OpenAICodexAgent:
+    """Create a coding agent.
 
     Args:
+        coding_agent_type: Type of coding agent to create.
         name: The name for the agent instance.
 
     Returns:
-        An instance of ClaudeCodingAgent.
+        An instance of the specified coding agent type.
     """
-    if coding_agent_type == "claude code":
+    if coding_agent_type == "kiss code":
+        return KISSCodingAgent(name)
+    elif coding_agent_type == "claude code":
         return ClaudeCodingAgent(name)
     elif coding_agent_type == "gemini cli":
         return GeminiCliAgent(name)
@@ -46,15 +49,22 @@ def create_coding_agent(
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
-@dataclass
 class ImprovementReport:
     """Report documenting improvements made to an agent."""
 
-    implemented_ideas: list[dict[str, str]] = field(default_factory=list)
-    failed_ideas: list[dict[str, str]] = field(default_factory=list)
-    generation: int = 0
-    metrics: dict[str, float] = field(default_factory=dict)  # Flexible metrics dictionary
-    summary: str = ""
+    def __init__(
+        self,
+        metrics: dict[str, float],
+        implemented_ideas: list[dict[str, str]],
+        failed_ideas: list[dict[str, str]],
+        generation: int = 0,
+        summary: str = "",
+    ):
+        self.metrics = metrics
+        self.implemented_ideas = implemented_ideas
+        self.failed_ideas = failed_ideas
+        self.generation = generation
+        self.summary = summary
 
     def save(self, path: str) -> None:
         """Save the report to a JSON file."""
@@ -85,21 +95,24 @@ class ImprovementReport:
 IMPROVE_AGENT_PROMPT = """You are an expert at optimizing AI agent code for efficiency.
 
 ## Your Task
-
+  - You are required to create a long running AI agent.
   - The agent must be designed for **long-running, complex tasks** using
     the Agent API available at {kiss_folder}.  Specifically, you should
     look at API.md and README.md first, and then look at code under the
     src folder as required. {kiss_folder}/src/kiss/core/models/model_info.py
     contains information about different LLM models and their context lengths.
+    {kiss_folder}/src/kiss/core/kiss_coding_agent.py is an example agent.
   - The agent.py when executed as a file, **MUST** run the given task.
   - The agent **MUST** be tested for success on the given task description.
     **YOU MUST ABSOLUTELY WAIT FOR THE TEST TO FINISH.**
   - You **MUST not make the agent specific to any particular task, but
     rather make it a general purpose agent that can be used for any task**.
-  - You MUST use KISSAgent, or ClaudeCodingAgent, or GeminiCliAgent, or
-    OpenAICodexAgent or a mixture of them to implement the agent.
+  - You MUST use KISSAgent, or KISSCodingAgent, or ClaudeCodingAgent, or
+    OpenAICodexAgent or a mixture of them to implement
+    the agent.
   - You MUST not use multithreading or multiprocessing or docker manager
-    or 'anyio' or 'async' or 'await' in the agent implementation.
+    or 'asyncio', or 'anyio' or 'async' or 'await' in the agent
+    implementation.
 
 ## Goals
 
@@ -180,7 +193,10 @@ class ImproverAgent:
         model_name: str | None = None,
         max_steps: int | None = None,
         max_budget: float | None = None,
-        coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] | None = None,
+        coding_agent_type: Literal[
+            "kiss code", "claude code", "gemini cli", "openai codex"
+        ]
+        | None = None,
     ):
         """Initialize the ImproverAgent.
 
@@ -195,9 +211,9 @@ class ImproverAgent:
         self.model_name = get_config_value(model_name, improver_cfg, "model_name")
         self.max_steps = get_config_value(max_steps, improver_cfg, "max_steps")
         self.max_budget = get_config_value(max_budget, improver_cfg, "max_budget")
-        self.coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] = (
-            coding_agent_type or DEFAULT_CONFIG.agent_creator.evolver.coding_agent_type
-        )
+        self.coding_agent_type: Literal[
+            "kiss code", "claude code", "gemini cli", "openai codex"
+        ] = coding_agent_type or DEFAULT_CONFIG.agent_creator.evolver.coding_agent_type
 
     def _load_report(self, path: str | None) -> ImprovementReport | None:
         """Load a report from a path, returning None if it fails."""
@@ -289,6 +305,9 @@ class ImproverAgent:
             )
         except Exception as e:
             print(f"Error during improvement: {e}")
+            # Clean up partially copied target folder
+            if Path(target_folder).exists():
+                shutil.rmtree(target_folder)
             return False, None
 
         if result is None:
@@ -297,15 +316,16 @@ class ImproverAgent:
 
         # Create improvement report
         new_report = ImprovementReport(
-            generation=(previous_report.generation + 1) if previous_report else 1,
-            implemented_ideas=[
-                {"idea": "Code optimization based on analysis", "source": "improver"}
-            ],
-            summary=result,
             metrics={
                 "tokens_used": agent.total_tokens_used,
                 "execution_time": time.time() - start_time,
             },
+            implemented_ideas=[
+                {"idea": "Code optimization based on analysis", "source": "improver"}
+            ],
+            failed_ideas=[],
+            generation=(previous_report.generation + 1) if previous_report else 1,
+            summary=result,
         )
 
         print(f"Improvement completed in {new_report.metrics['execution_time']:.2f}s")
@@ -340,10 +360,7 @@ class ImproverAgent:
 
         # Combine ideas from both reports
         merged_report = ImprovementReport(
-            generation=max(
-                p_report.generation if p_report else 0,
-                s_report.generation if s_report else 0,
-            ),
+            metrics={},
             implemented_ideas=(
                 (p_report.implemented_ideas if p_report else [])
                 + (s_report.implemented_ideas if s_report else [])
@@ -351,6 +368,10 @@ class ImproverAgent:
             failed_ideas=(
                 (p_report.failed_ideas if p_report else [])
                 + (s_report.failed_ideas if s_report else [])
+            ),
+            generation=max(
+                p_report.generation if p_report else 0,
+                s_report.generation if s_report else 0,
             ),
             summary="Crossover of two variants",
         )

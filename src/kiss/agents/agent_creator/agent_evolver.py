@@ -88,7 +88,7 @@ import random
 import shutil
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -111,10 +111,10 @@ class AgentVariant:
     folder_path: str
     report_path: str
     report: ImprovementReport
-    metrics: dict[str, float] = field(default_factory=dict)  # Flexible metrics dictionary
+    metrics: dict[str, float]
+    parent_ids: list[int]
     id: int = 0
     generation: int = 0
-    parent_ids: list[int] = field(default_factory=list)
     feedback: str = ""
 
     def dominates(self, other: "AgentVariant") -> bool:
@@ -175,14 +175,7 @@ class AgentVariant:
 
 
 # Prompt for initial agent creation
-INITIAL_AGENT_PROMPT = """You are an expert at building efficient, long-running AI agents.
-Your task is to create an initial agent implementation based on the following requirements.
-
-# Instructions
-- You are going to run a very long-running task
-- You may need to use the web to search on how to write such agents
-- You may consider orchestrator agents and sub-agents to solve the task
-
+INITIAL_AGENT_PROMPT = """
 ## Task Description
 {task_description}
 
@@ -198,8 +191,9 @@ Your task is to create an initial agent implementation based on the following re
     **YOU MUST ABSOLUTELY WAIT FOR THE TEST TO FINISH.**
   - You **MUST not make the agent specific to any particular task, but
     rather make it a general purpose agent that can be used for any task**.
-  - You MUST use KISSAgent, or ClaudeCodingAgent, or GeminiCliAgent, or
-    OpenAICodexAgent or a mixture of them to implement the agent.
+  - You MUST use KISSAgent, or KissCodingAgent, or ClaudeCodingAgent, or
+    GeminiCliAgent, or OpenAICodexAgent or a mixture of them to implement
+    the agent.
   - You MUST not use multithreading or multiprocessing or docker manager
     or 'anyio' or 'async' or 'await' in the agent implementation.
 
@@ -224,6 +218,10 @@ Create the following files in {target_folder}:
 
 The agent should collect fine-grained feedback on the task as it is executing.
 When complete, provide a summary of the agent created and the files that were written.
+
+# Instructions
+- You may need to use the web to search on how to write such agents
+- You may consider orchestrator agents and sub-agents to solve the task
 """
 
 
@@ -243,7 +241,9 @@ class AgentEvolver:
         initial_frontier_size: int | None = None,
         max_frontier_size: int | None = None,
         mutation_probability: float | None = None,
-        coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] | None = None,
+        coding_agent_type: (
+            Literal["kiss code", "claude code", "gemini cli", "openai codex"] | None
+        ) = None,
     ):
         """Initialize the AgentEvolver.
 
@@ -277,9 +277,9 @@ class AgentEvolver:
         self.initial_agent_max_budget: float = get_config_value(
             None, evolver_cfg, "initial_agent_max_budget"
         )
-        self.coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] = (
-            get_config_value(coding_agent_type, evolver_cfg, "coding_agent_type")
-        )
+        self.coding_agent_type: Literal[
+            "kiss code", "claude code", "gemini cli", "openai codex"
+        ] = get_config_value(coding_agent_type, evolver_cfg, "coding_agent_type")
 
         self.work_dir = Path(tempfile.mkdtemp())
         self.optimal_dir = Path(DEFAULT_CONFIG.agent.artifact_dir) / "optimal_agent"
@@ -323,7 +323,9 @@ class AgentEvolver:
         )
 
         initial_report = ImprovementReport(
+            metrics={},
             implemented_ideas=[{"idea": "Initial implementation", "source": "initial"}],
+            failed_ideas=[],
             generation=0,
         )
         initial_report.save(report_path)
@@ -332,8 +334,10 @@ class AgentEvolver:
             folder_path=target_folder,
             report_path=report_path,
             report=initial_report,
+            metrics={},
             id=variant_id,
             generation=0,
+            parent_ids=[],
         )
 
     def _load_module_from_path(self, module_name: str, file_path: str) -> Any:
@@ -481,6 +485,7 @@ class AgentEvolver:
             folder_path=target_folder,
             report_path=report_path,
             report=new_report,
+            metrics={},
             id=new_id,
             generation=self._generation,
             parent_ids=[variant.id],
@@ -513,6 +518,7 @@ class AgentEvolver:
             folder_path=target_folder,
             report_path=report_path,
             report=new_report,
+            metrics={},
             id=new_id,
             generation=self._generation,
             parent_ids=[primary.id, secondary.id],

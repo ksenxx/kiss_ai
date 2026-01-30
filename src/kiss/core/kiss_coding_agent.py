@@ -26,17 +26,13 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import get_max_context_length
 
-PLANNING_PROMPT = """You are a software engineering task planner.
-Your job is to analyze the given task and create an efficient execution plan
-by adding tasks.
+PLANNING_PROMPT = """Break down this task into sub-tasks:
 
-# Task
 {task_description}
 
-# Requirements
-- Break the task into high-level sub-tasks
-- Each sub-task should be independent and focused
-- Optimize for minimal token usage by being concise and targeted
+Call add_task() now to add the first sub-task. You can only call ONE function at a time.
+After each task is added, continue adding the next one.
+When all tasks are added, call finish() with a summary.
 """
 
 TASKING_PROMPT = """
@@ -106,14 +102,24 @@ the refined prompt template, no additional commentary.
 """
 
 
-def finish(success: bool, summary: str) -> tuple[bool, str]:
+def finish(success: bool, summary: str) -> str:
     """Finishes the current agent execution with success or failure, and summary.
 
     Args:
         success: True if the task was successful, False otherwise
         summary: Summary message to return
+    Returns:
+        A tuple of (success, summary)
     """
-    return (success, summary)
+    result_str = yaml.dump(
+        {
+            "success": success,
+            "summary": summary,
+        },
+        indent=2,
+        sort_keys=False,
+    )
+    return result_str
 
 
 
@@ -352,9 +358,17 @@ class KISSCodingAgent(Base):
         self.is_agentic = True
         self.max_steps = max_steps
         self.max_budget = max_budget
+        self.budget_used: float = 0.0
+        self.total_tokens_used: int = 0
 
     def run_bash_command(self, command: str, description: str) -> str:
-        """Runs a bash command and returns its output."""
+        """Runs a bash command and returns its output.
+        Args:
+            command: The bash command to run.
+            description: A brief description of the command.
+        Returns:
+            The output of the command.
+        """
         print(f"Running command: {description}")
 
         readable, writable = parse_bash_command_paths(command)
@@ -386,17 +400,44 @@ class KISSCodingAgent(Base):
         planner = KISSAgent(f"{self.name} Planner")
 
         sub_tasks: list[SubTask] = []
-        def add_task(sub_task_name: str, context: str, description: str) -> None:
+        def add_task(sub_task_name: str, context: str, description: str) -> str:
+            """Add a sub-task to the plan.
+
+            Args:
+                sub_task_name: Name of the sub-task
+                context: Context for the sub-task
+                description: Description of the sub-task
+
+            Returns:
+                Confirmation message
+            """
             sub_task = SubTask(sub_task_name, context, description)
             sub_tasks.append(sub_task)
+            return (
+                f"Added sub-task: {sub_task_name}. "
+                "Continue adding more tasks or call finish when done."
+            )
+
+        def finish(summary: str) -> str:
+            """Finish planning and return the list of sub-tasks.
+
+            Args:
+                summary: A brief summary of the plan
+
+            Returns:
+                Summary of the planning
+            """
+            return f"Planning complete. {len(sub_tasks)} sub-tasks created. {summary}"
 
         try:
             planner.run(
                 model_name=model_name,
                 prompt_template=PLANNING_PROMPT,
                 arguments={"task_description": task_description},
-                tools=[add_task]
+                tools=[add_task, finish]
             )
+            self.budget_used = planner.budget_used # type: ignore
+            self.total_tokens_used = planner.total_tokens_used  # type: ignore
             return sub_tasks
         except Exception as e:
             raise KISSError(f"Planning failed: {e}")
@@ -464,6 +505,9 @@ class KISSCodingAgent(Base):
                         max_steps=max_steps,
                         max_budget=max_budget,
                     )
+                    self.budget_used += executor.budget_used # type: ignore
+                    self.total_tokens_used += executor.total_tokens_used  # type: ignore
+
                     ret = yaml.safe_load(result)
                     success = ret.get("success", False)
                     if not success:
@@ -479,6 +523,8 @@ class KISSCodingAgent(Base):
                             },
                             is_agentic=False,
                         )
+                        self.budget_used += refiner.budget_used  # type: ignore
+                        self.total_tokens_used += refiner.total_tokens_used  # type: ignore
                         continue
                     summaries.append(ret.get("summary", ""))
             summarizer = KISSAgent(f"{self.name} Summarizer")

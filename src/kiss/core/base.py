@@ -12,14 +12,15 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import yaml
+from yaml.nodes import ScalarNode
 
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.utils import config_to_dict
 
 
-def _str_presenter(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")  # type: ignore[reportUnknownMemberType]
 
 
 yaml.add_representer(str, _str_presenter)
