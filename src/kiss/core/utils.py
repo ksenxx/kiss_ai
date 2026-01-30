@@ -97,10 +97,9 @@ def config_to_dict() -> dict[Any, Any]:
         if isinstance(obj, dict):
             return {k: convert_to_json(v) for k, v in obj.items() if "API_KEY" not in k}  # type: ignore[misc]
         if isinstance(obj, list):
-            return [convert_to_json(item) for item in obj]. # type: ignore[misc]
+            return [convert_to_json(item) for item in obj]  # type: ignore[misc]
         if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
-        # For classes/objects, recursively convert fields, skipping any that end with API_KEY
         if hasattr(obj, "__dict__"):
             return {
                 k: convert_to_json(getattr(obj, k))
@@ -109,8 +108,7 @@ def config_to_dict() -> dict[Any, Any]:
             }
         return obj
 
-    result: dict[Any, Any] = convert_to_json(DEFAULT_CONFIG)
-    return result
+    return cast(dict[Any, Any], convert_to_json(DEFAULT_CONFIG))
 
 
 def fc(file_path: str) -> str:
@@ -306,7 +304,8 @@ def _render_page_with_playwright(url: str, wait_selector: str | None = None) -> 
             is_mobile=False,
             device_scale_factor=2,
             extra_http_headers={
-                **SAFARI_HEADERS,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive",
                 "Upgrade-Insecure-Requests": "1",
@@ -401,9 +400,7 @@ def search_web(query: str, max_results: int = 5) -> str:
                     result_text = f"Title: {title}\nURL: {result_url}\nContent:\n{content}\n"
                     formatted_results.append(result_text)
 
-                ret = "\n---\n".join(formatted_results)
-                print("Web search results:", ret)
-                return ret
+                return "\n---\n".join(formatted_results)
         except Exception:
             continue
 

@@ -26,14 +26,14 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import get_max_context_length
 
-PLANNING_PROMPT = """
+ORCHESTRATOR_PROMPT = """
 
 ## Task
 
 {task_description}
 
-Call do_sub_task() to perform a sub-task.
-do_sub_task() will return a yaml encoded dictionary containing the keys
+Call do_subtask() to perform a sub-task.
+do_subtask() will return a yaml encoded dictionary containing the keys
 'success' (boolean) and 'summary' (string).
 """
 
@@ -45,9 +45,9 @@ bash commands and coding.
 
 # Sub-task
 
-{subtask}
+Name: {subtask_name}
 
-{description}
+Description:{description}
 
 # Context
 This is part of a larger task:
@@ -62,6 +62,8 @@ This is the relevant context for this sub-task:
 - Use minimal steps (max {max_steps})
 
 {coding_instructions}
+
+** You can call do_subtask() to delegate sub-tasks if needed (even from a sub task). **
 """
 
 PROMPT_TEMPLATE_REFINER = """
@@ -409,7 +411,56 @@ class KISSCodingAgent(Base):
         except subprocess.CalledProcessError as e:
             return f"Error: {e.stderr}"
 
-    def perform_sub_task(
+    def perform_task(
+        self,
+    ) -> str:
+        """Perform the main task by orchestrating sub-tasks.
+
+        Args:
+            task_description: Description of the main task
+        Returns:
+            A yaml encoded dictionary containing the keys
+            'success' (boolean) and 'summary' (string).
+        """
+        print(f"Executing task: {self.task_description}")
+        executor = KISSAgent(f"{self.name} Main")
+        task_prompt_template = ORCHESTRATOR_PROMPT
+        for _ in range(self.trials):
+            result = executor.run(
+                model_name=self.orchestrator_model_name,
+                prompt_template=task_prompt_template,
+                arguments={
+                    "task_description": self.task_description,
+                },
+                tools=[finish, self.run_bash_command, self.perform_subtask],
+                max_steps=self.max_steps,
+                max_budget=self.max_budget,
+            )
+            self.budget_used += executor.budget_used # type: ignore
+            self.total_tokens_used += executor.total_tokens_used  # type: ignore
+
+            ret = yaml.safe_load(result)
+            success = ret.get("success", False)
+            if not success:
+                print("Task failed, refining prompt and retrying...")
+                refiner = KISSAgent(f"{self.name} Prompt Refiner")
+                task_prompt_template = refiner.run(
+                    model_name=self.refiner_model_name,
+                    prompt_template=PROMPT_TEMPLATE_REFINER,
+                    arguments={
+                        "original_prompt_template": TASKING_PROMPT,
+                        "previous_prompt_template": task_prompt_template,
+                        "agent_trajectory_summary": result,
+                    },
+                    is_agentic=False,
+                )
+                self.budget_used += refiner.budget_used  # type: ignore
+                self.total_tokens_used += refiner.total_tokens_used  # type: ignore
+                continue
+            return result
+        raise KISSError(f"Task {self.task_description} failed after {self.trials} trials")
+
+    def perform_subtask(
         self,
         subtask_name: str,
         context: str,
@@ -435,14 +486,14 @@ class KISSCodingAgent(Base):
                 model_name=self.orchestrator_model_name,
                 prompt_template=task_prompt_template,
                 arguments={
-                    "subtask": subtask.name,
+                    "subtask_name": subtask.name,
                     "description": subtask.description,
                     "context": subtask.context,
                     "task_description": self.task_description,
                     "max_steps": str(self.max_steps),
                     "coding_instructions": DEFAULT_SYSTEM_PROMPT,
                 },
-                tools=[finish, self.run_bash_command],
+                tools=[finish, self.run_bash_command, self.perform_subtask],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
             )
@@ -469,45 +520,6 @@ class KISSCodingAgent(Base):
                 continue
             return result
         raise KISSError(f"Subtask {subtask.name} failed after {self.trials} trials")
-
-    def orchestrate(
-        self,
-        task_description: str,
-    ) -> str:
-        """Orchestrate the multi-agent coding system."""
-
-        planner = KISSAgent(f"{self.name} Planner")
-
-        def do_sub_task(sub_task_name: str, context: str, description: str) -> str:
-            """Perform a sub-task
-
-            Args:
-                sub_task_name: Name of the sub-task
-                context: Context for the sub-task
-                description: Description of the sub-task
-
-            Returns:
-                A yaml encoded dictionary containing the keys
-                'success' (boolean) and 'summary' (string).
-            """
-            subtask = SubTask(sub_task_name, context, description)
-            return self.perform_sub_task(
-                subtask_name=subtask.name,
-                context=subtask.context,
-                description=subtask.description,
-            )
-        try:
-            result = planner.run(
-                model_name=self.orchestrator_model_name,
-                prompt_template=PLANNING_PROMPT,
-                arguments={"task_description": task_description},
-                tools=[do_sub_task, finish]
-            )
-            self.budget_used = planner.budget_used # type: ignore
-            self.total_tokens_used = planner.total_tokens_used  # type: ignore
-        except Exception as e:
-            raise KISSError(f"Planning failed: {e}")
-        return result
 
     def run(
         self,
@@ -562,10 +574,7 @@ class KISSCodingAgent(Base):
         self.arguments = arguments or {}
 
         self.task_description = prompt_template.format(**self.arguments)
-        result = self.orchestrate(
-            task_description=self.task_description,
-        )
-        return result
+        return self.perform_task()
 
 def main() -> None:
     """Example usage of the KISSCodingAgent."""

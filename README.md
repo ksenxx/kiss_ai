@@ -85,11 +85,13 @@ from kiss.core import KISSCodingAgent
 
 agent = KISSCodingAgent("coder")
 result = agent.run(
-    model_name="claude-sonnet-4-5",
     prompt_template="""
         Write a fibonacci function in Python with tests.
         Save it to fibonacci.py and run the tests.
     """,
+    orchestrator_model_name="claude-sonnet-4-5",
+    subtasker_model_name="claude-opus-4-5",
+    refiner_model_name="claude-sonnet-4-5",
     readable_paths=["src/"],
     writable_paths=["output/"],
     trials=3
@@ -151,7 +153,7 @@ kiss/
 | Agent | Purpose | Key Feature |
 |-------|---------|-------------|
 | **KISSAgent** | General ReAct agent | Native function calling |
-| **KISSCodingAgent** | Complex coding tasks | Multi-agent orchestration with planner |
+| **KISSCodingAgent** | Complex coding tasks | Multi-agent orchestration (planner-executor-refiner) with sub-task delegation |
 | **ClaudeCodingAgent** | Claude SDK coding | Built-in file operations (Read, Write, Edit) |
 | **GeminiCliAgent** | Google ADK coding | Google-optimized tooling |
 | **OpenAICodexAgent** | OpenAI SDK coding | OpenAI-specific features |
@@ -190,6 +192,12 @@ DEFAULT_CONFIG.api_keys.openai_api_key = "your-key"
 DEFAULT_CONFIG.agent.max_steps = 100
 DEFAULT_CONFIG.agent.max_agent_budget = 10.0
 DEFAULT_CONFIG.agent.verbose = True
+
+# Configure KISSCodingAgent defaults
+DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name = "claude-sonnet-4-5"
+DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name = "claude-opus-4-5"
+DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name = "claude-sonnet-4-5"
+DEFAULT_CONFIG.agent.kiss_coding_agent.trials = 3
 ```
 
 ## Advanced Usage
@@ -229,8 +237,8 @@ Restrict file system access for coding agents:
 ```python
 agent = KISSCodingAgent("secure_coder")
 result = agent.run(
-    model_name="gpt-4o",
     prompt_template="Analyze and improve code in src/",
+    orchestrator_model_name="gpt-4o",
     readable_paths=["src/", "tests/"],
     writable_paths=["output/"],
     base_dir="workdir"

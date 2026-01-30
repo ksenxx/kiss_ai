@@ -153,7 +153,12 @@ ______________________________________________________________________
 
 ## KISSCodingAgent
 
-A multi-agent coding system with planning, orchestration, and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks through a planner agent, then coordinates executor agents to complete each sub-task.
+A multi-agent coding system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks through a multi-agent architecture with:
+- **Orchestrator Agent**: Manages overall task execution and delegates to sub-tasks
+- **Executor Agents**: Handle specific sub-tasks independently
+- **Refiner Agent**: Refines prompts on failures for improved retry attempts
+
+The system supports recursive sub-task delegation where any agent can call `perform_subtask()` to further decompose work.
 
 ### Constructor
 
@@ -188,35 +193,39 @@ Represents a sub-task in the multi-agent coding system.
 ```python
 def run(
     self,
-    model_name: str,
     prompt_template: str,
     arguments: dict[str, str] | None = None,
+    orchestrator_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name,
+    subtasker_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
+    refiner_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name,
+    trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
     base_dir: str = "<artifact_dir>/kiss_workdir",
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    trials: int = 3,
 ) -> str
 ```
 
-Run the multi-agent coding system with planning and orchestration.
+Run the multi-agent coding system with orchestration and sub-task delegation.
 
 **Parameters:**
 
-- `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-2.5-flash").
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int): Maximum number of total orchestration steps. Default is from config.
+- `orchestrator_model_name` (str): Model for the main orchestrator agent. Default is from config (claude-sonnet-4-5).
+- `subtasker_model_name` (str): Model for executor sub-task agents. Default is from config (claude-opus-4-5).
+- `refiner_model_name` (str): Model for prompt refinement on failures. Default is from config (claude-sonnet-4-5).
+- `trials` (int): Number of retry attempts for each task/subtask. Default is 3.
+- `max_steps` (int): Maximum number of steps per agent. Default is from config.
 - `max_budget` (float): Maximum budget in USD for this run. Default is from config.
 - `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no path restrictions.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no path restrictions.
-- `trials` (int): The number of retry attempts for each subtask. Default is 3.
 
 **Returns:**
 
-- `str`: The result of the task.
+- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
 
 #### `get_trajectory()`
 
@@ -230,26 +239,40 @@ Returns the agent's conversation trajectory as a JSON string.
 
 - `str`: JSON-formatted string containing the list of messages.
 
-#### `plan_tasks()`
+#### `perform_task()`
 
 ```python
-def plan_tasks(
-    self,
-    task_description: str,
-    model_name: str,
-) -> list[SubTask]
+def perform_task(self) -> str
 ```
 
-Use planner agent to create an execution plan by breaking down the task into sub-tasks.
-
-**Parameters:**
-
-- `task_description` (str): The description of the task to plan.
-- `model_name` (str): The model to use for planning.
+Execute the main task using the orchestrator agent. The orchestrator can delegate work by calling `perform_subtask()` as needed.
 
 **Returns:**
 
-- `list[SubTask]`: List of SubTask objects representing the execution plan.
+- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
+
+#### `perform_subtask()`
+
+```python
+def perform_subtask(
+    self,
+    subtask_name: str,
+    context: str,
+    description: str,
+) -> str
+```
+
+Execute a sub-task using a dedicated executor agent. Can be called by the orchestrator or recursively by other sub-task executors.
+
+**Parameters:**
+
+- `subtask_name` (str): Name of the sub-task for identification.
+- `context` (str): Relevant context information for this sub-task.
+- `description` (str): Detailed description of what needs to be done.
+
+**Returns:**
+
+- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
 
 #### `run_bash_command()`
 
@@ -257,43 +280,55 @@ Use planner agent to create an execution plan by breaking down the task into sub
 def run_bash_command(self, command: str, description: str) -> str
 ```
 
-Run a bash command with automatic path permission checks. Parses the command to extract readable and writable paths, then validates permissions before execution.
+Run a bash command with automatic path permission checks. Uses `parse_bash_command_paths()` to extract readable and writable paths from the command, then validates permissions before execution.
 
 **Parameters:**
 
 - `command` (str): The bash command to execute.
-- `description` (str): A description of what the command does.
+- `description` (str): A brief description of what the command does.
 
 **Returns:**
 
 - `str`: The command output (stdout), or an error message if permission denied or execution failed.
 
+**Notes:**
+
+- Automatically parses commands to detect file operations
+- Enforces readable_paths and writable_paths restrictions
+- Returns descriptive error messages for permission violations
+
 ### Instance Attributes (after `run()`)
 
 - `id` (int): Unique identifier for this agent instance.
 - `name` (str): The agent's name.
-- `model_name` (str): The name of the model being used.
-- `function_map` (list[str]): List of tools available to executor agents.
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
-- `step_count` (int): Current step number.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
+- `orchestrator_model_name` (str): Model name for orchestrator agent.
+- `subtasker_model_name` (str): Model name for executor agents.
+- `refiner_model_name` (str): Model name for prompt refinement.
+- `task_description` (str): The formatted task description.
+- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory (aggregated from all sub-agents).
+- `total_tokens_used` (int): Total tokens used across all agents in this run.
+- `budget_used` (float): Total budget used across all agents in this run.
 - `run_start_timestamp` (int): Unix timestamp when the run started.
 - `base_dir` (str): The base directory for the agent's working files.
 - `readable_paths` (list[Path]): List of paths the agent can read from.
 - `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps allowed.
-- `max_budget` (float): Maximum budget allowed for this run.
+- `max_steps` (int): Maximum number of steps per agent.
+- `max_budget` (float): Maximum total budget allowed for this run.
+- `trials` (int): Number of retry attempts for each task/subtask.
 
 ### Key Features
 
-- **Multi-Agent Architecture**: Uses a planner agent to break down tasks into sub-tasks, and executor KISSAgents to handle each sub-task
-- **Token Optimization**: Uses smaller models for simple tasks to minimize costs
-- **Efficient Orchestration**: Keeps total steps below configured maximum through smart task management
-- **Bash Command Parsing**: Automatically extracts readable/writable directories from bash commands
-- **Path Access Control**: Enforces read/write permissions on file system paths
-- **Retry Logic**: Supports multiple retry attempts for each subtask to improve reliability
-- **Prompt Refinement**: Automatically refines prompts when subtasks fail to improve success rate
+- **Multi-Agent Architecture**: Orchestrator delegates to executor agents; supports recursive sub-task decomposition
+- **Three-Model Strategy**:
+  - Orchestrator (default: claude-sonnet-4-5) for high-level coordination
+  - Subtasker (default: claude-opus-4-5) for complex sub-task execution
+  - Refiner (default: claude-sonnet-4-5) for prompt improvement on failures
+- **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
+- **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
+- **Path Access Control**: Enforces read/write permissions on file system paths before command execution
+- **Retry Logic with Refinement**: On failure, refines prompts using trajectory analysis for improved retry attempts (configurable trials)
+- **Built-in Tools**: Each agent has access to `finish()`, `run_bash_command()`, and `perform_subtask()`
+- **Recursive Delegation**: Sub-tasks can spawn further sub-tasks as needed
 
 ### Example
 
@@ -303,18 +338,26 @@ from kiss.core.kiss_coding_agent import KISSCodingAgent
 agent = KISSCodingAgent("My Coding Agent")
 
 result = agent.run(
-    model_name="gpt-4o",
     prompt_template="""
         Write, test, and optimize a fibonacci function in Python
         that is efficient and correct. Save it to fibonacci.py.
     """,
+    orchestrator_model_name="claude-sonnet-4-5",
+    subtasker_model_name="claude-opus-4-5",
+    refiner_model_name="claude-sonnet-4-5",
     readable_paths=["src/"],
     writable_paths=["output/"],
     base_dir="workdir",
-    max_steps=30,
+    max_steps=50,
     trials=3
 )
 print(f"Result: {result}")
+
+# Result is YAML with 'success' and 'summary' keys
+import yaml
+result_dict = yaml.safe_load(result)
+print(f"Success: {result_dict['success']}")
+print(f"Summary: {result_dict['summary']}")
 ```
 
 ______________________________________________________________________
@@ -1534,7 +1577,7 @@ Reads a file and returns the content.
 
 - `str`: The content of the file.
 
-### `finish()`
+### `finish()` (for KISSAgent)
 
 ```python
 def finish(
@@ -1544,7 +1587,7 @@ def finish(
 ) -> str
 ```
 
-The agent must call this function with the final status, analysis, and result when it has solved the given task.
+The agent must call this function with the final status, analysis, and result when it has solved the given task. This is automatically added as a tool for KISSAgent instances.
 
 **Parameters:**
 
@@ -1555,6 +1598,23 @@ The agent must call this function with the final status, analysis, and result wh
 **Returns:**
 
 - `str`: A YAML string containing the status, analysis, and result.
+
+### `finish()` (for KISSCodingAgent)
+
+```python
+def finish(success: bool, summary: str) -> str
+```
+
+Used by KISSCodingAgent and its sub-agents to complete task execution. This is a different signature than the KISSAgent finish() function.
+
+**Parameters:**
+
+- `success` (bool): True if the task was successful, False otherwise.
+- `summary` (str): Summary message describing the task outcome.
+
+**Returns:**
+
+- `str`: A YAML string containing the 'success' (boolean) and 'summary' (string) keys.
 
 ### `read_project_file()`
 
@@ -1595,7 +1655,14 @@ Perform a web search and return the top search results with page contents.
 def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
 ```
 
-Parse a bash command to extract readable and writable file paths.
+Parse a bash command to extract readable and writable directory paths.
+
+This function analyzes bash commands to intelligently determine which directories are being read from and which are being written to. It handles:
+- Common read commands: cat, grep, find, ls, python, gcc, etc.
+- Common write commands: touch, mkdir, rm, mv, cp, etc.
+- Output redirection: >, >>, &>, 2>, etc.
+- Pipe chains with multiple commands
+- Flags and arguments parsing
 
 **Parameters:**
 
@@ -1603,11 +1670,29 @@ Parse a bash command to extract readable and writable file paths.
 
 **Returns:**
 
-- `tuple[list[str], list[str]]`: A tuple of (readable_paths, writable_paths).
+- `tuple[list[str], list[str]]`: A tuple of (readable_dirs, writable_dirs) where each is a sorted list of directory paths.
+
+**Example:**
+
+```python
+from kiss.core.utils import parse_bash_command_paths
+
+# Reading and writing
+readable, writable = parse_bash_command_paths("cat input.txt > output.txt")
+# readable: ['input.txt'], writable: ['output.txt']
+
+# Complex command with pipes
+readable, writable = parse_bash_command_paths("grep 'pattern' src/*.py | tee results.txt")
+# readable: ['src/'], writable: ['results.txt']
+
+# Copy operations
+readable, writable = parse_bash_command_paths("cp -r src/ dest/")
+# readable: ['src/'], writable: ['dest/']
+```
 
 **Note:**
 
-This function is used internally by KISSCodingAgent to automatically determine which paths need read/write permissions before executing bash commands.
+This function is used internally by KISSCodingAgent.run_bash_command() to automatically determine which paths need read/write permissions before executing bash commands.
 
 ______________________________________________________________________
 
@@ -1769,6 +1854,16 @@ DEFAULT_CONFIG.agent.use_web_search = True
 - `verbose` (bool): Enable verbose output (default: True)
 - `use_web_search` (bool): Enable web search tool (default: False)
 - `model_name` (str): Default model name (default: "gpt-4o")
+- `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
+
+#### `agent.kiss_coding_agent`
+
+- `orchestrator_model_name` (str): Model for main orchestration (default: "claude-sonnet-4-5")
+- `subtasker_model_name` (str): Model for executor sub-agents (default: "claude-opus-4-5")
+- `refiner_model_name` (str): Model for prompt refinement (default: "claude-sonnet-4-5")
+- `trials` (int): Retry attempts per task/subtask (default: 3)
+- `max_steps` (int): Maximum steps per agent (default: 50)
+- `max_budget` (float): Maximum total budget in USD (default: 100.0)
 
 #### `docker`
 

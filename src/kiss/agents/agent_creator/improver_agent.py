@@ -16,7 +16,6 @@ import time
 from pathlib import Path
 from typing import Literal
 
-import kiss.agents.agent_creator.config  # noqa: F401
 from kiss.core.claude_coding_agent import ClaudeCodingAgent
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.gemini_cli_agent import GeminiCliAgent
@@ -24,30 +23,32 @@ from kiss.core.kiss_coding_agent import KISSCodingAgent
 from kiss.core.openai_codex_agent import OpenAICodexAgent
 from kiss.core.utils import get_config_value
 
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+
 
 def create_coding_agent(
-    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"], name: str
+    agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"],
+    name: str,
 ) -> KISSCodingAgent | ClaudeCodingAgent | GeminiCliAgent | OpenAICodexAgent:
-    """Create a coding agent.
+    """Create a coding agent based on the specified type.
 
     Args:
-        coding_agent_type: Type of coding agent to create.
-        name: The name for the agent instance.
+        agent_type: Type of coding agent to create
+        name: Name for the agent
 
     Returns:
-        An instance of the specified coding agent type.
+        An instance of the specified coding agent type
     """
-    if coding_agent_type == "kiss code":
+    if agent_type == "kiss code":
         return KISSCodingAgent(name)
-    elif coding_agent_type == "claude code":
+    elif agent_type == "claude code":
         return ClaudeCodingAgent(name)
-    elif coding_agent_type == "gemini cli":
+    elif agent_type == "gemini cli":
         return GeminiCliAgent(name)
-    elif coding_agent_type == "openai codex":
+    elif agent_type == "openai codex":
         return OpenAICodexAgent(name)
-    raise ValueError(f"Invalid coding agent type: {coding_agent_type}")
-
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+    else:
+        raise ValueError(f"Unknown coding agent type: {agent_type}")
 
 class ImprovementReport:
     """Report documenting improvements made to an agent."""
