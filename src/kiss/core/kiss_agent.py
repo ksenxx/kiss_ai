@@ -5,18 +5,12 @@
 
 """Core KISS agent implementation with native function calling support."""
 
-import sys
-import json
 import time
 import traceback
 from collections.abc import Callable
-from typing import Any, ClassVar
-from pathlib import Path
-from kiss.core.utils import config_to_dict
+from typing import Any
 
-
-import yaml
-
+from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
@@ -25,21 +19,16 @@ from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.utils import search_web
 
 
-class KISSAgent():
+class KISSAgent(Base):
     """A KISS agent using native function calling."""
 
     # Instance attributes initialized in _init_run_state
     budget_used: float
     step_count: int
     total_tokens_used: int
-    agent_counter: ClassVar[int] = 1
-    global_budget_used: ClassVar[float] = 0.0
-
 
     def __init__(self, name: str) -> None:
-        self.name = name
-        self.id = KISSAgent.agent_counter
-        KISSAgent.agent_counter += 1
+        super().__init__(name)
 
     def _reset(self, model_name: str) -> None:
         """Resets the agent's state."""
@@ -256,7 +245,7 @@ class KISSAgent():
         """Check budget and step limits, raise KISSError if exceeded."""
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if KISSAgent.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
+        if Base.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -281,7 +270,7 @@ class KISSAgent():
             self.total_tokens_used += input_tokens + output_tokens
             cost = calculate_cost(self.model.model_name, input_tokens, output_tokens)
             self.budget_used += cost
-            KISSAgent.global_budget_used += cost
+            Base.global_budget_used += cost
         except Exception as e:
             print(f"Error updating tokens and budget from response: {e} {traceback.format_exc()}")
 
@@ -293,7 +282,7 @@ class KISSAgent():
             token_info = f"[Token usage: {self.total_tokens_used}/{max_tokens}]"
             budget_info = f"[Agent budget usage: ${self.budget_used:.4f}/${self.max_budget:.2f}]"
             global_budget_info = (
-                f"[Global budget usage: ${KISSAgent.global_budget_used:.4f}/"
+                f"[Global budget usage: ${Base.global_budget_used:.4f}/"
                 f"${DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
             )
             return (
@@ -307,60 +296,6 @@ class KISSAgent():
             if DEFAULT_CONFIG.agent.verbose:
                 self._formatter.print_error(f"Error getting usage info: {traceback.format_exc()}")
             return f"#### Usage Information\n  - {step_info}\n"
-        
-    def _build_state_dict(self) -> dict[str, Any]:
-        """Build state dictionary for saving."""
-        try:
-            max_tokens = get_max_context_length(self.model_name)
-        except Exception:
-            max_tokens = None
-
-        return {
-            "name": self.name,
-            "id": self.id,
-            "messages": self.messages,
-            "function_map": self.function_map,
-            "run_start_timestamp": self.run_start_timestamp,
-            "run_end_timestamp": int(time.time()),
-            "config": config_to_dict(),
-            "arguments": getattr(self, "arguments", {}),
-            "prompt_template": getattr(self, "prompt_template", ""),
-            "is_agentic": getattr(self, "is_agentic", True),
-            "model": self.model_name,
-            "budget_used": self.budget_used,
-            "total_budget": getattr(self, "max_budget", DEFAULT_CONFIG.agent.max_agent_budget),
-            "global_budget_used": KISSAgent.global_budget_used,
-            "global_max_budget": DEFAULT_CONFIG.agent.global_max_budget,
-            "tokens_used": self.total_tokens_used,
-            "max_tokens": max_tokens,
-            "step_count": self.step_count,
-            "max_steps": getattr(self, "max_steps", DEFAULT_CONFIG.agent.max_steps),
-            "command": " ".join(sys.argv),
-        }
-
-    def _save(self) -> None:
-        """Save the agent's state to a file."""
-        folder_path = Path(DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
-        folder_path.mkdir(parents=True, exist_ok=True)
-        name_safe = self.name.replace(" ", "_").replace("/", "_")
-        filename = folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
-        with filename.open("w", encoding="utf-8") as f:
-            yaml.dump(self._build_state_dict(), f, indent=2)
-
-    def get_trajectory(self) -> str:
-        """Return the trajectory as JSON for visualization."""
-        return json.dumps(self.messages, indent=2)
-
-    def _add_message(
-        self, role: str, content: Any, timestamp: int | None = None
-    ) -> None:
-        """Add a message to the history."""
-        self.messages.append({
-            "unique_id": len(self.messages),
-            "role": role,
-            "content": content,
-            "timestamp": timestamp if timestamp is not None else int(time.time()),
-        })
 
     def _add_message_with_formatter(
         self, role: str, content: str, timestamp: int | None = None

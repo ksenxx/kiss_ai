@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from kiss.agents.coding_agents.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
