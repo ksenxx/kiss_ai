@@ -773,7 +773,7 @@ class UsefulTools:
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
-            return f"Error: {e.stderr}"
+            return f"Error: {e}"
         except Exception as e:
             return f"Error: {e}"
         finally:
@@ -839,7 +839,7 @@ class UsefulTools:
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
-            return f"Error: {e.stderr}"
+            return f"Error: {e}"
         except Exception as e:
             return f"Error: {e}"
         finally:
@@ -890,6 +890,6 @@ class UsefulTools:
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
-            return f"Error: {e.stderr}"
+            return f"Error: {e}"
         except Exception as e:
             return f"Error: {e}"

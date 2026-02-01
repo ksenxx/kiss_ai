@@ -255,8 +255,8 @@ class KISSCodingAgent(Base):
                 tools=[
                     finish,
                     bash_tool,
-                    # self.useful_tools.Edit,
-                    # self.useful_tools.MultiEdit,
+                    self.useful_tools.Edit,
+                    self.useful_tools.MultiEdit,
                 ],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
