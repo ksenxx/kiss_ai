@@ -23,8 +23,8 @@ ORCHESTRATOR_PROMPT = """
 
 {task_description}
 
-Call do_subtask() to perform a sub-task.
-do_subtask() will return a yaml encoded dictionary containing the keys
+Call perform_subtask() to perform a sub-task.
+perform_subtask() will return a yaml encoded dictionary containing the keys
 'success' (boolean) and 'summary' (string).
 """
 
@@ -195,15 +195,6 @@ class KISSCodingAgent(Base):
             writable_paths=[str(p) for p in self.writable_paths],
         )
 
-    def run_bash_command(self, command: str, description: str) -> str:
-        """Runs a bash command and returns its output.
-        Args:
-            command: The bash command to run.
-            description: A brief description of the command.
-        Returns:
-            The output of the command.
-        """
-        return self.useful_tools.Bash(command, description)
 
     def perform_task(
         self,
@@ -287,7 +278,12 @@ class KISSCodingAgent(Base):
                     "max_steps": str(self.max_steps),
                     "coding_instructions": DEFAULT_SYSTEM_PROMPT,
                 },
-                tools=[finish, self.run_bash_command],
+                tools=[
+                    finish,
+                    self.useful_tools.Bash,
+                    self.useful_tools.Edit,
+                    self.useful_tools.MultiEdit,
+                ],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
             )

@@ -193,7 +193,7 @@ class ImproverAgent:
             max_steps: Maximum steps for the coding agent.
             max_budget: Maximum budget in USD for the coding agent.
         """
-        cfg = getattr(DEFAULT_CONFIG, "agent_creator", None)
+        cfg = getattr(DEFAULT_CONFIG, "create_and_optimize_agent", None)
         improver_cfg = cfg.improver if cfg else None
         self.max_steps = get_config_value(max_steps, improver_cfg, "max_steps")
         self.max_budget = get_config_value(max_budget, improver_cfg, "max_budget")

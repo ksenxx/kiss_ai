@@ -74,4 +74,4 @@ class AgentCreatorConfig(BaseModel):
 
 
 # Register config with the global DEFAULT_CONFIG
-add_config("agent_creator", AgentCreatorConfig)
+add_config("create_and_optimize_agent", AgentCreatorConfig)

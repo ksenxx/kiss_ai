@@ -97,8 +97,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import kiss.agents.agent_creator.config  # type: ignore # noqa: F401
-from kiss.agents.agent_creator.improver_agent import (
+import kiss.agents.create_and_optimize_agent.config  # type: ignore # noqa: F401
+from kiss.agents.create_and_optimize_agent.improver_agent import (
     ImprovementReport,
     ImproverAgent,
 )
@@ -203,7 +203,7 @@ class AgentEvolver:
             max_frontier_size: Maximum size of the Pareto frontier.
             mutation_probability: Probability of mutation vs crossover.
         """
-        cfg = getattr(DEFAULT_CONFIG, "agent_creator", None)
+        cfg = getattr(DEFAULT_CONFIG, "create_and_optimize_agent", None)
         evolver_cfg = cfg.evolver if cfg else None
 
         self.task_description = task_description

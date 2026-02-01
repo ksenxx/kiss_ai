@@ -114,9 +114,8 @@ Here's where KISS really shines — composing multiple agents into systems great
 KISS includes utility agents that work beautifully together. Let's build a **self-improving coding agent** that writes code, tests it, and refines its own prompts based on failures:
 
 ```python
-import json
 from kiss.core.kiss_agent import KISSAgent
-from kiss.agents.kiss import refine_prompt_template, get_run_simple_coding_agent
+from kiss.agents.kiss import refine_prompt_template
 
 # Step 1: Define a test function for our coding task
 def test_fibonacci(code: str) -> bool:
@@ -133,16 +132,13 @@ def test_fibonacci(code: str) -> bool:
     except Exception:
         return False
 
-# Step 2: Create the coding agent
-coding_agent_fn = get_run_simple_coding_agent(test_fibonacci)
-
-# Step 3: Define our initial prompt
+# Step 2: Define our initial prompt
 prompt_template = """
 Write a Python function called 'fibonacci' that returns the nth Fibonacci number.
 Requirements: {requirements}
 """
 
-# Step 4: The self-improving loop
+# Step 3: The self-improving loop
 original_prompt = prompt_template
 current_prompt = prompt_template
 max_iterations = 3
@@ -152,13 +148,14 @@ for iteration in range(max_iterations):
     print(f"Iteration {iteration + 1}")
     print(f"{'='*50}")
     
-    # Run the coding agent
+    # Create and run the coding agent
     coding_agent = KISSAgent(name=f"Coder-{iteration}")
     try:
-        result = coding_agent_fn(
+        result = coding_agent.run(
+            model_name="gpt-4o",
             prompt_template=current_prompt,
             arguments={"requirements": "Use recursion with memoization for efficiency"},
-            model_name="gpt-4o"
+            tools=[test_fibonacci]
         )
         print(f"✅ Code generated successfully!")
         print(f"Result: {result[:100]}...")
@@ -183,8 +180,8 @@ for iteration in range(max_iterations):
 
 **What's happening here?**
 
-1. **Coding Agent** ['get_run_simple_coding_agent'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Generates code and validates it against test cases
-1. **Prompt Refiner Agent** ['refine_prompt_template'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and evolves the prompt
+1. **Coding Agent** [KISSAgent](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/kiss_agent.py): Generates code and validates it against test cases using the provided test function as a tool
+1. **Prompt Refiner Agent** ['refine_prompt_template'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and evolves the prompt based on the agent's trajectory
 1. **Orchestration**: A simple Python loop (not to be confused with the ReAct loop) coordinates the agents
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
@@ -195,20 +192,24 @@ Most multi-agent frameworks require you to learn a new paradigm: graphs, workflo
 
 ```python
 # Agent 1: Research
-research_result = research_agent.run(model_name="gpt-4o", more_args)
+research_result = research_agent.run(
+    model_name="gpt-4o",
+    prompt_template="Research this topic and return key points: {topic}",
+    arguments={"topic": "PostgreSQL indexing strategies"},
+)
 
 # Agent 2: Write (uses research)
 draft = writer_agent.run(
     model_name="claude-sonnet-4-5",
+    prompt_template="Write a short article using this research:\n{research}",
     arguments={"research": research_result},
-    # ...
 )
 
 # Agent 3: Edit (uses draft)
 final = editor_agent.run(
     model_name="gemini-2.5-flash",
+    prompt_template="Edit and polish this draft:\n{draft}",
     arguments={"draft": draft},
-    # ...
 )
 ```
 
@@ -216,7 +217,7 @@ Each agent can use a different model. Each agent has its own budget. Each agent 
 
 ### Using Agent Creator and Optimizer
 
-> 📖 **For detailed Agent Creator documentation, see [Agent Creator README](src/kiss/agents/agent_creator/README.md)**
+> 📖 **For detailed Agent Creator documentation, see [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md)**
 
 The Agent Creator module provides tools to automatically evolve and optimize AI agents for **token efficiency** and **execution speed** using evolutionary algorithms with Pareto frontier maintenance.
 
@@ -228,7 +229,7 @@ The Agent Creator module provides tools to automatically evolve and optimize AI 
 Both components use a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
 
 ```python
-from kiss.agents.agent_creator import ImproverAgent, AgentEvolver
+from kiss.agents.create_and_optimize_agent import ImproverAgent, AgentEvolver
 
 # Option 1: Improve an existing agent
 improver = ImproverAgent(
@@ -243,8 +244,8 @@ success, report = improver.improve(
 )
 
 if success and report:
-    print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
-    print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
+    print(f"Generation: {report.generation}")
+    print(f"Summary: {report.summary}")
 
 # Option 2: Evolve a new agent from a task description
 evolver = AgentEvolver(
@@ -272,23 +273,30 @@ print(f"Metrics: {best_variant.metrics}")
 
 **Configuration:**
 
+Configuration values can be passed directly to constructors or accessed via `DEFAULT_CONFIG`:
+
 ```python
 from kiss.core.config import DEFAULT_CONFIG
 
-# Access agent_creator config
-cfg = DEFAULT_CONFIG.agent_creator
+# Access create_and_optimize_agent config defaults
+cfg = DEFAULT_CONFIG.create_and_optimize_agent
 
-# Improver settings
-cfg.improver.max_steps = 150
-cfg.improver.max_budget = 15.0
+# View default settings
+print(f"Default max_steps: {cfg.improver.max_steps}")  # 50
+print(f"Default max_budget: {cfg.improver.max_budget}")  # 15.0
+print(f"Default max_generations: {cfg.evolver.max_generations}")  # 10
 
-# Evolver settings
-cfg.evolver.max_generations = 10
-cfg.evolver.max_frontier_size = 6
-cfg.evolver.mutation_probability = 0.8
+# Override settings by passing to constructors
+improver = ImproverAgent(max_steps=150, max_budget=20.0)
+evolver = AgentEvolver(
+    task_description="...",
+    max_generations=20,
+    max_frontier_size=8,
+    mutation_probability=0.9,
+)
 ```
 
-For usage examples, API reference, and configuration options, please see the [Agent Creator README](src/kiss/agents/agent_creator/README.md).
+For usage examples, API reference, and configuration options, please see the [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md).
 
 ### Using GEPA for Prompt Optimization
 
@@ -324,9 +332,9 @@ result = agent.run(
     """,
     orchestrator_model_name="claude-sonnet-4-5",  # Model for orchestration and execution
     dynamic_gepa_model_name="claude-sonnet-4-5",  # Model for prompt refinement on failures
-    readable_paths=["src/"],  # Allowed read paths
-    writable_paths=["output/"],  # Allowed write paths
-    base_dir="workdir",  # Base working directory
+    readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
+    writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
+    base_dir=".",  # Base working directory (project root)
     max_steps=50,  # Maximum steps per agent
     trials=3  # Number of retry attempts
 )
@@ -359,9 +367,9 @@ result = agent.run(
         Write, test, and optimize a fibonacci function in Python
         that is efficient and correct.
     """,
-    readable_paths=["src/"],  # Allowed read paths
-    writable_paths=["output/"],  # Allowed write paths
-    base_dir="workdir"  # Base working directory
+    readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
+    writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
+    base_dir="."  # Base working directory (project root)
 )
 if result:
     print(f"Result: {result}")
@@ -389,7 +397,7 @@ result = agent.run(
     prompt_template="Write a fibonacci function with tests",
     readable_paths=["src/"],
     writable_paths=["output/"],
-    base_dir="workdir"
+    base_dir="."
 )
 if result:
     print(f"Result: {result}")
@@ -409,7 +417,7 @@ result = agent.run(
     prompt_template="Write a fibonacci function with tests",
     readable_paths=["src/"],
     writable_paths=["output/"],
-    base_dir="workdir"
+    base_dir="."
 )
 if result:
     print(f"Result: {result}")
@@ -598,11 +606,11 @@ print(result)
 kiss/
 ├── src/kiss/
 │   ├── agents/          # Example agents
-│   │   ├── agent_creator/          # Agent evolution and improvement
-│   │   │   ├── agent_evolver.py    # Evolutionary agent optimization
-│   │   │   ├── improver_agent.py   # Agent improvement through generations
-│   │   │   ├── config.py           # Agent creator configuration
-│   │   │   └── README.md           # Agent creator documentation
+│   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
+│   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
+│   │   │   ├── improver_agent.py       # Agent improvement through generations
+│   │   │   ├── config.py               # Agent creator configuration
+│   │   │   └── README.md               # Agent creator documentation
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
 │   │   │   ├── gepa.py
 │   │   │   ├── config.py           # GEPA configuration

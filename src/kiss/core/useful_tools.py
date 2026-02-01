@@ -110,12 +110,23 @@ if [ "$REPLACE_ALL" = "true" ]; then
         echo -e "${RED}Error: String not found in file${NC}" >&2
         exit 3
     fi
-    
-    # Use perl for literal string replacement (handles special chars)
-    perl -i.bak -pe 's/\Q'"$OLD_STRING"'\E/'"$NEW_STRING"'/g' "$FILE_PATH"
-    
+
+    # Use python for literal string replacement (handles special chars)
+    # Pass strings via environment variables to handle embedded quotes safely
+    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+import os
+file_path = os.environ['EDIT_FILE_PATH']
+old_string = os.environ['EDIT_OLD_STRING']
+new_string = os.environ['EDIT_NEW_STRING']
+with open(file_path, 'r') as f:
+    content = f.read()
+content = content.replace(old_string, new_string)
+with open(file_path, 'w') as f:
+    f.write(content)
+"
+
     echo -e "${GREEN}✓ Successfully replaced $OCCURRENCE_COUNT occurrence(s)${NC}"
-    
+
 else
     # Single replacement mode - requires exactly one occurrence
     if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
@@ -126,15 +137,23 @@ else
         echo -e "${YELLOW}Hint: Use replace_all=true to replace all occurrences${NC}" >&2
         exit 3
     fi
-    
+
     # Exactly one occurrence - safe to replace
-    perl -i.bak -pe 's/\Q'"$OLD_STRING"'\E/'"$NEW_STRING"'/' "$FILE_PATH"
-    
+    # Pass strings via environment variables to handle embedded quotes safely
+    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+import os
+file_path = os.environ['EDIT_FILE_PATH']
+old_string = os.environ['EDIT_OLD_STRING']
+new_string = os.environ['EDIT_NEW_STRING']
+with open(file_path, 'r') as f:
+    content = f.read()
+content = content.replace(old_string, new_string, 1)
+with open(file_path, 'w') as f:
+    f.write(content)
+"
+
     echo -e "${GREEN}✓ Successfully replaced 1 occurrence${NC}"
 fi
-
-# Clean up backup file
-rm -f "$FILE_PATH.bak"
 
 # Show the changed section (context around the change)
 echo ""
@@ -238,12 +257,23 @@ if [ "$REPLACE_ALL" = "true" ]; then
         echo -e "${RED}Error: String not found in file${NC}" >&2
         exit 3
     fi
-    
-    # Use perl for literal string replacement (handles special chars)
-    perl -i.bak -pe 's/\Q'"$OLD_STRING"'\E/'"$NEW_STRING"'/g' "$FILE_PATH"
-    
+
+    # Use python for literal string replacement (handles special chars)
+    # Pass strings via environment variables to handle embedded quotes safely
+    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+import os
+file_path = os.environ['EDIT_FILE_PATH']
+old_string = os.environ['EDIT_OLD_STRING']
+new_string = os.environ['EDIT_NEW_STRING']
+with open(file_path, 'r') as f:
+    content = f.read()
+content = content.replace(old_string, new_string)
+with open(file_path, 'w') as f:
+    f.write(content)
+"
+
     echo -e "${GREEN}✓ Successfully replaced $OCCURRENCE_COUNT occurrence(s)${NC}"
-    
+
 else
     # Single replacement mode - requires exactly one occurrence
     if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
@@ -254,15 +284,23 @@ else
         echo -e "${YELLOW}Hint: Use replace_all=true to replace all occurrences${NC}" >&2
         exit 3
     fi
-    
+
     # Exactly one occurrence - safe to replace
-    perl -i.bak -pe 's/\Q'"$OLD_STRING"'\E/'"$NEW_STRING"'/' "$FILE_PATH"
-    
+    # Pass strings via environment variables to handle embedded quotes safely
+    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+import os
+file_path = os.environ['EDIT_FILE_PATH']
+old_string = os.environ['EDIT_OLD_STRING']
+new_string = os.environ['EDIT_NEW_STRING']
+with open(file_path, 'r') as f:
+    content = f.read()
+content = content.replace(old_string, new_string, 1)
+with open(file_path, 'w') as f:
+    f.write(content)
+"
+
     echo -e "${GREEN}✓ Successfully replaced 1 occurrence${NC}"
 fi
-
-# Clean up backup file
-rm -f "$FILE_PATH.bak"
 
 # Show the changed section (context around the change)
 echo ""
@@ -575,7 +613,11 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                         continue
 
                     # Skip redirect operators and their targets
-                    if token in [">", ">>", "<", "&>", "&>>", "1>", "2>", "2>&1", ">|", ">>|", "&>|", "1>>", "2>>"]:
+                    redirect_ops = [
+                        ">", ">>", "<", "&>", "&>>", "1>", "2>",
+                        "2>&1", ">|", ">>|", "&>|", "1>>", "2>>",
+                    ]
+                    if token in redirect_ops:
                         i += 1
                         # Skip the redirect target (next token)
                         if i < len(tokens):
@@ -666,7 +708,7 @@ class UsefulTools:
         self.readable_paths = [Path(p).resolve() for p in readable_paths or []]
         self.writable_paths = [Path(p).resolve() for p in writable_paths or []]
 
-    def Edit(
+    def Edit(  # noqa: N802
         self,
         file_path: str,
         old_string: str,
@@ -732,10 +774,8 @@ class UsefulTools:
                 Path(script_path).unlink()
             except Exception:
                 pass
-        
 
-
-    def MultiEdit(
+    def MultiEdit(  # noqa: N802
         self,
         file_path: str,
         old_string: str,
@@ -800,10 +840,8 @@ class UsefulTools:
                 Path(script_path).unlink()
             except Exception:
                 pass
-        
 
-
-    def Bash(self, command: str, description: str) -> str:
+    def Bash(self, command: str, description: str) -> str:  # noqa: N802
         """Runs a bash command and returns its output.
 
         Args:

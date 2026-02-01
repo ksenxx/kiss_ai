@@ -1,10 +1,10 @@
-# Agent Creator
+# Create and Optimize Agent
 
 A module for evolving and improving AI agents through multi-objective optimization. It provides tools to automatically optimize existing agent code for **token efficiency** and **execution speed** using evolutionary algorithms with Pareto frontier maintenance.
 
 ## Overview
 
-The Agent Creator module consists of two main components:
+The Create and Optimize Agent module consists of two main components:
 
 1. **ImproverAgent**: Takes existing agent source code and creates optimized versions through iterative improvement
 1. **AgentEvolver**: Maintains a population of agent variants and evolves them using mutation and crossover operations
@@ -18,7 +18,6 @@ Both components use a **Pareto frontier** approach to track non-dominated soluti
 - **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
 - **Automatic Pruning**: Removes dominated variants to manage memory and storage
 - **Lineage Tracking**: Records parent relationships and improvement history
-- **Configurable Coding Agents**: Supports Claude Code, Gemini CLI, and OpenAI Codex
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
 
 ## Installation
@@ -30,7 +29,7 @@ The module is part of the `kiss` package. No additional installation required.
 ### Improving an Existing Agent
 
 ```python
-from kiss.agents.agent_creator import ImproverAgent
+from kiss.agents.create_and_optimize_agent import ImproverAgent
 
 improver = ImproverAgent(
     max_steps=150,
@@ -51,7 +50,7 @@ if success and report:
 ### Evolving a New Agent from Scratch
 
 ```python
-from kiss.agents.agent_creator import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver
 
 evolver = AgentEvolver(
     task_description="Build a code analysis assistant that can parse and analyze large codebases",
@@ -130,8 +129,8 @@ Configuration can be provided via the global config system:
 ```python
 from kiss.core.config import DEFAULT_CONFIG
 
-# Access agent_creator config
-cfg = DEFAULT_CONFIG.agent_creator
+# Access create_and_optimize_agent config
+cfg = DEFAULT_CONFIG.create_and_optimize_agent
 
 # Improver settings
 cfg.improver.max_steps = 150
@@ -144,6 +143,122 @@ cfg.evolver.mutation_probability = 0.8
 ```
 
 ## How It Works
+
+### Architecture Overview
+
+```
+┌───────────────────────────────────────────────────┐
+│                 Task Description                  │
+└─────────────────────────┬─────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────┐
+│            Initial Agent Creation                 │
+│   (Claude Code / Gemini CLI / OpenAI Codex)       │
+│       + Web Search for Best Practices             │
+└─────────────────────────┬─────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────┐
+│                Evolution Loop              ◄──┐   │
+│  ┌─────────────────────────────────────────┐  │   │
+│  │  Mutation (80%)   │   Crossover (20%)   │  │   │
+│  │  Single parent    │   Two parents       │  │   │
+│  │  Targeted changes │   Combine best ideas│  │   │
+│  └───────────────────┬─────────────────────┘  │   │
+│                      │                        │   │
+│                      ▼                        │   │
+│  ┌─────────────────────────────────────────┐  │   │
+│  │             Evaluation                  │  │   │
+│  │  Measure: tokens_used, execution_time   │  │   │
+│  └───────────────────┬─────────────────────┘  │   │
+│                      │                        │   │
+│                      ▼                        │   │
+│  ┌─────────────────────────────────────────┐  │   │
+│  │       Pareto Frontier Update            │  │   │
+│  │    Keep non-dominated solutions         │  │   │
+│  │    Trim using crowding distance         │  │   │
+│  └───────────────────┬─────────────────────┘  │   │
+│                      │                        │   │
+│                      └── More generations? ───┘   │
+└─────────────────────────┬─────────────────────────┘
+                          │ Done
+                          ▼
+┌───────────────────────────────────────────────────┐
+│             Optimal Agent Output                  │
+│        Best trade-off on Pareto frontier          │
+└───────────────────────────────────────────────────┘
+```
+
+### Algorithm Pseudocode
+
+```
+Inputs:
+    - task_description: Description of the task the agent should perform
+    - max_generations: Maximum number of improvement generations
+    - initial_frontier_size: Number of initial agents to create
+    - max_frontier_size: Maximum size of the Pareto frontier
+    - mutation_probability: Probability of mutation vs crossover (0.0 to 1.0)
+
+Data Structures:
+    AgentVariant:
+        - folder_path: Directory containing agent code
+        - report_path: Path to improvement report JSON file
+        - report: ImprovementReport tracking implemented/failed ideas
+        - metrics: {success, tokens_used, execution_time, ...}
+        - id, generation, parent_ids (for lineage tracking)
+        - feedback: Feedback from evaluation
+
+    dominates(A, B):
+        # A dominates B if A is at least as good in all metrics
+        # and strictly better in one
+        # ALL metrics are minimized (lower is better)
+        # Note: success is 0 for success, 1 for failure
+
+    score(variant, weights=None):
+        # Combined ranking score (lower is better)
+        # Default: success * 1,000,000 + tokens_used * 1 + execution_time * 1000
+
+Algorithm EVOLVE():
+    1. INITIALIZE
+       - Create temporary work_dir for variants
+       - Set optimal_dir for storing best agent
+       - Initialize empty pareto_frontier
+
+    2. CREATE INITIAL AGENTS
+       - WHILE len(pareto_frontier) < initial_frontier_size:
+           - Use coding agent to generate agent files from task_description
+           - Agent must implement agent_run(task) -> {metrics: {...}, feedback: "..."}
+           - Evaluate agent by calling agent_run(task_description)
+           - Update pareto_frontier (may reject if dominated)
+           - Copy current best variant (min score) to optimal_dir
+
+    3. FOR generation = 1 TO max_generations:
+       a. SELECT OPERATION
+          IF random() < mutation_probability OR frontier_size < 2:
+              # MUTATION
+              parent = sample_uniform(pareto_frontier)
+              new_variant = ImproverAgent.improve(parent)
+          ELSE:
+              # CROSSOVER
+              v1, v2 = sample_two(pareto_frontier)
+              primary, secondary = order_by_score(v1, v2)  # better score first
+              new_variant = ImproverAgent.crossover_improve(primary, secondary)
+
+       b. IF new_variant created successfully:
+          - Evaluate: load agent.py, call agent_run(task_description)
+          - Store feedback from evaluation result
+          - Update pareto_frontier:
+              - Reject if dominated by any existing variant
+              - Remove variants dominated by new_variant
+              - Add new_variant
+              - If frontier > max_size: trim using crowding distance
+          - Copy best variant (min score) to optimal_dir
+
+    4. RETURN best variant from pareto_frontier (min score)
+
+    5. CLEANUP work_dir
+```
 
 ### Pareto Frontier
 

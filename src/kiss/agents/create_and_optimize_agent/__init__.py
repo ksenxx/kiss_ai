@@ -11,26 +11,31 @@ This module provides tools for:
 
 Example usage:
 
-    from kiss.agents.agent_creator import AgentEvolver, ImproverAgent
+    from kiss.agents.create_and_optimize_agent import AgentEvolver, ImproverAgent
 
     # Create and evolve an agent for a task
     evolver = AgentEvolver(
         task_description="Build a code analysis assistant",
         max_generations=10,
     )
-    best = await evolver.evolve()
+    best = evolver.evolve()
 
     # Or improve an existing agent
     improver = ImproverAgent()
-    success, report = await improver.improve(
+    success, report = improver.improve(
         source_folder="/path/to/agent",
         target_folder="/path/to/improved",
+        task_description="Build a code analysis assistant",
     )
 """
 
-from kiss.agents.agent_creator.agent_evolver import AgentEvolver, AgentVariant
-from kiss.agents.agent_creator.config import AgentCreatorConfig, EvolverConfig, ImproverConfig
-from kiss.agents.agent_creator.improver_agent import ImprovementReport, ImproverAgent
+from kiss.agents.create_and_optimize_agent.agent_evolver import AgentEvolver, AgentVariant
+from kiss.agents.create_and_optimize_agent.config import (
+    AgentCreatorConfig,
+    EvolverConfig,
+    ImproverConfig,
+)
+from kiss.agents.create_and_optimize_agent.improver_agent import ImprovementReport, ImproverAgent
 
 __all__ = [
     "AgentEvolver",

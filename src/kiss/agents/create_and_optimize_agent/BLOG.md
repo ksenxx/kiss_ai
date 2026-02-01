@@ -4,7 +4,7 @@
 
 We're witnessing a Cambrian explosion in AI agent development. Teams are building increasingly sophisticated multi-agent systems, but they're hitting a wall: as agents grow more capable, they also grow more expensive. Token costs spiral. Latency compounds. What started as a clever automation becomes a budget-draining behemoth.
 
-Enter [**Agent Evolver**](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/agent_creator)—a system that breeds better AI agents through genetic evolution, optimizing for the two metrics that matter most: **cost and speed**. It is built using the [KISS](https://github.com/ksenxx/kiss_ai/) framework.
+Enter [**Agent Evolver**](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/create_and_optimize_agent)—a system that breeds better AI agents through genetic evolution, optimizing for the two metrics that matter most: **cost and speed**. It is built using the [KISS](https://github.com/ksenxx/kiss_ai/) framework.
 
 ## The Problem with Prompt Engineering
 
@@ -82,45 +82,47 @@ When the improver agent analyzes your code, it's not just looking at strings. It
 Under the hood, Agent Evolver is elegantly simple:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Task Description                  │
-└─────────────────────┬───────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────┐
-│              Initial Agent Creation                  │
-│    (Claude Code / Gemini CLI / OpenAI Codex)        │
-│         + Web Search for Best Practices              │
-└─────────────────────┬───────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────┐
-│               Evolution Loop                         │
-│  ┌─────────────────────────────────────────────┐    │
-│  │  Mutation (80%)    │    Crossover (20%)     │    │
-│  │  Single parent     │    Two parents         │    │
-│  │  Targeted changes  │    Combine best ideas  │    │
-│  └─────────────────────────────────────────────┘    │
-│                      │                               │
-│                      ▼                               │
-│  ┌─────────────────────────────────────────────┐    │
-│  │           Evaluation                         │    │
-│  │    Measure: tokens_used, execution_time     │    │
-│  └─────────────────────────────────────────────┘    │
-│                      │                               │
-│                      ▼                               │
-│  ┌─────────────────────────────────────────────┐    │
-│  │       Pareto Frontier Update                 │    │
-│  │    Keep non-dominated solutions             │    │
-│  │    Trim using crowding distance             │    │
-│  └─────────────────────────────────────────────┘    │
-└─────────────────────┬───────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────┐
-│              Optimal Agent Output                    │
-│         Best trade-off on Pareto frontier           │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────┐
+│                 Task Description                  │
+└─────────────────────────┬─────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────┐
+│            Initial Agent Creation                 │
+│   (Claude Code / Gemini CLI / OpenAI Codex)       │
+│       + Web Search for Best Practices             │
+└─────────────────────────┬─────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────┐
+│                Evolution Loop              ◄──┐   │
+│  ┌─────────────────────────────────────────┐  │   │
+│  │  Mutation (80%)   │   Crossover (20%)   │  │   │
+│  │  Single parent    │   Two parents       │  │   │
+│  │  Targeted changes │   Combine best ideas│  │   │
+│  └───────────────────┬─────────────────────┘  │   │
+│                      │                        │   │
+│                      ▼                        │   │
+│  ┌─────────────────────────────────────────┐  │   │
+│  │             Evaluation                  │  │   │
+│  │  Measure: tokens_used, execution_time   │  │   │
+│  └───────────────────┬─────────────────────┘  │   │
+│                      │                        │   │
+│                      ▼                        │   │
+│  ┌─────────────────────────────────────────┐  │   │
+│  │       Pareto Frontier Update            │  │   │
+│  │    Keep non-dominated solutions         │  │   │
+│  │    Trim using crowding distance         │  │   │
+│  └───────────────────┬─────────────────────┘  │   │
+│                      │                        │   │
+│                      └── More generations? ───┘   │
+└─────────────────────────┬─────────────────────────┘
+                          │ Done
+                          ▼
+┌───────────────────────────────────────────────────┐
+│             Optimal Agent Output                  │
+│        Best trade-off on Pareto frontier          │
+└───────────────────────────────────────────────────┘
 ```
 
 Each generation, the system:
@@ -138,7 +140,7 @@ The best agent is always available—even while evolution continues.
 Using Agent Evolver is straightforward:
 
 ```python
-from kiss.agents.agent_creator import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver
 
 evolver = AgentEvolver(
     task_description="""

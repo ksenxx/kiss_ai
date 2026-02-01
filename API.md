@@ -78,7 +78,7 @@ Specialized coding agents using different SDKs.
 - **`gemini_cli_agent.py`** - `GeminiCliAgent` using Google ADK
 - **`openai_codex_agent.py`** - `OpenAICodexAgent` using OpenAI Agents SDK
 
-#### `src/kiss/agents/agent_creator/`
+#### `src/kiss/agents/create_and_optimize_agent/`
 
 Agent creation and evolutionary optimization.
 
@@ -190,7 +190,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.agents.coding_agents import KISSCodingAgent, ClaudeCodingAgent, GeminiCliAgent, OpenAICodexAgent
 
 # Agent creation
-from kiss.agents.agent_creator import AgentEvolver, ImproverAgent
+from kiss.agents.create_and_optimize_agent import AgentEvolver, ImproverAgent
 
 # Optimization
 from kiss.agents.gepa import GEPA
@@ -240,8 +240,8 @@ def run(
     tools: list[Callable[..., Any]] | None = None,
     formatter: Formatter | None = None,
     is_agentic: bool = True,
-    max_steps: int = 100,
-    max_budget: float = 10.0,
+    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
+    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
     model_config: dict[str, Any] | None = None,
 ) -> str
 ```
@@ -388,7 +388,7 @@ def run(
     trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    base_dir: str = "<artifact_dir>/kiss_workdir",
+    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
 ) -> str
@@ -400,15 +400,15 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `orchestrator_model_name` (str): Model for the main orchestrator agent and executor agents. Default is from config (claude-sonnet-4-5).
-- `subtasker_model_name` (str): Reserved for future use. Currently orchestrator_model_name is used for all agents.
+- `orchestrator_model_name` (str): Model for the main orchestrator agent. Default is from config (claude-sonnet-4-5).
+- `subtasker_model_name` (str): Model for executor agents handling sub-tasks. Default is from config (claude-opus-4-5).
 - `dynamic_gepa_model_name` (str): Model for dynamic prompt refinement when tasks fail. Default is from config (claude-sonnet-4-5).
 - `trials` (int): Number of retry attempts for each task/subtask. Default is 3.
 - `max_steps` (int): Maximum number of steps per agent. Default is from config.
 - `max_budget` (float): Maximum budget in USD for this run. Default is from config.
 - `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no path restrictions.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no path restrictions.
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access.
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access.
 
 **Returns:**
 
@@ -490,7 +490,7 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 - `id` (int): Unique identifier for this agent instance.
 - `name` (str): The agent's name.
 - `orchestrator_model_name` (str): Model name for orchestrator agent.
-- `subtasker_model_name` (str): Model name for executor agents (reserved, currently uses orchestrator_model_name).
+- `subtasker_model_name` (str): Model name for executor agents.
 - `dynamic_gepa_model_name` (str): Model name for dynamic prompt refinement.
 - `task_description` (str): The formatted task description.
 - `messages` (list\[dict[str, Any]\]): List of messages in the trajectory (aggregated from all sub-agents).
@@ -516,8 +516,9 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 - **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
 - **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
-- **Built-in Tools**: Each agent has access to `finish()`, `run_bash_command()`, and `perform_subtask()`
-- **Recursive Delegation**: Sub-tasks can spawn further sub-tasks as needed
+- **Built-in Tools**:
+  - Orchestrator agent has access to `finish()` and `perform_subtask()`
+  - Executor agents have access to `finish()` and `run_bash_command()`
 
 ### Example
 
@@ -576,7 +577,7 @@ def run(
     arguments: dict[str, str] | None = None,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    base_dir: str = "<artifact_dir>/claude_workdir",
+    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "claude_workdir"),
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
 ) -> str | None
@@ -592,8 +593,8 @@ Run the Claude coding agent for a given task.
 - `max_steps` (int): Maximum number of steps. Default is from config.
 - `max_budget` (float): Maximum budget in USD for this run. Default is from config.
 - `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no path restrictions.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no path restrictions.
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for Read/Grep/Glob.
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for Write/Edit/MultiEdit.
 
 **Returns:**
 
@@ -679,12 +680,12 @@ GeminiCliAgent(name: str)
 ```python
 def run(
     self,
-    model_name: str = "gemini-2.5-flash",
+    model_name: str = DEFAULT_GEMINI_MODEL,
     prompt_template: str = "",
     arguments: dict[str, str] | None = None,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    base_dir: str = "<artifact_dir>/gemini_workdir",
+    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "gemini_workdir"),
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     formatter: Formatter | None = None,
@@ -785,12 +786,12 @@ OpenAICodexAgent(name: str)
 ```python
 def run(
     self,
-    model_name: str = "gpt-5.2-codex",
+    model_name: str = DEFAULT_CODEX_MODEL,
     prompt_template: str = "",
     arguments: dict[str, str] | None = None,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    base_dir: str = "<artifact_dir>/codex_workdir",
+    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "codex_workdir"),
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     formatter: Formatter | None = None,
@@ -966,8 +967,8 @@ with DockerManager("ubuntu:latest", ports={80: 8080}) as env:
 ### Instance Attributes
 
 - `container`: The Docker container instance (after `open()`).
-- `host_shared_path` (str | None): Path to the host-side shared directory.
-- `client_shared_path` (str): Path to the container-side shared directory.
+- `host_shared_path` (str | None): Path to the host-side shared directory (auto-generated temp directory).
+- `client_shared_path` (str): Path to the container-side shared directory (from config, default: `/testbed`).
 - `image` (str): The Docker image name.
 - `tag` (str): The Docker image tag.
 - `workdir` (str): The working directory inside the container.
@@ -1218,8 +1219,8 @@ AgentEvolver evolves AI agents using a Pareto frontier approach, optimizing for 
 ```python
 AgentEvolver(
     task_description: str,
-    evaluation_fn: Callable[[str], tuple[int, float]] | None = None,
     max_generations: int | None = None,
+    initial_frontier_size: int | None = None,
     max_frontier_size: int | None = None,
     mutation_probability: float | None = None,
 )
@@ -1228,12 +1229,12 @@ AgentEvolver(
 **Parameters:**
 
 - `task_description` (str): Description of the task the agent should perform.
-- `evaluation_fn` (Callable | None): Optional function to evaluate agent variants. Takes folder path, returns `(tokens_used, execution_time)`. If None, uses placeholder evaluation.
 - `max_generations` (int | None): Maximum number of improvement generations. Uses config default if None.
+- `initial_frontier_size` (int | None): Number of initial agents to create. Uses config default if None.
 - `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
 - `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
 
-**Note:** AgentEvolver uses KISSCodingAgent internally for agent improvement.
+**Note:** AgentEvolver uses KISSCodingAgent internally for agent improvement. Evaluation is done internally by loading and running the generated `agent.py` which must implement `agent_run(task: str) -> dict[str, Any]`.
 
 ### Methods
 
@@ -1297,34 +1298,55 @@ class AgentVariant:
     folder_path: str
     report_path: str
     report: ImprovementReport
-    tokens_used: int = 0
-    execution_time: float = 0.0
+    metrics: dict[str, float]
+    parent_ids: list[int]
     id: int = 0
     generation: int = 0
-    parent_ids: list[int] = field(default_factory=list)
+    feedback: str = ""
 ```
+
+**Attributes:**
+
+- `folder_path` (str): Directory containing agent code.
+- `report_path` (str): Path to improvement report JSON file.
+- `report` (ImprovementReport): Improvement report tracking implemented/failed ideas.
+- `metrics` (dict[str, float]): Metrics dictionary with keys like `success`, `tokens_used`, `execution_time`.
+- `parent_ids` (list[int]): List of parent variant IDs (for lineage tracking).
+- `id` (int): Unique identifier for this variant.
+- `generation` (int): Generation number when this variant was created.
+- `feedback` (str): Feedback from evaluation.
 
 ### ImprovementReport
 
 ```python
-@dataclass
 class ImprovementReport:
-    implemented_ideas: list[dict[str, str]] = field(default_factory=list)
-    failed_ideas: list[dict[str, str]] = field(default_factory=list)
-    generation: int = 0
-    improved_tokens: int = 0
-    improved_time: float = 0.0
-    summary: str = ""
+    def __init__(
+        self,
+        metrics: dict[str, float],
+        implemented_ideas: list[dict[str, str]],
+        failed_ideas: list[dict[str, str]],
+        generation: int = 0,
+        summary: str = "",
+    )
 ```
+
+**Attributes:**
+
+- `metrics` (dict[str, float]): Metrics from the improvement run (e.g., `tokens_used`, `cost`, `execution_time`).
+- `implemented_ideas` (list\[dict[str, str]\]): List of successfully implemented optimization ideas.
+- `failed_ideas` (list\[dict[str, str]\]): List of failed optimization attempts.
+- `generation` (int): Generation number.
+- `summary` (str): Summary of the improvement.
 
 ### Example
 
 ```python
-from kiss.agents.agent_creator import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver
 
 evolver = AgentEvolver(
     task_description="Build a code analysis assistant that reviews Python files",
     max_generations=5,
+    initial_frontier_size=2,
     max_frontier_size=4,
     mutation_probability=0.8,
 )
@@ -1332,8 +1354,8 @@ evolver = AgentEvolver(
 best = evolver.evolve()
 
 print(f"Best variant: {best.folder_path}")
-print(f"Tokens used: {best.tokens_used}")
-print(f"Execution time: {best.execution_time:.2f}s")
+print(f"Metrics: {best.metrics}")
+print(f"Generation: {best.generation}")
 
 # Save state for later analysis
 evolver.save_state("evolver_state.json")
@@ -1351,6 +1373,7 @@ ImproverAgent optimizes existing agent code to reduce token usage and execution 
 ImproverAgent(
     max_steps: int | None = None,
     max_budget: float | None = None,
+    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"] | None = None,
 )
 ```
 
@@ -1358,6 +1381,7 @@ ImproverAgent(
 
 - `max_steps` (int | None): Maximum steps for the coding agent. Uses config default if None.
 - `max_budget` (float | None): Maximum budget in USD for the coding agent. Uses config default if None.
+- `coding_agent_type` (Literal | None): Type of coding agent to use internally. Currently defaults to KISSCodingAgent. Options: "kiss code", "claude code", "gemini cli", "openai codex".
 
 **Note:** ImproverAgent uses KISSCodingAgent internally for agent improvement.
 
@@ -1424,7 +1448,7 @@ Improve an agent by combining ideas from two variants.
 ### Example
 
 ```python
-from kiss.agents.agent_creator import ImproverAgent
+from kiss.agents.create_and_optimize_agent import ImproverAgent
 
 improver = ImproverAgent(max_steps=150, max_budget=15.0)
 
@@ -1437,6 +1461,7 @@ success, report = improver.improve(
 if success and report:
     print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
     print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
+    print(f"Cost: ${report.metrics.get('cost', 0):.4f}")
 ```
 
 ______________________________________________________________________
@@ -1473,7 +1498,7 @@ GEPA(
 - `max_generations` (int | None): Maximum evolutionary generations. Uses config default if None.
 - `population_size` (int | None): Number of candidates per generation. Uses config default if None.
 - `pareto_size` (int | None): Maximum Pareto frontier size. Uses config default if None.
-- `mutation_rate` (float | None): Probability of mutation. Default is 0.5.
+- `mutation_rate` (float | None): Probability of mutation. Uses config default if None.
 - `reflection_model` (str | None): Model for reflection. Uses config default if None.
 - `dev_val_split` (float | None): Fraction for dev set. Default is 0.5.
 - `perfect_score` (float): Score threshold to skip mutation. Default is 1.0.
@@ -1534,13 +1559,13 @@ Get current Pareto frontier.
 @dataclass
 class PromptCandidate:
     prompt_template: str
-    id: int = 0
     dev_scores: dict[str, float] = field(default_factory=dict)
     val_scores: dict[str, float] = field(default_factory=dict)
     per_item_val_scores: list[dict[str, float]] = field(default_factory=list)
     val_instance_wins: set[int] = field(default_factory=set)
     evaluated_val_ids: set[int] = field(default_factory=set)
     parents: list[int] = field(default_factory=list)
+    id: int = 0
 ```
 
 ______________________________________________________________________
@@ -1681,10 +1706,10 @@ UsefulTools(
 
 ### Methods
 
-#### `run_bash_command()`
+#### `Bash()`
 
 ```python
-def run_bash_command(self, command: str, description: str) -> str
+def Bash(self, command: str, description: str) -> str
 ```
 
 Execute a bash command with automatic path permission checks and security validation.
@@ -1703,8 +1728,57 @@ Execute a bash command with automatic path permission checks and security valida
 - Detects dangerous patterns (command substitution, variable manipulation, etc.)
 - Automatically parses commands to detect file operations
 - Enforces readable_paths and writable_paths restrictions
-- 30-second timeout for command execution
 - Returns descriptive error messages for violations
+
+#### `Edit()`
+
+```python
+def Edit(
+    self,
+    file_path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> str
+```
+
+Performs precise string replacements in files with exact matching.
+
+**Parameters:**
+
+- `file_path` (str): Absolute path to the file to modify.
+- `old_string` (str): Exact text to find and replace.
+- `new_string` (str): Replacement text, must differ from old_string.
+- `replace_all` (bool): If True, replace all occurrences. Default is False.
+
+**Returns:**
+
+- `str`: The output of the edit operation.
+
+#### `MultiEdit()`
+
+```python
+def MultiEdit(
+    self,
+    file_path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> str
+```
+
+Performs precise string replacements in files with exact matching. Has the same functionality as `Edit()` - both methods use the same underlying implementation for string replacement.
+
+**Parameters:**
+
+- `file_path` (str): Absolute path to the file to modify.
+- `old_string` (str): Exact text to find and replace.
+- `new_string` (str): Replacement text, must differ from old_string.
+- `replace_all` (bool): If True, replace all occurrences. Default is False.
+
+**Returns:**
+
+- `str`: The output of the edit operation.
 
 **Example:**
 
@@ -1718,10 +1792,10 @@ tools = UsefulTools(
 )
 
 # This will work
-output = tools.run_bash_command("cat src/file.txt > output/result.txt", "Copy file")
+output = tools.Bash("cat src/file.txt > output/result.txt", "Copy file")
 
 # This will be denied
-output = tools.run_bash_command("cat /etc/passwd", "Read system file")
+output = tools.Bash("cat /etc/passwd", "Read system file")
 # Returns: "Error: Access denied for reading /etc/passwd"
 ```
 
@@ -1911,9 +1985,9 @@ A utility function from `kiss.core.utils` that can be used as a finish tool for 
 def finish(success: bool, summary: str) -> str
 ```
 
-Used by KISSCodingAgent and its sub-agents to complete task execution. This is defined in `kiss.agents.kiss_coding_agent` and has a different signature than the utility version.
+Used by KISSCodingAgent and its sub-agents to complete task execution. This is defined in `kiss.agents.coding_agents.kiss_coding_agent` and has a different signature than the utility version.
 
-**Location:** `kiss.agents.kiss_coding_agent`
+**Location:** `kiss.agents.coding_agents.kiss_coding_agent`
 
 **Parameters:**
 
@@ -2002,7 +2076,7 @@ readable, writable = parse_bash_command_paths("cp -r src/ dest/")
 
 **Note:**
 
-This function is defined in `kiss.core.useful_tools` and is used internally by `UsefulTools.run_bash_command()` and `KISSCodingAgent.run_bash_command()` to automatically determine which paths need read/write permissions before executing bash commands.
+This function is defined in `kiss.core.useful_tools` and is used internally by `UsefulTools.Bash()` and `KISSCodingAgent.run_bash_command()` to automatically determine which paths need read/write permissions before executing bash commands.
 
 ______________________________________________________________________
 
@@ -2137,40 +2211,41 @@ The KISS framework uses a Pydantic-based configuration system accessible through
 from kiss.core.config import DEFAULT_CONFIG
 
 # Access configuration
-DEFAULT_CONFIG.api_keys.openai_api_key = "your-key"
+DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY = "your-key"
 DEFAULT_CONFIG.agent.max_steps = 100
 DEFAULT_CONFIG.agent.max_agent_budget = 10.0
-DEFAULT_CONFIG.agent.global_budget = 200.0
+DEFAULT_CONFIG.agent.global_max_budget = 200.0
 DEFAULT_CONFIG.agent.verbose = True
 DEFAULT_CONFIG.agent.use_web_search = True
 ```
 
 ### Configuration Sections
 
-#### `api_keys`
+#### `agent.api_keys`
 
-- `openai_api_key` (str): OpenAI API key
-- `anthropic_api_key` (str): Anthropic API key
-- `google_api_key` (str): Google API key
-- `together_api_key` (str): Together AI API key
-- `openrouter_api_key` (str): OpenRouter API key
-- `serper_api_key` (str): Serper API key for web search
+- `OPENAI_API_KEY` (str): OpenAI API key
+- `ANTHROPIC_API_KEY` (str): Anthropic API key
+- `GEMINI_API_KEY` (str): Google Gemini API key
+- `TOGETHER_API_KEY` (str): Together AI API key
+- `OPENROUTER_API_KEY` (str): OpenRouter API key
 
 #### `agent`
 
 - `max_steps` (int): Maximum steps per agent run (default: 100)
 - `max_agent_budget` (float): Maximum budget per agent in USD (default: 10.0)
-- `global_budget` (float): Global budget limit in USD (default: 200.0)
+- `global_max_budget` (float): Global budget limit in USD (default: 200.0)
 - `verbose` (bool): Enable verbose output (default: True)
-- `use_web_search` (bool): Enable web search tool (default: False)
-- `model_name` (str): Default model name (default: "gpt-4o")
+- `use_web_search` (bool): Enable web search tool (default: True)
+- `debug` (bool): Enable debug mode (default: False)
 - `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
 
 #### `agent.kiss_coding_agent`
 
 - `orchestrator_model_name` (str): Model for main orchestration and executor agents (default: "claude-sonnet-4-5")
-- `subtasker_model_name` (str): Reserved for future use (default: "claude-opus-4-5")
+- `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-5")
 - `dynamic_gepa_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
+- `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 50)
+- `max_budget` (float): Maximum budget in USD for the KISS Coding Agent (default: 100.0)
 - `trials` (int): Retry attempts per task/subtask (default: 3)
 - `max_steps` (int): Maximum steps per agent (default: 50)
 - `max_budget` (float): Maximum total budget in USD (default: 100.0)
@@ -2180,7 +2255,7 @@ DEFAULT_CONFIG.agent.use_web_search = True
 - `default_image` (str): Default Docker image (default: "ubuntu:latest")
 - `default_workdir` (str): Default working directory in container (default: "/workspace")
 
-#### `gepa`, `kiss_evolve`, `agent_creator`
+#### `gepa`, `kiss_evolve`, `create_and_optimize_agent`
 
 Configuration sections for evolutionary optimization systems. See respective classes for details.
 
