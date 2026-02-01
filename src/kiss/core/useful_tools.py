@@ -367,59 +367,6 @@ def _extract_directory(path_str: str) -> str | None:
     except Exception:
         return None
 
-
-def contains_dangerous_patterns(command: str) -> tuple[bool, str]:
-    """Check for dangerous shell patterns that commonly bypass security.
-
-    Args:
-        command: The bash command to analyze
-
-    Returns:
-        (is_dangerous, reason) tuple
-    """
-    # Check for command substitution
-    if "$(" in command:
-        return True, "Command substitution $() detected"
-
-    if "`" in command:
-        return True, "Command substitution with backticks detected"
-
-    # Check for variable assignment followed by usage
-    if re.search(r"\w+=/[^\s;]+ *(?:&&|;)", command):
-        return True, "Variable assignment with path detected"
-
-    # Check for export followed by usage
-    if "export" in command and re.search(r"export +\w+=/[^\s;]+", command):
-        return True, "Export of path variable detected"
-
-    # Check for cd followed by any command
-    if re.search(r"\bcd\b[^;]*(?:&&|;)", command):
-        return True, "Directory change followed by command detected"
-
-    # Check for exec with file descriptors
-    if re.search(r"\bexec +\d*[<>]", command):
-        return True, "File descriptor manipulation with exec detected"
-
-    # Check for process substitution
-    if "<(" in command or ">(" in command:
-        return True, "Process substitution detected"
-
-    # Check for input redirection from file
-    if re.search(r"<\s*/[^\s;&|]+", command):
-        return True, "Input redirection from absolute path detected"
-
-    # Check for heredocs (can be used for bypasses)
-    if "<<" in command and not re.search(r"2?<<\s*/dev/", command):
-        return True, "Heredoc detected"
-
-    # Check for multiple commands (compound statements)
-    # Allow && and ; only if no path-like strings follow cd
-    if "||" in command:
-        return True, "OR operator detected (||)"
-
-    return False, ""
-
-
 def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
     """Parse a bash command to extract readable and writable directory paths.
 
@@ -865,11 +812,6 @@ class UsefulTools:
         Returns:
             The output of the command.
         """
-
-        # NEW: Check for dangerous patterns first
-        is_dangerous, reason = contains_dangerous_patterns(command)
-        if is_dangerous:
-            return f"Error: Security violation - {reason}"
 
         # Parse and validate paths
         readable, writable = parse_bash_command_paths(command)

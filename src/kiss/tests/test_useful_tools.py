@@ -13,7 +13,6 @@ from pathlib import Path
 from kiss.core.useful_tools import (
     UsefulTools,
     _extract_directory,
-    contains_dangerous_patterns,
     parse_bash_command_paths,
 )
 
@@ -75,100 +74,6 @@ class TestExtractDirectory(unittest.TestCase):
         # Empty string
         result = _extract_directory("")
         self.assertIsNone(result)
-
-
-class TestContainsDangerousPatterns(unittest.TestCase):
-    """Test the contains_dangerous_patterns function."""
-
-    def test_safe_commands(self):
-        """Test that safe commands are not flagged."""
-        safe_commands = [
-            "ls -la",
-            "cat file.txt",
-            "grep pattern file.txt",
-            "echo hello",
-            "python script.py",
-        ]
-        for cmd in safe_commands:
-            is_dangerous, _ = contains_dangerous_patterns(cmd)
-            self.assertFalse(is_dangerous, f"Command flagged as dangerous: {cmd}")
-
-    def test_command_substitution_dollar(self):
-        """Test detection of command substitution with $()."""
-        cmd = "echo $(cat /etc/passwd)"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("Command substitution", reason)
-
-    def test_command_substitution_backticks(self):
-        """Test detection of command substitution with backticks."""
-        cmd = "echo `cat /etc/passwd`"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("backticks", reason)
-
-    def test_variable_assignment_with_path(self):
-        """Test detection of variable assignment with path."""
-        cmd = "DIR=/tmp/test && cd $DIR"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("Variable assignment", reason)
-
-    def test_export_with_path(self):
-        """Test detection of export with path."""
-        cmd = "export PATH=/malicious/bin"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("Export", reason)
-
-    def test_cd_followed_by_command(self):
-        """Test detection of cd followed by command."""
-        cmd = "cd /tmp && rm -rf *"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("Directory change", reason)
-
-    def test_exec_with_file_descriptors(self):
-        """Test detection of exec with file descriptors."""
-        cmd = "exec 3>/tmp/file"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("File descriptor", reason)
-
-    def test_process_substitution(self):
-        """Test detection of process substitution."""
-        cmd = "diff <(ls dir1) <(ls dir2)"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("Process substitution", reason)
-
-    def test_input_redirection_from_absolute_path(self):
-        """Test detection of input redirection from absolute path."""
-        cmd = "cat < /etc/passwd"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("Input redirection", reason)
-
-    def test_heredoc(self):
-        """Test detection of heredoc."""
-        cmd = "cat << EOF\ntest\nEOF"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("Heredoc", reason)
-
-    def test_heredoc_to_dev_allowed(self):
-        """Test that heredoc to /dev/ is allowed."""
-        cmd = "cat << /dev/null"
-        is_dangerous, _ = contains_dangerous_patterns(cmd)
-        # This should still be flagged based on the regex
-        self.assertTrue(is_dangerous)
-
-    def test_or_operator(self):
-        """Test detection of OR operator."""
-        cmd = "command1 || command2"
-        is_dangerous, reason = contains_dangerous_patterns(cmd)
-        self.assertTrue(is_dangerous)
-        self.assertIn("OR operator", reason)
 
 
 class TestParseBashCommandPaths(unittest.TestCase):

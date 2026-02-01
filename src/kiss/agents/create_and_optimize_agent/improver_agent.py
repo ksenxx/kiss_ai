@@ -14,7 +14,7 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
 from kiss.core.config import DEFAULT_CONFIG
