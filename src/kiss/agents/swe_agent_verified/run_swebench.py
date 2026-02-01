@@ -17,7 +17,7 @@ from datasets import load_dataset
 
 import kiss.agents.swe_agent_verified.config  # noqa: F401
 import kiss.core.utils as utils
-from kiss.agents.kiss import refine_prompt_template
+from kiss.agents.kiss import dynamic_gepa_agent
 from kiss.agents.swe_agent_verified.config import SWEBenchVerifiedConfig
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
@@ -205,9 +205,7 @@ def solve_instance(
     }
 
     try:
-        with DockerManager(
-            image_name, workdir=config.workdir, mount_shared_volume=False
-        ) as env:
+        with DockerManager(image_name, workdir=config.workdir, mount_shared_volume=False) as env:
 
             def do_sub_task(prompt: str) -> str:
                 """Execute a sub-task using a separate agent.
@@ -394,11 +392,13 @@ def run_swebench(
 
                 # Save result to JSONL
                 if config.save_patches:
-                    result_line = json.dumps({
-                        "instance_id": result["instance_id"],
-                        "model_patch": result.get("model_patch", ""),
-                        "model_name_or_path": result["model_name_or_path"],
-                    })
+                    result_line = json.dumps(
+                        {
+                            "instance_id": result["instance_id"],
+                            "model_patch": result.get("model_patch", ""),
+                            "model_name_or_path": result["model_name_or_path"],
+                        }
+                    )
                     with results_path.open("a") as f:
                         f.write(result_line + "\n")
             else:
@@ -409,10 +409,10 @@ def run_swebench(
                 # Refine prompt template on failure
                 if result.get("trajectory"):
                     try:
-                        prompt_template = refine_prompt_template(
-                            SWE_PROMPT_TEMPLATE,
-                            prompt_template,
-                            result.get("error", ""),
+                        prompt_template = dynamic_gepa_agent(
+                            original_prompt_template=SWE_PROMPT_TEMPLATE,
+                            previous_prompt_template=prompt_template,
+                            agent_trajectory_summary=result.get("error", ""),
                             model_name=config.model,
                         )
                     except Exception:

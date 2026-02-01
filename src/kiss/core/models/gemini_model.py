@@ -56,7 +56,7 @@ class GeminiModel(Model):
                     # Handle list of blocks (e.g. tool results)
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "tool_result":
-                             pass
+                            pass
 
             elif role == "assistant":
                 gemini_role = "model"
@@ -74,21 +74,21 @@ class GeminiModel(Model):
                         # Include thought_signature if we have one for this tool call
                         thought_sig = self._thought_signatures.get(call_id) if call_id else None
                         if thought_sig:
-                            parts.append(types.Part(
-                                function_call=types.FunctionCall(
-                                    name=fn.get("name"),
-                                    args=args
-                                ),
-                                thought_signature=thought_sig
-                            ))
+                            parts.append(
+                                types.Part(
+                                    function_call=types.FunctionCall(
+                                        name=fn.get("name"), args=args
+                                    ),
+                                    thought_signature=thought_sig,
+                                )
+                            )
                         else:
-                            parts.append(types.Part.from_function_call(
-                                name=fn.get("name"),
-                                args=args
-                            ))
+                            parts.append(
+                                types.Part.from_function_call(name=fn.get("name"), args=args)
+                            )
 
             elif role == "tool":
-                gemini_role = "user" # Function responses come from the 'user' side in Gemini chat
+                gemini_role = "user"  # Function responses come from the 'user' side in Gemini chat
 
                 tool_call_id = msg.get("tool_call_id")
                 func_name = "unknown"
@@ -104,6 +104,7 @@ class GeminiModel(Model):
                         break
 
                 import json
+
                 try:
                     if isinstance(content, str):
                         response_dict = json.loads(content)
@@ -116,18 +117,18 @@ class GeminiModel(Model):
                 # (required for Gemini 3.x models with thinking enabled)
                 thought_sig = self._thought_signatures.get(tool_call_id)
                 if thought_sig:
-                    parts.append(types.Part(
-                        function_response=types.FunctionResponse(
-                            name=func_name,
-                            response=response_dict
-                        ),
-                        thought_signature=thought_sig
-                    ))
+                    parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                name=func_name, response=response_dict
+                            ),
+                            thought_signature=thought_sig,
+                        )
+                    )
                 else:
-                    parts.append(types.Part.from_function_response(
-                        name=func_name,
-                        response=response_dict
-                    ))
+                    parts.append(
+                        types.Part.from_function_response(name=func_name, response=response_dict)
+                    )
 
             else:
                 continue
@@ -149,9 +150,7 @@ class GeminiModel(Model):
         )
 
         response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=contents,
-            config=config
+            model=self.model_name, contents=contents, config=config
         )
 
         content = response.text or ""
@@ -173,11 +172,13 @@ class GeminiModel(Model):
 
         for tool in openai_tools:
             fn = tool["function"]
-            declarations.append(types.FunctionDeclaration(
-                name=fn["name"],
-                description=fn.get("description"),
-                parameters=fn.get("parameters")
-            ))
+            declarations.append(
+                types.FunctionDeclaration(
+                    name=fn["name"],
+                    description=fn.get("description"),
+                    parameters=fn.get("parameters"),
+                )
+            )
 
         if declarations:
             gemini_tools = [types.Tool(function_declarations=declarations)]
@@ -189,13 +190,11 @@ class GeminiModel(Model):
             temperature=self.model_config.get("temperature"),
             top_p=self.model_config.get("top_p"),
             stop_sequences=self.model_config.get("stop"),
-            tools=gemini_tools if gemini_tools else None  # type: ignore[arg-type]
+            tools=gemini_tools if gemini_tools else None,  # type: ignore[arg-type]
         )
 
         response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=contents,
-            config=config
+            model=self.model_name, contents=contents, config=config
         )
 
         function_calls: list[dict[str, Any]] = []
@@ -217,30 +216,37 @@ class GeminiModel(Model):
                     # (Gemini doesn't provide one natively per call usually)
                     # OpenAI uses IDs to map responses. We need to generate one.
                     import uuid
+
                     call_id = f"call_{uuid.uuid4().hex[:8]}"
 
                     # Store thought_signature if present (required for Gemini 3.x models)
                     if part.thought_signature:
                         self._thought_signatures[call_id] = part.thought_signature
 
-                    function_calls.append({
-                        "id": call_id,
-                        "name": part.function_call.name,
-                        "arguments": part.function_call.args
-                    })
+                    function_calls.append(
+                        {
+                            "id": call_id,
+                            "name": part.function_call.name,
+                            "arguments": part.function_call.args,
+                        }
+                    )
 
-        self.conversation.append({
-            "role": "assistant",
-            "content": content,
-            "tool_calls": [
-                {
-                    "id": fc["id"],
-                    "type": "function",
-                    "function": {"name": fc["name"], "arguments": fc["arguments"]},
-                }
-                for fc in function_calls
-            ] if function_calls else None
-        })
+        self.conversation.append(
+            {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": fc["id"],
+                        "type": "function",
+                        "function": {"name": fc["name"], "arguments": fc["arguments"]},
+                    }
+                    for fc in function_calls
+                ]
+                if function_calls
+                else None,
+            }
+        )
 
         return function_calls, content, response
 
@@ -261,11 +267,13 @@ class GeminiModel(Model):
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
 
             # Add as a tool message (OpenAI style) which we convert later
-            self.conversation.append({
-                "role": "tool",
-                "tool_call_id": tool_call_map.get(func_name, f"call_{func_name}"),
-                "content": result_content,
-            })
+            self.conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_map.get(func_name, f"call_{func_name}"),
+                    "content": result_content,
+                }
+            )
 
     def add_message_to_conversation(self, role: str, content: str) -> None:
         """Adds a message to the conversation state."""
@@ -285,10 +293,7 @@ class GeminiModel(Model):
         """Generates an embedding vector for the given text."""
         model_to_use = embedding_model or "text-embedding-004"
         try:
-            response = self.client.models.embed_content(
-                model=model_to_use,
-                contents=text
-            )
+            response = self.client.models.embed_content(model=model_to_use, contents=text)
             # Response has embeddings (list), we take the first one
             return list(response.embeddings[0].values)
         except Exception as e:

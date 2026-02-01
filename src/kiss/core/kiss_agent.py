@@ -10,16 +10,22 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from kiss.core.base_agent import BaseAgent
+from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.utils import search_web
 
 
-class KISSAgent(BaseAgent):
+class KISSAgent(Base):
     """A KISS agent using native function calling."""
+
+    # Instance attributes initialized in _init_run_state
+    budget_used: float
+    step_count: int
+    total_tokens_used: int
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -27,7 +33,13 @@ class KISSAgent(BaseAgent):
     def _reset(self, model_name: str) -> None:
         """Resets the agent's state."""
         self._tool_map: dict[str, Callable[..., Any]] = {}
-        self._init_run_state(model_name, [])
+        self.function_map: list[str] = []
+        self.model_name = model_name
+        self.messages: list[dict[str, Any]] = []
+        self.step_count = 0
+        self.total_tokens_used = 0
+        self.budget_used = 0.0
+        self.run_start_timestamp = int(time.time())
 
     def _set_prompt(self, prompt_template: str, arguments: dict[str, str] | None = None) -> None:
         """Sets the prompt for the agent."""
@@ -45,7 +57,7 @@ class KISSAgent(BaseAgent):
         prompt_template: str,
         arguments: dict[str, str] | None = None,
         tools: list[Callable[..., Any]] | None = None,
-        formatter: Any = None,
+        formatter: Formatter | None = None,
         is_agentic: bool = True,
         max_steps: int = DEFAULT_CONFIG.agent.max_steps,
         max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
@@ -102,7 +114,7 @@ class KISSAgent(BaseAgent):
     def _initialize_run(
         self,
         model_name: str,
-        formatter: Any,
+        formatter: Formatter | None,
         is_agentic: bool,
         max_steps: int,
         max_budget: float,
@@ -169,8 +181,8 @@ class KISSAgent(BaseAgent):
             self._formatter.print_status(f"Asking {self.model.model_name}...\n")
         start_timestamp = int(time.time())
 
-        function_calls, response_text, response = (
-            self.model.generate_and_process_with_tools(self._tool_map)
+        function_calls, response_text, response = self.model.generate_and_process_with_tools(
+            self._tool_map
         )
         self._update_tokens_and_budget_from_response(response)
         usage_info = self._get_usage_info_string()
@@ -180,11 +192,27 @@ class KISSAgent(BaseAgent):
             self._add_message_with_formatter(
                 "model", response_text + "\n" + usage_info, start_timestamp
             )
-            self._add_message_with_formatter(
-                "user",
-                f"**Your response MUST have exactly one function call. "
-                f"Your response has {len(function_calls)} function calls.**",
-            )
+            # For Anthropic models, we must provide tool_result blocks for any tool_use blocks
+            # in the assistant's response, even when rejecting multiple tool calls
+            if function_calls:
+                error_msg = (
+                    f"**Your response MUST have exactly one function call. "
+                    f"Your response has {len(function_calls)} function calls.**"
+                )
+                # Add tool_result for each tool_use to satisfy Anthropic API requirements
+                # Include the tool_use_id to ensure correct matching
+                function_results = [
+                    (fc["name"], {"result": error_msg, "tool_use_id": fc.get("id")})
+                    for fc in function_calls
+                ]
+                self.model.add_function_results_to_conversation_and_return(function_results)
+                self._add_message_with_formatter("user", error_msg)
+            else:
+                self._add_message_with_formatter(
+                    "user",
+                    "**Your response MUST have exactly one function call. "
+                    "Your response has 0 function calls.**",
+                )
             return None
 
         return self._execute_tool(function_calls[0], response_text, usage_info, start_timestamp)
@@ -210,7 +238,8 @@ class KISSAgent(BaseAgent):
             result_raw = self._tool_map[function_name](**function_args)
             function_response = str(result_raw)
         except Exception as e:
-            call_repr = f"```python\n{function_name}({function_args})\n```"
+            args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
+            call_repr = f"```python\n{function_name}({args_str})\n```"
             tool_call_timestamp = int(time.time())
             function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
 
@@ -231,7 +260,7 @@ class KISSAgent(BaseAgent):
         """Check budget and step limits, raise KISSError if exceeded."""
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if BaseAgent.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
+        if Base.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -256,21 +285,19 @@ class KISSAgent(BaseAgent):
             self.total_tokens_used += input_tokens + output_tokens
             cost = calculate_cost(self.model.model_name, input_tokens, output_tokens)
             self.budget_used += cost
-            BaseAgent.global_budget_used += cost
+            Base.global_budget_used += cost
         except Exception as e:
             print(f"Error updating tokens and budget from response: {e} {traceback.format_exc()}")
 
     def _get_usage_info_string(self) -> str:
         """Returns the token usage and budget information string."""
         step_info = f"[Step {self.step_count}/{self.max_steps}]"
-        if self.model is None:
-            return step_info
         try:
             max_tokens = get_max_context_length(self.model.model_name)
             token_info = f"[Token usage: {self.total_tokens_used}/{max_tokens}]"
             budget_info = f"[Agent budget usage: ${self.budget_used:.4f}/${self.max_budget:.2f}]"
             global_budget_info = (
-                f"[Global budget usage: ${BaseAgent.global_budget_used:.4f}/"
+                f"[Global budget usage: ${Base.global_budget_used:.4f}/"
                 f"${DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
             )
             return (
@@ -303,5 +330,3 @@ class KISSAgent(BaseAgent):
             Returns the result of the agent's task.
         """
         return result
-
-

@@ -91,10 +91,12 @@ def list_jobs(artifact_dir: Path) -> list[dict]:
             if trajectories_dir.exists()
             else 0
         )
-        jobs.append({
-            "name": job_dir.name,
-            "trajectory_count": trajectory_count,
-        })
+        jobs.append(
+            {
+                "name": job_dir.name,
+                "trajectory_count": trajectory_count,
+            }
+        )
 
     # Sort by creation time (newest first)
     jobs.sort(key=lambda x: _parse_state_dir_timestamp(str(x["name"])), reverse=True)

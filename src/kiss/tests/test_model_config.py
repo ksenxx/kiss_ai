@@ -26,7 +26,7 @@ class TestModelConfig(unittest.TestCase):
             model_name="test-model",
             base_url="http://localhost:1234",
             api_key="sk-test",
-            model_config=config
+            model_config=config,
         )
 
         # Mock the client and initialize
@@ -51,7 +51,7 @@ class TestModelConfig(unittest.TestCase):
             model_name="test-model",
             base_url="http://localhost:1234",
             api_key="sk-test",
-            model_config=config
+            model_config=config,
         )
 
         model.initialize("Hello")
@@ -65,6 +65,7 @@ class TestModelConfig(unittest.TestCase):
 
         call_kwargs = model.client.chat.completions.create.call_args.kwargs
         self.assertEqual(call_kwargs.get("temperature"), 0.7)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -72,7 +72,7 @@ class DockerManager:
         self.formatter.print_status(f"Pulling Docker image: {full_image_name}")
         try:
             self.client.images.get(full_image_name)
-        except docker.errors.ImageNotFound:
+        except docker.errors.ImageNotFound:  # type: ignore[attr-defined]
             self.client.images.pull(image, tag=tag)
         # Create and start a container
         self.formatter.print_status(f"Creating and starting container from {full_image_name}")
@@ -89,6 +89,7 @@ class DockerManager:
         if self.ports:
             container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
         self.container = self.client.containers.run(full_image_name, **container_kwargs)
+        assert self.container is not None
         container_id = self.container.id[:12] if self.container.id else "unknown"
         self.formatter.print_status(f"Container {container_id} is now running")
 
@@ -117,11 +118,7 @@ class DockerManager:
         stdout_bytes, stderr_bytes = exec_result.output
         stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
         stderr = stderr_bytes.decode("utf-8") if stderr_bytes else ""
-        exit_code = exec_result.exit_code
-        return (
-            f"\n### ----STDOUT-----\n```{stdout}\n```### ----STDERR-----\n```{stderr}\n```"
-            f"### ----EXIT_CODE-----\n{exit_code}\n"
-        )
+        return stdout + "\n" + stderr
 
     def get_host_port(self, container_port: int) -> int | None:
         """Get the host port mapped to a container port.

@@ -116,7 +116,7 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     # First try to find JSON code blocks
     json_patterns = [
         r"```json\s*(\{.*?\})\s*```",  # JSON in code blocks
-        r"```\s*(\{.*?\})\s*```",       # JSON in generic code blocks
+        r"```\s*(\{.*?\})\s*```",  # JSON in generic code blocks
         r"(\{[^{}]*\"tool_calls\"[^{}]*\[[^\]]*\][^{}]*\})",  # Inline JSON with tool_calls
     ]
 
@@ -128,11 +128,13 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 if "tool_calls" in data and isinstance(data["tool_calls"], list):
                     for tc in data["tool_calls"]:
                         if "name" in tc:
-                            function_calls.append({
-                                "id": f"call_{uuid.uuid4().hex[:8]}",
-                                "name": tc["name"],
-                                "arguments": tc.get("arguments", {}),
-                            })
+                            function_calls.append(
+                                {
+                                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                                    "name": tc["name"],
+                                    "arguments": tc.get("arguments", {}),
+                                }
+                            )
                     if function_calls:
                         return function_calls
             except json.JSONDecodeError:
@@ -144,11 +146,13 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
         if "tool_calls" in data and isinstance(data["tool_calls"], list):
             for tc in data["tool_calls"]:
                 if "name" in tc:
-                    function_calls.append({
-                        "id": f"call_{uuid.uuid4().hex[:8]}",
-                        "name": tc["name"],
-                        "arguments": tc.get("arguments", {}),
-                    })
+                    function_calls.append(
+                        {
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "name": tc["name"],
+                            "arguments": tc.get("arguments", {}),
+                        }
+                    )
     except json.JSONDecodeError:
         pass
 
@@ -183,9 +187,7 @@ class OpenAICompatibleModel(Model):
         self.api_key = api_key
         # For OpenRouter, strip the "openrouter/" prefix from model name for API calls
         self._api_model_name = (
-            model_name[len("openrouter/"):]
-            if model_name.startswith("openrouter/")
-            else model_name
+            model_name[len("openrouter/") :] if model_name.startswith("openrouter/") else model_name
         )
 
     def __str__(self) -> str:
@@ -208,10 +210,12 @@ class OpenAICompatibleModel(Model):
     def generate(self) -> tuple[str, Any]:
         """Generates content from prompt without tools."""
         kwargs = self.model_config.copy()
-        kwargs.update({
-            "model": self._api_model_name,
-            "messages": self.conversation,
-        })
+        kwargs.update(
+            {
+                "model": self._api_model_name,
+                "messages": self.conversation,
+            }
+        )
         response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
 
@@ -233,11 +237,13 @@ class OpenAICompatibleModel(Model):
         # Standard OpenAI-style native function calling
         tools = self._build_openai_tools_schema(function_map)
         kwargs = self.model_config.copy()
-        kwargs.update({
-            "model": self._api_model_name,
-            "messages": self.conversation,
-            "tools": tools or None,
-        })
+        kwargs.update(
+            {
+                "model": self._api_model_name,
+                "messages": self.conversation,
+                "tools": tools or None,
+            }
+        )
         response = self.client.chat.completions.create(**kwargs)
 
         message = response.choices[0].message
@@ -250,24 +256,31 @@ class OpenAICompatibleModel(Model):
                     arguments = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     arguments = {}
-                function_calls.append({
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": arguments,
-                })
-
-            self.conversation.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
+                function_calls.append(
                     {
                         "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        "name": tc.function.name,
+                        "arguments": arguments,
                     }
-                    for tc in message.tool_calls
-                ],
-            })
+                )
+
+            self.conversation.append(
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in message.tool_calls
+                    ],
+                }
+            )
         else:
             self.conversation.append({"role": "assistant", "content": content})
 
@@ -297,10 +310,12 @@ class OpenAICompatibleModel(Model):
             modified_conversation.insert(0, {"role": "system", "content": tools_prompt})
 
         kwargs = self.model_config.copy()
-        kwargs.update({
-            "model": self._api_model_name,
-            "messages": modified_conversation,
-        })
+        kwargs.update(
+            {
+                "model": self._api_model_name,
+                "messages": modified_conversation,
+            }
+        )
         response = self.client.chat.completions.create(**kwargs)
 
         message = response.choices[0].message
@@ -314,18 +329,23 @@ class OpenAICompatibleModel(Model):
 
         if function_calls:
             # Store tool calls in conversation for proper result handling
-            self.conversation.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": fc["id"],
-                        "type": "function",
-                        "function": {"name": fc["name"], "arguments": json.dumps(fc["arguments"])},
-                    }
-                    for fc in function_calls
-                ],
-            })
+            self.conversation.append(
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": fc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": fc["name"],
+                                "arguments": json.dumps(fc["arguments"]),
+                            },
+                        }
+                        for fc in function_calls
+                    ],
+                }
+            )
         else:
             self.conversation.append({"role": "assistant", "content": content})
 
@@ -346,11 +366,13 @@ class OpenAICompatibleModel(Model):
             result_content = result_dict.get("result", str(result_dict))
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-            self.conversation.append({
-                "role": "tool",
-                "tool_call_id": tool_call_map.get(func_name, f"call_{func_name}"),
-                "content": result_content,
-            })
+            self.conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_map.get(func_name, f"call_{func_name}"),
+                    "content": result_content,
+                }
+            )
 
     def add_message_to_conversation(self, role: str, content: str) -> None:
         """Adds a message to the conversation state."""

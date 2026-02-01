@@ -12,20 +12,58 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import yaml
+from yaml.nodes import ScalarNode
 
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.utils import config_to_dict
 
 
-def _str_presenter(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")  # type: ignore[reportUnknownMemberType]
 
 
 yaml.add_representer(str, _str_presenter)
 
 
-class BaseAgent:
+DEFAULT_SYSTEM_PROMPT = """
+## Code Style Guidelines
+- Write simple, readable code with minimal indirection
+- Avoid unnecessary object attributes and local variables
+- No redundant abstractions or duplicate code
+- Each function should do one thing well
+- Use clear, descriptive names
+- NO need to write documentations or comments unless absolutely necessary
+
+## Testing Requirements
+- Run lint and fix any lint errors
+- Generate comprehensive tests for EVERY function and feature
+- Tests MUST NOT use mocks, patches, or any form of test doubles
+- Test with real inputs and verify real outputs
+- Test edge cases: empty inputs, None values, boundary conditions
+- Test error conditions with actual invalid inputs
+- Each test should be independent and verify actual behavior
+
+## Code Structure
+- Main implementation code first
+- Test code in a separate section using unittest or pytest
+- Include a __main__ block to run tests
+
+## Use tools when you need to:
+- Look up API documentation or library usage
+- Find examples of similar implementations
+- Understand existing code in the project
+
+## After you have implemented the task, simplify the code
+ - Remove unnessary object/struct attributes, variables, config variables
+ - Remove redundant and duplicate code
+ - Remove unnecessary comments
+ - Make sure that the code is still working correctly
+
+"""
+
+
+class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
     agent_counter: ClassVar[int] = 1
@@ -33,8 +71,9 @@ class BaseAgent:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self.id = BaseAgent.agent_counter
-        BaseAgent.agent_counter += 1
+        self.id = Base.agent_counter
+        Base.agent_counter += 1
+        self.base_dir = ""
 
     def _init_run_state(self, model_name: str, function_map: list[str]) -> None:
         """Initialize common run state variables."""
@@ -67,7 +106,7 @@ class BaseAgent:
             "model": self.model_name,
             "budget_used": self.budget_used,
             "total_budget": getattr(self, "max_budget", DEFAULT_CONFIG.agent.max_agent_budget),
-            "global_budget_used": BaseAgent.global_budget_used,
+            "global_budget_used": Base.global_budget_used,
             "global_max_budget": DEFAULT_CONFIG.agent.global_max_budget,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
@@ -89,13 +128,13 @@ class BaseAgent:
         """Return the trajectory as JSON for visualization."""
         return json.dumps(self.messages, indent=2)
 
-    def _add_message(
-        self, role: str, content: Any, timestamp: int | None = None
-    ) -> None:
+    def _add_message(self, role: str, content: Any, timestamp: int | None = None) -> None:
         """Add a message to the history."""
-        self.messages.append({
-            "unique_id": len(self.messages),
-            "role": role,
-            "content": content,
-            "timestamp": timestamp if timestamp is not None else int(time.time()),
-        })
+        self.messages.append(
+            {
+                "unique_id": len(self.messages),
+                "role": role,
+                "content": content,
+                "timestamp": timestamp if timestamp is not None else int(time.time()),
+            }
+        )

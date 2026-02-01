@@ -18,11 +18,11 @@ TEST_MODEL = "gemini-3-flash-preview"
 class TestKISSAgentNonAgentic(unittest.TestCase):
     """Tests for non-agentic mode."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Non-Agentic Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_non_agentic_simple_response(self):
         """Test non-agentic mode returns a response without tools."""

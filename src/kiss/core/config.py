@@ -16,12 +16,15 @@ from pydantic import BaseModel, Field
 def _generate_artifact_dir() -> str:
     """Generate a unique artifact subdirectory name based on timestamp and random number."""
     from pathlib import Path
+
     artifact_subdir_name = f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
     artifact_path = Path("artifacts").resolve() / artifact_subdir_name
     artifact_path.mkdir(parents=True, exist_ok=True)
     return str(artifact_path)
 
+
 artifact_dir = _generate_artifact_dir()
+
 
 class APIKeysConfig(BaseModel):
     GEMINI_API_KEY: str = Field(
@@ -59,6 +62,37 @@ class AgentConfig(BaseModel):
         default=200.0, description="Maximum budget for the global agent"
     )
     use_web_search: bool = Field(default=True, description="Use web search")
+    kiss_coding_agent: "KISSCodingAgentConfig" = Field(
+        default_factory=lambda: KISSCodingAgentConfig(),
+        description="Configuration for KISS Coding Agent",
+    )
+
+
+class KISSCodingAgentConfig(BaseModel):
+    orchestrator_model_name: str = Field(
+        default="claude-sonnet-4-5",
+        description="LLM model to use for KISS Coding Agent",
+    )
+    subtasker_model_name: str = Field(
+        default="claude-opus-4-5",
+        description="LLM model to use for subtask generation and execution",
+    )
+    dynamic_gepa_model_name: str = Field(
+        default="claude-sonnet-4-5",
+        description="LLM model to use for prompt refinement of failed tasks",
+    )
+    max_steps: int = Field(
+        default=50,
+        description="Maximum steps for the KISS Coding Agent",
+    )
+    max_budget: float = Field(
+        default=100.0,
+        description="Maximum budget in USD for the KISS Coding Agent",
+    )
+    trials: int = Field(
+        default=3,
+        description="Number of trials for failed subtasks",
+    )
 
 
 class DockerConfig(BaseModel):

@@ -96,11 +96,14 @@ as the 'result' argument.
         # Build train_examples list with expected answers embedded
         train_examples: list[dict[str, str]] = []
         for example in dataset:
-            train_examples.append({
-                "context": example["context"],
-                "question": example["question"],
-                "_expected_answer": example["answers"]["text"][0],
-            })
+            example = dict(example)  # type: ignore[assignment]
+            train_examples.append(
+                {
+                    "context": example["context"],  # type: ignore[index]
+                    "question": example["question"],  # type: ignore[index]
+                    "_expected_answer": example["answers"]["text"][0],  # type: ignore[index]
+                }
+            )
 
         print(f"\nLoaded {len(train_examples)} examples for optimization")
         for i, ex in enumerate(train_examples[:3]):
@@ -109,9 +112,7 @@ as the 'result' argument.
         # Agent counter for unique names
         agent_counter = [0]
 
-        def agent_wrapper(
-            prompt_template: str, arguments: dict[str, str]
-        ) -> tuple[str, list]:
+        def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
             """Agent wrapper that handles expected answer embedding."""
             expected_answer = arguments.get("_expected_answer", "")
             agent_args = {

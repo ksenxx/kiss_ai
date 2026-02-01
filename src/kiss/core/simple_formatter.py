@@ -34,10 +34,9 @@ Heading.__rich_console__ = _left_aligned_heading  # type: ignore[method-assign]
 
 class SimpleFormatter(Formatter):
     def __init__(self) -> None:
-        if DEFAULT_CONFIG.agent.verbose:
-            self.color = sys.stdout.isatty()
-            self._console = Console() if self.color else None
-            self._stderr_console = Console(stderr=True) if self.color else None
+        self.color = sys.stdout.isatty()
+        self._console = Console() if self.color else None
+        self._stderr_console = Console(stderr=True) if self.color else None
 
     def format_message(self, message: dict[str, Any]) -> str:
         if DEFAULT_CONFIG.agent.verbose:
@@ -91,3 +90,11 @@ class SimpleFormatter(Formatter):
                 self._console.print(message, style="yellow")
             else:
                 print(message)
+
+    def print_label_and_value(self, label: str, value: str) -> None:
+        if DEFAULT_CONFIG.agent.verbose:
+            if self._console:
+                # Use distinct colors: label in cyan, value in bold white for contrast
+                self._console.print(f"[cyan]{label}[/cyan]: [bold white]{value}[/bold white]")
+            else:
+                print(f"{label}: {value}")

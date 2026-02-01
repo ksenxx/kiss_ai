@@ -30,7 +30,7 @@ def run_command(cmd: list[str], description: str) -> bool:
 def find_markdown_files() -> list[str]:
     """Find all markdown files in the project."""
     project_root = Path(__file__).parent.parent.parent.parent
-    skip_dirs = {"node_modules", "venv", "__pycache__"}
+    skip_dirs = {"node_modules", "venv", "__pycache__", "artifacts"}
     md_files = []
     for md_file in project_root.rglob("*.md"):
         # Skip hidden directories and common non-project directories
@@ -141,13 +141,12 @@ def main() -> int:
         (["uv", "build"], "Build package"),
         (["uv", "run", "ruff", "check", "src/"], "Lint code (ruff)"),
         (["uv", "run", "mypy", "src/"], "Type check (mypy)"),
+        (["uv", "run", "pyright", "src/"], "Type check (pyright)"),
     ]
 
     # Add markdown lint check if there are markdown files
     if md_files:
-        checks.append(
-            (["uv", "run", "mdformat", "--check", *md_files], "Lint markdown (mdformat)")
-        )
+        checks.append((["uv", "run", "mdformat", "--check", *md_files], "Lint markdown (mdformat)"))
 
     print("\n🔍 Running all code quality checks...\n")
 

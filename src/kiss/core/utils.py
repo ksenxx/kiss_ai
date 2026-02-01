@@ -95,12 +95,11 @@ def config_to_dict() -> dict[Any, Any]:
 
     def convert_to_json(obj: Any) -> Any:
         if isinstance(obj, dict):
-            return {k: convert_to_json(v) for k, v in obj.items() if "API_KEY" not in k}
+            return {k: convert_to_json(v) for k, v in obj.items() if "API_KEY" not in k}  # type: ignore[misc]
         if isinstance(obj, list):
-            return [convert_to_json(item) for item in obj]
+            return [convert_to_json(item) for item in obj]  # type: ignore[misc]
         if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
-        # For classes/objects, recursively convert fields, skipping any that end with API_KEY
         if hasattr(obj, "__dict__"):
             return {
                 k: convert_to_json(getattr(obj, k))
@@ -109,8 +108,7 @@ def config_to_dict() -> dict[Any, Any]:
             }
         return obj
 
-    result: dict[Any, Any] = convert_to_json(DEFAULT_CONFIG)
-    return result
+    return cast(dict[Any, Any], convert_to_json(DEFAULT_CONFIG))
 
 
 def fc(file_path: str) -> str:
@@ -151,7 +149,7 @@ def finish(
         indent=2,
         sort_keys=False,
     )
-    return cast(str, result_str)
+    return result_str
 
 
 def read_project_file(file_path_relative_to_project_root: str) -> str:
@@ -169,12 +167,11 @@ def read_project_file(file_path_relative_to_project_root: str) -> str:
     import os
 
     # Try usual filesystem access from root
-    project_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..")
-    )
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     abs_path = os.path.join(project_root, file_path_relative_to_project_root)
     if os.path.isfile(abs_path):
-        return open(abs_path, encoding="utf-8").read()
+        with open(abs_path, encoding="utf-8") as f:
+            return f.read()
 
     rel_parts = file_path_relative_to_project_root.strip("/").split("/")
     if len(rel_parts) > 1:
@@ -189,7 +186,8 @@ def read_project_file(file_path_relative_to_project_root: str) -> str:
             return importlib.resources.read_text(pkg, file, encoding="utf-8")
         else:
             # If no package, try relative to this module's package
-            return importlib.resources.read_text(__package__, file, encoding="utf-8")
+            package = __package__ or "kiss.core"
+            return importlib.resources.read_text(package, file, encoding="utf-8")
     except Exception as e:
         raise KISSError(
             f"Could not find '{file_path_relative_to_project_root}' "
@@ -209,14 +207,13 @@ def read_project_file_from_package(file_name_as_python_package: str) -> str:
     import importlib.resources
 
     try:
-        return importlib.resources.read_text(
-            __package__, file_name_as_python_package, encoding="utf-8"
-        )
+        package = __package__ or "kiss.core"
+        return importlib.resources.read_text(package, file_name_as_python_package, encoding="utf-8")
     except Exception as e:
         raise KISSError(
-            f"Could not find '{file_name_as_python_package}' "
-            f"as a file or in a package. ({e})"
+            f"Could not find '{file_name_as_python_package}' as a file or in a package. ({e})"
         )
+
 
 def _fetch_page_content(url: str, headers: dict[str, str], max_content_length: int = 10000) -> str:
     """
@@ -244,7 +241,15 @@ def _fetch_page_content(url: str, headers: dict[str, str], max_content_length: i
 
         # Remove non-content elements
         non_content_tags = [
-            "script", "style", "noscript", "header", "footer", "nav", "aside", "iframe", "svg"
+            "script",
+            "style",
+            "noscript",
+            "header",
+            "footer",
+            "nav",
+            "aside",
+            "iframe",
+            "svg",
         ]
         for tag in soup(non_content_tags):
             tag.decompose()
@@ -303,7 +308,8 @@ def _render_page_with_playwright(url: str, wait_selector: str | None = None) -> 
             is_mobile=False,
             device_scale_factor=2,
             extra_http_headers={
-                **SAFARI_HEADERS,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive",
                 "Upgrade-Insecure-Requests": "1",
@@ -392,17 +398,26 @@ def search_web(query: str, max_results: int = 5) -> str:
             results = _extract_search_results(soup, selector, max_results)
 
             if results:
-                formatted_results = []
+                formatted_results: list[str] = []
                 for title, result_url in results:
                     content = _fetch_page_content(result_url, SAFARI_HEADERS)
                     result_text = f"Title: {title}\nURL: {result_url}\nContent:\n{content}\n"
                     formatted_results.append(result_text)
 
-                ret = "\n---\n".join(formatted_results)
-                print("Web search results:", ret)
-                return ret
+                return "\n---\n".join(formatted_results)
         except Exception:
             continue
 
     return "No search results found."
 
+def resolve_path(p: str, base_dir: str) -> Path:
+    """Resolve a path relative to base_dir if not absolute."""
+    path = Path(p)
+    if not path.is_absolute():
+        return (Path(base_dir) / path).resolve()
+    return path.resolve()
+
+def is_subpath(target: Path, whitelist: list[Path]) -> bool:
+    """Check if target has any prefix in whitelist."""
+    target = Path(target).resolve()
+    return any(target.is_relative_to(p) for p in whitelist)

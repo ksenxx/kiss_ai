@@ -17,6 +17,7 @@ from kiss.core.models.model_info import MODEL_INFO
 @dataclass
 class TestResult:
     """Result of a test run."""
+
     model_name: str
     test_type: str  # "non_agentic", "agentic", "embedding"
     passed: bool
@@ -26,6 +27,7 @@ class TestResult:
 @dataclass
 class ModelTestResults:
     """Results for all tests on a model."""
+
     model_name: str
     non_agentic: TestResult | None = None
     agentic: TestResult | None = None
@@ -35,7 +37,9 @@ class ModelTestResults:
 def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
     """Run a specific test for a model."""
     cmd = [
-        sys.executable, "-m", "pytest",
+        sys.executable,
+        "-m",
+        "pytest",
         "src/kiss/tests/test_a_model.py",
         f"--model={model_name}",
         f"-k={test_name}",
@@ -56,13 +60,14 @@ def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
             # Extract relevant error info
             output = result.stdout + result.stderr
             # Look for FAILED or ERROR lines
-            lines = output.split('\n')
+            lines = output.split("\n")
             error_lines = [
-                line for line in lines
-                if 'FAILED' in line or 'ERROR' in line or 'AssertionError' in line
+                line
+                for line in lines
+                if "FAILED" in line or "ERROR" in line or "AssertionError" in line
             ]
             if error_lines:
-                error_message = '\n'.join(error_lines[:5])  # First 5 error lines
+                error_message = "\n".join(error_lines[:5])  # First 5 error lines
             else:
                 error_message = output[-500:] if len(output) > 500 else output
 

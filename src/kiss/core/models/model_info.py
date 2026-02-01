@@ -89,6 +89,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5-codex": _mi(400000, 1.50, 12.00),
     "gpt-5.1-codex": _mi(400000, 1.50, 12.00),
     "gpt-5.1-codex-max": _mi(400000, 3.00, 24.00),
+    "gpt-5.2-codex": _mi(400000, 1.75, 14.00),  # Latest Codex model (Dec 2025)
+    "gpt-5.2-codex-max": _mi(400000, 3.50, 28.00),  # Max version with extended context
     "codex-mini": _mi(200000, 1.50, 6.00),
     # OpenAI o-series reasoning models
     "o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
@@ -548,10 +550,9 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
             model_config=model_config,
         )
     # OpenAI models (generation and embedding)
-    elif (
-        model_name.startswith(("gpt", "text-embedding", "o1", "o3", "o4", "codex"))
-        and not model_name.startswith("openai/gpt-oss")
-    ):
+    elif model_name.startswith(
+        ("gpt", "text-embedding", "o1", "o3", "o4", "codex")
+    ) and not model_name.startswith("openai/gpt-oss"):
         return OpenAICompatibleModel(
             model_name=model_name,
             base_url="https://api.openai.com/v1",
@@ -602,9 +603,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
         raise KISSError(f"Unknown model name: {model_name}")
 
 
-def calculate_cost(
-    model_name: str, num_input_tokens: int, num_output_tokens: int
-) -> float:
+def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int) -> float:
     """Calculates the cost in USD for the given token counts.
 
     Args:

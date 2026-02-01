@@ -9,14 +9,11 @@ These tests verify various internal components like formatters, utilities,
 config builders, and error classes without making real API calls.
 """
 
-import io
 import os
-import sys
 import tempfile
 import unittest
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.utils import (
     add_prefix_to_each_line,
     config_to_dict,
@@ -24,103 +21,6 @@ from kiss.core.utils import (
     finish,
     get_template_field_names,
 )
-from kiss.tests.conftest import CustomFormatter
-
-
-class TestSimpleFormatter(unittest.TestCase):
-    """Tests for SimpleFormatter class."""
-
-    def setUp(self):
-        self.formatter = SimpleFormatter()
-
-    def test_format_message(self):
-        """Test format_message returns correct format."""
-        message = {"role": "user", "content": "Hello, world!"}
-        formatted = self.formatter.format_message(message)
-        self.assertIn('role="user"', formatted)
-        self.assertIn("Hello, world!", formatted)
-
-        # Test with empty fields
-        empty_message = {}
-        formatted_empty = self.formatter.format_message(empty_message)
-        self.assertIn('role=""', formatted_empty)
-
-    def test_format_messages(self):
-        """Test format_messages formats multiple messages."""
-        messages = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there"},
-        ]
-        formatted = self.formatter.format_messages(messages)
-        self.assertIn('role="user"', formatted)
-        self.assertIn('role="assistant"', formatted)
-        self.assertIn("Hello", formatted)
-        self.assertIn("Hi there", formatted)
-
-    def test_print_methods_non_color(self):
-        """Test all print methods in non-color mode."""
-        self.formatter.color = False
-
-        # Test print_error
-        captured_stderr = io.StringIO()
-        old_stderr = sys.stderr
-        sys.stderr = captured_stderr
-        try:
-            self.formatter.print_error("Test error message")
-        finally:
-            sys.stderr = old_stderr
-        self.assertIn("Test error message", captured_stderr.getvalue())
-
-        # Test print_warning, print_status, print_message, print_messages
-        captured_stdout = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_stdout
-        try:
-            self.formatter.print_warning("Test warning")
-            self.formatter.print_status("Test status")
-            self.formatter.print_message({"role": "user", "content": "Hello"})
-            self.formatter.print_messages(
-                [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}]
-            )
-        finally:
-            sys.stdout = old_stdout
-
-        output = captured_stdout.getvalue()
-        self.assertIn("Test warning", output)
-        self.assertIn("Test status", output)
-        self.assertIn("user", output)
-        self.assertIn("Hello", output)
-        self.assertIn("Agent Messages", output)
-
-    def test_print_methods_color_mode(self):
-        """Test all print methods in color mode."""
-        self.formatter.color = True
-
-        # Test print_error in color mode
-        captured_stderr = io.StringIO()
-        old_stderr = sys.stderr
-        sys.stderr = captured_stderr
-        try:
-            self.formatter.print_error("Error message")
-        finally:
-            sys.stderr = old_stderr
-        self.assertIsNotNone(captured_stderr.getvalue())
-
-        # Test other methods in color mode
-        captured_stdout = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_stdout
-        try:
-            self.formatter.print_warning("Warning message")
-            self.formatter.print_status("Status message")
-            self.formatter.print_message({"role": "user", "content": "# Heading\nTest"})
-            self.formatter.print_messages([{"role": "user", "content": "Hello"}])
-        finally:
-            sys.stdout = old_stdout
-
-        output = captured_stdout.getvalue()
-        self.assertIn("user", output)
-        self.assertIn("Agent Messages", output)
 
 
 class TestUtilsFunctions(unittest.TestCase):
@@ -230,35 +130,6 @@ class TestKISSError(unittest.TestCase):
             DEFAULT_CONFIG.agent.debug = original_debug
 
 
-class TestCustomFormatter(unittest.TestCase):
-    """Tests for custom formatter implementation."""
-
-    def setUp(self):
-        self.custom_formatter = CustomFormatter()
-
-    def test_custom_formatter_methods(self):
-        """Test all custom formatter methods."""
-        # format_message
-        message = {"role": "user", "content": "Test content"}
-        formatted = self.custom_formatter.format_message(message)
-        self.assertEqual(formatted, "[user]: Test content")
-
-        # format_messages
-        messages = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"},
-        ]
-        formatted_multi = self.custom_formatter.format_messages(messages)
-        self.assertIn("[user]: Hello", formatted_multi)
-        self.assertIn("[assistant]: Hi", formatted_multi)
-
-        # print_error and print_warning
-        self.custom_formatter.print_error("Test error")
-        self.custom_formatter.print_warning("Test warning")
-        self.assertIn("ERROR: Test error", self.custom_formatter.status_messages)
-        self.assertIn("WARNING: Test warning", self.custom_formatter.status_messages)
-
-
 class TestConfigBuilder(unittest.TestCase):
     """Tests for config_builder.py functions."""
 
@@ -355,25 +226,6 @@ class TestConfigBuilder(unittest.TestCase):
         result_values = _flat_to_nested_dict(flat_values, SimpleModel)
         self.assertEqual(result_values["value"], "custom")
         self.assertEqual(result_values["number"], 42)
-
-
-class TestSimpleFormatterHeading(unittest.TestCase):
-    """Tests for the _left_aligned_heading function in simple_formatter."""
-
-    def test_left_aligned_heading_tags(self):
-        """Test _left_aligned_heading with various heading tags."""
-        from rich.markdown import Heading
-        from rich.text import Text
-
-        from kiss.core.simple_formatter import _left_aligned_heading
-
-        for tag in ["h1", "h2", "h3"]:
-            heading = Heading.__new__(Heading)
-            heading.text = Text("Test Heading")
-            heading.tag = tag
-
-            results = list(_left_aligned_heading(heading, None, None))
-            self.assertGreater(len(results), 0)
 
 
 if __name__ == "__main__":

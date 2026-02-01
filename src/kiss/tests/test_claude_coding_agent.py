@@ -15,10 +15,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.agents.coding_agents.claude_coding_agent import ClaudeCodingAgent
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.claude_coding_agent import (
-    ClaudeCodingAgent,
-)
+from kiss.core.utils import is_subpath
 
 
 class TestClaudeCodingAgentPermissions(unittest.TestCase):
@@ -47,75 +46,71 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_is_subpath_for_exact_match(self):
-        """Test _is_subpath returns True for exact path match."""
+        """Test is_subpath returns True for exact path match."""
         target = Path(self.readable_dir).resolve()
-        whitelist = {Path(self.readable_dir).resolve()}
-        self.assertTrue(self.agent._is_subpath(target, whitelist))
+        whitelist = [Path(self.readable_dir).resolve()]
+        self.assertTrue(is_subpath(target, whitelist))
 
     def test_is_subpath_for_child_path(self):
-        """Test _is_subpath returns True for child paths."""
+        """Test is_subpath returns True for child paths."""
         child_path = Path(self.readable_dir, "subdir", "file.txt").resolve()
-        whitelist = {Path(self.readable_dir).resolve()}
-        self.assertTrue(self.agent._is_subpath(child_path, whitelist))
+        whitelist = [Path(self.readable_dir).resolve()]
+        self.assertTrue(is_subpath(child_path, whitelist))
 
     def test_is_subpath_for_unrelated_path(self):
-        """Test _is_subpath returns False for unrelated paths."""
+        """Test is_subpath returns False for unrelated paths."""
         unrelated = Path("/tmp/unrelated/path").resolve()
-        whitelist = {Path(self.readable_dir).resolve()}
-        self.assertFalse(self.agent._is_subpath(unrelated, whitelist))
+        whitelist = [Path(self.readable_dir).resolve()]
+        self.assertFalse(is_subpath(unrelated, whitelist))
 
     def test_permission_handler_allows_read_in_readable_path(self):
         """Test permission_handler allows Read for readable paths."""
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
+
         file_path = str(self.readable_dir / "test.txt")
         context = ToolPermissionContext()
-        result = asyncio.run(
-            self.agent.permission_handler("Read", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Read", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultAllow)
 
     def test_permission_handler_denies_read_outside_readable_path(self):
         """Test permission_handler denies Read outside readable paths."""
         from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
+
         file_path = "/tmp/outside/test.txt"
         context = ToolPermissionContext()
-        result = asyncio.run(
-            self.agent.permission_handler("Read", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Read", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_allows_write_in_writable_path(self):
         """Test permission_handler allows Write for writable paths."""
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
+
         file_path = str(self.writable_dir / "output.txt")
         context = ToolPermissionContext()
-        result = asyncio.run(
-            self.agent.permission_handler("Write", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Write", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultAllow)
 
     def test_permission_handler_denies_write_outside_writable_path(self):
         """Test permission_handler denies Write outside writable paths."""
         from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
+
         file_path = str(self.readable_dir / "readonly.txt")
         context = ToolPermissionContext()
-        result = asyncio.run(
-            self.agent.permission_handler("Write", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Write", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_allows_tools_without_path(self):
         """Test permission_handler allows tools without path parameter."""
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
+
         context = ToolPermissionContext()
-        result = asyncio.run(
-            self.agent.permission_handler("SomeOtherTool", {}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("SomeOtherTool", {}, context))
         self.assertIsInstance(result, PermissionResultAllow)
 
     def test_permission_handler_handles_file_path_key(self):
         """Test permission_handler handles 'file_path' key."""
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
+
         file_path = str(self.readable_dir / "test.txt")
         context = ToolPermissionContext()
         result = asyncio.run(
@@ -130,19 +125,16 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
             PermissionResultDeny,
             ToolPermissionContext,
         )
+
         context = ToolPermissionContext()
         # In readable path
         file_path = str(self.readable_dir / "test.txt")
-        result = asyncio.run(
-            self.agent.permission_handler("Grep", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Grep", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultAllow)
 
         # Outside readable path
         file_path = "/tmp/outside/test.txt"
-        result = asyncio.run(
-            self.agent.permission_handler("Grep", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Grep", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_for_glob(self):
@@ -152,19 +144,16 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
             PermissionResultDeny,
             ToolPermissionContext,
         )
+
         context = ToolPermissionContext()
         # In readable path
         file_path = str(self.readable_dir / "*.py")
-        result = asyncio.run(
-            self.agent.permission_handler("Glob", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Glob", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultAllow)
 
         # Outside readable path
         file_path = "/tmp/outside/*.py"
-        result = asyncio.run(
-            self.agent.permission_handler("Glob", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Glob", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_for_edit(self):
@@ -174,19 +163,16 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
             PermissionResultDeny,
             ToolPermissionContext,
         )
+
         context = ToolPermissionContext()
         # In writable path
         file_path = str(self.writable_dir / "edit.txt")
-        result = asyncio.run(
-            self.agent.permission_handler("Edit", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Edit", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultAllow)
 
         # Outside writable path
         file_path = str(self.readable_dir / "readonly.txt")
-        result = asyncio.run(
-            self.agent.permission_handler("Edit", {"path": file_path}, context)
-        )
+        result = asyncio.run(self.agent.permission_handler("Edit", {"path": file_path}, context))
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_for_multiedit(self):
@@ -196,6 +182,7 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
             PermissionResultDeny,
             ToolPermissionContext,
         )
+
         context = ToolPermissionContext()
         # In writable path
         file_path = str(self.writable_dir / "multi.txt")
@@ -236,41 +223,39 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
 
         task = """Write a simple Python function that adds two numbers."""
 
-        result = asyncio.run(agent.run(
+        result = agent.run(
             model_name="claude-sonnet-4-5",
             prompt_template=task,
             readable_paths=[str(self.project_root / "src")],
             writable_paths=[str(self.output_dir)],
-            base_dir=str(self.temp_dir)
-        ))
+            base_dir=str(self.temp_dir),
+        )
 
-        # Result should have the expected structure
+        # Result should be a string summary
         self.assertIsNotNone(result)
         if result:
-            print(result.get("success"))
-            print(result.get("result"))
-            self.assertIn("success", result)
-            self.assertIn("result", result)
+            print(result)
+            self.assertIsInstance(result, str)
 
-    def test_agent_run_returns_dict_with_success(self):
-        """Test that agent run returns dict with success field."""
+    def test_agent_run_returns_string_summary(self):
+        """Test that agent run returns a string summary."""
         agent = ClaudeCodingAgent("test-agent")
 
         task = "Write a simple factorial function, test it, and mke it efficient."
 
-        result = asyncio.run(agent.run(
+        result = agent.run(
             model_name="claude-sonnet-4-5",
             prompt_template=task,
             readable_paths=[str(self.project_root / "src")],
             writable_paths=[str(self.output_dir)],
-            base_dir=str(self.temp_dir)
-        ))
+            base_dir=str(self.temp_dir),
+        )
 
         self.assertIsNotNone(result)
         if result:
-            print(result.get("success"))
-            print(result.get("result"))
-            self.assertIsInstance(result.get("success"), bool)
+            print(result)
+            self.assertIsInstance(result, str)
+
 
 if __name__ == "__main__":
     unittest.main()

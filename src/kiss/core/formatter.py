@@ -44,3 +44,8 @@ class Formatter(ABC):
     def print_warning(self, message: str) -> None:
         """Print a warning message."""
         pass
+
+    @abstractmethod
+    def print_label_and_value(self, label: str, value: str) -> None:
+        """Print a label and value pair."""
+        pass

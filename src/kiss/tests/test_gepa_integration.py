@@ -18,9 +18,7 @@ def create_agent_wrapper_with_expected(model_name: str = "gpt-4o"):
 
     call_counter = [0]
 
-    def agent_wrapper(
-        prompt_template: str, arguments: dict[str, str]
-    ) -> tuple[str, list]:
+    def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
         """Run agent with real LLM call, embedding expected answer and capturing trajectory."""
         expected = arguments.get("_expected", "")
         # Remove _expected from arguments passed to agent

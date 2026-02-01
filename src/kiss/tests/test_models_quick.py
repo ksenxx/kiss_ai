@@ -50,9 +50,7 @@ EMBEDDING_MODELS = [
 ]
 
 # Filter to only models that support function calling for agentic tests
-AGENTIC_MODELS = [
-    m for m in ALL_GENERATION_MODELS if MODEL_INFO[m].is_function_calling_supported
-]
+AGENTIC_MODELS = [m for m in ALL_GENERATION_MODELS if MODEL_INFO[m].is_function_calling_supported]
 
 
 class TestModelsQuickNonAgentic(unittest.TestCase):

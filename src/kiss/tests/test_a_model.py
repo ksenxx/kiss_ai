@@ -74,9 +74,9 @@ class TestAModel(unittest.TestCase):
 
         # Test that embedding works with SimpleRAG using this model
         from kiss.core.models.model_info import MODEL_INFO
+
         is_embedding = (
-            self.model_name in MODEL_INFO
-            and MODEL_INFO[self.model_name].is_embedding_supported
+            self.model_name in MODEL_INFO and MODEL_INFO[self.model_name].is_embedding_supported
         )
         if not is_embedding:
             self.skipTest(f"{self.model_name} does not support embedding")

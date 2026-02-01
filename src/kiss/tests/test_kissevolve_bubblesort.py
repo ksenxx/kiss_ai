@@ -200,9 +200,7 @@ class TestKISSEvolveIntegration(unittest.TestCase):
 
     @pytest.mark.timeout(300)  # 5 minutes for LLM-based evolution
     def test_kiss_evolve_improves_performance(self):
-        """Test that KISSEvolve improves performance over the initial code.
-
-        """
+        """Test that KISSEvolve improves performance over the initial code."""
         from kiss.agents.kiss import get_run_simple_coding_agent
 
         # Evaluate initial code performance
@@ -245,9 +243,7 @@ class TestKISSEvolveIntegration(unittest.TestCase):
 
     @pytest.mark.timeout(300)  # 5 minutes for LLM-based evolution
     def test_kiss_evolve_population_stats(self):
-        """Test that KISSEvolve maintains valid population statistics.
-
-        """
+        """Test that KISSEvolve maintains valid population statistics."""
         from kiss.agents.kiss import get_run_simple_coding_agent
 
         optimizer = KISSEvolve(
@@ -278,4 +274,3 @@ class TestKISSEvolveIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

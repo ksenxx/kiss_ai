@@ -44,6 +44,8 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "playwright>=1.40.0",
     "claude-agent-sdk>=0.1.19",
+    "openai-agents>=0.0.3",
+    "google-adk>=0.1.0",
 ]
 
 [build-system]
@@ -62,6 +64,7 @@ packages = ["src/kiss"]
 dev = [
     "mypy>=1.19.1",
     "ruff>=0.14.9",
+    "pyright>=1.1.0",
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
@@ -117,6 +120,10 @@ module = "google.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "google.adk.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "docker.*"
 ignore_missing_imports = true
 
@@ -138,6 +145,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "claude_agent_sdk.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "agents.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

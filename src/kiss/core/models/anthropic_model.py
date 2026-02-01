@@ -146,25 +146,42 @@ class AnthropicModel(Model):
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
-        # Map tool name -> tool_use id from the most recent assistant message
-        tool_use_id_map: dict[str, str] = {}
+        """Add tool results to the conversation.
+
+        Args:
+            function_results: List of (func_name, result_dict) tuples.
+                result_dict can contain:
+                - "result": The result content string
+                - "tool_use_id": Optional explicit tool_use_id to use
+        """
+        # Collect all tool_use blocks from the most recent assistant message
+        # Use a list to preserve order and handle multiple calls to the same function
+        tool_use_ids: list[tuple[str, str]] = []  # [(name, id), ...]
         for msg in reversed(self.conversation):
             if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
                 for b in msg["content"]:
                     if b.get("type") == "tool_use":
-                        tool_use_id_map[b.get("name", "")] = b.get("id", "")
-                if tool_use_id_map:
+                        tool_use_ids.append((b.get("name", ""), b.get("id", "")))
+                if tool_use_ids:
                     break
 
         tool_results_blocks: list[dict[str, Any]] = []
-        for func_name, result_dict in function_results:
+        for i, (func_name, result_dict) in enumerate(function_results):
             result_content = result_dict.get("result", str(result_dict))
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
+
+            # Use explicit tool_use_id if provided, otherwise match by position
+            tool_use_id = result_dict.get("tool_use_id")
+            if tool_use_id is None and i < len(tool_use_ids):
+                tool_use_id = tool_use_ids[i][1]
+            if tool_use_id is None:
+                tool_use_id = f"toolu_{func_name}_{i}"
+
             tool_results_blocks.append(
                 {
                     "type": "tool_result",
-                    "tool_use_id": tool_use_id_map.get(func_name, f"toolu_{func_name}"),
+                    "tool_use_id": tool_use_id,
                     "content": result_content,
                 }
             )
@@ -186,4 +203,3 @@ class AnthropicModel(Model):
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         raise KISSError("Anthropic does not provide an embeddings API.")
-

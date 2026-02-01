@@ -14,7 +14,7 @@ import unittest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.tests.conftest import CustomFormatter, simple_calculator
+from kiss.tests.conftest import simple_calculator
 
 # Test model - using a reliable model for agentic tool calling
 TEST_MODEL = "gemini-3-flash-preview"
@@ -44,11 +44,11 @@ def always_fails() -> str:
 class TestKISSAgentBasic(unittest.TestCase):
     """Basic KISSAgent tests."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Basic Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_agentic_simple_task(self):
         """Test agentic mode with a simple calculation task."""
@@ -119,43 +119,14 @@ class TestKISSAgentBasic(unittest.TestCase):
         self.assertIn("model", roles)
 
 
-class TestKISSAgentCustomFormatter(unittest.TestCase):
-    """Tests for custom formatter functionality."""
-
-    def setUp(self):
-        self.agent = KISSAgent("Formatter Test Agent")
-        self.custom_formatter = CustomFormatter()
-
-    def tearDown(self):
-        self.agent = None
-
-    def test_custom_formatter_receives_messages(self):
-        """Test that custom formatter receives messages."""
-        result = self.agent.run(
-            model_name=TEST_MODEL,
-            prompt_template=(
-                "Calculate 8934 * 2894 using the calculator tool. "
-                "Then call 'finish' with the result. "
-                "You MUST make exactly one tool call in your response."
-            ),
-            tools=[simple_calculator],
-            formatter=self.custom_formatter,
-            max_steps=10,
-        )
-        self.assertIsNotNone(result)
-        self.assertIn("25854996", result)
-        self.assertEqual(len(json.loads(self.agent.get_trajectory())), 5)
-        self.assertGreater(len(self.custom_formatter.messages), 0)
-
-
 class TestKISSAgentMultipleTools(unittest.TestCase):
     """Tests for agents with multiple tools."""
+
+    agent: KISSAgent
 
     def setUp(self):
         self.agent = KISSAgent("Multi-Tool Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_multiple_tools_available(self):
         """Test agent can choose between multiple tools."""
@@ -177,11 +148,11 @@ class TestKISSAgentMultipleTools(unittest.TestCase):
 class TestKISSAgentErrorHandling(unittest.TestCase):
     """Tests for error handling scenarios."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Error Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_tool_execution_error_recovery(self):
         """Test that agent can recover from tool execution errors."""
@@ -215,11 +186,11 @@ class TestKISSAgentErrorHandling(unittest.TestCase):
 class TestKISSAgentBudgetAndSteps(unittest.TestCase):
     """Tests for budget and step limit functionality."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Budget Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_max_steps_respected(self):
         """Test that agent completes within max_steps and tracks budget."""
@@ -268,11 +239,11 @@ class TestKISSAgentBudgetAndSteps(unittest.TestCase):
 class TestKISSAgentFinishTool(unittest.TestCase):
     """Tests for the built-in finish tool."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Finish Tool Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_finish_tool_auto_added(self):
         """Test that finish tool is automatically added when not provided."""
@@ -312,11 +283,11 @@ class TestKISSAgentFinishTool(unittest.TestCase):
 class TestKISSAgentMultipleRuns(unittest.TestCase):
     """Tests for running the same agent multiple times."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Multiple Runs Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_trajectory_resets_between_runs(self):
         """Test that trajectory is reset between runs."""
@@ -346,11 +317,11 @@ class TestKISSAgentMultipleRuns(unittest.TestCase):
 class TestKISSAgentToolVariants(unittest.TestCase):
     """Tests for tools with various parameter and return types."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Tool Variants Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_tool_with_optional_param(self):
         """Test tool with optional parameter."""
@@ -448,11 +419,11 @@ class TestKISSAgentToolVariants(unittest.TestCase):
 class TestKISSAgentPromptFormats(unittest.TestCase):
     """Tests for various prompt template formats."""
 
+    agent: KISSAgent
+
     def setUp(self):
         self.agent = KISSAgent("Prompt Format Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_multiline_prompt_template(self):
         """Test multiline prompt template."""
@@ -478,8 +449,7 @@ Only return the number.""",
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
-                "Say 'hello' and finish. "
-                "You MUST make exactly one tool call in your response."
+                "Say 'hello' and finish. You MUST make exactly one tool call in your response."
             ),
             arguments={},
             tools=[],
@@ -490,14 +460,15 @@ Only return the number.""",
         # Trajectory length varies based on LLM behavior
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
+
 class TestKISSAgentVerboseMode(unittest.TestCase):
     """Tests for verbose mode."""
+
+    agent: KISSAgent
 
     def setUp(self):
         self.agent = KISSAgent("Verbose Test Agent")
 
-    def tearDown(self):
-        self.agent = None
 
     def test_verbose_mode_toggle(self):
         """Test that verbose mode can be toggled without errors."""

@@ -222,7 +222,7 @@ def evaluate_performance_of_code(code: str) -> dict:
             pass
 
 
-def analyze_complexity(metrics: dict) -> str:
+def analyze_complexity(metrics: dict | None) -> str:
     """Analyze the complexity of the algorithm based on performance metrics."""
     if not metrics or "times_by_size" not in metrics:
         return "Unknown"

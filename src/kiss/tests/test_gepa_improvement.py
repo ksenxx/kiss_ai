@@ -43,9 +43,7 @@ Do something with it."""
 
     call_counter = [0]
 
-    def agent_wrapper(
-        prompt_template: str, arguments: dict[str, str]
-    ) -> tuple[str, list]:
+    def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
         """Run agent with real LLM call, capturing trajectory."""
         import json
 
@@ -207,8 +205,7 @@ Do something with it."""
 
     print("-" * 55)
     print(
-        f"{'AVERAGE':<15} {initial_avg:<12.2f} {optimized_avg:<12.2f} "
-        f"{overall_improvement:+.1f}%"
+        f"{'AVERAGE':<15} {initial_avg:<12.2f} {optimized_avg:<12.2f} {overall_improvement:+.1f}%"
     )
 
     print("\n" + "=" * 70)

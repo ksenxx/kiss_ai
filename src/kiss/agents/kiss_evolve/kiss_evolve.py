@@ -97,7 +97,6 @@ class KISSEvolve:
         # 4. Return best CodeVariant (highest .fitness) found upon completion.
     """
 
-
     def __init__(
         self,
         code_agent_wrapper: Callable[..., str],
@@ -125,7 +124,7 @@ class KISSEvolve:
 
         Args:
             code_agent_wrapper (Callable[..., str]): The code generation agent
-                wrapper. Should accept keyword arguments: model (Model),
+                wrapper. Should accept keyword arguments: model_name (str),
                 prompt_template (str), and arguments (dict[str, str]).
             initial_code (str): The initial code to evolve.
             evaluation_fn (Callable[[str], dict[str, Any]]): Function that takes
@@ -435,6 +434,7 @@ combine the best aspects of two code variants to create an improved version.
         )
 
         # Try generating novel code up to max_rejection_attempts times
+        result = variant.code  # Default to original code
         for attempt in range(self.max_rejection_attempts):
             result = self.code_agent_wrapper(
                 model_name=model_name,
@@ -481,6 +481,7 @@ combine the best aspects of two code variants to create an improved version.
         )
 
         # Try generating novel code up to max_rejection_attempts times
+        result = variant1.code  # Default to first parent's code
         for attempt in range(self.max_rejection_attempts):
             result = self.code_agent_wrapper(
                 model_name=model_name,

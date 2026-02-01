@@ -87,10 +87,7 @@ class SimpleRAG:
         try:
             # Use specific embedding model if provided, otherwise let provider decide
             # or use model_name if provider requires it
-            embedding = self._model.get_embedding(
-                text,
-                embedding_model=self.embedding_model_name
-            )
+            embedding = self._model.get_embedding(text, embedding_model=self.embedding_model_name)
             return np.array(embedding, dtype=np.float32)
         except Exception as e:
             raise KISSError(f"Failed to generate embedding: {e}") from e

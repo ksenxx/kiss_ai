@@ -195,19 +195,20 @@ class HotPotQABenchmark:
         )
 
         for item in dataset:
+            item = dict(item)  # type: ignore[assignment]
             example = HotPotQAExample(
-                id=item["id"],
-                question=item["question"],
-                answer=item["answer"],
-                question_type=item["type"],
-                level=item["level"],
+                id=item["id"],  # type: ignore[index]
+                question=item["question"],  # type: ignore[index]
+                answer=item["answer"],  # type: ignore[index]
+                question_type=item["type"],  # type: ignore[index]
+                level=item["level"],  # type: ignore[index]
                 supporting_facts={
-                    "title": item["supporting_facts"]["title"],
-                    "sent_id": item["supporting_facts"]["sent_id"],
+                    "title": item["supporting_facts"]["title"],  # type: ignore[index]
+                    "sent_id": item["supporting_facts"]["sent_id"],  # type: ignore[index]
                 },
                 context={
-                    "title": item["context"]["title"],
-                    "sentences": item["context"]["sentences"],
+                    "title": item["context"]["title"],  # type: ignore[index]
+                    "sentences": item["context"]["sentences"],  # type: ignore[index]
                 },
             )
             self.examples.append(example)
@@ -218,9 +219,7 @@ class HotPotQABenchmark:
         """Get a specific example by index."""
         return self.examples[index]
 
-    def create_evaluation_fn(
-        self, example: HotPotQAExample
-    ) -> Callable[[str], dict[str, float]]:
+    def create_evaluation_fn(self, example: HotPotQAExample) -> Callable[[str], dict[str, float]]:
         """Create an evaluation function for a specific example.
 
         Args:
@@ -291,15 +290,15 @@ class HotPotQABenchmark:
         train_examples: list[dict[str, str]] = []
         for idx in indices:
             example = self.get_example(idx)
-            train_examples.append({
-                "context": example.formatted_context,
-                "question": example.question,
-                "_expected_answer": example.answer,
-            })
+            train_examples.append(
+                {
+                    "context": example.formatted_context,
+                    "question": example.question,
+                    "_expected_answer": example.answer,
+                }
+            )
 
-        def agent_wrapper(
-            prompt_template: str, arguments: dict[str, str]
-        ) -> tuple[str, list]:
+        def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
             """Agent wrapper that embeds expected answer for evaluation."""
             expected_answer = arguments.get("_expected_answer", "")
             agent_args = {
