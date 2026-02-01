@@ -239,6 +239,13 @@ class KISSAgent(Base):
             tool_call_timestamp = int(time.time())
             function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
 
+        max_tokens = get_max_context_length(self.model_name)
+        if len(function_response)/4 > 0.95*(max_tokens - self.total_tokens_used):
+            function_response = (
+                "**The tool response is too long. "
+                "Please use head or tail to shorten the response.**"
+            )
+
         model_content = response_text + "\n" + call_repr + "\n" + usage_info
         self._add_message_with_formatter("model", model_content, start_timestamp)
         user_content = f"Tools call(s) successful.\nResult(s):\n{function_response}"
