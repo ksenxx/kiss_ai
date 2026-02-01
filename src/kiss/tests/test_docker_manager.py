@@ -34,8 +34,6 @@ class TestDockerManager(unittest.TestCase):
         with DockerManager("ubuntu:latest") as env:
             output = env.run_bash_command('echo "Hello, World!"', "Echo command")
             self.assertIn("Hello, World!", output)
-            self.assertIn("EXIT_CODE", output)
-            self.assertIn("0", output)
 
     def test_host_to_container_shared_volume(self):
         """Test writing a file on host_shared_path and verifying its existence and contents."""
@@ -52,17 +50,7 @@ class TestDockerManager(unittest.TestCase):
             output = env.run_bash_command(
                 f'cat "{client_file_path}"', "Read file written from host in container"
             )
-            print(output)
-            start_tag = "### ----STDOUT-----\n```"
-            end_tag = "```### ----STDERR-----"
-            start_idx = output.find(start_tag)
-            end_idx = output.find(end_tag)
-            if start_idx != -1 and end_idx != -1:
-                file_contents_from_container = output[start_idx + len(start_tag) : end_idx]
-            else:
-                file_contents_from_container = output
-
-            self.assertEqual(test_content, file_contents_from_container.strip())
+            self.assertEqual(test_content, output.strip())
 
     def test_port_mapping(self):
         """Test port mapping from container to host."""

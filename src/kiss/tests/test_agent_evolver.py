@@ -310,6 +310,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
             base_dir=self.test_dir,
             readable_paths=[self.test_dir],
             writable_paths=[self.writable_dir],
+            docker_image=None,
         )
 
         # Verify the UsefulTools instance has all required methods
@@ -340,6 +341,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
             base_dir=self.test_dir,
             readable_paths=[self.test_dir],
             writable_paths=[self.writable_dir],
+            docker_image=None,
         )
 
         # Create a test file
@@ -379,6 +381,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
             base_dir=self.test_dir,
             readable_paths=[self.test_dir],
             writable_paths=[self.writable_dir],
+            docker_image=None,
         )
 
         # Create a test file with multiple occurrences

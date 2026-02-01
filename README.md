@@ -54,8 +54,9 @@ KISS uses **native function calling** from the LLM providers. Your Python functi
 
 KISS is a lightweight agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
 
-- **Simple Architecture**: Clean, minimal core with a unified `Base` class that's easy to understand and extend
+- **Simple Architecture**: Clean, minimal core that's easy to understand and extend
 - **Multi-Agent Coding System**: KISSCodingAgent with orchestration, sub-agent management, and dynamic GEPA prompt refinement
+- **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
@@ -341,6 +342,27 @@ result = agent.run(
 print(f"Result: {result}")
 ```
 
+**Running with Docker:**
+
+You can optionally run bash commands inside a Docker container for isolation:
+
+```python
+from kiss.agents.coding_agents import KISSCodingAgent
+
+agent = KISSCodingAgent(name="Docker Coding Agent")
+
+result = agent.run(
+    prompt_template="""
+        Install numpy and create a script that generates 
+        a random matrix and computes its determinant.
+    """,
+    docker_image="python:3.11-slim",  # Bash commands run in Docker
+    max_steps=50,
+    trials=2
+)
+print(f"Result: {result}")
+```
+
 **Key Features:**
 
 - **Multi-Agent Architecture**: Orchestrator delegates to executor agents for specific sub-tasks
@@ -349,6 +371,7 @@ print(f"Result: {result}")
 - **Bash Command Parsing**: Automatically extracts readable/writable directories from bash commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
 - **Recursive Sub-tasks**: Agents can call `perform_subtask()` to further decompose work
+- **Docker Support**: Optional Docker container execution via the `docker_image` parameter for isolated bash command execution
 
 ### Using Claude Coding Agent
 

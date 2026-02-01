@@ -16,6 +16,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
+from kiss.docker.docker_manager import DockerManager
 
 ORCHESTRATOR_PROMPT = """
 
@@ -166,6 +167,7 @@ class KISSCodingAgent(Base):
         base_dir: str,
         readable_paths: list[str] | None,
         writable_paths: list[str] | None,
+        docker_image: str | None,
     ) -> None:
         Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = str(Path(base_dir).resolve())
@@ -188,6 +190,10 @@ class KISSCodingAgent(Base):
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
 
+        # Initialize Docker manager if docker_image is provided
+        self.docker_image = docker_image
+        self.docker_manager: DockerManager | None = None
+
         # Initialize UsefulTools instance
         self.useful_tools = UsefulTools(
             base_dir=self.base_dir,
@@ -195,6 +201,20 @@ class KISSCodingAgent(Base):
             writable_paths=[str(p) for p in self.writable_paths],
         )
 
+
+    def _docker_bash(self, command: str, description: str) -> str:
+        """Execute a bash command in the Docker container.
+
+        Args:
+            command: The bash command to run.
+            description: A brief description of the command.
+
+        Returns:
+            The output of the command.
+        """
+        if self.docker_manager is None:
+            raise KISSError("Docker manager not initialized")
+        return self.docker_manager.run_bash_command(command, description)
 
     def perform_task(
         self,
@@ -266,6 +286,10 @@ class KISSCodingAgent(Base):
         print(f"Executing subtask: {subtask.name}")
         executor = KISSAgent(f"{self.name} Executor {subtask.name}")
         task_prompt_template = TASKING_PROMPT
+
+        # Use Docker bash if Docker is enabled, otherwise use local bash
+        bash_tool = self._docker_bash if self.docker_manager else self.useful_tools.Bash
+
         for _ in range(self.trials):
             result = executor.run(
                 model_name=self.subtasker_model_name,
@@ -280,7 +304,7 @@ class KISSCodingAgent(Base):
                 },
                 tools=[
                     finish,
-                    self.useful_tools.Bash,
+                    bash_tool,
                     self.useful_tools.Edit,
                     self.useful_tools.MultiEdit,
                 ],
@@ -328,6 +352,7 @@ class KISSCodingAgent(Base):
         base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
+        docker_image: str | None = None,
     ) -> str:
         """Run the multi-agent coding system.
 
@@ -344,7 +369,9 @@ class KISSCodingAgent(Base):
             base_dir: The base directory for agent workspaces.
             readable_paths: The paths from which the agent is allowed to read from.
             writable_paths: The paths to which the agent is allowed to write.
-            trials: The number of trials to attempt for each subtask.
+            docker_image: Optional Docker image name to run bash commands in a container.
+                If provided, bash commands will be executed inside the Docker container.
+                Example: "ubuntu:latest", "python:3.11-slim".
 
         Returns:
             The result of the task.
@@ -359,11 +386,22 @@ class KISSCodingAgent(Base):
             base_dir,
             readable_paths,
             writable_paths,
+            docker_image,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        return self.perform_task()
+
+        # Run with Docker container if docker_image is provided
+        if self.docker_image:
+            with DockerManager(self.docker_image) as docker_mgr:
+                self.docker_manager = docker_mgr
+                try:
+                    return self.perform_task()
+                finally:
+                    self.docker_manager = None
+        else:
+            return self.perform_task()
 
 
 def main() -> None:

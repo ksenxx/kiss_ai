@@ -391,6 +391,7 @@ def run(
     base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
+    docker_image: str | None = None,
 ) -> str
 ```
 
@@ -409,6 +410,7 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access.
+- `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
 
 **Returns:**
 
@@ -504,6 +506,8 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 - `max_budget` (float): Maximum total budget allowed for this run.
 - `trials` (int): Number of retry attempts for each task/subtask.
 - `max_tokens` (int): Maximum context length across all models used.
+- `docker_image` (str | None): The Docker image name if Docker execution is enabled.
+- `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
 
 ### Key Features
 
@@ -516,9 +520,10 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 - **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
 - **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
+- **Docker Support**: Optional Docker container execution for bash commands via the `docker_image` parameter. When enabled, all bash commands from sub-agents run inside an isolated Docker container.
 - **Built-in Tools**:
   - Orchestrator agent has access to `finish()` and `perform_subtask()`
-  - Executor agents have access to `finish()` and `run_bash_command()`
+  - Executor agents have access to `finish()` and `Bash` (or Docker bash when `docker_image` is set), `Edit`, and `MultiEdit`
 
 ### Example
 
@@ -547,6 +552,26 @@ import yaml
 result_dict = yaml.safe_load(result)
 print(f"Success: {result_dict['success']}")
 print(f"Summary: {result_dict['summary']}")
+```
+
+### Example with Docker
+
+```python
+from kiss.agents.coding_agents import KISSCodingAgent
+
+agent = KISSCodingAgent("Docker Coding Agent")
+
+# Run with Docker - bash commands execute inside the container
+result = agent.run(
+    prompt_template="""
+        Install numpy and write a Python script that creates 
+        a random matrix and computes its eigenvalues.
+    """,
+    docker_image="python:3.11-slim",  # Commands run in Docker
+    max_steps=50,
+    trials=2
+)
+print(f"Result: {result}")
 ```
 
 ______________________________________________________________________

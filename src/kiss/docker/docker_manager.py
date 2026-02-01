@@ -118,11 +118,7 @@ class DockerManager:
         stdout_bytes, stderr_bytes = exec_result.output
         stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
         stderr = stderr_bytes.decode("utf-8") if stderr_bytes else ""
-        exit_code = exec_result.exit_code
-        return (
-            f"\n### ----STDOUT-----\n```{stdout}\n```### ----STDERR-----\n```{stderr}\n```"
-            f"### ----EXIT_CODE-----\n{exit_code}\n"
-        )
+        return stdout + "\n" + stderr
 
     def get_host_port(self, container_port: int) -> int | None:
         """Get the host port mapped to a container port.

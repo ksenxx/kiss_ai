@@ -113,7 +113,9 @@ if [ "$REPLACE_ALL" = "true" ]; then
 
     # Use python for literal string replacement (handles special chars)
     # Pass strings via environment variables to handle embedded quotes safely
-    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
+    export EDIT_NEW_STRING="$NEW_STRING"
+    python3 -c "
 import os
 file_path = os.environ['EDIT_FILE_PATH']
 old_string = os.environ['EDIT_OLD_STRING']
@@ -140,7 +142,9 @@ else
 
     # Exactly one occurrence - safe to replace
     # Pass strings via environment variables to handle embedded quotes safely
-    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
+    export EDIT_NEW_STRING="$NEW_STRING"
+    python3 -c "
 import os
 file_path = os.environ['EDIT_FILE_PATH']
 old_string = os.environ['EDIT_OLD_STRING']
@@ -168,7 +172,7 @@ exit 0
 MULTI_EDIT_SCRIPT = r"""
 #!/usr/bin/env bash
 #
-# Edit Tool - Claude Code Implementation
+# Multi Edit Tool - Claude Code Implementation
 # Performs precise string replacements in files with exact matching
 #
 # Usage: edit_tool.sh <file_path> <old_string> <new_string> [replace_all]
@@ -260,7 +264,9 @@ if [ "$REPLACE_ALL" = "true" ]; then
 
     # Use python for literal string replacement (handles special chars)
     # Pass strings via environment variables to handle embedded quotes safely
-    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
+    export EDIT_NEW_STRING="$NEW_STRING"
+    python3 -c "
 import os
 file_path = os.environ['EDIT_FILE_PATH']
 old_string = os.environ['EDIT_OLD_STRING']
@@ -287,7 +293,9 @@ else
 
     # Exactly one occurrence - safe to replace
     # Pass strings via environment variables to handle embedded quotes safely
-    EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING" EDIT_NEW_STRING="$NEW_STRING" python3 -c "
+    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
+    export EDIT_NEW_STRING="$NEW_STRING"
+    python3 -c "
 import os
 file_path = os.environ['EDIT_FILE_PATH']
 old_string = os.environ['EDIT_OLD_STRING']
