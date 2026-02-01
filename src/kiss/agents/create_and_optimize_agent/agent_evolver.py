@@ -204,7 +204,7 @@ class AgentEvolver:
             mutation_probability: Probability of mutation vs crossover.
         """
         cfg = getattr(DEFAULT_CONFIG, "create_and_optimize_agent", None)
-        evolver_cfg = cfg.evolver if cfg else None
+        evolver_cfg = getattr(cfg, "evolver", None)
 
         self.task_description = task_description
         self.max_generations = get_config_value(max_generations, evolver_cfg, "max_generations")
@@ -289,15 +289,18 @@ class AgentEvolver:
         # Create a temporary directory and copy the variant's code into it
         temp_dir = Path(tempfile.mkdtemp(prefix=f"eval_variant_{variant.id}_"))
         old_cwd = os.getcwd()
+        module_name: str | None = None
         try:
             shutil.copytree(variant.folder_path, temp_dir / "agent_code", dirs_exist_ok=True)
             agent_dir = str(temp_dir / "agent_code")
             agent_file = temp_dir / "agent_code" / "agent.py"
             module_name = f"agent_variant_{id(self)}_{random.randint(0, 10000)}"
 
+            # Change to temp_dir FIRST, before any module loading
+            # This ensures any file operations use temp_dir as the working directory
+            os.chdir(temp_dir)
             try:
                 sys.path.insert(0, agent_dir)
-                os.chdir(temp_dir)
                 agent_module = self._load_module_from_path(module_name, str(agent_file))
                 if agent_module is None:
                     print(f"Failed to load module from {agent_file}")
@@ -307,16 +310,21 @@ class AgentEvolver:
                     }
                 result: dict[str, Any] = agent_module.agent_run(self.task_description)
                 return result
-            except Exception:
+            except Exception as e:
                 return {
-                    "feedback": "Failed to run agent.py",
+                    "feedback": f"Failed to run agent.py: {e}",
                     "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
                 }
             finally:
                 os.chdir(old_cwd)
                 if agent_dir in sys.path:
                     sys.path.remove(agent_dir)
-                sys.modules.pop(module_name, None)
+                if module_name:
+                    sys.modules.pop(module_name, None)
+        except Exception:
+            # Ensure we restore cwd even if copytree or other setup fails
+            os.chdir(old_cwd)
+            raise
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

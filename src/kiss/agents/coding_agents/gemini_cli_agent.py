@@ -59,6 +59,7 @@ class GeminiCliAgent(Base):
         self.max_budget = max_budget
         self._formatter = formatter or SimpleFormatter()
         self.step_count: int = 0
+        self.run_start_timestamp = int(time.time())
         self.useful_tools = UsefulTools(
             base_dir=base_dir,
             readable_paths=[str(p) for p in self.readable_paths],

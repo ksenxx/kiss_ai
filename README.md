@@ -41,7 +41,7 @@ result = agent.run(
 print(result)  # 127.05
 ```
 
-That's a fully functional AI agent that uses tools. No boilerplate. No ceremony. Just intent, directly expressed.
+That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 
 KISS uses **native function calling** from the LLM providers. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. Everything just works.
 
@@ -230,25 +230,8 @@ The Agent Creator module provides tools to automatically evolve and optimize AI 
 Both components use a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
 
 ```python
-from kiss.agents.create_and_optimize_agent import ImproverAgent, AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver
 
-# Option 1: Improve an existing agent
-improver = ImproverAgent(
-    max_steps=150,
-    max_budget=15.0,
-)
-
-success, report = improver.improve(
-    source_folder="/path/to/agent",
-    target_folder="/path/to/improved_agent",
-    task_description="Build a code analysis assistant that can parse and analyze large codebases",
-)
-
-if success and report:
-    print(f"Generation: {report.generation}")
-    print(f"Summary: {report.summary}")
-
-# Option 2: Evolve a new agent from a task description
 evolver = AgentEvolver(
     task_description="Build a code analysis assistant that can parse and analyze large codebases",
     max_generations=10,

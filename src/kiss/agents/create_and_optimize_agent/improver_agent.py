@@ -14,7 +14,7 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
 from kiss.core.config import DEFAULT_CONFIG
@@ -196,7 +196,7 @@ class ImproverAgent:
             max_budget: Maximum budget in USD for the coding agent.
         """
         cfg = getattr(DEFAULT_CONFIG, "create_and_optimize_agent", None)
-        improver_cfg = cfg.improver if cfg else None
+        improver_cfg = getattr(cfg, "improver", None)
         self.max_steps = get_config_value(max_steps, improver_cfg, "max_steps")
         self.max_budget = get_config_value(max_budget, improver_cfg, "max_budget")
 
@@ -288,7 +288,7 @@ class ImproverAgent:
             return False, None
 
         print(f"Copying {source_folder} to {target_folder}")
-        shutil.copytree(source_folder, target_folder)
+        shutil.copytree(source_folder, target_folder, dirs_exist_ok=True)
 
         previous_report = self._load_report(report_path)
         previous_report_text = self._format_report_for_prompt(previous_report)

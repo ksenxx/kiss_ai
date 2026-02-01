@@ -322,44 +322,47 @@ exit 0
 
 
 def _extract_directory(path_str: str) -> str | None:
-    """Extract directory from a file path without resolving symlinks.
+    """Extract directory from a file path, resolving relative paths.
 
     Args:
         path_str: A file or directory path
 
     Returns:
-        The directory path, or None if invalid
+        The resolved absolute directory path, or None if invalid
     """
     try:
         path = Path(path_str)
 
-        # If it's an absolute path
-        if path.is_absolute():
-            # Check if path exists to determine if it's a file or directory
-            if path.exists():
+        # Resolve relative paths to absolute paths using current working directory
+        # This is important for security validation of relative paths
+        if not path.is_absolute():
+            path = Path.cwd() / path
+
+        # Resolve to get canonical path (handles .., ., etc.)
+        path = path.resolve()
+
+        # Check if path exists to determine if it's a file or directory
+        if path.exists():
+            return str(path)
+        else:
+            # Path doesn't exist - use heuristics
+            if path_str.endswith("/"):
+                # Trailing slash indicates directory
                 return str(path)
             else:
-                # Path doesn't exist - use heuristics
-                if path_str.endswith("/"):
-                    # Trailing slash indicates directory
+                # Check if it has a file extension
+                if path.suffix:
+                    # Has extension - likely a file
                     return str(path)
                 else:
-                    # Check if it has a file extension
-                    if path.suffix:
-                        # Has extension - likely a file
+                    # No extension - could be directory
+                    # Check if parent exists and is a directory
+                    if path.parent.exists() and path.parent.is_dir():
+                        # Parent exists, so this is likely a file or subdir
                         return str(path)
                     else:
-                        # No extension - could be directory
-                        # Check if parent exists and is a directory
-                        if path.parent.exists() and path.parent.is_dir():
-                            # Parent exists, so this is likely a file or subdir
-                            return str(path)
-                        else:
-                            # Parent doesn't exist either - assume it's a directory path
-                            return str(path)
-
-        # For relative paths, return None (we can't determine the directory reliably)
-        return None
+                        # Parent doesn't exist either - assume it's a directory path
+                        return str(path)
 
     except Exception:
         return None
@@ -773,7 +776,9 @@ class UsefulTools:
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
-            return f"Error: {e}"
+            # Include stderr which contains the actual error message from the script
+            error_msg = e.stderr.strip() if e.stderr else str(e)
+            return f"Error: {error_msg}"
         except Exception as e:
             return f"Error: {e}"
         finally:
@@ -839,7 +844,8 @@ class UsefulTools:
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
-            return f"Error: {e}"
+            error_msg = e.stderr.strip() if e.stderr else str(e)
+            return f"Error: {error_msg}"
         except Exception as e:
             return f"Error: {e}"
         finally:
