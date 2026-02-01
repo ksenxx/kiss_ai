@@ -30,50 +30,40 @@ The module is part of the `kiss` package. No additional installation required.
 ### Improving an Existing Agent
 
 ```python
-import anyio
 from kiss.agents.agent_creator import ImproverAgent
 
-async def improve_agent():
-    improver = ImproverAgent(
-        model_name="claude-sonnet-4-5",
-        max_steps=150,
-        max_budget=15.0,
-        coding_agent_type="claude code",
-    )
+improver = ImproverAgent(
+    max_steps=150,
+    max_budget=15.0,
+)
 
-    success, report = await improver.improve(
-        source_folder="/path/to/agent",
-        target_folder="/path/to/improved_agent",
-    )
+success, report = improver.improve(
+    source_folder="/path/to/agent",
+    target_folder="/path/to/improved_agent",
+    task_description="Build a code analysis assistant that can parse and analyze large codebases",
+)
 
-    if success and report:
-        print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
-        print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
-
-anyio.run(improve_agent)
+if success and report:
+    print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
+    print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
 ```
 
 ### Evolving a New Agent from Scratch
 
 ```python
-import anyio
 from kiss.agents.agent_creator import AgentEvolver
 
-async def evolve_agent():
-    evolver = AgentEvolver(
-        task_description="Build a code analysis assistant that can parse and analyze large codebases",
-        max_generations=10,
-        max_frontier_size=6,
-        mutation_probability=0.8,
-        coding_agent_type="claude code",
-    )
+evolver = AgentEvolver(
+    task_description="Build a code analysis assistant that can parse and analyze large codebases",
+    max_generations=10,
+    max_frontier_size=6,
+    mutation_probability=0.8,
+)
 
-    best_variant = await evolver.evolve()
+best_variant = evolver.evolve()
 
-    print(f"Best agent: {best_variant.folder_path}")
-    print(f"Metrics: {best_variant.metrics}")
-
-anyio.run(evolve_agent)
+print(f"Best agent: {best_variant.folder_path}")
+print(f"Metrics: {best_variant.metrics}")
 ```
 
 ## Components
@@ -84,15 +74,13 @@ The `ImproverAgent` optimizes existing agent code by analyzing and improving it 
 
 **Parameters:**
 
-- `model_name`: LLM model to use (default: `"claude-sonnet-4-5"`)
 - `max_steps`: Maximum steps for the improvement agent (default: `150`)
 - `max_budget`: Maximum USD budget for improvement (default: `15.0`)
-- `coding_agent_type`: Which coding agent to use: `"claude code"`, `"gemini cli"`, or `"openai codex"`
 
 **Methods:**
 
-- `improve(source_folder, target_folder, report_path, feedback, base_dir)`: Improve an agent's code
-- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, primary_feedback, secondary_feedback, target_folder, base_dir)`: Combine ideas from two agents
+- `improve(source_folder, target_folder, task_description, report_path, feedback)`: Improve an agent's code
+- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, primary_feedback, secondary_feedback, target_folder, task_description)`: Combine ideas from two agents
 
 ### AgentEvolver
 
@@ -101,11 +89,10 @@ The `AgentEvolver` creates and evolves agent populations from a task description
 **Parameters:**
 
 - `task_description`: Description of the task the agent should solve
-- `model_name`: LLM model for orchestration (default: `"claude-sonnet-4-5"`)
+- `evaluation_fn`: Optional function to evaluate agent variants (default: placeholder evaluation)
 - `max_generations`: Maximum evolutionary generations (default: `10`)
 - `max_frontier_size`: Maximum Pareto frontier size (default: `6`)
 - `mutation_probability`: Probability of mutation vs crossover (default: `0.8`)
-- `coding_agent_type`: Which coding agent to use: `"claude code"`, `"gemini cli"`, or `"openai codex"`
 
 **Methods:**
 
@@ -121,7 +108,8 @@ The `AgentEvolver` creates and evolves agent populations from a task description
 - `implemented_ideas`: List of successful optimizations with idea and source
 - `failed_ideas`: List of failed optimizations with idea and reason
 - `generation`: The generation number of this improvement
-- `metrics`: Dictionary of flexible metrics (e.g., `tokens_used`, `execution_time`)
+- `improved_tokens`: Token usage improvement (default: 0)
+- `improved_time`: Execution time improvement (default: 0.0)
 - `summary`: Summary of the improvement
 
 **AgentVariant**: Represents an agent variant in the Pareto frontier
@@ -129,13 +117,11 @@ The `AgentEvolver` creates and evolves agent populations from a task description
 - `folder_path`: Path to the variant's source code
 - `report_path`: Path to the variant's improvement report
 - `report`: The ImprovementReport instance
-- `metrics`: Dictionary of flexible metrics (e.g., `success`, `tokens_used`, `execution_time`)
+- `tokens_used`: Token usage for this variant (default: 0)
+- `execution_time`: Execution time for this variant (default: 0.0)
 - `id`: Unique variant identifier
 - `generation`: Generation when created
 - `parent_ids`: List of parent variant IDs
-- `feedback`: Feedback from the agent evaluation
-- `dominates(other, minimize)`: Check if this variant Pareto-dominates another
-- `score(weights)`: Compute combined ranking score (lower is better)
 
 ## Configuration
 
@@ -148,18 +134,13 @@ from kiss.core.config import DEFAULT_CONFIG
 cfg = DEFAULT_CONFIG.agent_creator
 
 # Improver settings
-cfg.improver.model_name = "claude-sonnet-4-5"
 cfg.improver.max_steps = 150
 cfg.improver.max_budget = 15.0
 
 # Evolver settings
-cfg.evolver.model_name = "claude-sonnet-4-5"
 cfg.evolver.max_generations = 10
 cfg.evolver.max_frontier_size = 6
 cfg.evolver.mutation_probability = 0.8
-cfg.evolver.initial_agent_max_steps = 50
-cfg.evolver.initial_agent_max_budget = 5.0
-cfg.evolver.coding_agent_type = "claude code"
 ```
 
 ## How It Works
@@ -173,15 +154,14 @@ The module uses **Pareto dominance** to compare solutions. A solution A dominate
 
 The Pareto frontier contains all non-dominated solutions, representing the best trade-offs between objectives.
 
-By default, `tokens_used` and `execution_time` are minimized, while `success` is maximized. The `dominates()` method accepts a `minimize` parameter to customize which metrics to minimize.
+By default, `tokens_used` and `execution_time` are minimized.
 
 ### Scoring
 
-Variants are ranked using a combined score (lower is better). Default weights:
+Variants are ranked using a combined score (lower is better). The score is calculated as:
+- `tokens_used` + (`execution_time` * 1000)
 
-- `success`: -1,000,000 (maximize success - most important)
-- `tokens_used`: 1 (minimize token usage)
-- `execution_time`: 1,000 (minimize execution time)
+This gives higher weight to execution time improvements.
 
 ### Evolutionary Operations
 
@@ -219,10 +199,8 @@ The `AgentEvolver` creates agents with these patterns:
         {"idea": "Aggressive caching", "reason": "Caused correctness issues"}
     ],
     "generation": 5,
-    "metrics": {
-        "tokens_used": 8000,
-        "execution_time": 25.0
-    },
+    "improved_tokens": 8000,
+    "improved_time": 25.0,
     "summary": "Optimized prompts and added caching for repeated operations"
 }
 ```
@@ -242,18 +220,15 @@ The `AgentEvolver` creates agents with these patterns:
                 "implemented_ideas": [...],
                 "failed_ideas": [...],
                 "generation": 4,
-                "metrics": {"tokens_used": 5000, "execution_time": 12.5},
+                "improved_tokens": 5000,
+                "improved_time": 12.5,
                 "summary": "..."
             },
-            "metrics": {
-                "success": 1,
-                "tokens_used": 5000,
-                "execution_time": 12.5
-            },
+            "tokens_used": 5000,
+            "execution_time": 12.5,
             "id": 3,
             "generation": 4,
-            "parent_ids": [1],
-            "feedback": "Agent completed task successfully with minor issues..."
+            "parent_ids": [1]
         }
     ]
 }
@@ -280,22 +255,20 @@ The improver applies various optimization strategies:
 class ImproverAgent:
     def __init__(
         self,
-        model_name: str | None = None,
         max_steps: int | None = None,
         max_budget: float | None = None,
-        coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] | None = None,
     ): ...
 
-    async def improve(
+    def improve(
         self,
         source_folder: str,
         target_folder: str,
+        task_description: str,
         report_path: str | None = None,
         feedback: str = "",
-        base_dir: str | None = None,
     ) -> tuple[bool, ImprovementReport | None]: ...
 
-    async def crossover_improve(
+    def crossover_improve(
         self,
         primary_folder: str,
         primary_report_path: str,
@@ -303,7 +276,7 @@ class ImproverAgent:
         primary_feedback: str,
         secondary_feedback: str,
         target_folder: str,
-        base_dir: str | None = None,
+        task_description: str,
     ) -> tuple[bool, ImprovementReport | None]: ...
 ```
 
@@ -314,14 +287,13 @@ class AgentEvolver:
     def __init__(
         self,
         task_description: str,
-        model_name: str | None = None,
+        evaluation_fn: Callable[[str], tuple[int, float]] | None = None,
         max_generations: int | None = None,
         max_frontier_size: int | None = None,
         mutation_probability: float | None = None,
-        coding_agent_type: Literal["claude code", "gemini cli", "openai codex"] | None = None,
     ): ...
 
-    async def evolve(self) -> AgentVariant: ...
+    def evolve(self) -> AgentVariant: ...
     def get_best_variant(self) -> AgentVariant: ...
     def get_pareto_frontier(self) -> list[AgentVariant]: ...
     def save_state(self, path: str) -> None: ...
@@ -335,12 +307,9 @@ class ImprovementReport:
     implemented_ideas: list[dict[str, str]] = field(default_factory=list)
     failed_ideas: list[dict[str, str]] = field(default_factory=list)
     generation: int = 0
-    metrics: dict[str, float] = field(default_factory=dict)
+    improved_tokens: int = 0
+    improved_time: float = 0.0
     summary: str = ""
-
-    def save(self, path: str) -> None: ...
-    @classmethod
-    def load(cls, path: str) -> "ImprovementReport": ...
 ```
 
 ### AgentVariant
@@ -351,15 +320,11 @@ class AgentVariant:
     folder_path: str
     report_path: str
     report: ImprovementReport
-    metrics: dict[str, float] = field(default_factory=dict)
+    tokens_used: int = 0
+    execution_time: float = 0.0
     id: int = 0
     generation: int = 0
     parent_ids: list[int] = field(default_factory=list)
-    feedback: str = ""
-
-    def dominates(self, other: "AgentVariant", minimize: set[str] | None = None) -> bool: ...
-    def score(self, weights: dict[str, float] | None = None) -> float: ...
-    def to_dict(self) -> dict[str, Any]: ...
 ```
 
 ## License

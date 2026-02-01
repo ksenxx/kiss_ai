@@ -228,43 +228,36 @@ The Agent Creator module provides tools to automatically evolve and optimize AI 
 Both components use a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
 
 ```python
-import anyio
 from kiss.agents.agent_creator import ImproverAgent, AgentEvolver
 
 # Option 1: Improve an existing agent
-async def improve_existing_agent():
-    improver = ImproverAgent(
-        model_name="claude-sonnet-4-5",
-        max_steps=150,
-        max_budget=15.0,
-        coding_agent_type="claude code",
-    )
+improver = ImproverAgent(
+    max_steps=150,
+    max_budget=15.0,
+)
 
-    success, report = await improver.improve(
-        source_folder="/path/to/agent",
-        target_folder="/path/to/improved_agent",
-    )
+success, report = improver.improve(
+    source_folder="/path/to/agent",
+    target_folder="/path/to/improved_agent",
+    task_description="Build a code analysis assistant that can parse and analyze large codebases",
+)
 
-    if success and report:
-        print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
-        print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
+if success and report:
+    print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
+    print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
 
 # Option 2: Evolve a new agent from a task description
-async def evolve_new_agent():
-    evolver = AgentEvolver(
-        task_description="Build a code analysis assistant that can parse and analyze large codebases",
-        max_generations=10,
-        max_frontier_size=6,
-        mutation_probability=0.8,
-        coding_agent_type="claude code",
-    )
+evolver = AgentEvolver(
+    task_description="Build a code analysis assistant that can parse and analyze large codebases",
+    max_generations=10,
+    max_frontier_size=6,
+    mutation_probability=0.8,
+)
 
-    best_variant = await evolver.evolve()
+best_variant = evolver.evolve()
 
-    print(f"Best agent: {best_variant.folder_path}")
-    print(f"Metrics: {best_variant.metrics}")
-
-anyio.run(improve_existing_agent)
+print(f"Best agent: {best_variant.folder_path}")
+print(f"Metrics: {best_variant.metrics}")
 ```
 
 **Key Features:**
@@ -272,7 +265,7 @@ anyio.run(improve_existing_agent)
 - **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time)
 - **Pareto Frontier Maintenance**: Keeps track of all non-dominated solutions
 - **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
-- **Configurable Coding Agents**: Supports Claude Code, Gemini CLI, and OpenAI Codex
+- **Uses KISSCodingAgent**: Leverages the multi-agent coding system for agent improvement
 - **Automatic Pruning**: Removes dominated variants to manage memory and storage
 - **Lineage Tracking**: Records parent relationships and improvement history
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
@@ -286,16 +279,13 @@ from kiss.core.config import DEFAULT_CONFIG
 cfg = DEFAULT_CONFIG.agent_creator
 
 # Improver settings
-cfg.improver.model_name = "claude-sonnet-4-5"
 cfg.improver.max_steps = 150
 cfg.improver.max_budget = 15.0
 
 # Evolver settings
-cfg.evolver.model_name = "claude-sonnet-4-5"
 cfg.evolver.max_generations = 10
 cfg.evolver.max_frontier_size = 6
 cfg.evolver.mutation_probability = 0.8
-cfg.evolver.coding_agent_type = "claude code"
 ```
 
 For usage examples, API reference, and configuration options, please see the [Agent Creator README](src/kiss/agents/agent_creator/README.md).
@@ -316,45 +306,12 @@ KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
-### Using Self-Evolving Multi-Agent
-
-> 📖 **For detailed Self-Evolving Multi-Agent documentation, see [Self-Evolving Multi-Agent README](src/kiss/agents/self_evolving_multi_agent/README.md)**
-
-The goal of this project is to create an optimal multi-agent using KISSAgent and ClaudeCodingAgent given a set of tasks.
-
-```python
-from kiss.agents.self_evolving_multi_agent import SelfEvolvingMultiAgent, run_task
-
-# Option 1: Using the class directly
-agent = SelfEvolvingMultiAgent()
-result = agent.run("""
-    Create a Python script that:
-    1. Generates the first 20 Fibonacci numbers
-    2. Saves them to 'fibonacci.txt'
-    3. Reads the file and prints the sum
-""")
-print(result)
-
-# Access execution statistics
-stats = agent.get_stats()
-print(f"Completed todos: {stats['completed']}/{stats['total_todos']}")
-print(f"Dynamic tools created: {stats['dynamic_tools']}")
-
-# Option 2: Using run_task (for evolver integration)
-result = run_task("Create a calculator module with tests")
-print(f"Result: {result['result']}")
-print(f"Metrics: {result['metrics']}")
-print(f"Stats: {result['stats']}")
-```
-
-For usage examples, API reference, and configuration options, please see the [Self-Evolving Multi-Agent README](src/kiss/agents/self_evolving_multi_agent/README.md).
-
 ### Using KISS Coding Agent
 
 The KISS Coding Agent is a multi-agent system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks:
 
 ```python
-from kiss.agents.kiss_coding_agent import KISSCodingAgent
+from kiss.agents.coding_agents import KISSCodingAgent
 
 # Create agent with a name
 agent = KISSCodingAgent(name="My Coding Agent")
@@ -390,28 +347,24 @@ print(f"Result: {result}")
 The Claude Coding Agent uses the Claude Agent SDK to generate tested Python programs with file system access controls:
 
 ```python
-from kiss.agents.claude_coding_agent import ClaudeCodingAgent
-import anyio
+from kiss.agents.coding_agents import ClaudeCodingAgent
 
 # Create agent with a name
 agent = ClaudeCodingAgent(name="My Coding Agent")
 
-async def main():
-    # Run a coding task with path restrictions
-    result = await agent.run(
-        model_name="claude-sonnet-4-5",
-        prompt_template="""
-            Write, test, and optimize a fibonacci function in Python
-            that is efficient and correct.
-        """,
-        readable_paths=["src/"],  # Allowed read paths
-        writable_paths=["output/"],  # Allowed write paths
-        base_dir="workdir"  # Base working directory
-    )
-    if result:
-        print(f"Result: {result}")
-
-anyio.run(main)
+# Run a coding task with path restrictions
+result = agent.run(
+    model_name="claude-sonnet-4-5",
+    prompt_template="""
+        Write, test, and optimize a fibonacci function in Python
+        that is efficient and correct.
+    """,
+    readable_paths=["src/"],  # Allowed read paths
+    writable_paths=["output/"],  # Allowed write paths
+    base_dir="workdir"  # Base working directory
+)
+if result:
+    print(f"Result: {result}")
 ```
 
 **Built-in Tools Available:**
@@ -426,24 +379,20 @@ anyio.run(main)
 The Gemini CLI Agent uses the Google ADK (Agent Development Kit) to generate tested Python programs:
 
 ```python
-from kiss.agents.gemini_cli_agent import GeminiCliAgent
-import anyio
+from kiss.agents.coding_agents import GeminiCliAgent
 
 # Create agent with a name (must be a valid identifier - use underscores, not hyphens)
 agent = GeminiCliAgent(name="my_coding_agent")
 
-async def main():
-    result = await agent.run(
-        model_name="gemini-2.5-flash",
-        prompt_template="Write a fibonacci function with tests",
-        readable_paths=["src/"],
-        writable_paths=["output/"],
-        base_dir="workdir"
-    )
-    if result:
-        print(f"Result: {result}")
-
-anyio.run(main)
+result = agent.run(
+    model_name="gemini-2.5-flash",
+    prompt_template="Write a fibonacci function with tests",
+    readable_paths=["src/"],
+    writable_paths=["output/"],
+    base_dir="workdir"
+)
+if result:
+    print(f"Result: {result}")
 ```
 
 ### Using OpenAI Codex Agent
@@ -451,23 +400,19 @@ anyio.run(main)
 The OpenAI Codex Agent uses the OpenAI Agents SDK to generate tested Python programs:
 
 ```python
-from kiss.agents.openai_codex_agent import OpenAICodexAgent
-import anyio
+from kiss.agents.coding_agents import OpenAICodexAgent
 
 agent = OpenAICodexAgent(name="My Coding Agent")
 
-async def main():
-    result = await agent.run(
-        model_name="gpt-5.2-codex",
-        prompt_template="Write a fibonacci function with tests",
-        readable_paths=["src/"],
-        writable_paths=["output/"],
-        base_dir="workdir"
-    )
-    if result:
-        print(f"Result: {result}")
-
-anyio.run(main)
+result = agent.run(
+    model_name="gpt-5.2-codex",
+    prompt_template="Write a fibonacci function with tests",
+    readable_paths=["src/"],
+    writable_paths=["output/"],
+    base_dir="workdir"
+)
+if result:
+    print(f"Result: {result}")
 ```
 
 ### Running Agent Examples
@@ -680,10 +625,6 @@ kiss/
 │   │   │   ├── run_swebench.py     # Main runner with CLI support
 │   │   │   ├── config.py           # Configuration for SWE-bench runs
 │   │   │   └── README.md           # SWE-bench documentation
-│   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent with planning
-│   │   │   ├── multi_agent.py          # Main multi-agent implementation
-│   │   │   ├── agent_evolver.py        # Agent evolution using KISSEvolve
-│   │   │   └── config.py
 │   │   └── arvo_agent/             # ARVO vulnerability detection agent
 │   │       ├── arvo_agent.py       # Arvo-based vulnerability detector
 │   │       └── arvo_tags.json      # Docker image tags for Arvo

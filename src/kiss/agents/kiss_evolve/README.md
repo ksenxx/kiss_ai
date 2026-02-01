@@ -31,7 +31,7 @@ KISSEvolve is part of the KISS Agent Framework. See the main [README.md](../../.
 ```python
 from typing import Any
 
-from kiss.agents.kiss_evolve.kiss_evolve import KISSEvolve
+from kiss.agents.kiss_evolve import KISSEvolve
 from kiss.core.kiss_agent import KISSAgent
 
 def evaluate_code(code: str) -> dict[str, Any]:
@@ -93,7 +93,7 @@ optimizer = KISSEvolve(
     code_agent_wrapper=code_agent_wrapper,
     initial_code=initial_code,
     evaluation_fn=evaluate_code,
-    model_names=[("gemini-3-pro-preview", 1.0)],  # List of (model_name, probability) tuples
+    model_names=[("gemini-2.5-flash", 1.0)],  # List of (model_name, probability) tuples
     population_size=8,
     max_generations=10,
     mutation_rate=0.7,
@@ -244,7 +244,7 @@ You can use multiple models with different probabilities:
 optimizer = KISSEvolve(
     # ... other parameters ...
     model_names=[
-        ("gemini-3-pro-preview", 0.7),  # 70% probability
+        ("gemini-2.5-flash", 0.7),  # 70% probability
         ("gpt-4o", 0.3),  # 30% probability
     ]
 )

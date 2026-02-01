@@ -103,14 +103,6 @@ Evolutionary algorithm discovery using LLMs.
 - **`config.py`** - KISSEvolve configuration
 - **`algotune/`** - Algorithm tuning utilities
 
-#### `src/kiss/agents/self_evolving_multi_agent/`
-
-Self-evolving multi-agent system (experimental).
-
-- **`multi_agent.py`** - Multi-agent coordination
-- **`agent_evolver.py`** - Self-evolution logic
-- **`config.py`** - Multi-agent configuration
-
 #### `src/kiss/agents/swe_agent_verified/`
 
 SWE-bench verified agent implementation.
@@ -192,7 +184,7 @@ Comprehensive test suite for all components.
 
 ```python
 # Core agent
-from kiss import KISSAgent
+from kiss.core.kiss_agent import KISSAgent
 
 # Coding agents
 from kiss.agents.coding_agents import KISSCodingAgent, ClaudeCodingAgent, GeminiCliAgent, OpenAICodexAgent
@@ -530,7 +522,7 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 ### Example
 
 ```python
-from kiss.agents.kiss_coding_agent import KISSCodingAgent
+from kiss.agents.coding_agents import KISSCodingAgent
 
 agent = KISSCodingAgent("My Coding Agent")
 
@@ -577,7 +569,7 @@ ClaudeCodingAgent(name: str)
 #### `run()`
 
 ```python
-async def run(
+def run(
     self,
     model_name: str,
     prompt_template: str,
@@ -653,19 +645,15 @@ The agent has access to these built-in tools from Claude Agent SDK:
 ### Example
 
 ```python
-import anyio
-from kiss.agents.claude_coding_agent import ClaudeCodingAgent
+from kiss.agents.coding_agents import ClaudeCodingAgent
 
-async def main():
-    agent = ClaudeCodingAgent("My Agent")
-    result = await agent.run(
-        model_name="claude-sonnet-4-5",
-        prompt_template="Write a fibonacci function with tests"
-    )
-    if result:
-        print(f"Result: {result}")
-
-anyio.run(main)
+agent = ClaudeCodingAgent("My Agent")
+result = agent.run(
+    model_name="claude-sonnet-4-5",
+    prompt_template="Write a fibonacci function with tests"
+)
+if result:
+    print(f"Result: {result}")
 ```
 
 ______________________________________________________________________
@@ -689,7 +677,7 @@ GeminiCliAgent(name: str)
 #### `run()`
 
 ```python
-async def run(
+def run(
     self,
     model_name: str = "gemini-2.5-flash",
     prompt_template: str = "",
@@ -763,19 +751,15 @@ The agent has access to these built-in tools:
 ### Example
 
 ```python
-import anyio
-from kiss.agents.gemini_cli_agent import GeminiCliAgent
+from kiss.agents.coding_agents import GeminiCliAgent
 
-async def main():
-    agent = GeminiCliAgent("my_agent")
-    result = await agent.run(
-        model_name="gemini-2.5-flash",
-        prompt_template="Write a fibonacci function with tests"
-    )
-    if result:
-        print(f"Result: {result}")
-
-anyio.run(main)
+agent = GeminiCliAgent("my_agent")
+result = agent.run(
+    model_name="gemini-2.5-flash",
+    prompt_template="Write a fibonacci function with tests"
+)
+if result:
+    print(f"Result: {result}")
 ```
 
 ______________________________________________________________________
@@ -799,7 +783,7 @@ OpenAICodexAgent(name: str)
 #### `run()`
 
 ```python
-async def run(
+def run(
     self,
     model_name: str = "gpt-5.2-codex",
     prompt_template: str = "",
@@ -873,19 +857,15 @@ The agent has access to these built-in tools:
 ### Example
 
 ```python
-import anyio
-from kiss.agents.openai_codex_agent import OpenAICodexAgent
+from kiss.agents.coding_agents import OpenAICodexAgent
 
-async def main():
-    agent = OpenAICodexAgent("My Agent")
-    result = await agent.run(
-        model_name="gpt-5.2-codex",
-        prompt_template="Write a fibonacci function with tests"
-    )
-    if result:
-        print(f"Result: {result}")
-
-anyio.run(main)
+agent = OpenAICodexAgent("My Agent")
+result = agent.run(
+    model_name="gpt-5.2-codex",
+    prompt_template="Write a fibonacci function with tests"
+)
+if result:
+    print(f"Result: {result}")
 ```
 
 ______________________________________________________________________
@@ -1239,11 +1219,9 @@ AgentEvolver evolves AI agents using a Pareto frontier approach, optimizing for 
 AgentEvolver(
     task_description: str,
     evaluation_fn: Callable[[str], tuple[int, float]] | None = None,
-    model_name: str | None = None,
     max_generations: int | None = None,
     max_frontier_size: int | None = None,
     mutation_probability: float | None = None,
-    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"] | None = None,
 )
 ```
 
@@ -1251,18 +1229,18 @@ AgentEvolver(
 
 - `task_description` (str): Description of the task the agent should perform.
 - `evaluation_fn` (Callable | None): Optional function to evaluate agent variants. Takes folder path, returns `(tokens_used, execution_time)`. If None, uses placeholder evaluation.
-- `model_name` (str | None): LLM model to use for agent creation and improvement. Uses config default if None.
 - `max_generations` (int | None): Maximum number of improvement generations. Uses config default if None.
 - `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
 - `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
-- `coding_agent_type` (Literal | None): Which coding agent to use: `"kiss code"`, `"claude code"`, `"gemini cli"`, or `"openai codex"`. Uses config default if None.
+
+**Note:** AgentEvolver uses KISSCodingAgent internally for agent improvement.
 
 ### Methods
 
 #### `evolve()`
 
 ```python
-async def evolve(self) -> AgentVariant
+def evolve(self) -> AgentVariant
 ```
 
 Run the evolutionary optimization process.
@@ -1342,27 +1320,23 @@ class ImprovementReport:
 ### Example
 
 ```python
-import anyio
 from kiss.agents.agent_creator import AgentEvolver
 
-async def main():
-    evolver = AgentEvolver(
-        task_description="Build a code analysis assistant that reviews Python files",
-        max_generations=5,
-        max_frontier_size=4,
-        mutation_probability=0.8,
-    )
+evolver = AgentEvolver(
+    task_description="Build a code analysis assistant that reviews Python files",
+    max_generations=5,
+    max_frontier_size=4,
+    mutation_probability=0.8,
+)
 
-    best = await evolver.evolve()
+best = evolver.evolve()
 
-    print(f"Best variant: {best.folder_path}")
-    print(f"Tokens used: {best.tokens_used}")
-    print(f"Execution time: {best.execution_time:.2f}s")
+print(f"Best variant: {best.folder_path}")
+print(f"Tokens used: {best.tokens_used}")
+print(f"Execution time: {best.execution_time:.2f}s")
 
-    # Save state for later analysis
-    evolver.save_state("evolver_state.json")
-
-anyio.run(main)
+# Save state for later analysis
+evolver.save_state("evolver_state.json")
 ```
 
 ______________________________________________________________________
@@ -1375,31 +1349,30 @@ ImproverAgent optimizes existing agent code to reduce token usage and execution 
 
 ```python
 ImproverAgent(
-    model_name: str | None = None,
     max_steps: int | None = None,
     max_budget: float | None = None,
-    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"] | None = None,
 )
 ```
 
 **Parameters:**
 
-- `model_name` (str | None): LLM model to use for improvement. Uses config default if None.
 - `max_steps` (int | None): Maximum steps for the coding agent. Uses config default if None.
 - `max_budget` (float | None): Maximum budget in USD for the coding agent. Uses config default if None.
-- `coding_agent_type` (Literal | None): Which coding agent to use: `"kiss code"`, `"claude code"`, `"gemini cli"`, or `"openai codex"`. Defaults to `"claude code"` if None.
+
+**Note:** ImproverAgent uses KISSCodingAgent internally for agent improvement.
 
 ### Methods
 
 #### `improve()`
 
 ```python
-async def improve(
+def improve(
     self,
     source_folder: str,
     target_folder: str,
+    task_description: str,
     report_path: str | None = None,
-    base_dir: str | None = None,
+    feedback: str = "",
 ) -> tuple[bool, ImprovementReport | None]
 ```
 
@@ -1409,8 +1382,9 @@ Improve an agent's code to reduce token usage and execution time.
 
 - `source_folder` (str): Path to the folder containing the agent's source code.
 - `target_folder` (str): Path where the improved agent will be written.
+- `task_description` (str): Description of the task the agent should perform.
 - `report_path` (str | None): Optional path to a previous improvement report.
-- `base_dir` (str | None): Working directory for the coding agent.
+- `feedback` (str): Optional feedback to guide the improvement. Default is "".
 
 **Returns:**
 
@@ -1419,13 +1393,15 @@ Improve an agent's code to reduce token usage and execution time.
 #### `crossover_improve()`
 
 ```python
-async def crossover_improve(
+def crossover_improve(
     self,
     primary_folder: str,
     primary_report_path: str,
     secondary_report_path: str,
+    primary_feedback: str,
+    secondary_feedback: str,
     target_folder: str,
-    base_dir: str | None = None,
+    task_description: str,
 ) -> tuple[bool, ImprovementReport | None]
 ```
 
@@ -1436,8 +1412,10 @@ Improve an agent by combining ideas from two variants.
 - `primary_folder` (str): Path to the primary variant's source code.
 - `primary_report_path` (str): Path to the primary variant's improvement report.
 - `secondary_report_path` (str): Path to the secondary variant's improvement report.
+- `primary_feedback` (str): Feedback from the primary variant.
+- `secondary_feedback` (str): Feedback from the secondary variant.
 - `target_folder` (str): Path where the improved agent will be written.
-- `base_dir` (str | None): Working directory for the coding agent.
+- `task_description` (str): Description of the task the agent should perform.
 
 **Returns:**
 
@@ -1446,22 +1424,19 @@ Improve an agent by combining ideas from two variants.
 ### Example
 
 ```python
-import anyio
 from kiss.agents.agent_creator import ImproverAgent
 
-async def main():
-    improver = ImproverAgent(model_name="claude-sonnet-4-5")
+improver = ImproverAgent(max_steps=150, max_budget=15.0)
 
-    success, report = await improver.improve(
-        source_folder="/path/to/original/agent",
-        target_folder="/path/to/improved/agent",
-    )
+success, report = improver.improve(
+    source_folder="/path/to/original/agent",
+    target_folder="/path/to/improved/agent",
+    task_description="Build a code analysis assistant that reviews Python files",
+)
 
-    if success and report:
-        print(f"Improvement completed in {report.improved_time:.2f}s")
-        print(f"Tokens used: {report.improved_tokens}")
-
-anyio.run(main)
+if success and report:
+    print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
+    print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
 ```
 
 ______________________________________________________________________
