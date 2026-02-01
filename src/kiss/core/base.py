@@ -26,7 +26,7 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 yaml.add_representer(str, _str_presenter)
 
 
-DEFAULT_SYSTEM_PROMPT = """
+CODING_INSTRUCTIONS = """
 ## Code Style Guidelines
 - Write simple, readable code with minimal indirection
 - Avoid unnecessary object attributes and local variables

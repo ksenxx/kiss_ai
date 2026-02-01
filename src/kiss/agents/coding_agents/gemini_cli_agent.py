@@ -17,7 +17,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
@@ -266,7 +266,7 @@ class GeminiCliAgent(Base):
             agent = Agent(
                 model=model_name,
                 name=self.name,
-                instruction=DEFAULT_SYSTEM_PROMPT,
+                instruction=CODING_INSTRUCTIONS,
                 description="An expert Python programmer that writes clean, simple, robust code.",
                 tools=tools,
             )

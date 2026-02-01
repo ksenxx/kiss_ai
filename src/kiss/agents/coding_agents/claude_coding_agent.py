@@ -26,7 +26,7 @@ from claude_agent_sdk import (
 )
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.utils import is_subpath, resolve_path
 
@@ -179,7 +179,7 @@ class ClaudeCodingAgent(Base):
         async def _run_async() -> str | None:
             options = ClaudeAgentOptions(
                 model=model_name,
-                system_prompt=DEFAULT_SYSTEM_PROMPT,
+                system_prompt=CODING_INSTRUCTIONS,
                 can_use_tool=self.permission_handler,
                 permission_mode="default",
                 allowed_tools=BUILTIN_TOOLS,

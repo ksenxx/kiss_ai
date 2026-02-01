@@ -14,7 +14,7 @@ from agents import Agent, Runner, function_tool
 from agents.tool import WebSearchTool
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
@@ -186,7 +186,7 @@ class OpenAICodexAgent(Base):
 
             agent = Agent(
                 name=self.name,
-                instructions=DEFAULT_SYSTEM_PROMPT,
+                instructions=CODING_INSTRUCTIONS,
                 model=model_name,
                 tools=self._create_tools(),
             )

@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from kiss.agents.kiss import dynamic_gepa_agent
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
@@ -250,7 +250,7 @@ class KISSCodingAgent(Base):
                     "context": subtask.context,
                     "task_description": self.task_description,
                     "max_steps": str(self.max_steps),
-                    "coding_instructions": DEFAULT_SYSTEM_PROMPT,
+                    "coding_instructions": CODING_INSTRUCTIONS,
                 },
                 tools=[
                     finish,
