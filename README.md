@@ -218,16 +218,14 @@ Each agent can use a different model. Each agent has its own budget. Each agent 
 
 ### Using Agent Creator and Optimizer
 
-> 📖 **For detailed Agent Creator documentation, see [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md)**
+> 📖 **For detailed Agent Creator and Optimizer documentation, see [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md)**
 
-The Agent Creator module provides tools to automatically evolve and optimize AI agents for **token efficiency** and **execution speed** using evolutionary algorithms with Pareto frontier maintenance.
+The Agent Creator module provides tools to automatically evolve and optimize AI agents for **token efficiency**, **execution speed**, and **cost** using evolutionary algorithms with Pareto frontier maintenance.
 
-**Key Components:**
+**Key Component:**
+ - **AgentEvolver**: Maintains a population of agent variants and evolves them using mutation and crossover operations
 
-- **ImproverAgent**: Takes existing agent source code and creates optimized versions through iterative improvement
-- **AgentEvolver**: Maintains a population of agent variants and evolves them using mutation and crossover operations
-
-Both components use a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
+It uses a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
 
 ```python
 from kiss.agents.create_and_optimize_agent import AgentEvolver
@@ -247,7 +245,7 @@ print(f"Metrics: {best_variant.metrics}")
 
 **Key Features:**
 
-- **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time)
+- **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time, cost)
 - **Pareto Frontier Maintenance**: Keeps track of all non-dominated solutions
 - **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
 - **Uses KISSCodingAgent**: Leverages the multi-agent coding system for agent improvement
@@ -286,7 +284,7 @@ For usage examples, API reference, and configuration options, please see the [Ag
 
 > 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
-KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
+KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
 
 For usage examples, API reference, and configuration options, please see the [GEPA README](src/kiss/agents/gepa/README.md).
 
@@ -315,11 +313,12 @@ result = agent.run(
         that is efficient and correct.
     """,
     orchestrator_model_name="claude-sonnet-4-5",  # Model for orchestration and execution
-    dynamic_gepa_model_name="claude-sonnet-4-5",  # Model for prompt refinement on failures
+    subtasker_model_name="claude-opus-4-5"
+    dynamic_gepa_model_name="claude-haiku-4-5",  # Model for prompt refinement on failures
     readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
     writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
     base_dir=".",  # Base working directory (project root)
-    max_steps=50,  # Maximum steps per agent
+    max_steps=100,  # Maximum steps per agent
     trials=3  # Number of retry attempts
 )
 print(f"Result: {result}")
@@ -353,11 +352,11 @@ print(f"Result: {result}")
 - **Efficient Orchestration**: Manages execution through smart task delegation
 - **Bash Command Parsing**: Automatically extracts readable/writable directories from bash commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
-- **Recursive Sub-tasks**: Agents can call `perform_subtask()` to further decompose work
 - **Docker Support**: Optional Docker container execution via the `docker_image` parameter for isolated bash command execution
 
 ### Using Claude Coding Agent
 
+Since everyone loves Claude Code, I thought I will provide API access to Claude Code so that you can use the best coding agent.
 The Claude Coding Agent uses the Claude Agent SDK to generate tested Python programs with file system access controls:
 
 ```python
@@ -455,7 +454,7 @@ tags = get_all_arvo_tags("n132/arvo")
 
 # Find vulnerabilities in a specific Docker image
 result = find_vulnerability(
-    model_name="gemini-2.5-flash",
+    model_name="gemini-3-pro-preview",
     image_name="n132/arvo:tag-name",
     num_trials=10,  # Number of attempts to find a vulnerability
     location="/src"  # Location of the source code in the container
