@@ -104,6 +104,36 @@ Unlike other agentic systems, you do not need to specify the output schema for t
 a suitable "finish" function with parameters. The parameters could be treated as the top level keys
 in a json format.
 
+**Example: Custom Structured Output**
+
+```python
+from kiss.core.kiss_agent import KISSAgent
+
+# Define a custom finish function with your desired output structure
+def finish(
+    sentiment: str,
+    confidence: float,
+    key_phrases: str,
+    summary: str
+) -> str:
+    """
+    Complete the analysis with structured results.
+    
+    Args:
+        sentiment: The overall sentiment ('positive', 'negative', or 'neutral')
+        confidence: Confidence score between 0.0 and 1.0
+        key_phrases: Comma-separated list of key phrases found in the text
+        summary: A brief summary of the analysis
+    
+    Returns:
+        The formatted analysis result
+    """
+    ...
+
+```
+
+The agent will automatically use your custom `finish` function instead of the default one. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
+
 ### KISSAgent API Reference
 
 > 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
@@ -260,7 +290,6 @@ Configuration values can be passed directly to constructors or accessed via `DEF
 ```python
 from kiss.core.config import DEFAULT_CONFIG
 
-# Access create_and_optimize_agent config defaults
 cfg = DEFAULT_CONFIG.create_and_optimize_agent
 
 # View default settings
@@ -268,8 +297,6 @@ print(f"Default max_steps: {cfg.improver.max_steps}")  # 50
 print(f"Default max_budget: {cfg.improver.max_budget}")  # 15.0
 print(f"Default max_generations: {cfg.evolver.max_generations}")  # 10
 
-# Override settings by passing to constructors
-improver = ImproverAgent(max_steps=150, max_budget=20.0)
 evolver = AgentEvolver(
     task_description="...",
     max_generations=20,
