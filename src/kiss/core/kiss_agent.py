@@ -16,7 +16,7 @@ from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.simple_formatter import SimpleFormatter
-from kiss.core.utils import search_web
+from kiss.core.useful_tools import fetch_url, search_web
 
 
 class KISSAgent(Base):
@@ -137,7 +137,8 @@ class KISSAgent(Base):
 
         if "finish" not in tool_names:
             tools.append(self.finish)
-        if DEFAULT_CONFIG.agent.use_web_search and "search_web" not in tool_names:
+        if DEFAULT_CONFIG.agent.use_web and "search_web" not in tool_names:
+            tools.append(fetch_url)
             tools.append(search_web)
 
         self._add_functions(tools)

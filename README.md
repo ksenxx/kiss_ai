@@ -654,8 +654,8 @@ kiss/
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
-│   │   ├── utils.py           # Utility functions (finish, search_web, resolve_path, is_subpath, etc.)
-│   │   ├── useful_tools.py    # UsefulTools class with path-restricted bash execution
+│   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
+│   │   ├── useful_tools.py    # UsefulTools class with path-restricted bash execution, search_web, fetch_url
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface
 │   │       ├── gemini_model.py    # Gemini model implementation
@@ -726,7 +726,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `debug`: Enable debug mode (default: False)
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
-  - `use_web_search`: Automatically add web search tool if enabled (default: True)
+  - `use_web`: Automatically add web browsing and search tool if enabled (default: True)
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.kiss_coding_agent`:
   - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-sonnet-4-5")

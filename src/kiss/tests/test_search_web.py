@@ -1,6 +1,6 @@
 # Author: Koushik Sen (ksen@berkeley.edu)
 
-"""Test suite for web search functionality in utils.py.
+"""Test suite for web search functionality in useful_tools.py.
 
 These tests make actual network calls to search engines and external websites.
 Uses Playwright headless browser to render JavaScript-heavy pages.
@@ -14,7 +14,7 @@ import unittest
 
 import pytest
 
-from kiss.core.utils import _fetch_page_content, search_web
+from kiss.core.useful_tools import fetch_url, search_web
 
 
 def _search_is_blocked(result: str) -> bool:
@@ -34,7 +34,7 @@ class TestFetchPageContent(unittest.TestCase):
                 "Chrome/120.0.0.0 Safari/537.36"
             )
         }
-        result = _fetch_page_content("https://example.com", headers)
+        result = fetch_url("https://example.com", headers)
 
         # example.com has minimal content
         self.assertIn("Example Domain", result)
@@ -44,7 +44,7 @@ class TestFetchPageContent(unittest.TestCase):
     def test_fetch_page_content_invalid_url(self) -> None:
         """Test handling of invalid/unreachable URL."""
         headers = {"User-Agent": "Test Agent"}
-        result = _fetch_page_content("https://this-domain-does-not-exist-12345.com", headers)
+        result = fetch_url("https://this-domain-does-not-exist-12345.com", headers)
 
         self.assertIn("Failed to fetch content", result)
 
@@ -58,7 +58,7 @@ class TestFetchPageContent(unittest.TestCase):
             )
         }
         # Fetch with very small max length to test truncation
-        result = _fetch_page_content("https://example.com", headers, max_content_length=50)
+        result = fetch_url("https://example.com", headers, max_content_length=50)
 
         self.assertLessEqual(len(result), 70)  # 50 + "... [truncated]"
         self.assertIn("[truncated]", result)

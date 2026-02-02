@@ -61,7 +61,7 @@ class AgentConfig(BaseModel):
     global_max_budget: float = Field(
         default=200.0, description="Maximum budget for the global agent"
     )
-    use_web_search: bool = Field(default=True, description="Use web search")
+    use_web: bool = Field(default=True, description="Use web browsing and search")
     kiss_coding_agent: "KISSCodingAgentConfig" = Field(
         default_factory=lambda: KISSCodingAgentConfig(),
         description="Configuration for KISS Coding Agent",

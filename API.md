@@ -68,7 +68,7 @@ Runs the agent's main ReAct loop to solve the task.
 - `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-2.5-flash", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "openrouter/anthropic/claude-3.5-sonnet")
 - `prompt_template` (str): The prompt template for the agent. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web_search` is enabled in config, `search_web` is also automatically added. Default is None.
+- `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web` is enabled in config, `search_web` and `fetch_url` is also automatically added. Default is None.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
 - `is_agentic` (bool): If True, runs in agentic mode with tools. If False, returns raw LLM response. Default is True.
 - `max_steps` (int): Maximum number of ReAct loop iterations. Default is 100.
@@ -1536,6 +1536,94 @@ output = tools.Bash("cat /etc/passwd", "Read system file")
 # Returns: "Error: Access denied for reading /etc/passwd"
 ```
 
+### Module-level Functions
+
+The `kiss.core.useful_tools` module also provides these standalone functions:
+
+#### `fetch_url()`
+
+```python
+def fetch_url(url: str, headers: dict[str, str], max_content_length: int = 10000) -> str
+```
+
+Fetch and extract text content from a URL using BeautifulSoup.
+
+**Parameters:**
+
+- `url` (str): The URL to fetch.
+- `headers` (dict[str, str]): HTTP headers to use for the request.
+- `max_content_length` (int): Maximum length of content to return. Default is 10000.
+
+**Returns:**
+
+- `str`: Extracted text content from the page, or an error message if fetch failed.
+
+#### `search_web()`
+
+```python
+def search_web(query: str, max_results: int = 10) -> str
+```
+
+Perform a web search and return the top search results with page contents.
+
+Tries DuckDuckGo first (more reliable for automated access), then falls back to Startpage if needed. Uses Playwright headless browser with Safari/WebKit to render JavaScript and avoid bot detection.
+
+**Parameters:**
+
+- `query` (str): The search query.
+- `max_results` (int): Maximum number of results to fetch content for. Default is 10.
+
+**Returns:**
+
+- `str`: A string containing titles, links, and page contents of the top search results.
+
+#### `parse_bash_command_paths()`
+
+```python
+def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
+```
+
+Parse a bash command to extract readable and writable directory paths.
+
+This function analyzes bash commands to intelligently determine which directories are being read from and which are being written to. It handles:
+
+- Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
+- Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
+- Output redirection: >, >>, &>, 2>, etc.
+- Pipe chains with multiple commands
+- Flags and arguments parsing
+- Special commands like tee (reads stdin and writes to file)
+
+**Parameters:**
+
+- `command` (str): The bash command to parse.
+
+**Returns:**
+
+- `tuple[list[str], list[str]]`: A tuple of (readable_dirs, writable_dirs) where each is a sorted list of directory paths.
+
+**Example:**
+
+```python
+from kiss.core.useful_tools import parse_bash_command_paths
+
+# Reading and writing
+readable, writable = parse_bash_command_paths("cat input.txt > output.txt")
+# readable: ['input.txt'], writable: ['output.txt']
+
+# Complex command with pipes
+readable, writable = parse_bash_command_paths("grep 'pattern' src/*.py | tee results.txt")
+# readable: ['src/'], writable: ['results.txt']
+
+# Copy operations
+readable, writable = parse_bash_command_paths("cp -r src/ dest/")
+# readable: ['src/'], writable: ['dest/']
+```
+
+**Note:**
+
+This function is used internally by `UsefulTools.Bash()` and `KISSCodingAgent.run_bash_command()` to automatically determine which paths need read/write permissions before executing bash commands.
+
 ______________________________________________________________________
 
 ## Utility Functions
@@ -1751,70 +1839,6 @@ Read a file from the project root. Compatible with installations packaged as .wh
 
 - `str`: The file's contents.
 
-### `search_web()`
-
-```python
-def search_web(query: str, max_results: int = 5) -> str
-```
-
-Perform a web search and return the top search results with page contents.
-
-**Parameters:**
-
-- `query` (str): The search query.
-- `max_results` (int): Maximum number of results to fetch content for. Default is 5.
-
-**Returns:**
-
-- `str`: A string containing titles, links, and page contents of the top search results.
-
-### `parse_bash_command_paths()`
-
-```python
-def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
-```
-
-Parse a bash command to extract readable and writable directory paths.
-
-This function analyzes bash commands to intelligently determine which directories are being read from and which are being written to. It handles:
-
-- Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
-- Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
-- Output redirection: >, >>, &>, 2>, etc.
-- Pipe chains with multiple commands
-- Flags and arguments parsing
-- Special commands like tee (reads stdin and writes to file)
-
-**Parameters:**
-
-- `command` (str): The bash command to parse.
-
-**Returns:**
-
-- `tuple[list[str], list[str]]`: A tuple of (readable_dirs, writable_dirs) where each is a sorted list of directory paths.
-
-**Example:**
-
-```python
-from kiss.core.useful_tools import parse_bash_command_paths
-
-# Reading and writing
-readable, writable = parse_bash_command_paths("cat input.txt > output.txt")
-# readable: ['input.txt'], writable: ['output.txt']
-
-# Complex command with pipes
-readable, writable = parse_bash_command_paths("grep 'pattern' src/*.py | tee results.txt")
-# readable: ['src/'], writable: ['results.txt']
-
-# Copy operations
-readable, writable = parse_bash_command_paths("cp -r src/ dest/")
-# readable: ['src/'], writable: ['dest/']
-```
-
-**Note:**
-
-This function is defined in `kiss.core.useful_tools` and is used internally by `UsefulTools.Bash()` and `KISSCodingAgent.run_bash_command()` to automatically determine which paths need read/write permissions before executing bash commands.
-
 ______________________________________________________________________
 
 ## SimpleFormatter
@@ -1953,7 +1977,7 @@ DEFAULT_CONFIG.agent.max_steps = 100
 DEFAULT_CONFIG.agent.max_agent_budget = 10.0
 DEFAULT_CONFIG.agent.global_max_budget = 200.0
 DEFAULT_CONFIG.agent.verbose = True
-DEFAULT_CONFIG.agent.use_web_search = True
+DEFAULT_CONFIG.agent.use_web = True
 ```
 
 ### Configuration Sections
@@ -1972,7 +1996,7 @@ DEFAULT_CONFIG.agent.use_web_search = True
 - `max_agent_budget` (float): Maximum budget per agent in USD (default: 10.0)
 - `global_max_budget` (float): Global budget limit in USD (default: 200.0)
 - `verbose` (bool): Enable verbose output (default: True)
-- `use_web_search` (bool): Enable web search tool (default: True)
+- `use_web` (bool): Enable web search tool (default: True)
 - `debug` (bool): Enable debug mode (default: False)
 - `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
 
