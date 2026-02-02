@@ -198,7 +198,7 @@ for iteration in range(max_iterations):
         # Get the trajectory to understand what went wrong
         trajectory = coding_agent.get_trajectory()
         
-        # Use the Prompt Refiner agent to improve our prompt
+        # Use the Dynamic GEPA Refiner agent to improve our prompt
         print("🔄 Refining prompt based on failure...")
         current_prompt = dynamic_gepa_agent(
             original_prompt_template=original_prompt,
@@ -283,28 +283,6 @@ print(f"Metrics: {best_variant.metrics}")
 - **Lineage Tracking**: Records parent relationships and improvement history
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
 
-**Configuration:**
-
-Configuration values can be passed directly to constructors or accessed via `DEFAULT_CONFIG`:
-
-```python
-from kiss.core.config import DEFAULT_CONFIG
-
-cfg = DEFAULT_CONFIG.create_and_optimize_agent
-
-# View default settings
-print(f"Default max_steps: {cfg.improver.max_steps}")  # 50
-print(f"Default max_budget: {cfg.improver.max_budget}")  # 15.0
-print(f"Default max_generations: {cfg.evolver.max_generations}")  # 10
-
-evolver = AgentEvolver(
-    task_description="...",
-    max_generations=20,
-    max_frontier_size=8,
-    mutation_probability=0.9,
-)
-```
-
 For usage examples, API reference, and configuration options, please see the [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md).
 
 ### Using GEPA for Prompt Optimization
@@ -323,7 +301,7 @@ KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
-### Using KISS Coding Agent
+### Using KISS Coding Agent: The Relentless Coding Agent
 
 The KISS Coding Agent is a multi-agent system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks:
 
@@ -340,7 +318,7 @@ result = agent.run(
         that is efficient and correct.
     """,
     orchestrator_model_name="claude-sonnet-4-5",  # Model for orchestration and execution
-    subtasker_model_name="claude-opus-4-5"
+    subtasker_model_name="claude-opus-4-5"  # Model for subtasker agents
     dynamic_gepa_model_name="claude-haiku-4-5",  # Model for prompt refinement on failures
     readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
     writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
@@ -595,7 +573,7 @@ from kiss.agents.kiss import run_bash_task_in_sandboxed_ubuntu_latest
 
 result = run_bash_task_in_sandboxed_ubuntu_latest(
     task="Install and configure nginx",
-    model_name="gemini-2.5-flash"
+    model_name="gemini-3-pro-preview"
 )
 ```
 
@@ -734,7 +712,7 @@ print(f"KISS version: {__version__}")
 To update the version, simply edit `src/kiss/_version.py`:
 
 ```python
-__version__ = "0.2.0"  # Update to new version
+__version__ = "0.1.0"  # Update to new version
 ```
 
 ## Configuration
@@ -763,9 +741,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `population_size`: Number of candidates to maintain in population (default: 8)
   - `pareto_size`: Maximum size of Pareto frontier (default: 4)
   - `mutation_rate`: Probability of mutating a prompt template (default: 0.5)
-- **AlgoTune Settings**: Modify `DEFAULT_CONFIG.algotune` in `src/kiss/agents/kiss_evolve/algotune/config.py`:
-  - `task`: Specific task name to solve (default: "matrix_multiplication")
-  - `all_tasks`: Solve all tasks in AlgoTuneTasks directory (default: False)
 
 ## Available Commands
 
@@ -793,6 +768,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run ruff format src/` - Format code with ruff (line-length: 100, target: py313)
 - `uv run ruff check src/` - Lint code with ruff (selects: E, F, W, I, N, UP)
 - `uv run mypy src/` - Type check with mypy (python_version: 3.13)
+- `uv run pyright src/` - Type check with pyright (alternative to mypy, stricter checking)
 
 ### Utilities
 
