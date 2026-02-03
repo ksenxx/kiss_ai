@@ -263,14 +263,14 @@ It uses a **Pareto frontier** approach to track non-dominated solutions, optimiz
 ```python
 from kiss.agents.create_and_optimize_agent import AgentEvolver
 
-evolver = AgentEvolver(
+evolver = AgentEvolver()
+
+best_variant = evolver.evolve(
     task_description="Build a code analysis assistant that can parse and analyze large codebases",
     max_generations=10,
     max_frontier_size=6,
     mutation_probability=0.8,
 )
-
-best_variant = evolver.evolve()
 
 print(f"Best agent: {best_variant.folder_path}")
 print(f"Metrics: {best_variant.metrics}")
@@ -680,15 +680,22 @@ kiss/
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_kissevolve_bubblesort.py
 │   │   ├── test_gepa_squad.py
+│   │   ├── test_gepa_hotpotqa.py
+│   │   ├── test_gepa_improvement.py
+│   │   ├── test_gepa_integration.py
 │   │   ├── test_docker_manager.py
 │   │   ├── test_models_quick.py   # Quick tests for models based on ModelInfo capabilities
+│   │   ├── test_model_config.py
+│   │   ├── test_a_model.py
 │   │   ├── run_all_models_test.py # Comprehensive tests for all models
 │   │   ├── test_multiprocess.py
 │   │   ├── test_internal.py
 │   │   ├── test_claude_coding_agent.py  # Tests for Claude Coding Agent
 │   │   ├── test_gemini_cli_agent.py     # Tests for Gemini CLI Agent
 │   │   ├── test_openai_codex_agent.py   # Tests for OpenAI Codex Agent
-│   │   └── test_agent_creator.py        # Tests for Agent Creator
+│   │   ├── test_agent_evolver.py        # Tests for Agent Evolver
+│   │   ├── test_search_web.py
+│   │   └── test_useful_tools.py
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
 │       ├── README.md                    # Trajectory visualizer documentation
@@ -774,6 +781,14 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run ruff check src/` - Lint code with ruff (selects: E, F, W, I, N, UP)
 - `uv run mypy src/` - Type check with mypy (python_version: 3.13)
 - `uv run pyright src/` - Type check with pyright (alternative to mypy, stricter checking)
+
+### Notebook
+
+- `uv run notebook --test` - Test all imports and basic functionality
+- `uv run notebook --lab` - Open the tutorial notebook in JupyterLab (recommended)
+- `uv run notebook --run` - Open the tutorial notebook in Jupyter Notebook
+- `uv run notebook --execute` - Execute notebook cells and update outputs in place
+- `uv run notebook --convert` - Convert notebook to Python script
 
 ### Cleanup
 
