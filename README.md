@@ -1,12 +1,14 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.7
+**Version:** 0.1.7 
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
 ______________________________________________________________________
+
+KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software egineering principle.
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
