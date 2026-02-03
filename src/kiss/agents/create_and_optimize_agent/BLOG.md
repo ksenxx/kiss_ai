@@ -1,10 +1,12 @@
+
+
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fua0wd1uhu227x18ohpz.jpeg)
 
 **What if your AI agents could evolve themselves—getting smarter, faster, and cheaper with each generation?**
 
 We're witnessing a Cambrian explosion in AI agent development. Teams are building increasingly sophisticated multi-agent systems, but they're hitting a wall: as agents grow more capable, they also grow more expensive. Token costs spiral. Latency compounds. What started as a clever automation becomes a budget-draining behemoth.
 
-Enter [**Agent Evolver**](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/create_and_optimize_agent)—a system that breeds better AI agents through genetic evolution, optimizing for the two metrics that matter most: **cost and speed**. It is built using the [KISS](https://github.com/ksenxx/kiss_ai/) framework.
+Enter [**Agent Evolver**](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/create_and_optimize_agent)—a system that breeds better AI agents through genetic evolution, optimizing for the two metrics that matter most: **cost and speed**.  It is built using the [KISS](https://github.com/ksenxx/kiss_ai/) framework.
 
 ## The Problem with Prompt Engineering
 
@@ -13,7 +15,6 @@ Let's be honest: prompt engineering has become the modern equivalent of hand-tun
 But here's the dirty secret: **prompt optimization only scratches the surface**.
 
 Your agent's efficiency isn't just about the words in your prompts. It's about:
-
 - How your orchestrator delegates to sub-agents
 - When you batch operations vs. run them sequentially
 - Which tools you create dynamically vs. hardcode
@@ -53,7 +54,6 @@ Each generation, Agent Evolver applies two evolutionary operations:
 Here's where it gets interesting. Agent Evolver doesn't optimize for a single metric—it maintains a **Pareto frontier** of non-dominated solutions.
 
 What does that mean? Consider two agents:
-
 - Agent A: 5,000 tokens, 10 seconds
 - Agent B: 3,000 tokens, 15 seconds
 
@@ -67,13 +67,15 @@ The system uses crowding distance to maintain diversity—ensuring that even whe
 
 This is what separates Agent Evolver from tools like prompt tuning frameworks. Those systems optimize your prompts while leaving your code untouched. Agent Evolver optimizes **everything**:
 
-| Traditional Prompt Optimization | Agent Evolver |
-|--------------------------------|---------------|
-| Tunes prompt text | Optimizes prompts AND code |
-| Single objective (accuracy) | Multi-objective (cost + speed) |
-| Static architecture | Evolves architecture |
-| Manual iteration | Automated generations |
-| Local improvements | Global search via genetics |
+-------------------------------------------------------------------
+| Traditional Prompt Optimization | Agent Evolver                 |
+|--------------------------------|--------------------------------|
+| Tunes prompt text              | Optimizes prompts AND code     |
+| Single objective (accuracy)    | Multi-objective (cost + speed) |
+| Static architecture            | Evolves architecture           |
+| Manual iteration               | Automated generations          |
+| Local improvements             | Global search via genetics     |
+-------------------------------------------------------------------
 
 When the improver agent analyzes your code, it's not just looking at strings. It's understanding your control flow, identifying redundant API calls, spotting opportunities for parallelization, and restructuring your agent delegation hierarchy.
 
@@ -82,56 +84,44 @@ When the improver agent analyzes your code, it's not just looking at strings. It
 Under the hood, Agent Evolver is elegantly simple:
 
 ```
-┌───────────────────────────────────────────────────┐
-│                 Task Description                  │
-└─────────────────────────┬─────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────────────────┐
-│            Initial Agent Creation                 │
-│   (Claude Code / Gemini CLI / OpenAI Codex)       │
-│       + Web Search for Best Practices             │
-└─────────────────────────┬─────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────────────────┐
-│                Evolution Loop              ◄──┐   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │  Mutation (80%)   │   Crossover (20%)   │  │   │
-│  │  Single parent    │   Two parents       │  │   │
-│  │  Targeted changes │   Combine best ideas│  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      ▼                        │   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │             Evaluation                  │  │   │
-│  │  Measure: tokens_used, execution_time   │  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      ▼                        │   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │       Pareto Frontier Update            │  │   │
-│  │    Keep non-dominated solutions         │  │   │
-│  │    Trim using crowding distance         │  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      └── More generations? ───┘   │
-└─────────────────────────┬─────────────────────────┘
-                          │ Done
-                          ▼
-┌───────────────────────────────────────────────────┐
-│             Optimal Agent Output                  │
-│        Best trade-off on Pareto frontier          │
-└───────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                           Task Description                                               │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│            Initial Agent Creation (KISS Coding Agent) + Web Search for Best Practices                    │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                          Evolution Loop                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────◄──┐   │
+│  │    Mutation (80%): Single parent, Targeted changes   │   Crossover (20%): Two parents, Combine │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  ▼                                                   │   │ 
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐  │   │
+│  │                         Evaluation: Measure tokens_used, execution_time                        │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  ▼                                                   │   │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐  │   │
+│  │            Pareto Frontier Update: Keep non-dominated solutions, Trim by crowding distance     │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  └───────────────── More generations? ───────────────┘   │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │ Done
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                            Optimal Agent Output: Best trade-off on Pareto frontier                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Each generation, the system:
-
 1. Samples from the Pareto frontier
-1. Applies mutation or crossover
-1. Evaluates the offspring
-1. Updates the frontier with any non-dominated variants
-1. Copies the current best to an `optimal_agent` directory
+2. Applies mutation or crossover
+3. Evaluates the offspring
+4. Updates the frontier with any non-dominated variants
+5. Copies the current best to an `optimal_agent` directory
 
 The best agent is always available—even while evolution continues.
 
@@ -174,7 +164,7 @@ The best part? Every generation of evolution incorporates the latest public know
 
 Stop tuning prompts. Start evolving agents.
 
-______________________________________________________________________
+---
 
 *Agent Evolver is part of the KISS (Keep It Simple, Stupid) agent framework. It's open-source, production-ready, and waiting for your most ambitious multi-agent challenges.*
 
