@@ -17,8 +17,10 @@ from pathlib import Path
 from kiss.agents.coding_agents.gemini_cli_agent import DEFAULT_GEMINI_MODEL, GeminiCliAgent
 from kiss.core import DEFAULT_CONFIG
 from kiss.core.utils import is_subpath, resolve_path
+from kiss.tests.conftest import requires_gemini_api_key
 
 
+@requires_gemini_api_key
 class TestGeminiCliAgentPermissions(unittest.TestCase):
     """Tests for GeminiCliAgent permission handling."""
 
@@ -129,6 +131,7 @@ class TestGeminiCliAgentPermissions(unittest.TestCase):
         self.assertTrue(new_dir.exists())
 
 
+@requires_gemini_api_key
 class TestGeminiCliAgentTools(unittest.TestCase):
     """Tests for GeminiCliAgent tool functions."""
 
@@ -231,6 +234,7 @@ class TestGeminiCliAgentTools(unittest.TestCase):
         self.assertEqual(result["exit_code"], 1)
 
 
+@requires_gemini_api_key
 class TestGeminiCliAgentRun(unittest.TestCase):
     """Integration tests for GeminiCliAgent.run() method.
 

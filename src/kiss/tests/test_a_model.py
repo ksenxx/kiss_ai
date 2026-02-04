@@ -16,7 +16,7 @@ import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.rag.simple_rag import SimpleRAG
-from kiss.tests.conftest import DEFAULT_MODEL, simple_calculator
+from kiss.tests.conftest import DEFAULT_MODEL, simple_calculator, skip_if_no_api_key_for_model
 
 TEST_TIMEOUT = 60
 
@@ -49,6 +49,7 @@ class TestAModel(unittest.TestCase):
         Returns:
             None
         """
+        skip_if_no_api_key_for_model(self.model_name)
         agent = KISSAgent(f"Test Agent for {self.model_name}")
         result = agent.run(
             model_name=self.model_name,
@@ -72,6 +73,7 @@ class TestAModel(unittest.TestCase):
         Returns:
             None
         """
+        skip_if_no_api_key_for_model(self.model_name)
         agent = KISSAgent(f"Test Agent for {self.model_name}")
         result = agent.run(
             model_name=self.model_name,
@@ -100,6 +102,7 @@ class TestAModel(unittest.TestCase):
         Returns:
             None
         """
+        skip_if_no_api_key_for_model(self.model_name)
 
         # Test that embedding works with SimpleRAG using this model
         from kiss.core.models.model_info import MODEL_INFO

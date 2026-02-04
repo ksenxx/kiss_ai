@@ -9,6 +9,7 @@ import kiss.core.utils as utils
 from kiss.agents.gepa import GEPA
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.tests.conftest import has_openai_api_key
 
 
 def run_gepa_improvement_test():
@@ -255,4 +256,7 @@ Do something with it."""
 
 
 if __name__ == "__main__":
-    run_gepa_improvement_test()
+    if not has_openai_api_key():
+        print("Skipping test: OPENAI_API_KEY is not set")
+    else:
+        run_gepa_improvement_test()

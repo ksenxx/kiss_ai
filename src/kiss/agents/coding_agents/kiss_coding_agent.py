@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from kiss.agents.kiss import dynamic_gepa_agent
+from kiss.agents.kiss import prompt_refiner_agent
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.compact_formatter import CompactFormatter
 from kiss.core.config import DEFAULT_CONFIG
@@ -133,7 +133,7 @@ class KISSCodingAgent(Base):
         self,
         orchestrator_model_name: str,
         subtasker_model_name: str,
-        dynamic_gepa_model_name: str,
+        refiner_model_name: str,
         trials: int,
         max_steps: int,
         max_budget: float,
@@ -148,7 +148,7 @@ class KISSCodingAgent(Base):
         Args:
             orchestrator_model_name: The model name for the orchestrator agent.
             subtasker_model_name: The model name for subtask execution.
-            dynamic_gepa_model_name: The model name for prompt refinement.
+            refiner_model_name: The model name for prompt refinement.
             trials: Number of retry attempts for failed tasks.
             max_steps: Maximum steps per agent execution.
             max_budget: Maximum budget in USD.
@@ -173,11 +173,11 @@ class KISSCodingAgent(Base):
         self.max_budget = max_budget
         self.orchestrator_model_name = orchestrator_model_name
         self.subtasker_model_name = subtasker_model_name
-        self.dynamic_gepa_model_name = dynamic_gepa_model_name
+        self.refiner_model_name = refiner_model_name
         self.max_tokens = max(
             get_max_context_length(orchestrator_model_name),
             get_max_context_length(subtasker_model_name),
-            get_max_context_length(dynamic_gepa_model_name),
+            get_max_context_length(refiner_model_name),
         )
 
         self.budget_used: float = 0.0
@@ -246,11 +246,11 @@ class KISSCodingAgent(Base):
             success = ret.get("success", False)
             if not success:
                 self.formatter.print_error("Task failed, refining prompt and retrying...")
-                task_prompt_template = dynamic_gepa_agent(
+                task_prompt_template = prompt_refiner_agent(
                     original_prompt_template=ORCHESTRATOR_PROMPT,
                     previous_prompt_template=task_prompt_template,
                     agent_trajectory_summary=result,
-                    model_name=self.dynamic_gepa_model_name,
+                    model_name=self.refiner_model_name,
                 )
                 continue
             return result
@@ -312,11 +312,11 @@ class KISSCodingAgent(Base):
                 self.formatter.print_error(
                     f"Subtask {subtask.name} failed, refining prompt and retrying..."
                 )
-                task_prompt_template = dynamic_gepa_agent(
+                task_prompt_template = prompt_refiner_agent(
                     original_prompt_template=TASKING_PROMPT,
                     previous_prompt_template=task_prompt_template,
                     agent_trajectory_summary=result,
-                    model_name=self.dynamic_gepa_model_name,
+                    model_name=self.refiner_model_name,
                 )
                 continue
             return result
@@ -330,8 +330,8 @@ class KISSCodingAgent(Base):
             DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name
         ),
         subtasker_model_name: str = (DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name),
-        dynamic_gepa_model_name: str = (
-            DEFAULT_CONFIG.agent.kiss_coding_agent.dynamic_gepa_model_name
+        refiner_model_name: str = (
+            DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name
         ),
         trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
         max_steps: int = DEFAULT_CONFIG.agent.max_steps,
@@ -348,7 +348,7 @@ class KISSCodingAgent(Base):
         Args:
             orchestrator_model_name: The name of the orchestrator model to use.
             subtasker_model_name: The name of the subtasker model to use.
-            dynamic_gepa_model_name: The name of the dynamic_gepa model to use.
+            refiner_model_name: The name of the dynamic_gepa model to use.
             trials: The number of trials to attempt for each subtask.
             prompt_template: The prompt template for the task.
             arguments: The arguments for the task.
@@ -371,7 +371,7 @@ class KISSCodingAgent(Base):
         self._reset(
             orchestrator_model_name,
             subtasker_model_name,
-            dynamic_gepa_model_name,
+            refiner_model_name,
             trials,
             max_steps,
             max_budget,

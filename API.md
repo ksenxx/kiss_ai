@@ -11,6 +11,7 @@ For a high-level overview and quick start guide, see [README.md](README.md).
 ## Table of Contents
 
 - [KISSAgent](#kissagent) - Core agent class with function calling
+- [RelentlessCodingAgent](#relentlesscodingagent) - Relentless multi-agent coding system
 - [KISSCodingAgent](#kisscodingagent) - Multi-agent coding system with planning and orchestration
 - [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
 - [GeminiCliAgent](#geminicliagent) - Google ADK-based coding agent
@@ -153,13 +154,217 @@ The framework automatically extracts the function signature, type hints, and doc
 
 ______________________________________________________________________
 
+## RelentlessCodingAgent
+
+A relentless coding agent that uses a multi-agent architecture to solve tasks. It implements a multi-agent architecture with:
+
+- **Orchestrator Agent**: Manages overall task execution and keeps steps below configured limits
+- **Executor Sub-agents**: Handle specific sub-tasks efficiently
+- **Token Optimization**: Uses smaller models for simple tasks
+
+The agent continues attempting tasks through multiple trials until success or exhaustion of retry attempts.
+
+### Constructor
+
+```python
+RelentlessCodingAgent(name: str)
+```
+
+**Parameters:**
+
+- `name` (str): Name of the agent. Used for identification and artifact naming.
+
+### SubTask Class
+
+```python
+class SubTask:
+    def __init__(self, name: str, description: str) -> None
+```
+
+Represents a sub-task in the multi-agent coding system.
+
+**Attributes:**
+
+- `id` (int): Unique identifier for this sub-task (auto-incremented)
+- `name` (str): Name of the sub-task
+- `description` (str): Detailed description of what needs to be done
+
+### Methods
+
+#### `run()`
+
+```python
+def run(
+    self,
+    prompt_template: str,
+    arguments: dict[str, str] | None = None,
+    orchestrator_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name,
+    subtasker_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
+    trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
+    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
+    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+    work_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
+    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
+    readable_paths: list[str] | None = None,
+    writable_paths: list[str] | None = None,
+    docker_image: str | None = None,
+    formatter: Formatter | None = None,
+) -> str
+```
+
+Run the multi-agent coding system with orchestration and sub-task delegation.
+
+**Parameters:**
+
+- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
+- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
+- `orchestrator_model_name` (str): Model for the main orchestrator agent. Default is from config (claude-sonnet-4-5).
+- `subtasker_model_name` (str): Model for executor agents handling sub-tasks. Default is from config (claude-opus-4-5).
+- `trials` (int): Number of retry attempts for each task/subtask. Default is 200.
+- `max_steps` (int): Maximum number of steps per agent. Default is from config.
+- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
+- `work_dir` (str): The working directory for the agent's operations.
+- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access.
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access.
+- `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
+- `formatter` (Formatter | None): Custom formatter for output. Default is `CompactFormatter`.
+
+**Returns:**
+
+- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
+
+#### `perform_task()`
+
+```python
+def perform_task(self) -> str
+```
+
+Execute the main task using the orchestrator agent. The orchestrator can delegate work by calling `perform_subtask()` as needed.
+
+**Returns:**
+
+- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
+
+**Raises:**
+
+- `KISSError`: If the task fails after all continuation trials.
+
+#### `perform_subtask()`
+
+```python
+def perform_subtask(
+    self,
+    subtask_name: str,
+    description: str,
+) -> str
+```
+
+Execute a sub-task using a dedicated executor agent (using `subtasker_model_name`). Can be called by the orchestrator.
+
+**Parameters:**
+
+- `subtask_name` (str): Name of the sub-task for identification.
+- `description` (str): Detailed description of what needs to be done.
+
+**Returns:**
+
+- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
+
+**Raises:**
+
+- `KISSError`: If the subtask fails after all retry trials.
+
+### Instance Attributes (after `run()`)
+
+- `id` (int): Unique identifier for this agent instance.
+- `name` (str): The agent's name.
+- `orchestrator_model_name` (str): Model name for orchestrator agent.
+- `subtasker_model_name` (str): Model name for executor agents handling sub-tasks.
+- `task_description` (str): The formatted task description.
+- `total_tokens_used` (int): Total tokens used across all agents in this run.
+- `budget_used` (float): Total budget used across all agents in this run.
+- `work_dir` (str): The working directory for the agent's operations.
+- `base_dir` (str): The base directory for the agent's working files.
+- `readable_paths` (list[Path]): List of paths the agent can read from.
+- `writable_paths` (list[Path]): List of paths the agent can write to.
+- `max_steps` (int): Maximum number of steps per agent.
+- `max_budget` (float): Maximum total budget allowed for this run.
+- `trials` (int): Number of continuations attempts for each task/subtask.
+- `max_tokens` (int): Maximum context length across all models used.
+- `docker_image` (str | None): The Docker image name if Docker execution is enabled.
+- `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
+
+### Key Features
+
+- **Multi-Agent Architecture**: Orchestrator (using `orchestrator_model_name`) delegates to executor agents (using `subtasker_model_name`)
+- **Relentless Retries**: Continues attempting tasks through multiple coninuation attempts until success
+- **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
+- **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
+- **Path Access Control**: Enforces read/write permissions on file system paths before command execution
+- **Docker Support**: Optional Docker container execution for bash commands via the `docker_image` parameter. When enabled, all bash commands from sub-agents run inside an isolated Docker container.
+- **Built-in Tools**:
+  - Orchestrator agent has access to `finish()` and `perform_subtask()`
+  - Executor agents have access to `finish()`, `Bash` (or Docker bash when `docker_image` is set), `Edit`, and `MultiEdit`
+
+### Example
+
+```python
+from kiss.agents.coding_agents import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent("My Relentless Agent")
+
+result = agent.run(
+    prompt_template="""
+        Write, test, and optimize a fibonacci function in Python
+        that is efficient and correct. Save it to fibonacci.py.
+    """,
+    orchestrator_model_name="claude-sonnet-4-5",
+    subtasker_model_name="claude-opus-4-5",
+    readable_paths=["src/"],
+    writable_paths=["output/"],
+    base_dir="workdir",
+    max_steps=50,
+    trials=3
+)
+print(f"Result: {result}")
+
+# Result is YAML with 'success' and 'summary' keys
+import yaml
+result_dict = yaml.safe_load(result)
+print(f"Success: {result_dict['success']}")
+print(f"Summary: {result_dict['summary']}")
+```
+
+### Example with Docker
+
+```python
+from kiss.agents.coding_agents import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent("Docker Relentless Agent")
+
+# Run with Docker - bash commands execute inside the container
+result = agent.run(
+    prompt_template="""
+        Install numpy and write a Python script that creates 
+        a random matrix and computes its eigenvalues.
+    """,
+    docker_image="python:3.11-slim",  # Commands run in Docker
+    max_steps=50,
+    trials=2
+)
+print(f"Result: {result}")
+```
+
+______________________________________________________________________
+
 ## KISSCodingAgent
 
 A multi-agent coding system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks through a multi-agent architecture with:
 
 - **Orchestrator Agent**: Manages overall task execution and delegates to sub-tasks
 - **Executor Agents**: Handle specific sub-tasks independently
-- **Dynamic GEPA**: Automatically refines prompts on failures using trajectory analysis for improved retry attempts
+- **Prompt Refinement**: Automatically refines prompts on failures using trajectory analysis for improved retry attempts
 
 The system supports recursive sub-task delegation where any agent can call `perform_subtask()` to further decompose work.
 
@@ -199,7 +404,7 @@ def run(
     arguments: dict[str, str] | None = None,
     orchestrator_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name,
     subtasker_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
-    dynamic_gepa_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.dynamic_gepa_model_name,
+    refiner_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name,
     trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
@@ -220,7 +425,7 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `orchestrator_model_name` (str): Model for the main orchestrator agent. Default is from config (claude-sonnet-4-5).
 - `subtasker_model_name` (str): Model for executor agents handling sub-tasks. Default is from config (claude-opus-4-5).
-- `dynamic_gepa_model_name` (str): Model for dynamic prompt refinement when tasks fail. Default is from config (claude-sonnet-4-5).
+- `refiner_model_name` (str): Model for dynamic prompt refinement when tasks fail. Default is from config (claude-sonnet-4-5).
 - `trials` (int): Number of retry attempts for each task/subtask. Default is 3.
 - `max_steps` (int): Maximum number of steps per agent. Default is from config.
 - `max_budget` (float): Maximum budget in USD for this run. Default is from config.
@@ -286,7 +491,7 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 - `name` (str): The agent's name.
 - `orchestrator_model_name` (str): Model name for orchestrator agent.
 - `subtasker_model_name` (str): Model name for executor agents handling sub-tasks.
-- `dynamic_gepa_model_name` (str): Model name for dynamic prompt refinement.
+- `refiner_model_name` (str): Model name for dynamic prompt refinement.
 - `task_description` (str): The formatted task description.
 - `total_tokens_used` (int): Total tokens used across all agents in this run.
 - `budget_used` (float): Total budget used across all agents in this run.
@@ -305,9 +510,9 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 ### Key Features
 
 - **Multi-Agent Architecture**: Orchestrator (using `orchestrator_model_name`) delegates to executor agents (using `subtasker_model_name`);
-- **Dynamic GEPA (Genetic-Pareto) Refinement**:
+- **Prompt Refinement**:
   - Automatically refines prompts when tasks fail using trajectory analysis
-  - Uses dynamic_gepa_model_name (default: claude-sonnet-4-5) for non-agentic prompt improvement
+  - Uses refiner_model_name (default: claude-sonnet-4-5) for non-agentic prompt improvement
   - Analyzes original prompt, previous prompt, and agent trajectory to generate refined prompts
   - Retries tasks with refined prompts up to `trials` times
 - **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
@@ -331,7 +536,7 @@ result = agent.run(
         that is efficient and correct. Save it to fibonacci.py.
     """,
     orchestrator_model_name="claude-sonnet-4-5",
-    dynamic_gepa_model_name="claude-sonnet-4-5",
+    refiner_model_name="claude-sonnet-4-5",
     readable_paths=["src/"],
     writable_paths=["output/"],
     base_dir="workdir",
@@ -2101,7 +2306,7 @@ DEFAULT_CONFIG.agent.use_web = True
 
 - `orchestrator_model_name` (str): Model for main orchestration and executor agents (default: "claude-sonnet-4-5")
 - `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-5")
-- `dynamic_gepa_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
+- `refiner_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
 - `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 50)
 - `max_budget` (float): Maximum budget in USD for the KISS Coding Agent (default: 100.0)
 - `trials` (int): Retry attempts per task/subtask (default: 3)
@@ -2120,10 +2325,10 @@ ______________________________________________________________________
 
 Ready-to-use agent functions from `kiss.agents.kiss`.
 
-### `dynamic_gepa_agent()`
+### `prompt_refiner_agent()`
 
 ```python
-def dynamic_gepa_agent(
+def prompt_refiner_agent(
     original_prompt_template: str,
     previous_prompt_template: str,
     agent_trajectory_summary: str,
@@ -2131,7 +2336,7 @@ def dynamic_gepa_agent(
 ) -> str
 ```
 
-Dynamic GEPA: Refines the prompt template based on the agent's trajectory summary.
+Refines the prompt template based on the agent's trajectory summary.
 
 **Parameters:**
 

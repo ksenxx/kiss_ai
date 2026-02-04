@@ -16,6 +16,7 @@ from kiss.evals.hotpotqa.hotpotqa_benchmark import (
     compute_f1,
     normalize_answer,
 )
+from kiss.tests.conftest import requires_openai_api_key
 
 
 class TestHotPotQAEvaluation(unittest.TestCase):
@@ -146,6 +147,7 @@ result: "{example.answer}"
         self.assertEqual(scores["exact_match"], 1.0)
 
 
+@requires_openai_api_key
 class TestGEPAHotPotQA(unittest.TestCase):
     """Test GEPA optimization on HotPotQA."""
 

@@ -14,7 +14,7 @@ import unittest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.tests.conftest import simple_calculator
+from kiss.tests.conftest import requires_gemini_api_key, simple_calculator
 
 # Test model - using a reliable model for agentic tool calling
 TEST_MODEL = "gemini-3-flash-preview"
@@ -41,6 +41,7 @@ def always_fails() -> str:
     raise ValueError("This function always fails!")
 
 
+@requires_gemini_api_key
 class TestKISSAgentBasic(unittest.TestCase):
     """Basic KISSAgent tests."""
 
@@ -146,6 +147,7 @@ class TestKISSAgentBasic(unittest.TestCase):
         self.assertIn("model", roles)
 
 
+@requires_gemini_api_key
 class TestKISSAgentMultipleTools(unittest.TestCase):
     """Tests for agents with multiple tools."""
 
@@ -185,6 +187,7 @@ class TestKISSAgentMultipleTools(unittest.TestCase):
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
 
+@requires_gemini_api_key
 class TestKISSAgentErrorHandling(unittest.TestCase):
     """Tests for error handling scenarios."""
 
@@ -243,6 +246,7 @@ class TestKISSAgentErrorHandling(unittest.TestCase):
         self.assertIn("already registered", str(context.exception))
 
 
+@requires_gemini_api_key
 class TestKISSAgentBudgetAndSteps(unittest.TestCase):
     """Tests for budget and step limit functionality."""
 
@@ -316,6 +320,7 @@ class TestKISSAgentBudgetAndSteps(unittest.TestCase):
             self.assertIn("exceeded", str(e).lower())
 
 
+@requires_gemini_api_key
 class TestKISSAgentFinishTool(unittest.TestCase):
     """Tests for the built-in finish tool."""
 
@@ -380,6 +385,7 @@ class TestKISSAgentFinishTool(unittest.TestCase):
         self.assertEqual(len(json.loads(self.agent.get_trajectory())), 3)
 
 
+@requires_gemini_api_key
 class TestKISSAgentMultipleRuns(unittest.TestCase):
     """Tests for running the same agent multiple times."""
 
@@ -427,6 +433,7 @@ class TestKISSAgentMultipleRuns(unittest.TestCase):
         self.assertIn("4 + 4", trajectory2_str)
 
 
+@requires_gemini_api_key
 class TestKISSAgentToolVariants(unittest.TestCase):
     """Tests for tools with various parameter and return types."""
 
@@ -553,6 +560,7 @@ class TestKISSAgentToolVariants(unittest.TestCase):
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
 
+@requires_gemini_api_key
 class TestKISSAgentPromptFormats(unittest.TestCase):
     """Tests for various prompt template formats."""
 
@@ -618,6 +626,7 @@ Only return the number.""",
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
 
+@requires_gemini_api_key
 class TestKISSAgentVerboseMode(unittest.TestCase):
     """Tests for verbose mode."""
 

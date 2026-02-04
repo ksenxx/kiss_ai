@@ -20,6 +20,7 @@ from kiss.scripts.kissevolve_bubblesort import (
     evaluate_correctness_of_code,
     evaluate_performance_of_code,
 )
+from kiss.tests.conftest import requires_gemini_api_key
 
 
 class TestEvaluateCorrectnessOfCode(unittest.TestCase):
@@ -302,6 +303,7 @@ class TestInitialCode(unittest.TestCase):
         self.assertIn("arr[j] > arr[j + 1]", INITIAL_CODE)
 
 
+@requires_gemini_api_key
 class TestKISSEvolveIntegration(unittest.TestCase):
     """Integration tests for KISSEvolve with sorting algorithms using real LLM."""
 

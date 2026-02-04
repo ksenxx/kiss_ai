@@ -10,6 +10,7 @@ import unittest
 import kiss.core.utils as utils
 from kiss.agents.gepa import GEPA, PromptCandidate
 from kiss.core.kiss_agent import KISSAgent
+from kiss.tests.conftest import requires_openai_api_key
 
 
 def create_agent_wrapper_with_expected(model_name: str = "gpt-4o"):
@@ -93,6 +94,7 @@ def create_evaluation_fn():
     return evaluation_fn
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeBasic(unittest.TestCase):
     """Test basic GEPA optimization functionality."""
 
@@ -211,6 +213,7 @@ Call finish with status='success' and result=<answer>."""
         self.assertGreater(call_counter[0], 0)
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeWithMutation(unittest.TestCase):
     """Test GEPA optimization with mutation/reflection enabled."""
 
@@ -297,6 +300,7 @@ class TestGEPAOptimizeWithMutation(unittest.TestCase):
         print(f"Pareto frontier size: {len(gepa.get_pareto_frontier())}")
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeParetoFrontier(unittest.TestCase):
     """Test GEPA Pareto frontier management through optimize."""
 
@@ -380,6 +384,7 @@ class TestGEPAOptimizeParetoFrontier(unittest.TestCase):
         self.assertLessEqual(len(gepa.pareto_frontier), pareto_size)
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeWithMerge(unittest.TestCase):
     """Test GEPA optimization with merge functionality."""
 
@@ -461,6 +466,7 @@ class TestGEPAOptimizeWithMerge(unittest.TestCase):
         self.assertEqual(gepa._merge_invocations, 0)
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeGetters(unittest.TestCase):
     """Test GEPA getter methods after optimization."""
 
@@ -542,6 +548,7 @@ class TestGEPAOptimizeGetters(unittest.TestCase):
         self.assertEqual(len(gepa.pareto_frontier), original_len)
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeMultiplePlaceholders(unittest.TestCase):
     """Test GEPA with prompts containing multiple placeholders."""
 
@@ -635,6 +642,7 @@ Answer using the finish tool."""
         self.assertIn("{input}", best.prompt_template)
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeScoring(unittest.TestCase):
     """Test GEPA scoring behavior through optimization."""
 
@@ -716,6 +724,7 @@ class TestGEPAOptimizeScoring(unittest.TestCase):
         # With perfect scores, optimization should complete successfully
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeEdgeCases(unittest.TestCase):
     """Test GEPA optimization edge cases."""
 
@@ -830,6 +839,7 @@ class TestGEPAOptimizeEdgeCases(unittest.TestCase):
         self.assertTrue(found or best.prompt_template == initial_prompt)
 
 
+@requires_openai_api_key
 class TestGEPAOptimizeUseBestPrompt(unittest.TestCase):
     """Test using the optimized prompt with an agent."""
 

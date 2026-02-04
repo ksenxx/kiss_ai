@@ -1,6 +1,6 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.8
+**Version:** 0.1.9
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
@@ -57,7 +57,7 @@ KISS uses **native function calling** from the LLM providers. Your Python functi
 KISS is a lightweight agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
 
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
-- **Multi-Agent Coding System**: KISSCodingAgent with orchestration, sub-agent management, and dynamic GEPA prompt refinement
+- **Multi-Agent Coding System**: KISSCodingAgent with orchestration, sub-agent management, and automatic prompt refinement
 - **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
@@ -116,6 +116,9 @@ uv sync --group gemini    # Core + Google Gemini
 # Claude Coding Agent (includes claude-agent-sdk)
 uv sync --group claude-coding-agent
 
+# Docker support (for running agents in isolated containers)
+uv sync --group docker
+
 # Evals dependencies (for running benchmarks)
 uv sync --group evals
 
@@ -135,6 +138,7 @@ uv sync --group claude --group dev
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
 | `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk |
+| `docker` | Docker integration | docker, types-docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter |
 
@@ -186,7 +190,7 @@ KISS includes utility agents that work beautifully together. Let's build a **sel
 
 ```python
 from kiss.core.kiss_agent import KISSAgent
-from kiss.agents.kiss import dynamic_gepa_agent
+from kiss.agents.kiss import prompt_refiner_agent
 
 # Step 1: Define a test function for our coding task
 def test_fibonacci(code: str) -> bool:
@@ -238,9 +242,9 @@ for iteration in range(max_iterations):
         # Get the trajectory to understand what went wrong
         trajectory = coding_agent.get_trajectory()
         
-        # Use the Dynamic GEPA Refiner agent to improve our prompt
+        # Use the Prompt Refiner agent to improve our prompt
         print("🔄 Refining prompt based on failure...")
-        current_prompt = dynamic_gepa_agent(
+        current_prompt = prompt_refiner_agent(
             original_prompt_template=original_prompt,
             previous_prompt_template=current_prompt,
             agent_trajectory_summary=trajectory,
@@ -252,7 +256,7 @@ for iteration in range(max_iterations):
 **What's happening here?**
 
 1. **Coding Agent** [KISSAgent](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/kiss_agent.py): Generates code and validates it against test cases using the provided test function as a tool
-1. **Dynamic GEPA Agent** ['dynamic_gepa_agent'](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and evolves the prompt based on the agent's trajectory
+1. **Prompt Refiner Agent** [`prompt_refiner_agent`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and refines the prompt based on the agent's trajectory
 1. **Orchestration**: A simple Python loop (not to be confused with the ReAct loop) coordinates the agents
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
@@ -342,9 +346,64 @@ KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
-### Using KISS Coding Agent: The Relentless Coding Agent
+### Using RelentlessCodingAgent
 
-The KISS Coding Agent is a multi-agent system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks:
+For very very long running tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task:
+
+```python
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent(name="Simple Coding Agent")
+
+result = agent.run(
+    prompt_template="""
+        Create a Python script that reads a CSV file,
+        filters rows where age > 18, and writes to a new file.
+    """,
+    orchestrator_model_name="gpt-4o",
+    subtasker_model_name="gpt-4o-mini",
+    work_dir="./workspace",
+    max_steps=200,
+    trials=200
+)
+print(f"Result: {result}")
+```
+
+**Running with Docker:**
+
+You can optionally run bash commands inside a Docker container for isolation:
+
+```python
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent(name="Dockered Relenetless Coding Agent")
+
+result = agent.run(
+    prompt_template="""
+        Install numpy and create a script that generates 
+        a random matrix and computes its determinant.
+    """,
+    docker_image="python:3.11-slim",  # Bash commands run in Docker
+    max_steps=200,
+    trials=2000
+)
+print(f"Result: {result}")
+```
+
+**Key Features:**
+
+- **Multi-Agent Architecture**: Orchestrator delegates tasks to executor sub-agents for parallel task handling
+- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, allowing seamless task handoff with context preservation
+- **Retry with Context**: Failed tasks automatically retry with previous summary appended to the prompt
+- **Configurable Trials**: Set high trial counts (e.g., 200+) for truly relentless execution
+- **Docker Support**: Optional isolated execution via Docker containers
+- **Path Access Control**: Enforces read/write permissions on file system paths
+- **Built-in Tools**: Bash, Edit, and MultiEdit tools for file operations
+- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-agents
+
+### Using KISS Coding Agent
+
+The KISS Coding Agent is a multi-agent system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks and includes automatic prompt refinement on failures:
 
 ```python
 from kiss.agents.coding_agents import KISSCodingAgent
@@ -360,7 +419,7 @@ result = agent.run(
     """,
     orchestrator_model_name="claude-sonnet-4-5",  # Model for orchestration and execution
     subtasker_model_name="claude-opus-4-5"  # Model for subtasker agents
-    dynamic_gepa_model_name="claude-haiku-4-5",  # Model for prompt refinement on failures
+    refiner_model_name="claude-haiku-4-5",  # Model for prompt refinement on failures
     readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
     writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
     base_dir=".",  # Base working directory (project root)
@@ -370,31 +429,10 @@ result = agent.run(
 print(f"Result: {result}")
 ```
 
-**Running with Docker:**
-
-You can optionally run bash commands inside a Docker container for isolation:
-
-```python
-from kiss.agents.coding_agents import KISSCodingAgent
-
-agent = KISSCodingAgent(name="Docker Coding Agent")
-
-result = agent.run(
-    prompt_template="""
-        Install numpy and create a script that generates 
-        a random matrix and computes its determinant.
-    """,
-    docker_image="python:3.11-slim",  # Bash commands run in Docker
-    max_steps=50,
-    trials=2
-)
-print(f"Result: {result}")
-```
-
 **Key Features:**
 
 - **Multi-Agent Architecture**: Orchestrator delegates to executor agents for specific sub-tasks
-- **Dynamic GEPA Refinement**: Automatically refines prompts when tasks fail using trajectory analysis
+- **Prompt Refinement**: Automatically refines prompts when tasks fail using trajectory analysis (KISSCodingAgent)
 - **Efficient Orchestration**: Manages execution through smart task delegation
 - **Bash Command Parsing**: Automatically extracts readable/writable directories from bash commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
@@ -594,12 +632,12 @@ rag.clear_collection()
 
 The framework includes pre-built utility agents for common tasks:
 
-**Dynamic GEPA Agent:**
+**Prompt Refiner Agent:**
 
 ```python
-from kiss.agents.kiss import dynamic_gepa_agent
+from kiss.agents.kiss import prompt_refiner_agent
 
-refined_prompt = dynamic_gepa_agent(
+refined_prompt = prompt_refiner_agent(
     original_prompt_template="Original prompt...",
     previous_prompt_template="Previous version...",
     agent_trajectory_summary=agent.get_trajectory(),  # Returns JSON string
@@ -672,10 +710,11 @@ kiss/
 │   │   │   ├── config.py           # KISSEvolve configuration
 │   │   │   └── README.md           # KISSEvolve documentation
 │   │   ├── coding_agents/          # Coding agents for software development tasks
-│   │   │   ├── kiss_coding_agent.py   # Multi-agent coding system with orchestration
-│   │   │   ├── claude_coding_agent.py # Claude Coding Agent using Claude Agent SDK
-│   │   │   ├── gemini_cli_agent.py    # Gemini CLI Agent using Google ADK
-│   │   │   └── openai_codex_agent.py  # OpenAI Codex Agent using OpenAI Agents SDK
+│   │   │   ├── kiss_coding_agent.py       # Multi-agent coding system with orchestration
+│   │   │   ├── relentless_coding_agent.py # Simplified multi-agent system without prompt refinement
+│   │   │   ├── claude_coding_agent.py     # Claude Coding Agent using Claude Agent SDK
+│   │   │   ├── gemini_cli_agent.py        # Gemini CLI Agent using Google ADK
+│   │   │   └── openai_codex_agent.py      # OpenAI Codex Agent using OpenAI Agents SDK
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
 │   │   │   ├── agent_evolver.py       # Agent evolution logic
 │   │   │   ├── multi_agent.py         # Multi-agent orchestration
@@ -789,7 +828,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.kiss_coding_agent`:
   - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-sonnet-4-5")
   - `subtasker_model_name`: Reserved for future use (default: "claude-opus-4-5")
-  - `dynamic_gepa_model_name`: Model for prompt refinement on failures (default: "claude-sonnet-4-5")
+  - `refiner_model_name`: Model for prompt refinement on failures (default: "claude-sonnet-4-5")
   - `trials`: Number of retry attempts per task/subtask (default: 3)
   - `max_steps`: Maximum steps per agent (default: 50)
   - `max_budget`: Maximum budget in USD (default: 100.0)

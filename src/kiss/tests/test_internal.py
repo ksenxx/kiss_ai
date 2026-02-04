@@ -310,6 +310,186 @@ class TestConfigBuilder(unittest.TestCase):
         self.assertEqual(result_values["value"], "custom")
         self.assertEqual(result_values["number"], 42)
 
+    def test_cli_args_with_dashes(self):
+        """Test that CLI arguments work with both dash and underscore styles.
+
+        Verifies that field names with underscores can be specified on the CLI
+        using either dashes (e.g., --test.my-field) or underscores (--test.my_field).
+
+        Returns:
+            None. Uses assertions to verify both argument styles work.
+        """
+        import sys
+
+        from pydantic import BaseModel, Field
+
+        from kiss.core import config as config_module
+        from kiss.core.config_builder import add_config
+
+        class TestConfig(BaseModel):
+            my_value: int = Field(default=10, description="A test value")
+            another_field: str = Field(default="default", description="Another field")
+
+        original_config = config_module.DEFAULT_CONFIG
+        original_argv = sys.argv
+
+        try:
+            # Test dash-style arguments
+            sys.argv = ["test", "--test.my-value", "42", "--test.another-field", "hello"]
+            add_config("test", TestConfig)
+            self.assertEqual(config_module.DEFAULT_CONFIG.test.my_value, 42)
+            self.assertEqual(config_module.DEFAULT_CONFIG.test.another_field, "hello")
+
+            # Reset and test underscore-style arguments
+            config_module.DEFAULT_CONFIG = original_config
+            sys.argv = ["test", "--test.my_value", "99", "--test.another_field", "world"]
+            add_config("test", TestConfig)
+            self.assertEqual(config_module.DEFAULT_CONFIG.test.my_value, 99)
+            self.assertEqual(config_module.DEFAULT_CONFIG.test.another_field, "world")
+        finally:
+            sys.argv = original_argv
+            config_module.DEFAULT_CONFIG = original_config
+
+    def test_cli_args_nested_with_dashes(self):
+        """Test that nested CLI arguments work with dash-style naming.
+
+        Verifies that deeply nested field names with underscores can be specified
+        using dashes on the CLI (e.g., --outer.inner-config.deep-value).
+
+        Returns:
+            None. Uses assertions to verify nested argument parsing.
+        """
+        import sys
+
+        from pydantic import BaseModel, Field
+
+        from kiss.core import config as config_module
+        from kiss.core.config_builder import add_config
+
+        class InnerConfig(BaseModel):
+            deep_value: int = Field(default=5, description="Deep value")
+
+        class OuterConfig(BaseModel):
+            inner_config: InnerConfig = Field(default_factory=InnerConfig)
+            outer_value: str = Field(default="outer", description="Outer value")
+
+        original_config = config_module.DEFAULT_CONFIG
+        original_argv = sys.argv
+
+        try:
+            # Test dash-style for nested config
+            sys.argv = [
+                "test",
+                "--outer.inner-config.deep-value",
+                "100",
+                "--outer.outer-value",
+                "changed",
+            ]
+            add_config("outer", OuterConfig)
+            self.assertEqual(config_module.DEFAULT_CONFIG.outer.inner_config.deep_value, 100)
+            self.assertEqual(config_module.DEFAULT_CONFIG.outer.outer_value, "changed")
+        finally:
+            sys.argv = original_argv
+            config_module.DEFAULT_CONFIG = original_config
+
+    def test_cli_args_triple_nested_with_dashes(self):
+        """Test that triple-nested CLI arguments work with dash-style naming.
+
+        Verifies that three levels of nested field names with underscores can be
+        specified using dashes on the CLI (e.g., --level1.level2-config.level3-config.deep-value).
+
+        Returns:
+            None. Uses assertions to verify triple-nested argument parsing.
+        """
+        import sys
+
+        from pydantic import BaseModel, Field
+
+        from kiss.core import config as config_module
+        from kiss.core.config_builder import add_config
+
+        class Level3Config(BaseModel):
+            deep_value: int = Field(default=1, description="Deep value")
+            deep_name: str = Field(default="deep", description="Deep name")
+
+        class Level2Config(BaseModel):
+            level3_config: Level3Config = Field(default_factory=Level3Config)
+            mid_value: int = Field(default=2, description="Mid value")
+
+        class Level1Config(BaseModel):
+            level2_config: Level2Config = Field(default_factory=Level2Config)
+            top_value: str = Field(default="top", description="Top value")
+
+        original_config = config_module.DEFAULT_CONFIG
+        original_argv = sys.argv
+
+        try:
+            # Test dash-style for triple-nested config
+            sys.argv = [
+                "test",
+                "--level1.level2-config.level3-config.deep-value",
+                "999",
+                "--level1.level2-config.level3-config.deep-name",
+                "very-deep",
+                "--level1.level2-config.mid-value",
+                "50",
+                "--level1.top-value",
+                "changed-top",
+            ]
+            add_config("level1", Level1Config)
+            self.assertEqual(
+                config_module.DEFAULT_CONFIG.level1.level2_config.level3_config.deep_value, 999
+            )
+            self.assertEqual(
+                config_module.DEFAULT_CONFIG.level1.level2_config.level3_config.deep_name,
+                "very-deep",
+            )
+            self.assertEqual(config_module.DEFAULT_CONFIG.level1.level2_config.mid_value, 50)
+            self.assertEqual(config_module.DEFAULT_CONFIG.level1.top_value, "changed-top")
+        finally:
+            sys.argv = original_argv
+            config_module.DEFAULT_CONFIG = original_config
+
+    def test_cli_bool_args_with_dashes(self):
+        """Test that boolean CLI arguments work with dash-style naming.
+
+        Verifies that boolean flags with underscores can be toggled using
+        dash-style CLI args (e.g., --test.my-flag, --no-test.my-flag).
+
+        Returns:
+            None. Uses assertions to verify boolean flag handling.
+        """
+        import sys
+
+        from pydantic import BaseModel, Field
+
+        from kiss.core import config as config_module
+        from kiss.core.config_builder import add_config
+
+        class TestConfig(BaseModel):
+            my_flag: bool = Field(default=True, description="A boolean flag")
+            another_flag: bool = Field(default=False, description="Another flag")
+
+        original_config = config_module.DEFAULT_CONFIG
+        original_argv = sys.argv
+
+        try:
+            # Test disabling with dash-style --no-
+            sys.argv = ["test", "--no-test.my-flag", "--test.another-flag"]
+            add_config("test", TestConfig)
+            self.assertFalse(config_module.DEFAULT_CONFIG.test.my_flag)
+            self.assertTrue(config_module.DEFAULT_CONFIG.test.another_flag)
+
+            # Reset and test with underscore-style
+            config_module.DEFAULT_CONFIG = original_config
+            sys.argv = ["test", "--no-test.my_flag", "--test.another_flag"]
+            add_config("test", TestConfig)
+            self.assertFalse(config_module.DEFAULT_CONFIG.test.my_flag)
+            self.assertTrue(config_module.DEFAULT_CONFIG.test.another_flag)
+        finally:
+            sys.argv = original_argv
+            config_module.DEFAULT_CONFIG = original_config
+
 
 if __name__ == "__main__":
     unittest.main()

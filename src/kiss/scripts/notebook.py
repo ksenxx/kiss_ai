@@ -159,8 +159,8 @@ def test_imports() -> bool:
     # Test 10: Useful agents
     try:
         from kiss.agents.kiss import (  # noqa: F401
-            dynamic_gepa_agent,
             get_run_simple_coding_agent,
+            prompt_refiner_agent,
             run_bash_task_in_sandboxed_ubuntu_latest,
         )
 

@@ -13,8 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-import kiss.evals.algotune.config  # noqa: F401
 import kiss.agents.kiss_evolve.config  # noqa: F401
+import kiss.evals.algotune.config  # noqa: F401
 from kiss.agents.kiss import get_run_simple_coding_agent
 from kiss.agents.kiss_evolve.kiss_evolve import KISSEvolve
 from kiss.core.config import DEFAULT_CONFIG

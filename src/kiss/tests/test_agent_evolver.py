@@ -366,7 +366,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
         agent._reset(
             orchestrator_model_name="gpt-4o-mini",
             subtasker_model_name="gpt-4o-mini",
-            dynamic_gepa_model_name="gpt-4o-mini",
+            refiner_model_name="gpt-4o-mini",
             trials=1,
             max_steps=10,
             max_budget=1.0,
@@ -402,7 +402,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
         agent._reset(
             orchestrator_model_name="gpt-4o-mini",
             subtasker_model_name="gpt-4o-mini",
-            dynamic_gepa_model_name="gpt-4o-mini",
+            refiner_model_name="gpt-4o-mini",
             trials=1,
             max_steps=10,
             max_budget=1.0,
@@ -447,7 +447,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
         agent._reset(
             orchestrator_model_name="gpt-4o-mini",
             subtasker_model_name="gpt-4o-mini",
-            dynamic_gepa_model_name="gpt-4o-mini",
+            refiner_model_name="gpt-4o-mini",
             trials=1,
             max_steps=10,
             max_budget=1.0,

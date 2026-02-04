@@ -17,8 +17,10 @@ from pathlib import Path
 from kiss.agents.coding_agents.openai_codex_agent import OpenAICodexAgent
 from kiss.core import DEFAULT_CONFIG
 from kiss.core.utils import is_subpath, resolve_path
+from kiss.tests.conftest import requires_openai_api_key
 
 
+@requires_openai_api_key
 class TestOpenAICodexAgentPermissions(unittest.TestCase):
     """Tests for OpenAICodexAgent permission handling."""
 
@@ -126,6 +128,7 @@ class TestOpenAICodexAgentPermissions(unittest.TestCase):
         self.assertTrue(new_dir.exists())
 
 
+@requires_openai_api_key
 class TestOpenAICodexAgentRun(unittest.TestCase):
     """Integration tests for OpenAICodexAgent.run() method.
 

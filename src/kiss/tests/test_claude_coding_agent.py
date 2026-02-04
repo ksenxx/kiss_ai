@@ -18,8 +18,10 @@ from pathlib import Path
 from kiss.agents.coding_agents.claude_coding_agent import ClaudeCodingAgent
 from kiss.core import DEFAULT_CONFIG
 from kiss.core.utils import is_subpath
+from kiss.tests.conftest import requires_anthropic_api_key
 
 
+@requires_anthropic_api_key
 class TestClaudeCodingAgentPermissions(unittest.TestCase):
     """Tests for ClaudeCodingAgent permission handling."""
 
@@ -246,6 +248,7 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultDeny)
 
 
+@requires_anthropic_api_key
 class TestClaudeCodingAgentRun(unittest.TestCase):
     """Integration tests for ClaudeCodingAgent.run() method.
 

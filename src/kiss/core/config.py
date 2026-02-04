@@ -72,6 +72,29 @@ class AgentConfig(BaseModel):
     )
 
 
+class RelentlessCodingAgentConfig(BaseModel):
+    orchestrator_model_name: str = Field(
+        default="claude-sonnet-4-5",
+        description="LLM model to use for Relentless Coding Agent",
+    )
+    subtasker_model_name: str = Field(
+        default="claude-opus-4-5",
+        description="LLM model to use for subtask generation and execution",
+    )
+    max_steps: int = Field(
+        default=200,
+        description="Maximum steps for the Relentless Coding Agent",
+    )
+    max_budget: float = Field(
+        default=200.0,
+        description="Maximum budget in USD for the Relentless Coding Agent",
+    )
+    trials: int = Field(
+        default=200,
+        description="Number of trials for failed subtasks",
+    )
+
+
 class KISSCodingAgentConfig(BaseModel):
     orchestrator_model_name: str = Field(
         default="claude-sonnet-4-5",
@@ -81,12 +104,12 @@ class KISSCodingAgentConfig(BaseModel):
         default="claude-opus-4-5",
         description="LLM model to use for subtask generation and execution",
     )
-    dynamic_gepa_model_name: str = Field(
+    refiner_model_name: str = Field(
         default="claude-sonnet-4-5",
         description="LLM model to use for prompt refinement of failed tasks",
     )
     max_steps: int = Field(
-        default=50,
+        default=200,
         description="Maximum steps for the KISS Coding Agent",
     )
     max_budget: float = Field(
@@ -94,7 +117,7 @@ class KISSCodingAgentConfig(BaseModel):
         description="Maximum budget in USD for the KISS Coding Agent",
     )
     trials: int = Field(
-        default=3,
+        default=200,
         description="Number of trials for failed subtasks",
     )
 

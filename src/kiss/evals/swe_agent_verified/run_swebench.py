@@ -17,7 +17,7 @@ from datasets import load_dataset
 
 import kiss.core.utils as utils
 import kiss.evals.swe_agent_verified.config  # noqa: F401
-from kiss.agents.kiss import dynamic_gepa_agent
+from kiss.agents.kiss import prompt_refiner_agent
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
@@ -409,7 +409,7 @@ def run_swebench(
                 # Refine prompt template on failure
                 if result.get("trajectory"):
                     try:
-                        prompt_template = dynamic_gepa_agent(
+                        prompt_template = prompt_refiner_agent(
                             original_prompt_template=SWE_PROMPT_TEMPLATE,
                             previous_prompt_template=prompt_template,
                             agent_trajectory_summary=result.get("error", ""),

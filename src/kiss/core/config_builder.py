@@ -16,62 +16,49 @@ from kiss.core.config import Config
 
 
 def _add_model_arguments(parser: ArgumentParser, model: type[BaseModel], prefix: str = "") -> None:
-    """Recursively add arguments for all fields in a Pydantic model.
-
-    Args:
-        parser: The ArgumentParser instance to add arguments to.
-        model: The Pydantic model class to extract fields from.
-        prefix: Optional prefix for nested model field names.
-    """
+    """Recursively add arguments for all fields in a Pydantic model."""
     for field_name, field_info in model.model_fields.items():
         arg_name = f"{prefix}.{field_name}" if prefix else field_name
-        # Use dots in dest to preserve structure (argparse converts dots to underscores by default)
-        dest_name = arg_name.replace(".", "__")  # Use double underscore as separator for dest
+        dest_name = arg_name.replace(".", "__")
         field_type = field_info.annotation
 
-        # Handle nested BaseModel fields
         if isinstance(field_type, type) and issubclass(field_type, BaseModel):
             _add_model_arguments(parser, field_type, arg_name)
             continue
 
-        # Get type for argument (handle Optional/Union)
         if hasattr(field_type, "__origin__"):
             args = get_args(field_type)
             non_none = [a for a in args if a is not type(None)]
             if non_none:
                 field_type = non_none[0]
 
-        # Determine type and action
+        arg_name_dashes = arg_name.replace("_", "-")
+        if arg_name_dashes != arg_name:
+            names = [f"--{arg_name_dashes}", f"--{arg_name}"]
+        else:
+            names = [f"--{arg_name}"]
+        help_text = f"{field_info.description or field_name} (default: {field_info.default})"
+
         if field_type is bool:
-            help_text = f"{field_info.description or field_name} (default: {field_info.default})"
             parser.add_argument(
-                f"--{arg_name}",
-                action="store_true",
-                dest=dest_name,
-                default=None,
-                help=help_text,
+                *names, action="store_true", dest=dest_name, default=None, help=help_text
             )
+            if arg_name_dashes != arg_name:
+                no_names = [f"--no-{arg_name_dashes}", f"--no-{arg_name}"]
+            else:
+                no_names = [f"--no-{arg_name}"]
             parser.add_argument(
-                f"--no-{arg_name}",
-                action="store_false",
-                dest=dest_name,
-                help=f"Disable {field_name}",
+                *no_names, action="store_false", dest=dest_name, help=f"Disable {field_name}"
             )
         else:
-            # Determine the argument type for argparse
             if field_type is int:
                 arg_type: type[int] | type[float] | type[str] = int
             elif field_type is float:
                 arg_type = float
             else:
                 arg_type = str
-            help_text = f"{field_info.description or field_name} (default: {field_info.default})"
             parser.add_argument(
-                f"--{arg_name}",
-                type=arg_type,
-                dest=dest_name,
-                default=None,
-                help=help_text,
+                *names, type=arg_type, dest=dest_name, default=None, help=help_text
             )
 
 

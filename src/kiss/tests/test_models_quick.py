@@ -16,7 +16,10 @@ import pytest
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.rag.simple_rag import SimpleRAG
-from kiss.tests.conftest import simple_calculator
+from kiss.tests.conftest import (
+    simple_calculator,
+    skip_if_no_api_key_for_model,
+)
 
 # Timeout in seconds for each test
 TEST_TIMEOUT = 60
@@ -66,6 +69,7 @@ class TestModelsQuickNonAgentic(unittest.TestCase):
             None. Asserts are used to verify the model returns a valid response
             containing the expected answer and generates a non-empty trajectory.
         """
+        skip_if_no_api_key_for_model(model_name)
         agent = KISSAgent(f"Test Agent for {model_name}")
         result = agent.run(
             model_name=model_name,
@@ -124,6 +128,7 @@ class TestModelsQuickAgentic(unittest.TestCase):
             None. Asserts are used to verify the model correctly uses the calculator
             tool to compute the expected result and generates a valid trajectory.
         """
+        skip_if_no_api_key_for_model(model_name)
         agent = KISSAgent(f"Test Agent for {model_name}")
         result = agent.run(
             model_name=model_name,
@@ -187,6 +192,7 @@ class TestModelsQuickEmbedding(unittest.TestCase):
             collection stats are valid, and similarity queries return valid results
             with reasonable cosine similarity scores.
         """
+        skip_if_no_api_key_for_model(model_name)
         rag = SimpleRAG(model_name=model_name)
         # Initialize the model's client (required for embedding calls)
         rag._model.initialize("dummy prompt for initialization")

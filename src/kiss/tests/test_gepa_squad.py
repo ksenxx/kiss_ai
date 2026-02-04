@@ -13,6 +13,7 @@ from datasets import load_dataset
 import kiss.core.utils as utils
 from kiss.agents.gepa import GEPA
 from kiss.core.kiss_agent import KISSAgent
+from kiss.tests.conftest import requires_openai_api_key
 
 
 def evaluate_qa_result(result: str, expected_answer: str) -> dict[str, float]:
@@ -59,6 +60,7 @@ def evaluate_qa_result(result: str, expected_answer: str) -> dict[str, float]:
     return scores
 
 
+@requires_openai_api_key
 class TestGEPAHuggingFace(unittest.TestCase):
     """Test GEPA algorithm on HuggingFace datasets."""
 

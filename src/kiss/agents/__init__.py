@@ -10,8 +10,8 @@ from kiss.agents.coding_agents.gemini_cli_agent import GeminiCliAgent
 from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
 from kiss.agents.coding_agents.openai_codex_agent import OpenAICodexAgent
 from kiss.agents.kiss import (
-    dynamic_gepa_agent,
     get_run_simple_coding_agent,
+    prompt_refiner_agent,
     run_bash_task_in_sandboxed_ubuntu_latest,
 )
 
@@ -20,7 +20,7 @@ __all__ = [
     "GeminiCliAgent",
     "KISSCodingAgent",
     "OpenAICodexAgent",
-    "dynamic_gepa_agent",
+    "prompt_refiner_agent",
     "get_run_simple_coding_agent",
     "run_bash_task_in_sandboxed_ubuntu_latest",
 ]
