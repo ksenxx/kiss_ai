@@ -21,3 +21,4 @@ ref
 artifacts/
 .cursor
 .claude
+.ipynb_checkpoints

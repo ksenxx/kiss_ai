@@ -5,7 +5,6 @@
 
 """Utility functions for the KISS core module."""
 
-import math
 from pathlib import Path
 from string import Formatter as StringFormatter
 from typing import Any, TypeVar, cast
