@@ -28,6 +28,9 @@ ORCHESTRATOR_PROMPT = """
 
 {task_description}
 
+
+{coding_instructions}
+
 Call perform_subtask() to perform a sub-task.
 perform_subtask() will return a yaml encoded dictionary containing the keys
 'success' (boolean) and 'summary' (string).
@@ -38,20 +41,16 @@ the work have done so far and the work you need to do next.
 """
 
 TASKING_PROMPT = """
-# Role
+# Main Task
 
-You are a software engineer who is expert with
-bash commands and coding.
+{task_description}
 
 # Sub-task
 
+You need to perform the following sub-task:
+
 Name: {subtask_name}
 Description: {description}
-
-# Context
-This is part of a larger task:
-
-{task_description}
 
 {coding_instructions}
 
@@ -238,6 +237,7 @@ class RelentlessCodingAgent(Base):
                 prompt_template=task_prompt_template,
                 arguments={
                     "task_description": self.task_description,
+                    "coding_instructions": CODING_INSTRUCTIONS,
                 },
                 tools=[finish, self.perform_subtask],
                 max_steps=self.max_steps,
@@ -286,10 +286,9 @@ class RelentlessCodingAgent(Base):
                 model_name=self.subtasker_model_name,
                 prompt_template=task_prompt_template,
                 arguments={
+                    "task_description": self.task_description,
                     "subtask_name": subtask.name,
                     "description": subtask.description,
-                    "task_description": self.task_description,
-                    "max_steps": str(self.max_steps),
                     "coding_instructions": CODING_INSTRUCTIONS,
                 },
                 tools=[

@@ -699,6 +699,7 @@ kiss/
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
 │   │   │   ├── improver_agent.py       # Agent improvement through generations
 │   │   │   ├── config.py               # Agent creator configuration
+│   │   │   ├── BLOG.md                 # Blog post about agent evolution
 │   │   │   └── README.md               # Agent creator documentation
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
 │   │   │   ├── gepa.py
@@ -760,8 +761,10 @@ kiss/
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
+│   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
 │   │   └── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
 │   ├── tests/           # Test suite
+│   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_kissevolve_bubblesort.py
@@ -787,6 +790,8 @@ kiss/
 │       ├── README.md                    # Trajectory visualizer documentation
 │       └── templates/                   # HTML templates for the visualizer
 │           └── index.html
+├── scripts/             # Repository-level scripts
+│   └── release.sh       # Release script
 ├── pyproject.toml       # Project configuration
 └── README.md
 ```
