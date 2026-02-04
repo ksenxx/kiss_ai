@@ -8,11 +8,11 @@
 
 import unittest
 
-from kiss.agents.gepa.hotpotqa import (
+from kiss.evals.hotpotqa import (
     HotPotQABenchmark,
     evaluate_hotpotqa_result,
 )
-from kiss.agents.gepa.hotpotqa.hotpotqa_benchmark import (
+from kiss.evals.hotpotqa.hotpotqa_benchmark import (
     compute_f1,
     normalize_answer,
 )

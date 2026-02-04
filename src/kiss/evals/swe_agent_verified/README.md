@@ -29,7 +29,7 @@ docker --version
 
 ```bash
 # Run on a specific instance with a specific model
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py \
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py \
     --swebench_verified.model gemini-3-flash-preview \
     --swebench_verified.instance_id "django__django-11099"
 ```
@@ -37,13 +37,13 @@ uv run src/kiss/agents/swe_agent_verified/run_swebench.py \
 ### Run on All Instances
 
 ```bash
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py
 ```
 
 ### Run on Specific Instances
 
 ```python
-from kiss.agents.swe_agent_verified import run_swebench, SWEBenchVerifiedConfig
+from kiss.evals.swe_agent_verified import run_swebench, SWEBenchVerifiedConfig
 
 # Run on specific instances
 config = SWEBenchVerifiedConfig(
@@ -58,7 +58,7 @@ print(f"Success rate: {result['successful']}/{result['total_samples']}")
 ### Run with Limited Instances
 
 ```python
-from kiss.agents.swe_agent_verified import run_swebench
+from kiss.evals.swe_agent_verified import run_swebench
 
 # Run on first 10 instances
 result = run_swebench(max_instances=10, model="gpt-4o")
@@ -220,23 +220,23 @@ Configuration is managed through `SWEBenchVerifiedConfig`. All settings can be o
 
 ```bash
 # Run on a specific instance with a specific model
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py \
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py \
     --swebench_verified.model gemini-3-flash-preview \
     --swebench_verified.instance_id "django__django-11099"
 
 # Run with custom model and budget
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py \
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py \
     --swebench_verified.model gpt-4o \
     --swebench_verified.max_steps 60 \
     --swebench_verified.max_budget 2.0
 
 # Run on first N instances
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py \
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py \
     --swebench_verified.max_instances 5 \
     --swebench_verified.num_samples 3
 
 # Disable evaluation
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py --no-swebench_verified.run_evaluation
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py --no-swebench_verified.run_evaluation
 ```
 
 ## Dataset Structure

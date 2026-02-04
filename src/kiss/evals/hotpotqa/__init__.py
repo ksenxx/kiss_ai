@@ -6,7 +6,7 @@
 
 """HotPotQA benchmark for GEPA prompt optimization."""
 
-from kiss.agents.gepa.hotpotqa.hotpotqa_benchmark import (
+from kiss.evals.hotpotqa.hotpotqa_benchmark import (
     HotPotQABenchmark,
     evaluate_hotpotqa_result,
 )

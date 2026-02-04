@@ -5,6 +5,6 @@
 
 """ARVO vulnerability detection agent."""
 
-from kiss.agents.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
+from kiss.evals.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
 
 __all__ = ["find_vulnerability", "get_all_arvo_tags"]

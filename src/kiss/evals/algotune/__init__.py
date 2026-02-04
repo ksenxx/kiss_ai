@@ -5,7 +5,7 @@
 
 """AlgoTune integration module for KISSEvolve."""
 
-from kiss.agents.kiss_evolve.algotune.config import AlgoTuneConfig
-from kiss.agents.kiss_evolve.algotune.run_algotune import main, run_algotune
+from kiss.evals.algotune.config import AlgoTuneConfig
+from kiss.evals.algotune.run_algotune import main, run_algotune
 
 __all__ = ["AlgoTuneConfig", "main", "run_algotune"]

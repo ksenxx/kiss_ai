@@ -1,6 +1,6 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.7
+**Version:** 0.1.8
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
@@ -8,7 +8,7 @@
 
 ______________________________________________________________________
 
-KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software egineering principle.
+KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
@@ -86,8 +86,8 @@ cd kiss
 # Create virtual environment
 uv venv --python 3.13
 
-# Install dependencies (including dev tools)
-uv sync --group dev
+# Install all dependencies (full installation)
+uv sync
 
 # (Optional) activate the venv for convenience (uv run works without activation)
 source .venv/bin/activate
@@ -99,6 +99,44 @@ export ANTHROPIC_API_KEY="your-key-here"
 export TOGETHER_API_KEY="your-key-here"
 export OPENROUTER_API_KEY="your-key-here"
 ```
+
+### Selective Installation (Dependency Groups)
+
+KISS supports selective installation via dependency groups for minimal footprints:
+
+```bash
+# Minimal core only (no model SDKs) - for custom integrations
+uv sync --group core
+
+# Core + specific provider support
+uv sync --group claude    # Core + Anthropic Claude
+uv sync --group openai    # Core + OpenAI Compatible Models
+uv sync --group gemini    # Core + Google Gemini
+
+# Claude Coding Agent (includes claude-agent-sdk)
+uv sync --group claude-coding-agent
+
+# Evals dependencies (for running benchmarks)
+uv sync --group evals
+
+# Development tools (mypy, ruff, pytest, jupyter, etc.)
+uv sync --group dev
+
+# Combine multiple groups as needed
+uv sync --group claude --group dev
+```
+
+**Dependency Group Contents:**
+
+| Group | Description | Key Packages |
+|-------|-------------|--------------|
+| `core` | Minimal core module | pydantic, rich, requests, beautifulsoup4, playwright, flask |
+| `claude` | Core + Anthropic | core + anthropic |
+| `openai` | Core + OpenAI | core + openai |
+| `gemini` | Core + Google | core + google-genai |
+| `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk |
+| `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
+| `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter |
 
 ## Output Formatting
 
@@ -441,7 +479,7 @@ if result:
 **Vulnerability Detector Agent (ARVO):**
 
 ```bash
-uv run python -m kiss.agents.arvo_agent.arvo_agent
+uv run python -m kiss.evals.arvo_agent.arvo_agent
 ```
 
 The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discover security vulnerabilities in C/C++ code:
@@ -455,7 +493,7 @@ The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discove
 **Programmatic Usage:**
 
 ```python
-from kiss.agents.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
+from kiss.evals.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
 
 # Get available Arvo Docker image tags
 tags = get_all_arvo_tags("n132/arvo")
@@ -477,7 +515,7 @@ else:
 **SWE-bench Verified Agent:**
 
 ```bash
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-2.5-flash --swebench_verified.instance_id "django__django-11099"
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-2.5-flash --swebench_verified.instance_id "django__django-11099"
 ```
 
 The SWE-bench Verified agent is a Software Engineering agent that:
@@ -489,7 +527,7 @@ The SWE-bench Verified agent is a Software Engineering agent that:
 - Automatically evaluates results using the official SWE-bench evaluation harness
 - Supports command-line configuration for model, instance selection, budget, and more
 
-See the [SWE-bench Verified README](src/kiss/agents/swe_agent_verified/README.md) for detailed documentation.
+See the [SWE-bench Verified README](src/kiss/evals/swe_agent_verified/README.md) for detailed documentation.
 
 ### Using SimpleRAG for Retrieval-Augmented Generation
 
@@ -618,7 +656,7 @@ print(result)
 ```
 kiss/
 ├── src/kiss/
-│   ├── agents/          # Example agents
+│   ├── agents/          # Agent implementations
 │   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
 │   │   │   ├── improver_agent.py       # Agent improvement through generations
@@ -632,23 +670,18 @@ kiss/
 │   │   │   ├── kiss_evolve.py
 │   │   │   ├── novelty_prompts.py  # Prompts for novelty-based evolution
 │   │   │   ├── config.py           # KISSEvolve configuration
-│   │   │   ├── README.md           # KISSEvolve documentation
-│   │   │   └── algotune/           # AlgoTune benchmark integration
-│   │   │       ├── run_algotune.py # AlgoTune task evolution
-│   │   │       └── config.py       # AlgoTune configuration
+│   │   │   └── README.md           # KISSEvolve documentation
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── kiss_coding_agent.py   # Multi-agent coding system with orchestration
 │   │   │   ├── claude_coding_agent.py # Claude Coding Agent using Claude Agent SDK
 │   │   │   ├── gemini_cli_agent.py    # Gemini CLI Agent using Google ADK
 │   │   │   └── openai_codex_agent.py  # OpenAI Codex Agent using OpenAI Agents SDK
-│   │   ├── kiss.py                 # Utility agents (prompt refiner, bash agent)
-│   │   ├── swe_agent_verified/     # SWE-bench Verified benchmark integration
-│   │   │   ├── run_swebench.py     # Main runner with CLI support
-│   │   │   ├── config.py           # Configuration for SWE-bench runs
-│   │   │   └── README.md           # SWE-bench documentation
-│   │   └── arvo_agent/             # ARVO vulnerability detection agent
-│   │       ├── arvo_agent.py       # Arvo-based vulnerability detector
-│   │       └── arvo_tags.json      # Docker image tags for Arvo
+│   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
+│   │   │   ├── agent_evolver.py       # Agent evolution logic
+│   │   │   ├── multi_agent.py         # Multi-agent orchestration
+│   │   │   ├── config.py              # Configuration
+│   │   │   └── README.md              # Documentation
+│   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   ├── core/            # Core framework components
 │   │   ├── base.py            # Base class with common functionality for all KISS agents
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
@@ -668,6 +701,20 @@ kiss/
 │   │       └── model_info.py      # Model info: context lengths, pricing, and capabilities
 │   ├── docker/          # Docker integration
 │   │   └── docker_manager.py
+│   ├── evals/            # Benchmark and evaluation integrations
+│   │   ├── algotune/               # AlgoTune benchmark integration
+│   │   │   ├── run_algotune.py     # AlgoTune task evolution
+│   │   │   └── config.py           # AlgoTune configuration
+│   │   ├── arvo_agent/             # ARVO vulnerability detection agent
+│   │   │   ├── arvo_agent.py       # Arvo-based vulnerability detector
+│   │   │   └── arvo_tags.json      # Docker image tags for Arvo
+│   │   ├── hotpotqa/               # HotPotQA benchmark integration
+│   │   │   ├── hotpotqa_benchmark.py # HotPotQA benchmark runner
+│   │   │   └── README.md           # HotPotQA documentation
+│   │   └── swe_agent_verified/     # SWE-bench Verified benchmark integration
+│   │       ├── run_swebench.py     # Main runner with CLI support
+│   │       ├── config.py           # Configuration for SWE-bench runs
+│   │       └── README.md           # SWE-bench documentation
 │   ├── multiprocessing/ # Multiprocessing utilities
 │   │   └── multiprocess.py
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
@@ -757,8 +804,9 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 
 ### Development
 
-- `uv sync` - Install dependencies
-- `uv sync --group dev` - Install dependencies including dev tools (mypy, ruff, pytest, etc.)
+- `uv sync` - Install all dependencies (full installation)
+- `uv sync --group dev` - Install dev tools (mypy, ruff, pytest, jupyter, etc.)
+- `uv sync --group <name>` - Install specific dependency group (see [Selective Installation](#selective-installation-dependency-groups))
 - `uv build` - Build the project package
 
 ### Testing

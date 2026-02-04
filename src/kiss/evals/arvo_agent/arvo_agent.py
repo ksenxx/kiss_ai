@@ -65,7 +65,7 @@ def get_all_arvo_tags(image_name: str = "n132/arvo") -> list[str]:
     """
     try:
         tags_text = resources.read_text(
-            "kiss.agents.arvo_agent", "arvo_tags.json", encoding="utf-8"
+            "kiss.evals.arvo_agent", "arvo_tags.json", encoding="utf-8"
         )
         return cast(list[str], json.loads(tags_text))
     except (FileNotFoundError, ModuleNotFoundError):

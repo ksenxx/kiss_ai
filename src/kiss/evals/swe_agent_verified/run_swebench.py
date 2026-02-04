@@ -15,14 +15,14 @@ from typing import Any
 import yaml
 from datasets import load_dataset
 
-import kiss.agents.swe_agent_verified.config  # noqa: F401
 import kiss.core.utils as utils
+import kiss.evals.swe_agent_verified.config  # noqa: F401
 from kiss.agents.kiss import dynamic_gepa_agent
-from kiss.agents.swe_agent_verified.config import SWEBenchVerifiedConfig
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.docker.docker_manager import DockerManager
+from kiss.evals.swe_agent_verified.config import SWEBenchVerifiedConfig
 
 # SWE-bench agent prompt template
 # Inspired by: https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/config/mini.yaml

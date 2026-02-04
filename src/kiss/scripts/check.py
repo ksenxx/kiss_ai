@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Script to run all code quality checks: install dependencies, build, lint, and type check."""
+"""Script to run all code quality checks: syntax check, lint, and type check."""
 
 import argparse
 import shutil
@@ -151,8 +151,8 @@ def main() -> int:
     """Run all code quality checks.
 
     Parses command-line arguments and runs code quality checks including
-    dependency installation, building, linting with ruff, type checking with
-    mypy and pyright, and markdown formatting checks.
+    dependency installation, syntax checking with py_compile, linting with ruff,
+    type checking with mypy and pyright, and markdown formatting checks.
 
     Returns:
         Exit code 0 if all checks pass, 1 if any check fails.
@@ -179,9 +179,13 @@ def main() -> int:
     # Find all markdown files for linting
     md_files = find_markdown_files()
 
+    # Find all Python files for syntax checking
+    project_root = Path(__file__).parent.parent.parent.parent
+    py_files = [str(f) for f in (project_root / "src").rglob("*.py") if not _should_skip_path(f)]
+
     checks = [
         (["uv", "sync"], "Install dependencies (uv sync)"),
-        (["uv", "build"], "Build package"),
+        (["uv", "run", "python", "-m", "py_compile", *py_files], "Syntax check (py_compile)"),
         (["uv", "run", "ruff", "check", "src/"], "Lint code (ruff)"),
         (["uv", "run", "mypy", "src/"], "Type check (mypy)"),
         (["uv", "run", "pyright", "src/"], "Type check (pyright)"),

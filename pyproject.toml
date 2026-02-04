@@ -74,6 +74,52 @@ dev = [
     "nbconvert>=7.17.0",
 ]
 
+# Minimal dependencies for kiss.core module only (no model SDKs)
+core = [
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0.0",
+    "types-PyYAML>=6.0.0",
+    "rich>=14.2.0",
+    "requests>=2.28.0",
+    "beautifulsoup4>=4.12.0",
+    "playwright>=1.40.0",
+    "flask>=3.0.0",
+]
+
+# Core + Anthropic Claude support
+claude = [
+    {include-group = "core"},
+    "anthropic>=0.40.0",
+]
+
+# Core + OpenAI support
+openai = [
+    {include-group = "core"},
+    "openai>=2.13.0",
+]
+
+# Core + Google Gemini support
+gemini = [
+    {include-group = "core"},
+    "google-genai>=0.30.0",
+]
+
+# Claude Coding Agent (uses claude-agent-sdk)
+claude-coding-agent = [
+    {include-group = "claude"},
+    "claude-agent-sdk>=0.1.19",
+]
+
+# Evals dependencies (for running benchmarks in src/kiss/evals)
+evals = [
+    "datasets>=2.0.0",
+    "swebench>=1.0.0",
+    "orjson>=3.9.0",
+    "scipy>=1.11.0",
+    "scikit-learn>=1.3.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["src/kiss/tests"]
 python_files = ["test_*.py"]
@@ -163,7 +209,7 @@ module = "kiss.viz_trajectory.*"
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = "kiss.agents.kiss_evolve.algotune.*"
+module = "kiss.evals.algotune.*"
 disallow_untyped_defs = false
 
 [tool.ruff]
@@ -176,5 +222,5 @@ ignore = []
 
 [project.scripts]
 check = "kiss.scripts.check:main"
-algotune = "kiss.agents.kiss_evolve.algotune.run_algotune:main"
+algotune = "kiss.evals.algotune.run_algotune:main"
 notebook = "kiss.scripts.notebook:main"

@@ -135,7 +135,7 @@ def test_imports() -> bool:
 
     # Test 8: ARVO agent imports
     try:
-        from kiss.agents.arvo_agent.arvo_agent import (  # noqa: F401
+        from kiss.evals.arvo_agent.arvo_agent import (  # noqa: F401
             find_vulnerability,
             get_all_arvo_tags,
         )
