@@ -116,6 +116,9 @@ uv sync --group gemini    # Core + Google Gemini
 # Claude Coding Agent (includes claude-agent-sdk)
 uv sync --group claude-coding-agent
 
+# Docker support (for running agents in isolated containers)
+uv sync --group docker
+
 # Evals dependencies (for running benchmarks)
 uv sync --group evals
 
@@ -135,6 +138,7 @@ uv sync --group claude --group dev
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
 | `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk |
+| `docker` | Docker integration | docker, types-docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter |
 

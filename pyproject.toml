@@ -72,6 +72,8 @@ dev = [
     "jupyter>=1.1.1",
     "notebook>=7.5.3",
     "nbconvert>=7.17.0",
+    "docker>=7.0.0",
+    "types-docker>=7.1.0.20251202",
 ]
 
 # Minimal dependencies for kiss.core module only (no model SDKs)
@@ -109,6 +111,11 @@ gemini = [
 claude-coding-agent = [
     {include-group = "claude"},
     "claude-agent-sdk>=0.1.19",
+]
+
+docker = [
+    "docker>=7.0.0",
+    "types-docker>=7.1.0.20251202",
 ]
 
 # Evals dependencies (for running benchmarks in src/kiss/evals)

@@ -17,7 +17,6 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.rag.simple_rag import SimpleRAG
 from kiss.tests.conftest import (
-    has_api_key_for_model,
     simple_calculator,
     skip_if_no_api_key_for_model,
 )
