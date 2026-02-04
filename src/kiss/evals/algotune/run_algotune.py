@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import kiss.agents.kiss_evolve.algotune.config  # noqa: F401
+import kiss.evals.algotune.config  # noqa: F401
 import kiss.agents.kiss_evolve.config  # noqa: F401
 from kiss.agents.kiss import get_run_simple_coding_agent
 from kiss.agents.kiss_evolve.kiss_evolve import KISSEvolve
@@ -36,7 +36,14 @@ NETWORK_ERROR_PATTERNS = [
 
 
 def _check_and_install_dependencies() -> None:
-    """Check for required dependencies and install them if missing."""
+    """Check for required dependencies and install them if missing.
+
+    Attempts to import required packages (orjson, scipy, scikit-learn) and
+    installs any missing ones using uv pip (preferred) or pip fallback.
+
+    Raises:
+        RuntimeError: If package installation fails.
+    """
     missing = []
 
     # Map package names to their import names
@@ -77,13 +84,28 @@ def _check_and_install_dependencies() -> None:
 
 
 def _is_network_error(error: Exception) -> bool:
-    """Check if an exception is a network-related error that should be retried."""
+    """Check if an exception is a network-related error that should be retried.
+
+    Args:
+        error: The exception to check.
+
+    Returns:
+        True if the error matches known network error patterns, False otherwise.
+    """
     error_str = str(error) + str(type(error).__name__)
     return any(pattern in error_str for pattern in NETWORK_ERROR_PATTERNS)
 
 
 def _ensure_algotune_installed(path: Path, repo_url: str) -> None:
-    """Clone AlgoTune repository if it doesn't exist, then add to sys.path."""
+    """Clone AlgoTune repository if it doesn't exist, then add to sys.path.
+
+    Args:
+        path: Local path where AlgoTune should be installed.
+        repo_url: Git URL for cloning the AlgoTune repository.
+
+    Raises:
+        RuntimeError: If git clone fails or git is not installed.
+    """
     if not path.exists():
         print(f"AlgoTune not found at {path}, cloning from {repo_url}...")
         try:
@@ -106,7 +128,14 @@ def _ensure_algotune_installed(path: Path, repo_url: str) -> None:
 
 
 def get_all_task_names(algotune_path: Path) -> list[str]:
-    """Get all available task names from the AlgoTune repository."""
+    """Get all available task names from the AlgoTune repository.
+
+    Args:
+        algotune_path: Path to the AlgoTune repository root.
+
+    Returns:
+        Sorted list of valid task names (directories with matching .py files).
+    """
     tasks_dir = algotune_path / "AlgoTuneTasks"
     if not tasks_dir.exists():
         return []
@@ -124,7 +153,17 @@ def get_all_task_names(algotune_path: Path) -> list[str]:
 
 
 def get_task_class(task_name: str):
-    """Dynamically import and return a task class from AlgoTune."""
+    """Dynamically import and return a task class from AlgoTune.
+
+    Args:
+        task_name: Name of the AlgoTune task to load.
+
+    Returns:
+        The task class from the AlgoTune registry.
+
+    Raises:
+        ValueError: If task_name is not found in the AlgoTune registry.
+    """
     module_name = f"AlgoTuneTasks.{task_name}.{task_name}"
     __import__(module_name, fromlist=[task_name])
 
@@ -136,7 +175,15 @@ def get_task_class(task_name: str):
 
 
 def _extract_solve_body(solve_source: str) -> str:
-    """Extract the body of a solve method, skipping docstrings."""
+    """Extract the body of a solve method, skipping docstrings.
+
+    Args:
+        solve_source: Source code string containing the solve method.
+
+    Returns:
+        The body of the solve method with proper indentation for embedding
+        in _solve_internal, with docstrings removed.
+    """
     lines = solve_source.split("\n")
     body_lines = []
     in_body = False
@@ -184,7 +231,15 @@ def _extract_solve_body(solve_source: str) -> str:
 
 
 def _extract_imports(task_file: Path) -> str:
-    """Extract import statements from a task file."""
+    """Extract import statements from a task file.
+
+    Args:
+        task_file: Path to the task's Python file.
+
+    Returns:
+        String containing all import statements from the file, excluding
+        AlgoTune internal imports. Always includes 'import numpy as np'.
+    """
     if not task_file.exists():
         return "import numpy as np"
 
@@ -210,7 +265,17 @@ def _extract_imports(task_file: Path) -> str:
 def _create_initial_code(
     task_name: str, description: str, solve_source: str, task_file: Path
 ) -> str:
-    """Create initial solver code from reference implementation."""
+    """Create initial solver code from reference implementation.
+
+    Args:
+        task_name: Name of the AlgoTune task.
+        description: Task description text.
+        solve_source: Source code of the reference solve method.
+        task_file: Path to the task's Python file for extracting imports.
+
+    Returns:
+        Complete solver code string with imports, Solver class, and solve method.
+    """
     body = _extract_solve_body(solve_source)
     imports = _extract_imports(task_file)
 
@@ -237,7 +302,14 @@ class Solver:
 
 
 def _execute_code(code: str) -> dict[str, Any] | None:
-    """Execute code and return namespace, or None on failure."""
+    """Execute code and return namespace, or None on failure.
+
+    Args:
+        code: Python code string to execute.
+
+    Returns:
+        The execution namespace dictionary if successful, None on any exception.
+    """
     try:
         namespace: dict[str, Any] = {}
         exec(compile(code, "<solver>", "exec"), namespace)
@@ -247,9 +319,28 @@ def _execute_code(code: str) -> dict[str, Any] | None:
 
 
 def create_evaluation_fn(task_instance, test_problems: list, num_timing_runs: int = 5):
-    """Create an evaluation function for KISSEvolve."""
+    """Create an evaluation function for KISSEvolve.
+
+    Args:
+        task_instance: AlgoTune task instance with is_solution method.
+        test_problems: List of test problems to evaluate against.
+        num_timing_runs: Number of timing runs for performance measurement.
+
+    Returns:
+        Evaluation function that takes code string and returns dict with
+        fitness, metrics, artifacts, and optional error.
+    """
 
     def evaluate(code: str) -> dict[str, Any]:
+        """Evaluate solver code for correctness and performance.
+
+        Args:
+            code: Python code string containing Solver class.
+
+        Returns:
+            Dictionary with fitness (1/total_time), metrics (total_time_seconds),
+            artifacts, and error (if any).
+        """
         namespace = _execute_code(code)
         if namespace is None or "Solver" not in namespace:
             return {"fitness": 0.0, "metrics": {}, "artifacts": {}, "error": "Invalid code"}
@@ -298,9 +389,27 @@ def create_evaluation_fn(task_instance, test_problems: list, num_timing_runs: in
 
 
 def create_correctness_test_fn(task_instance, test_problems: list):
-    """Create a correctness test function for the coding agent."""
+    """Create a correctness test function for the coding agent.
+
+    Args:
+        task_instance: AlgoTune task instance with is_solution method.
+        test_problems: List of test problems to validate against.
+
+    Returns:
+        Test function that takes code string and returns True if all
+        problems are solved correctly, False otherwise.
+    """
 
     def test(code: str) -> bool:
+        """Test solver code for correctness on all problems.
+
+        Args:
+            code: Python code string containing Solver class.
+
+        Returns:
+            True if solver produces correct solutions for all test problems,
+            False on any error or incorrect solution.
+        """
         namespace = _execute_code(code)
         if namespace is None or "Solver" not in namespace:
             return False
@@ -549,8 +658,11 @@ def run_all_tasks(max_retries: int = 3) -> list[dict[str, Any]]:
 
 
 def main():
-    """Main entry point."""
+    """Main entry point.
 
+    Reads configuration from DEFAULT_CONFIG.algotune and runs either
+    all tasks (if all_tasks is True) or a single task optimization.
+    """
     config = DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
 
     if config.all_tasks:

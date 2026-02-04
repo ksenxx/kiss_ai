@@ -24,23 +24,44 @@ class GeminiModel(Model):
         api_key: str,
         model_config: dict[str, Any] | None = None,
     ):
+        """Initialize a GeminiModel instance.
+
+        Args:
+            model_name: The name of the Gemini model to use.
+            api_key: The Google API key for authentication.
+            model_config: Optional dictionary of model configuration parameters.
+        """
         super().__init__(model_name, model_config=model_config)
         self.api_key = api_key
         # Store thought signatures from function calls for use in responses
         self._thought_signatures: dict[str, bytes] = {}
 
     def __str__(self) -> str:
+        """Return string representation of the model.
+
+        Returns:
+            str: A string describing the model class and name.
+        """
         return f"{self.__class__.__name__}(name={self.model_name})"
 
     __repr__ = __str__
 
     def initialize(self, prompt: str) -> None:
+        """Initializes the conversation with an initial user prompt.
+
+        Args:
+            prompt: The initial user prompt to start the conversation.
+        """
         self.client = genai.Client(api_key=self.api_key)
         self.conversation = [{"role": "user", "content": prompt}]
         self._thought_signatures = {}  # Reset thought signatures for new conversation
 
     def _convert_conversation_to_gemini_contents(self) -> list[types.Content]:
-        """Converts the internal conversation format to Gemini contents."""
+        """Converts the internal conversation format to Gemini contents.
+
+        Returns:
+            list[types.Content]: The conversation in Gemini API format.
+        """
         contents = []
         for msg in self.conversation:
             role = msg["role"]
@@ -139,7 +160,11 @@ class GeminiModel(Model):
         return contents
 
     def generate(self) -> tuple[str, Any]:
-        """Generates content from prompt without tools."""
+        """Generates content from prompt without tools.
+
+        Returns:
+            tuple[str, Any]: A tuple of (generated_text, raw_response).
+        """
         contents = self._convert_conversation_to_gemini_contents()
 
         config = types.GenerateContentConfig(
@@ -160,7 +185,15 @@ class GeminiModel(Model):
     def generate_and_process_with_tools(
         self, function_map: dict[str, Callable[..., Any]]
     ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Generates content with tools, processes the response, and adds it to conversation."""
+        """Generates content with tools, processes the response, and adds it to conversation.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            tuple[list[dict[str, Any]], str, Any]: A tuple of
+                (function_calls, response_text, raw_response).
+        """
 
         # Convert tools to Gemini format
         # Gemini expects a list of Tool objects
@@ -253,7 +286,11 @@ class GeminiModel(Model):
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
-        """Adds function results to the conversation state."""
+        """Adds function results to the conversation state.
+
+        Args:
+            function_results: List of tuples containing (function_name, result_dict).
+        """
         # Find tool call IDs from the last assistant message
         tool_call_map: dict[str, str] = {}
         for msg in reversed(self.conversation):
@@ -276,13 +313,25 @@ class GeminiModel(Model):
             )
 
     def add_message_to_conversation(self, role: str, content: str) -> None:
-        """Adds a message to the conversation state."""
+        """Adds a message to the conversation state.
+
+        Args:
+            role: The role of the message sender (e.g., 'user', 'assistant').
+            content: The message content.
+        """
         if role == "user" and self.usage_info_for_messages:
             content = f"{content}\n\n{self.usage_info_for_messages}"
         self.conversation.append({"role": role, "content": content})
 
     def extract_input_output_token_counts_from_response(self, response: Any) -> tuple[int, int]:
-        """Extracts input and output token counts from an API response."""
+        """Extracts input and output token counts from an API response.
+
+        Args:
+            response: The raw Gemini API response object.
+
+        Returns:
+            tuple[int, int]: A tuple of (input_tokens, output_tokens).
+        """
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             prompt_tokens = response.usage_metadata.prompt_token_count or 0
             output_tokens = response.usage_metadata.candidates_token_count or 0
@@ -290,7 +339,18 @@ class GeminiModel(Model):
         return 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
-        """Generates an embedding vector for the given text."""
+        """Generates an embedding vector for the given text.
+
+        Args:
+            text: The text to generate an embedding for.
+            embedding_model: Optional model name. Defaults to "text-embedding-004".
+
+        Returns:
+            list[float]: The embedding vector as a list of floats.
+
+        Raises:
+            KISSError: If embedding generation fails.
+        """
         model_to_use = embedding_model or "text-embedding-004"
         try:
             response = self.client.models.embed_content(model=model_to_use, contents=text)

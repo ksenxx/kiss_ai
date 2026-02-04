@@ -12,7 +12,16 @@ from kiss.core.kiss_error import KISSError
 
 
 def run_gepa_improvement_test():
-    """Run GEPA optimization and measure improvement before/after."""
+    """Run GEPA optimization and measure improvement before/after.
+
+    This function executes a full GEPA optimization cycle and compares
+    the performance of the initial prompt vs the optimized prompt on
+    held-out test examples.
+
+    Returns:
+        Dict containing initial_scores, optimized_scores, initial_prompt,
+        optimized_prompt, and improvement_percent.
+    """
     print("=" * 70)
     print("GEPA Prompt Optimization - Improvement Factor Test")
     print("=" * 70)
@@ -44,7 +53,15 @@ Do something with it."""
     call_counter = [0]
 
     def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
-        """Run agent with real LLM call, capturing trajectory."""
+        """Run agent with real LLM call, capturing trajectory.
+
+        Args:
+            prompt_template: The prompt template to fill and run.
+            arguments: Dict of arguments including '_expected' for expected answer.
+
+        Returns:
+            Tuple of (result string with expected/actual, trajectory list).
+        """
         import json
 
         expected = arguments.get("_expected", "")
@@ -70,7 +87,14 @@ Do something with it."""
         return f"EXPECTED:{expected}\nRESULT:{result}", trajectory
 
     def evaluation_fn(result: str) -> dict[str, float]:
-        """Evaluate result against expected."""
+        """Evaluate result against expected.
+
+        Args:
+            result: Result string in format 'EXPECTED:...\nRESULT:...'
+
+        Returns:
+            Dict with 'success' and 'correct' scores (0.0 or 1.0).
+        """
         import yaml
 
         try:
@@ -93,7 +117,16 @@ Do something with it."""
     def evaluate_prompt_on_examples(
         prompt: str, examples: list[dict], label: str
     ) -> dict[str, float]:
-        """Evaluate a prompt on a set of examples."""
+        """Evaluate a prompt on a set of examples.
+
+        Args:
+            prompt: The prompt template to evaluate.
+            examples: List of example dicts with problem and _expected keys.
+            label: Label for logging purposes.
+
+        Returns:
+            Dict of average scores across all examples.
+        """
         total_scores: dict[str, float] = {}
         count = 0
 

@@ -16,7 +16,13 @@ from kiss.core.config import Config
 
 
 def _add_model_arguments(parser: ArgumentParser, model: type[BaseModel], prefix: str = "") -> None:
-    """Recursively add arguments for all fields in a Pydantic model."""
+    """Recursively add arguments for all fields in a Pydantic model.
+
+    Args:
+        parser: The ArgumentParser instance to add arguments to.
+        model: The Pydantic model class to extract fields from.
+        prefix: Optional prefix for nested model field names.
+    """
     for field_name, field_info in model.model_fields.items():
         arg_name = f"{prefix}.{field_name}" if prefix else field_name
         # Use dots in dest to preserve structure (argparse converts dots to underscores by default)
@@ -72,7 +78,16 @@ def _add_model_arguments(parser: ArgumentParser, model: type[BaseModel], prefix:
 def _flat_to_nested_dict(
     flat: dict[str, Any], model: type[BaseModel], prefix: str = ""
 ) -> dict[str, Any]:
-    """Convert flat argparse namespace dict to nested dict matching model structure."""
+    """Convert flat argparse namespace dict to nested dict matching model structure.
+
+    Args:
+        flat: A flat dictionary from argparse namespace with double-underscore separated keys.
+        model: The Pydantic model class defining the target structure.
+        prefix: Optional prefix for nested field key construction.
+
+    Returns:
+        dict[str, Any]: A nested dictionary matching the Pydantic model structure.
+    """
     nested: dict[str, Any] = {}
 
     for field_name, field_info in model.model_fields.items():

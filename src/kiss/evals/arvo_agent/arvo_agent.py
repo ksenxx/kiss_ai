@@ -49,15 +49,23 @@ prompt_template_vuln_agent = """
 
 
 def get_all_arvo_tags(image_name: str = "n132/arvo") -> list[str]:
-    """
-    Get all tags of the Docker Hub repository {image_name}.
+    """Get all tags of the Docker Hub repository.
+
+    Retrieves tags from a cached JSON file if available, otherwise fetches
+    from Docker Hub API and caches the results.
+
+    Args:
+        image_name: The Docker Hub repository name (e.g., "n132/arvo").
 
     Returns:
-        List of tag names as strings.
+        List of full image tag strings (e.g., ["n132/arvo:tag1", "n132/arvo:tag2"]).
+
+    Raises:
+        RuntimeError: If fetching tags from Docker Hub fails.
     """
     try:
         tags_text = resources.read_text(
-            "kiss.agents.arvo_agent", "arvo_tags.json", encoding="utf-8"
+            "kiss.evals.arvo_agent", "arvo_tags.json", encoding="utf-8"
         )
         return cast(list[str], json.loads(tags_text))
     except (FileNotFoundError, ModuleNotFoundError):
@@ -92,7 +100,22 @@ def find_vulnerability(
     num_trials: int = 10,
     location: str = "/src",
 ) -> str | None:
-    """Run the agent for the given instance."""
+    """Run the vulnerability detection agent for the given Docker image.
+
+    Attempts to find security vulnerabilities by running a KISS agent that
+    analyzes code, generates test inputs, and checks for ASAN crashes.
+    Uses dynamic prompt refinement on failures.
+
+    Args:
+        model_name: The LLM model name to use for the agent.
+        image_name: The Docker image containing the target code to analyze.
+        num_trials: Maximum number of attempts to find a vulnerability.
+        location: The path to the repository in the Docker container.
+
+    Returns:
+        The Python script that found the vulnerability if successful,
+        or None if no vulnerability was found after all trials.
+    """
     global prompt_template_vuln_agent
 
     with DockerManager(image_name) as env:

@@ -16,7 +16,7 @@ from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.simple_formatter import SimpleFormatter
-from kiss.core.utils import search_web
+from kiss.core.useful_tools import fetch_url, search_web
 
 
 class KISSAgent(Base):
@@ -28,10 +28,19 @@ class KISSAgent(Base):
     total_tokens_used: int
 
     def __init__(self, name: str) -> None:
+        """Initialize a KISSAgent instance.
+
+        Args:
+            name: The name identifier for the agent.
+        """
         super().__init__(name)
 
     def _reset(self, model_name: str) -> None:
-        """Resets the agent's state."""
+        """Resets the agent's state.
+
+        Args:
+            model_name: The name of the model to use.
+        """
         self._tool_map: dict[str, Callable[..., Any]] = {}
         self.function_map: list[str] = []
         self.model_name = model_name
@@ -42,7 +51,12 @@ class KISSAgent(Base):
         self.run_start_timestamp = int(time.time())
 
     def _set_prompt(self, prompt_template: str, arguments: dict[str, str] | None = None) -> None:
-        """Sets the prompt for the agent."""
+        """Sets the prompt for the agent.
+
+        Args:
+            prompt_template: The template string for the prompt with placeholders.
+            arguments: Optional dictionary of arguments to substitute into the template.
+        """
         assert self.model is not None
         self.arguments = dict(arguments) if arguments is not None else {}
         self.prompt_template = prompt_template
@@ -120,7 +134,16 @@ class KISSAgent(Base):
         max_budget: float,
         model_config: dict[str, Any] | None,
     ) -> None:
-        """Initialize run parameters."""
+        """Initialize run parameters.
+
+        Args:
+            model_name: The name of the model to use.
+            formatter: Optional formatter for output display.
+            is_agentic: Whether the agent operates in agentic mode with tools.
+            max_steps: Maximum number of steps allowed in the ReAct loop.
+            max_budget: Maximum budget in dollars for this run.
+            model_config: Optional model-specific configuration dictionary.
+        """
         self.model = model(model_name, model_config=model_config)
         self._formatter = formatter or SimpleFormatter()
         self.is_agentic = is_agentic
@@ -128,7 +151,13 @@ class KISSAgent(Base):
         self.max_budget = max_budget
 
     def _setup_tools(self, tools: list[Callable[..., Any]] | None) -> None:
-        """Setup tools for agentic mode."""
+        """Setup tools for agentic mode.
+
+        Adds finish tool if not present, and web tools if enabled in config.
+
+        Args:
+            tools: Optional list of callable tools to make available to the agent.
+        """
         if not self.is_agentic:
             return
 
@@ -137,13 +166,18 @@ class KISSAgent(Base):
 
         if "finish" not in tool_names:
             tools.append(self.finish)
-        if DEFAULT_CONFIG.agent.use_web_search and "search_web" not in tool_names:
+        if DEFAULT_CONFIG.agent.use_web and "search_web" not in tool_names:
+            tools.append(fetch_url)
             tools.append(search_web)
 
         self._add_functions(tools)
 
     def _run_non_agentic(self) -> str:
-        """Run a single generation without tools."""
+        """Run a single generation without tools.
+
+        Returns:
+            str: The generated response text from the model.
+        """
         if DEFAULT_CONFIG.agent.verbose:
             self._formatter.print_status(f"Asking {self.model.model_name}...\n")
         start_timestamp = int(time.time())
@@ -159,7 +193,14 @@ class KISSAgent(Base):
         return response_text
 
     def _run_agentic_loop(self) -> str:
-        """Run the main ReAct loop for agentic mode."""
+        """Run the main ReAct loop for agentic mode.
+
+        Returns:
+            str: The final result from the agent's task.
+
+        Raises:
+            KISSError: If the agent exceeds maximum steps without finishing.
+        """
         for _ in range(self.max_steps):
             self.step_count += 1
             try:
@@ -176,7 +217,11 @@ class KISSAgent(Base):
         raise KISSError(f"Agent {self.name} completed {self.max_steps} steps without finishing.")
 
     def _execute_step(self) -> str | None:
-        """Execute a single step in the ReAct loop. Returns result if finished, None otherwise."""
+        """Execute a single step in the ReAct loop.
+
+        Returns:
+            str | None: The result string if the task is finished, None otherwise.
+        """
         if DEFAULT_CONFIG.agent.verbose:
             self._formatter.print_status(f"Asking {self.model.model_name}...\n")
         start_timestamp = int(time.time())
@@ -192,17 +237,13 @@ class KISSAgent(Base):
             self._add_message_with_formatter(
                 "model", response_text + "\n" + usage_info, start_timestamp
             )
-            # For Anthropic models, we must provide tool_result blocks for any tool_use blocks
-            # in the assistant's response, even when rejecting multiple tool calls
             if function_calls:
                 error_msg = (
                     f"**Your response MUST have exactly one function call. "
                     f"Your response has {len(function_calls)} function calls.**"
                 )
-                # Add tool_result for each tool_use to satisfy Anthropic API requirements
-                # Include the tool_use_id to ensure correct matching
                 function_results = [
-                    (fc["name"], {"result": error_msg, "tool_use_id": fc.get("id")})
+                    (fc["name"], {"result": error_msg})
                     for fc in function_calls
                 ]
                 self.model.add_function_results_to_conversation_and_return(function_results)
@@ -224,7 +265,17 @@ class KISSAgent(Base):
         usage_info: str,
         start_timestamp: int,
     ) -> str | None:
-        """Execute a tool call. Returns result if finished, None otherwise."""
+        """Execute a tool call.
+
+        Args:
+            function_call: Dictionary containing 'name' and 'arguments' for the tool call.
+            response_text: The model's response text preceding the tool call.
+            usage_info: Token and budget usage information string.
+            start_timestamp: Unix timestamp when the step started.
+
+        Returns:
+            str | None: The result string if the finish tool was called, None otherwise.
+        """
         function_name = function_call["name"]
         function_args = function_call.get("arguments", {})
 
@@ -243,10 +294,16 @@ class KISSAgent(Base):
             tool_call_timestamp = int(time.time())
             function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
 
+        # max_tokens = get_max_context_length(self.model_name)
+        # if len(function_response)/4 > 0.95*(max_tokens - self.total_tokens_used):
+        #     function_response = (
+        #         "**The tool response is too long. "
+        #         "Please use head or tail commands to shorten the response.**"
+        #     )
+
         model_content = response_text + "\n" + call_repr + "\n" + usage_info
         self._add_message_with_formatter("model", model_content, start_timestamp)
-        user_content = f"Tools call(s) successful.\nResult(s):\n{function_response}"
-        self._add_message_with_formatter("user", user_content, tool_call_timestamp)
+        self._add_message_with_formatter("user", function_response, tool_call_timestamp)
 
         if function_name == "finish":
             return function_response
@@ -257,7 +314,11 @@ class KISSAgent(Base):
         return None
 
     def _check_limits(self) -> None:
-        """Check budget and step limits, raise KISSError if exceeded."""
+        """Check budget and step limits, raise KISSError if exceeded.
+
+        Raises:
+            KISSError: If agent budget, global budget, or step limit is exceeded.
+        """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
         if Base.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
@@ -266,7 +327,14 @@ class KISSAgent(Base):
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:
-        """Adds callable tools to the agent's function map."""
+        """Adds callable tools to the agent's function map.
+
+        Args:
+            tools: List of callable functions to register as tools.
+
+        Raises:
+            KISSError: If a tool with the same name is already registered.
+        """
         for tool in tools:
             if tool.__name__ in self._tool_map:
                 error_msg = (
@@ -277,7 +345,11 @@ class KISSAgent(Base):
             self._tool_map[tool.__name__] = tool
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
-        """Updates token counter and budget from API response."""
+        """Updates token counter and budget from API response.
+
+        Args:
+            response: The API response object containing usage information.
+        """
         try:
             input_tokens, output_tokens = (
                 self.model.extract_input_output_token_counts_from_response(response)
@@ -290,7 +362,11 @@ class KISSAgent(Base):
             print(f"Error updating tokens and budget from response: {e} {traceback.format_exc()}")
 
     def _get_usage_info_string(self) -> str:
-        """Returns the token usage and budget information string."""
+        """Returns the token usage and budget information string.
+
+        Returns:
+            str: A formatted markdown string with usage information.
+        """
         step_info = f"[Step {self.step_count}/{self.max_steps}]"
         try:
             max_tokens = get_max_context_length(self.model.model_name)
@@ -315,7 +391,13 @@ class KISSAgent(Base):
     def _add_message_with_formatter(
         self, role: str, content: str, timestamp: int | None = None
     ) -> None:
-        """Add a message and print it using the formatter."""
+        """Add a message and print it using the formatter.
+
+        Args:
+            role: The role of the message sender (e.g., 'user', 'model').
+            content: The content of the message.
+            timestamp: Optional Unix timestamp. If None, uses current time.
+        """
         self._add_message(role, content, timestamp)
         self._formatter.print_message(self.messages[-1])
 

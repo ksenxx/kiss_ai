@@ -13,13 +13,28 @@ from kiss.core.kiss_agent import KISSAgent
 
 
 def create_agent_wrapper_with_expected(model_name: str = "gpt-4o"):
-    """Create an agent wrapper that embeds expected answer for evaluation."""
+    """Create an agent wrapper that embeds expected answer for evaluation.
+
+    Args:
+        model_name: Name of the LLM model to use for agent calls.
+
+    Returns:
+        Tuple of (agent_wrapper function, call_counter list for tracking calls).
+    """
     import json
 
     call_counter = [0]
 
     def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
-        """Run agent with real LLM call, embedding expected answer and capturing trajectory."""
+        """Run agent with real LLM call, embedding expected answer and capturing trajectory.
+
+        Args:
+            prompt_template: The prompt template to use for the agent.
+            arguments: Dict of arguments including '_expected' for the expected answer.
+
+        Returns:
+            Tuple of (result string with expected/actual, trajectory list).
+        """
         expected = arguments.get("_expected", "")
         # Remove _expected from arguments passed to agent
         agent_args = {k: v for k, v in arguments.items() if not k.startswith("_")}
@@ -42,10 +57,22 @@ def create_agent_wrapper_with_expected(model_name: str = "gpt-4o"):
 
 
 def create_evaluation_fn():
-    """Create evaluation function that extracts expected and compares."""
+    """Create evaluation function that extracts expected and compares.
+
+    Returns:
+        Evaluation function that takes a result string and returns metric scores.
+    """
     import yaml
 
     def evaluation_fn(result: str) -> dict[str, float]:
+        """Evaluate result by comparing expected and actual answers.
+
+        Args:
+            result: Result string in format 'EXPECTED:...\nRESULT:...'
+
+        Returns:
+            Dict with 'success' and 'correct' scores (0.0 or 1.0).
+        """
         try:
             if result.startswith("EXPECTED:"):
                 parts = result.split("\nRESULT:", 1)
@@ -70,7 +97,14 @@ class TestGEPAOptimizeBasic(unittest.TestCase):
     """Test basic GEPA optimization functionality."""
 
     def test_optimize_returns_prompt_candidate(self):
-        """Test that optimize returns a valid PromptCandidate."""
+        """Test that optimize returns a valid PromptCandidate.
+
+        Verifies that GEPA.optimize() returns a non-None PromptCandidate
+        with preserved placeholders and non-empty prompt template.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = """Solve the math problem: {problem}
@@ -100,7 +134,14 @@ Call finish with status='success' and result=<answer>."""
         self.assertGreater(len(best.prompt_template), 0)
 
     def test_optimize_with_dev_val_split(self):
-        """Test that optimize correctly splits examples into dev/val."""
+        """Test that optimize correctly splits examples into dev/val.
+
+        Verifies that training examples are properly divided between
+        development and validation sets according to dev_val_split ratio.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Answer: {question}\nCall finish with result."
@@ -134,7 +175,14 @@ Call finish with status='success' and result=<answer>."""
         self.assertIsNotNone(best)
 
     def test_optimize_with_minibatch_size(self):
-        """Test optimize with dev minibatch size parameter."""
+        """Test optimize with dev minibatch size parameter.
+
+        Verifies that optimization works correctly when using
+        dev_minibatch_size to limit examples per evaluation batch.
+
+        Returns:
+            None
+        """
         agent_wrapper, call_counter = create_agent_wrapper_with_expected()
 
         initial_prompt = "Compute: {expr}\nCall finish with the result."
@@ -167,7 +215,14 @@ class TestGEPAOptimizeWithMutation(unittest.TestCase):
     """Test GEPA optimization with mutation/reflection enabled."""
 
     def test_optimize_with_mutation_creates_new_candidates(self):
-        """Test that mutation creates new candidate prompts via reflection."""
+        """Test that mutation creates new candidate prompts via reflection.
+
+        Verifies that with high mutation rate, GEPA creates new candidate
+        prompts through the reflection/mutation mechanism.
+
+        Returns:
+            None
+        """
         agent_wrapper, call_counter = create_agent_wrapper_with_expected()
 
         initial_prompt = "Problem: {problem}\nSolve and call finish."
@@ -202,7 +257,14 @@ class TestGEPAOptimizeWithMutation(unittest.TestCase):
         print(f"LLM calls: {call_counter[0]}")
 
     def test_optimize_multiple_generations(self):
-        """Test optimization across multiple generations."""
+        """Test optimization across multiple generations.
+
+        Verifies that GEPA can run through multiple generations and
+        maintain valid validation scores and Pareto frontier.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Q: {q}\nAnswer and call finish with result."
@@ -239,7 +301,14 @@ class TestGEPAOptimizeParetoFrontier(unittest.TestCase):
     """Test GEPA Pareto frontier management through optimize."""
 
     def test_optimize_builds_pareto_frontier(self):
-        """Test that optimize builds a Pareto frontier."""
+        """Test that optimize builds a Pareto frontier.
+
+        Verifies that optimization creates a valid Pareto frontier with
+        PromptCandidate instances that preserve required placeholders.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Calculate {calc} and call finish with the answer."
@@ -274,7 +343,14 @@ class TestGEPAOptimizeParetoFrontier(unittest.TestCase):
             self.assertIn("{calc}", candidate.prompt_template)
 
     def test_optimize_pareto_respects_size_limit(self):
-        """Test that Pareto frontier respects max size during optimize."""
+        """Test that Pareto frontier respects max size during optimize.
+
+        Verifies that the Pareto frontier never exceeds the configured
+        pareto_size limit during optimization.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Solve: {x}\nCall finish with answer."
@@ -308,7 +384,14 @@ class TestGEPAOptimizeWithMerge(unittest.TestCase):
     """Test GEPA optimization with merge functionality."""
 
     def test_optimize_with_merge_enabled(self):
-        """Test optimization with structural merge enabled."""
+        """Test optimization with structural merge enabled.
+
+        Verifies that optimization works correctly when use_merge is True,
+        allowing candidates to be merged for potential improvement.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Task: {task}\nProvide answer via finish tool."
@@ -342,7 +425,14 @@ class TestGEPAOptimizeWithMerge(unittest.TestCase):
         print(f"\nMerge invocations: {gepa._merge_invocations}")
 
     def test_optimize_merge_disabled(self):
-        """Test optimization with merge explicitly disabled."""
+        """Test optimization with merge explicitly disabled.
+
+        Verifies that when use_merge is False, no merge operations
+        are invoked during optimization.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Compute {op} and respond with finish."
@@ -375,7 +465,14 @@ class TestGEPAOptimizeGetters(unittest.TestCase):
     """Test GEPA getter methods after optimization."""
 
     def test_get_best_prompt_after_optimize(self):
-        """Test get_best_prompt returns valid prompt after optimize."""
+        """Test get_best_prompt returns valid prompt after optimize.
+
+        Verifies that get_best_prompt() returns a string with preserved
+        placeholders and reasonable length after optimization completes.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Question: {q}\nUse finish to answer."
@@ -405,7 +502,14 @@ class TestGEPAOptimizeGetters(unittest.TestCase):
         self.assertGreater(len(best_prompt), 10)
 
     def test_get_pareto_frontier_is_copy(self):
-        """Test get_pareto_frontier returns a copy."""
+        """Test get_pareto_frontier returns a copy.
+
+        Verifies that get_pareto_frontier() returns a copy of the frontier
+        list, so modifications don't affect internal state.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Solve {p} and finish."
@@ -442,7 +546,14 @@ class TestGEPAOptimizeMultiplePlaceholders(unittest.TestCase):
     """Test GEPA with prompts containing multiple placeholders."""
 
     def test_optimize_with_two_placeholders(self):
-        """Test optimization with prompt containing two placeholders."""
+        """Test optimization with prompt containing two placeholders.
+
+        Verifies that GEPA preserves multiple placeholders (context, question)
+        in the prompt template during optimization.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = """Context: {context}
@@ -489,7 +600,14 @@ Answer using the finish tool."""
         self.assertIn("{question}", best.prompt_template)
 
     def test_optimize_sanitizes_invalid_placeholders(self):
-        """Test that optimize sanitizes prompts with invalid placeholders."""
+        """Test that optimize sanitizes prompts with invalid placeholders.
+
+        Verifies that valid placeholders are preserved even when mutations
+        might introduce changes to the prompt template.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         # Initial prompt has valid placeholder
@@ -521,7 +639,14 @@ class TestGEPAOptimizeScoring(unittest.TestCase):
     """Test GEPA scoring behavior through optimization."""
 
     def test_optimize_tracks_val_scores(self):
-        """Test that optimization tracks validation scores."""
+        """Test that optimization tracks validation scores.
+
+        Verifies that the best candidate has populated val_scores dict
+        and per_item_val_scores list after optimization.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Evaluate: {expr}\nFinish with the answer."
@@ -552,7 +677,14 @@ class TestGEPAOptimizeScoring(unittest.TestCase):
         self.assertIsInstance(best.per_item_val_scores, list)
 
     def test_optimize_with_perfect_score_eval(self):
-        """Test optimization behavior with perfect scores."""
+        """Test optimization behavior with perfect scores.
+
+        Verifies that optimization completes successfully when the
+        evaluation function always returns perfect scores.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Simple: {s}\nJust call finish with success."
@@ -588,7 +720,14 @@ class TestGEPAOptimizeEdgeCases(unittest.TestCase):
     """Test GEPA optimization edge cases."""
 
     def test_optimize_with_minimal_examples(self):
-        """Test optimization with minimal number of examples."""
+        """Test optimization with minimal number of examples.
+
+        Verifies that optimization works with only 2 examples (minimum
+        needed for dev/val split to have at least one example each).
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Do: {x}\nCall finish."
@@ -616,7 +755,14 @@ class TestGEPAOptimizeEdgeCases(unittest.TestCase):
         self.assertGreaterEqual(len(gepa.val_examples), 1)
 
     def test_optimize_with_single_generation(self):
-        """Test optimization with single generation."""
+        """Test optimization with single generation.
+
+        Verifies that with max_generations=1 and mutation_rate=0,
+        the returned prompt equals the initial prompt.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Calc: {c}\nFinish with answer."
@@ -643,7 +789,14 @@ class TestGEPAOptimizeEdgeCases(unittest.TestCase):
         self.assertEqual(best.prompt_template, initial_prompt)
 
     def test_optimize_returns_best_from_frontier(self):
-        """Test that optimize returns best candidate from frontier."""
+        """Test that optimize returns best candidate from frontier.
+
+        Verifies that the returned best candidate is found in either
+        the Pareto frontier or current candidates list.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = "Math: {m}\nAnswer via finish."
@@ -681,7 +834,14 @@ class TestGEPAOptimizeUseBestPrompt(unittest.TestCase):
     """Test using the optimized prompt with an agent."""
 
     def test_use_optimized_prompt_with_agent(self):
-        """Test that optimized prompt works with a real agent."""
+        """Test that optimized prompt works with a real agent.
+
+        Verifies that the optimized prompt can be used with a KISSAgent
+        to produce valid results on new problems.
+
+        Returns:
+            None
+        """
         agent_wrapper, _ = create_agent_wrapper_with_expected()
 
         initial_prompt = """You are a helpful math assistant.

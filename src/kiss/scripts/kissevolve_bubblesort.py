@@ -41,10 +41,11 @@ def evaluate_correctness_of_code(code: str) -> dict:
     """Evaluate the correctness of a sorting code variant by running test cases.
 
     Args:
-        code: The code string to evaluate
+        code: The code string to evaluate containing a sort_array function.
 
     Returns:
-        Dict with 'correctness' and 'error'
+        Dictionary with 'correctness' (bool) indicating if all test cases passed,
+        and 'error' (str) containing error message or 'None' if successful.
     """
     # Create a temporary file to execute the code
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -120,11 +121,19 @@ def evaluate_correctness_of_code(code: str) -> dict:
 def evaluate_performance_of_code(code: str) -> dict:
     """Evaluate the performance of a sorting code variant by measuring execution time.
 
+    Measures execution time on arrays of various sizes (100, 500, 1000, 2000 elements)
+    and calculates fitness based on total time and scaling behavior. Algorithms with
+    O(n log n) scaling receive a bonus.
+
     Args:
-        code: The code string to evaluate
+        code: The code string to evaluate containing a sort_array function.
 
     Returns:
-        Dict with 'fitness', 'metrics', 'artifacts', and optionally 'error'
+        Dictionary containing:
+            - 'fitness': Float score (higher is better, with bonus for O(n log n) scaling).
+            - 'metrics': Dict with 'total_time_seconds', 'times_by_size', 'growth_ratio'.
+            - 'artifacts': Dict with 'test_sizes' and 'performance_data'.
+            - 'error': Optional string with error message if evaluation failed.
     """
     # Create a temporary file to execute the code
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -223,7 +232,19 @@ def evaluate_performance_of_code(code: str) -> dict:
 
 
 def analyze_complexity(metrics: dict | None) -> str:
-    """Analyze the complexity of the algorithm based on performance metrics."""
+    """Analyze the complexity of the algorithm based on performance metrics.
+
+    Compares the growth rate of execution time across different input sizes
+    to estimate whether the algorithm is O(n log n) or O(n²).
+
+    Args:
+        metrics: Dictionary containing 'times_by_size' with size-to-time mappings,
+            or None.
+
+    Returns:
+        String describing the estimated complexity: "O(n log n)", "O(n²)",
+        "O(n^?) - ratio: X.XX", or "Unknown" if analysis is not possible.
+    """
     if not metrics or "times_by_size" not in metrics:
         return "Unknown"
 
@@ -259,7 +280,15 @@ def analyze_complexity(metrics: dict | None) -> str:
 
 
 def main() -> None:
-    """Run OpenEvolve optimization on bubble sort."""
+    """Run OpenEvolve optimization on bubble sort.
+
+    Initializes the KISSEvolve optimizer with bubble sort as the initial code,
+    runs the evolutionary process to discover faster sorting algorithms, and
+    reports results including fitness improvement, speedup, and complexity analysis.
+
+    Returns:
+        None.
+    """
     print("=" * 80)
     print("OpenEvolve Test: Evolving Bubble Sort to O(n log n)")
     print("=" * 80)
@@ -291,7 +320,14 @@ def main() -> None:
 
     # Wrapper function to convert evaluate_correctness_of_code return value to bool
     def test_correctness(code: str) -> bool:
-        """Test if code is correct, returning a boolean."""
+        """Test if code is correct, returning a boolean.
+
+        Args:
+            code: The code string to evaluate for correctness.
+
+        Returns:
+            True if the code passes all correctness tests, False otherwise.
+        """
         result = evaluate_correctness_of_code(code)
         correctness = result.get("correctness", False)
         return bool(correctness)

@@ -26,7 +26,7 @@ from claude_agent_sdk import (
 )
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.utils import is_subpath, resolve_path
 
@@ -47,7 +47,14 @@ WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 
 
 class ClaudeCodingAgent(Base):
+    """Claude Coding Agent using the Claude Agent SDK."""
+
     def __init__(self, name: str) -> None:
+        """Initialize a ClaudeCodingAgent instance.
+
+        Args:
+            name: The name identifier for the agent.
+        """
         super().__init__(name)
 
     def _reset(
@@ -59,6 +66,16 @@ class ClaudeCodingAgent(Base):
         max_steps: int,
         max_budget: float,
     ) -> None:
+        """Reset the agent's state for a new run.
+
+        Args:
+            model_name: The model name to use.
+            readable_paths: Paths allowed for reading.
+            writable_paths: Paths allowed for writing.
+            base_dir: Base directory for path resolution.
+            max_steps: Maximum steps allowed.
+            max_budget: Maximum budget in USD.
+        """
         self._init_run_state(model_name, BUILTIN_TOOLS)
         Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = str(Path(base_dir).resolve())
@@ -74,7 +91,15 @@ class ClaudeCodingAgent(Base):
     def _check_path_permission(
         self, path_str: str, allowed_paths: list[Path]
     ) -> PermissionResultAllow | PermissionResultDeny:
-        """Check if path is allowed, return appropriate permission result."""
+        """Check if path is allowed, return appropriate permission result.
+
+        Args:
+            path_str: The path to check.
+            allowed_paths: List of allowed path prefixes.
+
+        Returns:
+            PermissionResultAllow if path is allowed, PermissionResultDeny otherwise.
+        """
         if is_subpath(Path(path_str).resolve(), allowed_paths):
             return PermissionResultAllow(behavior="allow")
         return PermissionResultDeny(
@@ -87,6 +112,16 @@ class ClaudeCodingAgent(Base):
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
+        """Handle permission requests for tool calls.
+
+        Args:
+            tool_name: The name of the tool being called.
+            tool_input: The input arguments for the tool.
+            context: The permission context from the SDK.
+
+        Returns:
+            PermissionResultAllow or PermissionResultDeny based on path access.
+        """
         path_str = tool_input.get("file_path") or tool_input.get("path")
         if not path_str:
             return PermissionResultAllow(behavior="allow")
@@ -98,13 +133,22 @@ class ClaudeCodingAgent(Base):
         return PermissionResultAllow(behavior="allow")
 
     def _update_token_usage(self, message: Any) -> None:
-        """Update token counts from message usage."""
+        """Update token counts from message usage.
+
+        Args:
+            message: A message object with optional usage attribute.
+        """
         if hasattr(message, "usage") and message.usage:
             self.total_tokens_used += getattr(message.usage, "input_tokens", 0)
             self.total_tokens_used += getattr(message.usage, "output_tokens", 0)
 
     def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> None:
-        """Process assistant message and update state."""
+        """Process assistant message and update state.
+
+        Args:
+            message: The assistant message from the Claude SDK.
+            timestamp: Unix timestamp for the message.
+        """
         self.step_count += 1
         self._update_token_usage(message)
 
@@ -121,7 +165,12 @@ class ClaudeCodingAgent(Base):
         self._add_message("model", thought + tool_call, timestamp)
 
     def _process_user_message(self, message: UserMessage, timestamp: int) -> None:
-        """Process user message (tool results) and update state."""
+        """Process user message (tool results) and update state.
+
+        Args:
+            message: The user message containing tool results.
+            timestamp: Unix timestamp for the message.
+        """
         result = ""
         for block in message.content:
             if isinstance(block, ToolResultBlock):
@@ -134,7 +183,15 @@ class ClaudeCodingAgent(Base):
         self._add_message("user", result, timestamp)
 
     def _process_result_message(self, message: ResultMessage, timestamp: int) -> str | None:
-        """Process final result message and return the result."""
+        """Process final result message and return the result.
+
+        Args:
+            message: The final result message from the Claude SDK.
+            timestamp: Unix timestamp for the message.
+
+        Returns:
+            str | None: The final result string.
+        """
         self._update_token_usage(message)
         if hasattr(message, "cost") and message.total_cost_usd:
             cost = message.total_cost_usd
@@ -179,7 +236,7 @@ class ClaudeCodingAgent(Base):
         async def _run_async() -> str | None:
             options = ClaudeAgentOptions(
                 model=model_name,
-                system_prompt=DEFAULT_SYSTEM_PROMPT,
+                system_prompt=CODING_INSTRUCTIONS,
                 can_use_tool=self.permission_handler,
                 permission_mode="default",
                 allowed_tools=BUILTIN_TOOLS,
@@ -209,6 +266,7 @@ class ClaudeCodingAgent(Base):
 
 
 def main() -> None:
+    """Example usage of the ClaudeCodingAgent."""
     agent = ClaudeCodingAgent("Example agent")
     task_description = """
     can you write, test, and optimize a fibonacci function in Python that is efficient and correct?

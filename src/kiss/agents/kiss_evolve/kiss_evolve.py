@@ -216,7 +216,19 @@ class KISSEvolve:
     def _validate_and_normalize_models(
         model_names: list[tuple[str, float]],
     ) -> list[tuple[str, float]]:
-        """Validate and normalize model probabilities."""
+        """Validate and normalize model probabilities.
+
+        Args:
+            model_names: List of (model_name, probability) tuples.
+
+        Returns:
+            List of (model_name, normalized_probability) tuples where
+            probabilities sum to 1.0.
+
+        Raises:
+            ValueError: If model_names is empty, contains negative probabilities,
+                or has probabilities summing to zero.
+        """
         if not model_names:
             raise ValueError("models list cannot be empty")
         if not all(isinstance(p, (int, float)) and p >= 0 for _, p in model_names):
@@ -227,7 +239,12 @@ class KISSEvolve:
         return [(name, prob / total_prob) for name, prob in model_names]
 
     def _validate_parameters(self) -> None:
-        """Validate all configuration parameters."""
+        """Validate all configuration parameters.
+
+        Raises:
+            ValueError: If any configuration parameter is invalid (e.g., elite_size
+                >= population_size, mutation_rate outside [0, 1], invalid topology).
+        """
         if self.elite_size >= self.population_size:
             error_msg = (
                 f"elite_size ({self.elite_size}) must be less than "
@@ -272,7 +289,12 @@ class KISSEvolve:
             )
 
     def _initialize_tracking(self, novelty_rag_model: Model | None) -> None:
-        """Initialize population tracking and novelty RAG."""
+        """Initialize population tracking and novelty RAG.
+
+        Args:
+            novelty_rag_model: Optional model for novelty RAG. If None and novelty
+                rejection is enabled, uses the first model from model_names.
+        """
         # Population tracking
         self.population: list[CodeVariant] = []
         self.variant_counter = 0
@@ -299,7 +321,11 @@ class KISSEvolve:
             )
 
     def _setup_prompt_templates(self) -> None:
-        """Initialize prompt templates for mutation and crossover."""
+        """Initialize prompt templates for mutation and crossover.
+
+        Sets up the mutation_prompt_template, crossover_prompt_template,
+        and constraints string used during code evolution.
+        """
         self.mutation_prompt_template = """You are an expert code optimizer. Your task is to \
 improve the given code by optimizing it for better performance while maintaining correctness.
 
@@ -352,7 +378,12 @@ combine the best aspects of two code variants to create an improved version.
         )
 
     def _select_model(self) -> str:
-        """Randomly select a model name based on probabilities."""
+        """Randomly select a model name based on probabilities.
+
+        Returns:
+            Selected model name string, chosen based on the normalized
+            probability weights.
+        """
         model_names, weights = zip(*self.model_names)
         selected: str = random.choices(model_names, weights=weights, k=1)[0]
         return selected
@@ -410,7 +441,11 @@ combine the best aspects of two code variants to create an improved version.
         self.novelty_rag.add_documents([document])
 
     def __pick_random_innovation_prompt(self) -> str:
-        """Pick a random innovation prompt from the list of innovation prompts."""
+        """Pick a random innovation prompt from the list of innovation prompts.
+
+        Returns:
+            A random innovation prompt string, or empty string (50% chance).
+        """
         if random.random() < 0.5:
             return ""
         rand_index = random.randint(0, len(INNOVATION_INSTRUCTIONS) - 1)
@@ -512,7 +547,12 @@ combine the best aspects of two code variants to create an improved version.
         return result
 
     def _evaluate_variant(self, variant: CodeVariant) -> None:
-        """Evaluate a code variant and update its fitness."""
+        """Evaluate a code variant and update its fitness.
+
+        Args:
+            variant: The code variant to evaluate. Modified in place with
+                fitness, metrics, artifacts, and evaluation_error fields.
+        """
         try:
             result = self.evaluation_fn(variant.code)
             variant.fitness = result.get("fitness", 0.0)
@@ -529,7 +569,11 @@ combine the best aspects of two code variants to create an improved version.
             variant.artifacts = {}
 
     def _initialize_population(self) -> None:
-        """Initialize the population with the initial code."""
+        """Initialize the population with the initial code.
+
+        Creates a single variant from initial_code, evaluates it, and adds
+        it to the population and novelty RAG.
+        """
         initial_variant = CodeVariant(
             code=self.initial_code,
             id=self.variant_counter,
@@ -542,7 +586,11 @@ combine the best aspects of two code variants to create an improved version.
         self._add_code_to_rag(self.initial_code, initial_variant.id)
 
     def _initialize_islands(self) -> None:
-        """Initialize islands for island-based evolution."""
+        """Initialize islands for island-based evolution.
+
+        Creates num_islands separate populations, each initialized with a
+        copy of the initial code. Each island maintains independent evolution.
+        """
         self.islands = []
         self.island_histories = []
 
@@ -785,7 +833,11 @@ combine the best aspects of two code variants to create an improved version.
         return new_population
 
     def _evolve_generation(self, generation: int) -> None:
-        """Evolve one generation of the population."""
+        """Evolve one generation of the population.
+
+        Args:
+            generation: The current generation number.
+        """
         self.population = self._evolve_population(self.population, generation)
         self.generation_history.append(self.population.copy())
 
@@ -801,7 +853,11 @@ combine the best aspects of two code variants to create an improved version.
             return self._evolve_single_population()
 
     def _evolve_single_population(self) -> CodeVariant:
-        """Run the evolutionary algorithm with a single population."""
+        """Run the evolutionary algorithm with a single population.
+
+        Returns:
+            The best CodeVariant found during evolution.
+        """
         pop_size = self.population_size
         print(f"Initializing KISSEvolve with population size {pop_size}")
         self._initialize_population()
@@ -827,7 +883,11 @@ combine the best aspects of two code variants to create an improved version.
         return self.population[0]
 
     def _evolve_with_islands(self) -> CodeVariant:
-        """Run the evolutionary algorithm with island-based evolution."""
+        """Run the evolutionary algorithm with island-based evolution.
+
+        Returns:
+            The best CodeVariant found across all islands during evolution.
+        """
         pop_size = self.population_size
         print(
             f"Initializing KISSEvolve with {self.num_islands} islands, "
@@ -890,7 +950,13 @@ combine the best aspects of two code variants to create an improved version.
         return all_variants[0]
 
     def get_best_variant(self) -> CodeVariant:
-        """Get the best variant from the current population or islands."""
+        """Get the best variant from the current population or islands.
+
+        Returns:
+            The CodeVariant with the highest fitness from the current population
+            or all islands. Returns a default variant with initial_code if no
+            population exists.
+        """
         if self.num_islands > 1 and self.islands:
             # Get best from all islands
             all_variants = [v for island in self.islands for v in island]
@@ -901,7 +967,15 @@ combine the best aspects of two code variants to create an improved version.
         return CodeVariant(code=self.initial_code, id=0)
 
     def get_population_stats(self) -> dict[str, Any]:
-        """Get statistics about the current population."""
+        """Get statistics about the current population.
+
+        Returns:
+            Dictionary containing:
+                - size: Total population size
+                - avg_fitness: Average fitness across all variants
+                - best_fitness: Maximum fitness value
+                - worst_fitness: Minimum fitness value
+        """
         # Handle island-based evolution
         if self.num_islands > 1 and self.islands:
             all_variants = [v for island in self.islands for v in island]
@@ -927,7 +1001,17 @@ combine the best aspects of two code variants to create an improved version.
         }
 
     def _get_migration_targets(self, island_id: int) -> list[int]:
-        """Get target islands for migration from a given island."""
+        """Get target islands for migration from a given island.
+
+        Args:
+            island_id: The source island ID.
+
+        Returns:
+            List of target island IDs based on the migration topology:
+                - ring: Returns the next island in circular order
+                - fully_connected: Returns all other islands
+                - random: Returns a single randomly chosen other island
+        """
         if self.migration_topology == "ring":
             # Ring topology: each island migrates to the next one
             return [(island_id + 1) % self.num_islands]
@@ -944,7 +1028,12 @@ combine the best aspects of two code variants to create an improved version.
             return []
 
     def _migrate_between_islands(self) -> None:
-        """Perform migration between islands."""
+        """Perform migration between islands.
+
+        Selects the top migration_size individuals from each island and copies
+        them to target islands based on the migration topology. If target
+        island becomes too large, worst individuals are removed to make room.
+        """
         if self.num_islands <= 1:
             return
 
@@ -997,5 +1086,13 @@ combine the best aspects of two code variants to create an improved version.
                 print(f"  Migrated {len(migrants)} individuals to island {target_id}")
 
     def _evolve_island_generation(self, island_id: int, generation: int) -> list[CodeVariant]:
-        """Evolve one generation for a specific island."""
+        """Evolve one generation for a specific island.
+
+        Args:
+            island_id: The island index to evolve.
+            generation: The current generation number.
+
+        Returns:
+            The new population for the island after evolution.
+        """
         return self._evolve_population(self.islands[island_id], generation)

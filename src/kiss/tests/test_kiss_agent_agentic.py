@@ -46,12 +46,25 @@ class TestKISSAgentBasic(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Basic Test Agent")
 
+    def test_agentic_simple_task(self) -> None:
+        """Test agentic mode with a simple calculation task.
 
-    def test_agentic_simple_task(self):
-        """Test agentic mode with a simple calculation task."""
+        Verifies that the agent can execute a calculation using the simple_calculator
+        tool and return the correct result through the finish tool.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
@@ -68,8 +81,15 @@ class TestKISSAgentBasic(unittest.TestCase):
         self.assertIn("25854996", result)
         self.assertEqual(len(json.loads(self.agent.get_trajectory())), 5)
 
-    def test_agentic_with_arguments(self):
-        """Test agentic mode with prompt template arguments."""
+    def test_agentic_with_arguments(self) -> None:
+        """Test agentic mode with prompt template arguments.
+
+        Verifies that the agent can substitute template arguments into the prompt
+        and execute the task correctly with the provided values.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
@@ -86,8 +106,15 @@ class TestKISSAgentBasic(unittest.TestCase):
         self.assertRegex(result, r"\d+")
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
-    def test_trajectory_structure(self):
-        """Test that trajectory has proper structure with user and model messages."""
+    def test_trajectory_structure(self) -> None:
+        """Test that trajectory has proper structure with user and model messages.
+
+        Verifies that the agent's trajectory contains properly structured messages
+        with role and content fields, and that the conversation flow is correct.
+
+        Returns:
+            None
+        """
         self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
@@ -124,12 +151,25 @@ class TestKISSAgentMultipleTools(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Multi-Tool Test Agent")
 
+    def test_multiple_tools_available(self) -> None:
+        """Test agent can choose between multiple tools.
 
-    def test_multiple_tools_available(self):
-        """Test agent can choose between multiple tools."""
+        Verifies that when given multiple tools, the agent can correctly select
+        and use the appropriate tool for the given task.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
@@ -150,12 +190,25 @@ class TestKISSAgentErrorHandling(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Error Test Agent")
 
+    def test_tool_execution_error_recovery(self) -> None:
+        """Test that agent can recover from tool execution errors.
 
-    def test_tool_execution_error_recovery(self):
-        """Test that agent can recover from tool execution errors."""
+        Verifies that when a tool raises an exception, the agent can handle
+        the error gracefully and continue with alternative tools.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
@@ -172,8 +225,15 @@ class TestKISSAgentErrorHandling(unittest.TestCase):
         # Trajectory length varies based on LLM behavior
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 4)
 
-    def test_duplicate_tool_raises_error(self):
-        """Test that registering duplicate tools raises KISSError."""
+    def test_duplicate_tool_raises_error(self) -> None:
+        """Test that registering duplicate tools raises KISSError.
+
+        Verifies that providing the same tool twice in the tools list
+        raises an appropriate error to prevent duplicate registrations.
+
+        Returns:
+            None
+        """
         with self.assertRaises(KISSError) as context:
             self.agent.run(
                 model_name=TEST_MODEL,
@@ -188,12 +248,25 @@ class TestKISSAgentBudgetAndSteps(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Budget Test Agent")
 
+    def test_max_steps_respected(self) -> None:
+        """Test that agent completes within max_steps and tracks budget.
 
-    def test_max_steps_respected(self):
-        """Test that agent completes within max_steps and tracks budget."""
+        Verifies that the agent respects the max_steps limit and properly
+        tracks budget usage during execution.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
@@ -211,8 +284,15 @@ class TestKISSAgentBudgetAndSteps(unittest.TestCase):
         # Trajectory length varies based on LLM behavior
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
-    def test_max_steps_exceeded_raises_error(self):
-        """Test that exceeding max_steps raises KISSError."""
+    def test_max_steps_exceeded_raises_error(self) -> None:
+        """Test that exceeding max_steps raises KISSError.
+
+        Verifies that when an agent exceeds the maximum number of steps,
+        a KISSError is raised with an appropriate message.
+
+        Returns:
+            None
+        """
 
         def never_finish() -> str:
             """A tool that never finishes the task.
@@ -241,12 +321,25 @@ class TestKISSAgentFinishTool(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Finish Tool Test Agent")
 
+    def test_finish_tool_auto_added(self) -> None:
+        """Test that finish tool is automatically added when not provided.
 
-    def test_finish_tool_auto_added(self):
-        """Test that finish tool is automatically added when not provided."""
+        Verifies that the agent automatically includes a finish tool when
+        no tools are explicitly provided, allowing the agent to complete tasks.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template="Just say 'done' and finish.",
@@ -257,8 +350,15 @@ class TestKISSAgentFinishTool(unittest.TestCase):
         # Trajectory length varies based on LLM behavior
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
-    def test_custom_finish_tool_not_duplicated(self):
-        """Test that providing a custom finish tool doesn't add another."""
+    def test_custom_finish_tool_not_duplicated(self) -> None:
+        """Test that providing a custom finish tool doesn't add another.
+
+        Verifies that when a custom finish function is provided, the agent
+        uses it instead of adding the default finish tool.
+
+        Returns:
+            None
+        """
 
         def finish(result: str) -> str:
             """Custom finish function.
@@ -285,12 +385,25 @@ class TestKISSAgentMultipleRuns(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Multiple Runs Test Agent")
 
+    def test_trajectory_resets_between_runs(self) -> None:
+        """Test that trajectory is reset between runs.
 
-    def test_trajectory_resets_between_runs(self):
-        """Test that trajectory is reset between runs."""
+        Verifies that when running the same agent multiple times, the trajectory
+        is cleared between runs and doesn't accumulate from previous runs.
+
+        Returns:
+            None
+        """
         # First run
         self.agent.run(
             model_name=TEST_MODEL,
@@ -319,12 +432,25 @@ class TestKISSAgentToolVariants(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Tool Variants Test Agent")
 
+    def test_tool_with_optional_param(self) -> None:
+        """Test tool with optional parameter.
 
-    def test_tool_with_optional_param(self):
-        """Test tool with optional parameter."""
+        Verifies that the agent can correctly call tools that have optional
+        parameters and pass both required and optional arguments.
+
+        Returns:
+            None
+        """
 
         def greet_with_title(name: str, title: str = "Mr.") -> str:
             """Greet someone with an optional title.
@@ -353,12 +479,16 @@ class TestKISSAgentToolVariants(unittest.TestCase):
         trajectory = json.loads(self.agent.get_trajectory())
         self.assertIn(len(trajectory), [3, 5])
 
-    def test_tool_returns_dict(self):
+    def test_tool_returns_dict(self) -> None:
         """Test tool that returns a dictionary.
 
-        Note: This test can be flaky due to LLM behavior - the model may not always
-        follow tool calling instructions consistently. We use a more explicit prompt
-        and allow for multiple attempts.
+        Verifies that the agent can handle tools that return dictionary objects
+        and extract values from them. Note: This test can be flaky due to LLM
+        behavior - the model may not always follow tool calling instructions
+        consistently. We use a more explicit prompt and allow for multiple attempts.
+
+        Returns:
+            None
         """
 
         def get_info() -> dict:
@@ -386,8 +516,15 @@ class TestKISSAgentToolVariants(unittest.TestCase):
         # Trajectory length varies based on LLM behavior
         self.assertGreater(len(json.loads(self.agent.get_trajectory())), 2)
 
-    def test_tool_with_multiple_params(self):
-        """Test tool with multiple required parameters."""
+    def test_tool_with_multiple_params(self) -> None:
+        """Test tool with multiple required parameters.
+
+        Verifies that the agent can correctly call tools that require
+        multiple parameters and pass all required arguments.
+
+        Returns:
+            None
+        """
 
         def add_numbers(a: int, b: int) -> str:
             """Add two numbers together.
@@ -421,12 +558,25 @@ class TestKISSAgentPromptFormats(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Prompt Format Test Agent")
 
+    def test_multiline_prompt_template(self) -> None:
+        """Test multiline prompt template.
 
-    def test_multiline_prompt_template(self):
-        """Test multiline prompt template."""
+        Verifies that the agent can correctly process multiline prompt
+        templates with complex formatting and step-by-step instructions.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template="""You are a helpful calculator assistant.
@@ -444,8 +594,15 @@ Only return the number.""",
         self.assertIn("10", result)
         self.assertEqual(len(json.loads(self.agent.get_trajectory())), 5)
 
-    def test_empty_arguments_dict(self):
-        """Test that empty arguments dict works."""
+    def test_empty_arguments_dict(self) -> None:
+        """Test that empty arguments dict works.
+
+        Verifies that providing an empty arguments dictionary doesn't cause
+        errors and the agent can still process the prompt correctly.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template=(
@@ -466,12 +623,25 @@ class TestKISSAgentVerboseMode(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Verbose Test Agent")
 
+    def test_verbose_mode_toggle(self) -> None:
+        """Test that verbose mode can be toggled without errors.
 
-    def test_verbose_mode_toggle(self):
-        """Test that verbose mode can be toggled without errors."""
+        Verifies that enabling verbose mode doesn't cause any errors
+        and the agent can still complete tasks successfully.
+
+        Returns:
+            None
+        """
         from kiss.core.config import DEFAULT_CONFIG
 
         original_verbose = DEFAULT_CONFIG.agent.verbose

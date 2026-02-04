@@ -67,13 +67,9 @@ The system uses crowding distance to maintain diversity—ensuring that even whe
 
 This is what separates Agent Evolver from tools like prompt tuning frameworks. Those systems optimize your prompts while leaving your code untouched. Agent Evolver optimizes **everything**:
 
-| Traditional Prompt Optimization | Agent Evolver |
-|--------------------------------|---------------|
-| Tunes prompt text | Optimizes prompts AND code |
-| Single objective (accuracy) | Multi-objective (cost + speed) |
-| Static architecture | Evolves architecture |
-| Manual iteration | Automated generations |
-| Local improvements | Global search via genetics |
+______________________________________________________________________
+
+## | Traditional Prompt Optimization | Agent Evolver | |--------------------------------|--------------------------------| | Tunes prompt text | Optimizes prompts AND code | | Single objective (accuracy) | Multi-objective (cost + speed) | | Static architecture | Evolves architecture | | Manual iteration | Automated generations | | Local improvements | Global search via genetics |
 
 When the improver agent analyzes your code, it's not just looking at strings. It's understanding your control flow, identifying redundant API calls, spotting opportunities for parallelization, and restructuring your agent delegation hierarchy.
 
@@ -82,47 +78,36 @@ When the improver agent analyzes your code, it's not just looking at strings. It
 Under the hood, Agent Evolver is elegantly simple:
 
 ```
-┌───────────────────────────────────────────────────┐
-│                 Task Description                  │
-└─────────────────────────┬─────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────────────────┐
-│            Initial Agent Creation                 │
-│   (Claude Code / Gemini CLI / OpenAI Codex)       │
-│       + Web Search for Best Practices             │
-└─────────────────────────┬─────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────────────────┐
-│                Evolution Loop              ◄──┐   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │  Mutation (80%)   │   Crossover (20%)   │  │   │
-│  │  Single parent    │   Two parents       │  │   │
-│  │  Targeted changes │   Combine best ideas│  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      ▼                        │   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │             Evaluation                  │  │   │
-│  │  Measure: tokens_used, execution_time   │  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      ▼                        │   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │       Pareto Frontier Update            │  │   │
-│  │    Keep non-dominated solutions         │  │   │
-│  │    Trim using crowding distance         │  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      └── More generations? ───┘   │
-└─────────────────────────┬─────────────────────────┘
-                          │ Done
-                          ▼
-┌───────────────────────────────────────────────────┐
-│             Optimal Agent Output                  │
-│        Best trade-off on Pareto frontier          │
-└───────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                           Task Description                                               │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│            Initial Agent Creation (KISS Coding Agent) + Web Search for Best Practices                    │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                          Evolution Loop                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────◄──┐   │
+│  │    Mutation (80%): Single parent, Targeted changes   │   Crossover (20%): Two parents, Combine │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  ▼                                                   │   │ 
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐  │   │
+│  │                         Evaluation: Measure tokens_used, execution_time                        │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  ▼                                                   │   │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐  │   │
+│  │            Pareto Frontier Update: Keep non-dominated solutions, Trim by crowding distance     │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  └───────────────── More generations? ───────────────┘   │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │ Done
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                            Optimal Agent Output: Best trade-off on Pareto frontier                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Each generation, the system:

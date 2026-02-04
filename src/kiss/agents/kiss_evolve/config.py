@@ -11,7 +11,29 @@ from kiss.core.config_builder import add_config
 
 
 class KISSEvolveConfig(BaseModel):
-    """KISSEvolve-specific configuration settings."""
+    """KISSEvolve-specific configuration settings.
+
+    This configuration class defines all parameters for the KISSEvolve
+    evolutionary algorithm, including population settings, mutation rates,
+    island-based evolution, and novelty-based sampling.
+
+    Attributes:
+        max_generations: Maximum number of evolutionary generations.
+        population_size: Number of variants to maintain in population.
+        mutation_rate: Probability of mutating a variant (0.0-1.0).
+        elite_size: Number of best variants to preserve each generation.
+        num_islands: Number of islands for island-based evolution (1 = disabled).
+        migration_frequency: Number of generations between migrations.
+        migration_size: Number of individuals to migrate between islands.
+        migration_topology: Migration topology ('ring', 'fully_connected', 'random').
+        enable_novelty_rejection: Enable code novelty rejection sampling.
+        novelty_threshold: Cosine similarity threshold for rejecting code.
+        max_rejection_attempts: Maximum rejection attempts before accepting.
+        parent_sampling_method: Parent sampling method ('tournament', 'power_law',
+            'performance_novelty').
+        power_law_alpha: Power-law sampling parameter for rank-based selection.
+        performance_novelty_lambda: Selection pressure parameter for sigmoid.
+    """
 
     max_generations: int = Field(
         default=10, description="Maximum number of evolutionary generations"

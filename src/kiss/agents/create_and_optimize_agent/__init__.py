@@ -24,7 +24,7 @@ Example usage:
     improver = ImproverAgent()
     success, report = improver.improve(
         source_folder="/path/to/agent",
-        target_folder="/path/to/improved",
+        work_dir="/path/to/improved",
         task_description="Build a code analysis assistant",
     )
 """

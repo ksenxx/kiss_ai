@@ -10,7 +10,6 @@ For a high-level overview and quick start guide, see [README.md](README.md).
 
 ## Table of Contents
 
-- [Project Structure](#project-structure) - File organization and module layout
 - [KISSAgent](#kissagent) - Core agent class with function calling
 - [KISSCodingAgent](#kisscodingagent) - Multi-agent coding system with planning and orchestration
 - [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
@@ -20,196 +19,13 @@ For a high-level overview and quick start guide, see [README.md](README.md).
 - [Multiprocessing](#multiprocessing) - Parallel execution utilities
 - [SimpleRAG](#simplerag) - Simple RAG system for document retrieval
 - [AgentEvolver](#agentevolver) - Evolutionary agent optimization
-- [ImproverAgent](#improveragent) - Multi agent creator and optimizer
 - [GEPA](#gepa) - Genetic-Pareto prompt optimizer
 - [KISSEvolve](#kissevolve) - Evolutionary algorithm discovery
 - [Utility Functions](#utility-functions) - Helper functions
-- [SimpleFormatter](#simpleformatter) - Terminal output formatting
+- [SimpleFormatter](#simpleformatter) - Rich terminal output formatting
+- [CompactFormatter](#compactformatter) - Compact single-line output formatting
 - [Pre-built Agents](#pre-built-agents) - Ready-to-use agents
 - [Configuration System](#configuration-system) - Config management
-- [Constants](#constants) - Framework constants
-
-______________________________________________________________________
-
-## Project Structure
-
-The KISS framework is organized into the following modules and directories:
-
-### Core Modules
-
-#### `src/kiss/core/`
-
-Core framework functionality and base classes.
-
-- **`kiss_agent.py`** - Core `KISSAgent` class implementing ReAct agent with function calling
-- **`base.py`** - Base class for all agents, `DEFAULT_SYSTEM_PROMPT` constant
-- **`config.py`** - Pydantic-based configuration system (`DEFAULT_CONFIG`)
-- **`config_builder.py`** - Configuration builder utilities
-- **`utils.py`** - Utility functions (`finish()`, `search_web()`, `resolve_path()`, `is_subpath()`, etc.)
-- **`useful_tools.py`** - `UsefulTools` class with path-restricted bash command execution, `parse_bash_command_paths()`, security validation
-- **`formatter.py`** - Base `Formatter` abstract class
-- **`simple_formatter.py`** - Terminal output formatter using Rich
-- **`kiss_error.py`** - Custom exception classes
-
-#### `src/kiss/core/models/`
-
-LLM model implementations and utilities.
-
-- **`model.py`** - Abstract base `Model` class
-- **`model_info.py`** - Model metadata, context lengths, pricing (`get_max_context_length()`, etc.)
-- **`openai_compatible_model.py`** - OpenAI-compatible API model implementation
-- **`anthropic_model.py`** - Anthropic Claude model implementation
-- **`gemini_model.py`** - Google Gemini model implementation
-
-### Agent Modules
-
-#### `src/kiss/agents/`
-
-Pre-built agents and agent utilities.
-
-- **`kiss.py`** - Pre-built agent functions (`dynamic_gepa_agent()`, `run_bash_task_in_sandboxed_ubuntu_latest()`, `get_run_simple_coding_agent()`)
-
-#### `src/kiss/agents/coding_agents/`
-
-Specialized coding agents using different SDKs.
-
-- **`kiss_coding_agent.py`** - `KISSCodingAgent` multi-agent coding system with orchestration
-- **`claude_coding_agent.py`** - `ClaudeCodingAgent` using Claude Agent SDK
-- **`gemini_cli_agent.py`** - `GeminiCliAgent` using Google ADK
-- **`openai_codex_agent.py`** - `OpenAICodexAgent` using OpenAI Agents SDK
-
-#### `src/kiss/agents/create_and_optimize_agent/`
-
-Agent creation and evolutionary optimization.
-
-- **`agent_evolver.py`** - `AgentEvolver` class for Pareto-frontier agent evolution
-- **`improver_agent.py`** - `ImproverAgent` class for optimizing agent code
-- **`config.py`** - Configuration for agent creator
-
-#### `src/kiss/agents/gepa/`
-
-GEPA (Genetic-Pareto) prompt optimization system.
-
-- **`gepa.py`** - `GEPA` class implementing reflective prompt evolution
-- **`config.py`** - GEPA configuration settings
-- **`hotpotqa/`** - HotpotQA benchmark implementation
-
-#### `src/kiss/agents/kiss_evolve/`
-
-Evolutionary algorithm discovery using LLMs.
-
-- **`kiss_evolve.py`** - `KISSEvolve` class for code evolution
-- **`novelty_prompts.py`** - Prompts for novelty-based evolution
-- **`config.py`** - KISSEvolve configuration
-- **`algotune/`** - Algorithm tuning utilities
-
-#### `src/kiss/agents/swe_agent_verified/`
-
-SWE-bench verified agent implementation.
-
-- **`run_swebench.py`** - SWE-bench evaluation runner
-- **`config.py`** - SWE-bench configuration
-
-#### `src/kiss/agents/arvo_agent/`
-
-ARVO agent implementation (experimental).
-
-- **`arvo_agent.py`** - ARVO agent class
-
-### Infrastructure Modules
-
-#### `src/kiss/docker/`
-
-Docker container management.
-
-- **`docker_manager.py`** - `DockerManager` class for container lifecycle management
-
-#### `src/kiss/multiprocessing/`
-
-Parallel execution utilities.
-
-- **`multiprocess.py`** - `run_functions_in_parallel()`, `run_functions_in_parallel_with_kwargs()`, `get_available_cores()`
-
-#### `src/kiss/rag/`
-
-Retrieval-Augmented Generation (RAG) system.
-
-- **`simple_rag.py`** - `SimpleRAG` class with in-memory vector store
-
-### Utility Modules
-
-#### `src/kiss/scripts/`
-
-Command-line scripts and utilities.
-
-- **`check.py`** - Code quality check script (linting, type checking, testing)
-- **`kissevolve_bubblesort.py`** - Example KISSEvolve script for bubble sort evolution
-
-#### `src/kiss/viz_trajectory/`
-
-Trajectory visualization tools.
-
-- **`server.py`** - Visualization server for agent trajectories
-
-### Test Suite
-
-#### `src/kiss/tests/`
-
-Comprehensive test suite for all components.
-
-- **`test_kiss_agent_agentic.py`** - Tests for KISSAgent in agentic mode
-- **`test_kiss_agent_non_agentic.py`** - Tests for KISSAgent in non-agentic mode
-- **`test_claude_coding_agent.py`** - Tests for ClaudeCodingAgent
-- **`test_gemini_cli_agent.py`** - Tests for GeminiCliAgent
-- **`test_openai_codex_agent.py`** - Tests for OpenAICodexAgent
-- **`test_docker_manager.py`** - Tests for DockerManager
-- **`test_multiprocess.py`** - Tests for multiprocessing utilities
-- **`test_agent_creator.py`** - Tests for AgentEvolver and ImproverAgent
-- **`test_gepa_*.py`** - Tests for GEPA system
-- **`test_kissevolve_bubblesort.py`** - Tests for KISSEvolve
-- **`test_a_model.py`** - Tests for Model implementations
-- **`test_models_quick.py`** - Quick model tests
-- **`test_model_config.py`** - Configuration tests
-- **`test_search_web.py`** - Web search tests
-- **`test_internal.py`** - Internal utility tests
-- **`run_all_models_test.py`** - Comprehensive model testing
-- **`conftest.py`** - Pytest configuration and fixtures
-
-### Package Files
-
-- **`src/kiss/__init__.py`** - Main package initialization, exports core classes
-- **`src/kiss/_version.py`** - Version information
-
-### Import Paths
-
-```python
-# Core agent
-from kiss.core.kiss_agent import KISSAgent
-
-# Coding agents
-from kiss.agents.coding_agents import KISSCodingAgent, ClaudeCodingAgent, GeminiCliAgent, OpenAICodexAgent
-
-# Agent creation
-from kiss.agents.create_and_optimize_agent import AgentEvolver, ImproverAgent
-
-# Optimization
-from kiss.agents.gepa import GEPA
-from kiss.agents.kiss_evolve import KISSEvolve
-
-# Infrastructure
-from kiss.docker import DockerManager
-from kiss.multiprocessing import run_functions_in_parallel
-from kiss.rag import SimpleRAG
-
-# Configuration
-from kiss.core import DEFAULT_CONFIG
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT
-
-# Utilities
-from kiss.core.utils import finish, search_web, resolve_path, is_subpath
-from kiss.core.useful_tools import UsefulTools, parse_bash_command_paths
-from kiss.core.simple_formatter import SimpleFormatter
-```
 
 ______________________________________________________________________
 
@@ -253,7 +69,7 @@ Runs the agent's main ReAct loop to solve the task.
 - `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-2.5-flash", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "openrouter/anthropic/claude-3.5-sonnet")
 - `prompt_template` (str): The prompt template for the agent. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web_search` is enabled in config, `search_web` is also automatically added. Default is None.
+- `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web` is enabled in config, `search_web` and `fetch_url` is also automatically added. Default is None.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
 - `is_agentic` (bool): If True, runs in agentic mode with tools. If False, returns raw LLM response. Default is True.
 - `max_steps` (int): Maximum number of ReAct loop iterations. Default is 100.
@@ -361,7 +177,7 @@ KISSCodingAgent(name: str)
 
 ```python
 class SubTask:
-    def __init__(self, name: str, context: str, description: str) -> None
+    def __init__(self, name: str, description: str) -> None
 ```
 
 Represents a sub-task in the multi-agent coding system.
@@ -370,7 +186,6 @@ Represents a sub-task in the multi-agent coding system.
 
 - `id` (int): Unique identifier for this sub-task (auto-incremented)
 - `name` (str): Name of the sub-task
-- `context` (str): Relevant context information for this sub-task
 - `description` (str): Detailed description of what needs to be done
 
 ### Methods
@@ -388,10 +203,12 @@ def run(
     trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
     max_steps: int = DEFAULT_CONFIG.agent.max_steps,
     max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+    work_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
     base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     docker_image: str | None = None,
+    formatter: Formatter | None = None,
 ) -> str
 ```
 
@@ -407,10 +224,12 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `trials` (int): Number of retry attempts for each task/subtask. Default is 3.
 - `max_steps` (int): Maximum number of steps per agent. Default is from config.
 - `max_budget` (float): Maximum budget in USD for this run. Default is from config.
+- `work_dir` (str): The working directory for the agent's operations.
 - `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access.
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
+- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
 
 **Returns:**
 
@@ -446,59 +265,33 @@ Execute the main task using the orchestrator agent. The orchestrator can delegat
 def perform_subtask(
     self,
     subtask_name: str,
-    context: str,
     description: str,
 ) -> str
 ```
 
-Execute a sub-task using a dedicated executor agent. Can be called by the orchestrator or recursively by other sub-task executors.
+Execute a sub-task using a dedicated executor agent (using `subtasker_model_name`). Can be called by the orchestrator .
 
 **Parameters:**
 
 - `subtask_name` (str): Name of the sub-task for identification.
-- `context` (str): Relevant context information for this sub-task.
 - `description` (str): Detailed description of what needs to be done.
 
 **Returns:**
 
 - `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
 
-#### `run_bash_command()`
-
-```python
-def run_bash_command(self, command: str, description: str) -> str
-```
-
-Run a bash command with automatic path permission checks. Uses `parse_bash_command_paths()` to extract readable and writable paths from the command, then validates permissions before execution.
-
-**Parameters:**
-
-- `command` (str): The bash command to execute.
-- `description` (str): A brief description of what the command does.
-
-**Returns:**
-
-- `str`: The command output (stdout), or an error message if permission denied or execution failed.
-
-**Notes:**
-
-- Automatically parses commands to detect file operations
-- Enforces readable_paths and writable_paths restrictions
-- Returns descriptive error messages for permission violations
-- Uses subprocess.run() with shell=True for command execution
-
 ### Instance Attributes (after `run()`)
 
 - `id` (int): Unique identifier for this agent instance.
 - `name` (str): The agent's name.
 - `orchestrator_model_name` (str): Model name for orchestrator agent.
-- `subtasker_model_name` (str): Model name for executor agents.
+- `subtasker_model_name` (str): Model name for executor agents handling sub-tasks.
 - `dynamic_gepa_model_name` (str): Model name for dynamic prompt refinement.
 - `task_description` (str): The formatted task description.
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory (aggregated from all sub-agents).
 - `total_tokens_used` (int): Total tokens used across all agents in this run.
 - `budget_used` (float): Total budget used across all agents in this run.
 - `run_start_timestamp` (int): Unix timestamp when the run started.
+- `work_dir` (str): The working directory for the agent's operations.
 - `base_dir` (str): The base directory for the agent's working files.
 - `readable_paths` (list[Path]): List of paths the agent can read from.
 - `writable_paths` (list[Path]): List of paths the agent can write to.
@@ -511,7 +304,7 @@ Run a bash command with automatic path permission checks. Uses `parse_bash_comma
 
 ### Key Features
 
-- **Multi-Agent Architecture**: Orchestrator delegates to executor agents; supports recursive sub-task decomposition
+- **Multi-Agent Architecture**: Orchestrator (using `orchestrator_model_name`) delegates to executor agents (using `subtasker_model_name`);
 - **Dynamic GEPA (Genetic-Pareto) Refinement**:
   - Automatically refines prompts when tasks fail using trajectory analysis
   - Uses dynamic_gepa_model_name (default: claude-sonnet-4-5) for non-agentic prompt improvement
@@ -1242,22 +1035,10 @@ AgentEvolver evolves AI agents using a Pareto frontier approach, optimizing for 
 ### Constructor
 
 ```python
-AgentEvolver(
-    task_description: str,
-    max_generations: int | None = None,
-    initial_frontier_size: int | None = None,
-    max_frontier_size: int | None = None,
-    mutation_probability: float | None = None,
-)
+AgentEvolver()
 ```
 
-**Parameters:**
-
-- `task_description` (str): Description of the task the agent should perform.
-- `max_generations` (int | None): Maximum number of improvement generations. Uses config default if None.
-- `initial_frontier_size` (int | None): Number of initial agents to create. Uses config default if None.
-- `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
-- `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
+AgentEvolver is instantiated without parameters. All configuration is passed to the `evolve()` method.
 
 **Note:** AgentEvolver uses KISSCodingAgent internally for agent improvement. Evaluation is done internally by loading and running the generated `agent.py` which must implement `agent_run(task: str) -> dict[str, Any]`.
 
@@ -1266,10 +1047,25 @@ AgentEvolver(
 #### `evolve()`
 
 ```python
-def evolve(self) -> AgentVariant
+def evolve(
+    self,
+    task_description: str,
+    max_generations: int | None = None,
+    initial_frontier_size: int | None = None,
+    max_frontier_size: int | None = None,
+    mutation_probability: float | None = None,
+) -> AgentVariant
 ```
 
 Run the evolutionary optimization process.
+
+**Parameters:**
+
+- `task_description` (str): Description of the task the agent should perform.
+- `max_generations` (int | None): Maximum number of improvement generations. Uses config default if None.
+- `initial_frontier_size` (int | None): Number of initial agents to create. Uses config default if None.
+- `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
+- `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
 
 **Returns:**
 
@@ -1327,7 +1123,6 @@ class AgentVariant:
     parent_ids: list[int]
     id: int = 0
     generation: int = 0
-    feedback: str = ""
 ```
 
 **Attributes:**
@@ -1339,7 +1134,6 @@ class AgentVariant:
 - `parent_ids` (list[int]): List of parent variant IDs (for lineage tracking).
 - `id` (int): Unique identifier for this variant.
 - `generation` (int): Generation number when this variant was created.
-- `feedback` (str): Feedback from evaluation.
 
 ### ImprovementReport
 
@@ -1368,7 +1162,9 @@ class ImprovementReport:
 ```python
 from kiss.agents.create_and_optimize_agent import AgentEvolver
 
-evolver = AgentEvolver(
+evolver = AgentEvolver()
+
+best = evolver.evolve(
     task_description="Build a code analysis assistant that reviews Python files",
     max_generations=5,
     initial_frontier_size=2,
@@ -1376,117 +1172,12 @@ evolver = AgentEvolver(
     mutation_probability=0.8,
 )
 
-best = evolver.evolve()
-
 print(f"Best variant: {best.folder_path}")
 print(f"Metrics: {best.metrics}")
 print(f"Generation: {best.generation}")
 
 # Save state for later analysis
 evolver.save_state("evolver_state.json")
-```
-
-______________________________________________________________________
-
-## ImproverAgent
-
-ImproverAgent optimizes existing agent code to reduce token usage and execution time using a configurable coding agent.
-
-### Constructor
-
-```python
-ImproverAgent(
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    coding_agent_type: Literal["kiss code", "claude code", "gemini cli", "openai codex"] | None = None,
-)
-```
-
-**Parameters:**
-
-- `max_steps` (int | None): Maximum steps for the coding agent. Uses config default if None.
-- `max_budget` (float | None): Maximum budget in USD for the coding agent. Uses config default if None.
-- `coding_agent_type` (Literal | None): Type of coding agent to use internally. Currently defaults to KISSCodingAgent. Options: "kiss code", "claude code", "gemini cli", "openai codex".
-
-**Note:** ImproverAgent uses KISSCodingAgent internally for agent improvement.
-
-### Methods
-
-#### `improve()`
-
-```python
-def improve(
-    self,
-    source_folder: str,
-    target_folder: str,
-    task_description: str,
-    report_path: str | None = None,
-    feedback: str = "",
-) -> tuple[bool, ImprovementReport | None]
-```
-
-Improve an agent's code to reduce token usage and execution time.
-
-**Parameters:**
-
-- `source_folder` (str): Path to the folder containing the agent's source code.
-- `target_folder` (str): Path where the improved agent will be written.
-- `task_description` (str): Description of the task the agent should perform.
-- `report_path` (str | None): Optional path to a previous improvement report.
-- `feedback` (str): Optional feedback to guide the improvement. Default is "".
-
-**Returns:**
-
-- `tuple[bool, ImprovementReport | None]`: Tuple of (success, report). Report is None if improvement failed.
-
-#### `crossover_improve()`
-
-```python
-def crossover_improve(
-    self,
-    primary_folder: str,
-    primary_report_path: str,
-    secondary_report_path: str,
-    primary_feedback: str,
-    secondary_feedback: str,
-    target_folder: str,
-    task_description: str,
-) -> tuple[bool, ImprovementReport | None]
-```
-
-Improve an agent by combining ideas from two variants.
-
-**Parameters:**
-
-- `primary_folder` (str): Path to the primary variant's source code.
-- `primary_report_path` (str): Path to the primary variant's improvement report.
-- `secondary_report_path` (str): Path to the secondary variant's improvement report.
-- `primary_feedback` (str): Feedback from the primary variant.
-- `secondary_feedback` (str): Feedback from the secondary variant.
-- `target_folder` (str): Path where the improved agent will be written.
-- `task_description` (str): Description of the task the agent should perform.
-
-**Returns:**
-
-- `tuple[bool, ImprovementReport | None]`: Tuple of (success, report).
-
-### Example
-
-```python
-from kiss.agents.create_and_optimize_agent import ImproverAgent
-
-improver = ImproverAgent(max_steps=150, max_budget=15.0)
-
-success, report = improver.improve(
-    source_folder="/path/to/original/agent",
-    target_folder="/path/to/improved/agent",
-    task_description="Build a code analysis assistant that reviews Python files",
-)
-
-if success and report:
-    print(f"Improvement completed in {report.metrics.get('execution_time', 0):.2f}s")
-    print(f"Tokens used: {report.metrics.get('tokens_used', 0)}")
-    print(f"Cost: ${report.metrics.get('cost', 0):.4f}")
 ```
 
 ______________________________________________________________________
@@ -1750,7 +1441,6 @@ Execute a bash command with automatic path permission checks and security valida
 
 **Security Features:**
 
-- Detects dangerous patterns (command substitution, variable manipulation, etc.)
 - Automatically parses commands to detect file operations
 - Enforces readable_paths and writable_paths restrictions
 - Returns descriptive error messages for violations
@@ -1823,6 +1513,94 @@ output = tools.Bash("cat src/file.txt > output/result.txt", "Copy file")
 output = tools.Bash("cat /etc/passwd", "Read system file")
 # Returns: "Error: Access denied for reading /etc/passwd"
 ```
+
+### Module-level Functions
+
+The `kiss.core.useful_tools` module also provides these standalone functions:
+
+#### `fetch_url()`
+
+```python
+def fetch_url(url: str, headers: dict[str, str], max_content_length: int = 10000) -> str
+```
+
+Fetch and extract text content from a URL using BeautifulSoup.
+
+**Parameters:**
+
+- `url` (str): The URL to fetch.
+- `headers` (dict[str, str]): HTTP headers to use for the request.
+- `max_content_length` (int): Maximum length of content to return. Default is 10000.
+
+**Returns:**
+
+- `str`: Extracted text content from the page, or an error message if fetch failed.
+
+#### `search_web()`
+
+```python
+def search_web(query: str, max_results: int = 10) -> str
+```
+
+Perform a web search and return the top search results with page contents.
+
+Tries DuckDuckGo first (more reliable for automated access), then falls back to Startpage if needed. Uses Playwright headless browser with Safari/WebKit to render JavaScript and avoid bot detection.
+
+**Parameters:**
+
+- `query` (str): The search query.
+- `max_results` (int): Maximum number of results to fetch content for. Default is 10.
+
+**Returns:**
+
+- `str`: A string containing titles, links, and page contents of the top search results.
+
+#### `parse_bash_command_paths()`
+
+```python
+def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
+```
+
+Parse a bash command to extract readable and writable directory paths.
+
+This function analyzes bash commands to intelligently determine which directories are being read from and which are being written to. It handles:
+
+- Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
+- Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
+- Output redirection: >, >>, &>, 2>, etc.
+- Pipe chains with multiple commands
+- Flags and arguments parsing
+- Special commands like tee (reads stdin and writes to file)
+
+**Parameters:**
+
+- `command` (str): The bash command to parse.
+
+**Returns:**
+
+- `tuple[list[str], list[str]]`: A tuple of (readable_dirs, writable_dirs) where each is a sorted list of directory paths.
+
+**Example:**
+
+```python
+from kiss.core.useful_tools import parse_bash_command_paths
+
+# Reading and writing
+readable, writable = parse_bash_command_paths("cat input.txt > output.txt")
+# readable: ['input.txt'], writable: ['output.txt']
+
+# Complex command with pipes
+readable, writable = parse_bash_command_paths("grep 'pattern' src/*.py | tee results.txt")
+# readable: ['src/'], writable: ['results.txt']
+
+# Copy operations
+readable, writable = parse_bash_command_paths("cp -r src/ dest/")
+# readable: ['src/'], writable: ['dest/']
+```
+
+**Note:**
+
+This function is used internally by `UsefulTools.Bash()` and `KISSCodingAgent.run_bash_command()` to automatically determine which paths need read/write permissions before executing bash commands.
 
 ______________________________________________________________________
 
@@ -2039,70 +1817,6 @@ Read a file from the project root. Compatible with installations packaged as .wh
 
 - `str`: The file's contents.
 
-### `search_web()`
-
-```python
-def search_web(query: str, max_results: int = 5) -> str
-```
-
-Perform a web search and return the top search results with page contents.
-
-**Parameters:**
-
-- `query` (str): The search query.
-- `max_results` (int): Maximum number of results to fetch content for. Default is 5.
-
-**Returns:**
-
-- `str`: A string containing titles, links, and page contents of the top search results.
-
-### `parse_bash_command_paths()`
-
-```python
-def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
-```
-
-Parse a bash command to extract readable and writable directory paths.
-
-This function analyzes bash commands to intelligently determine which directories are being read from and which are being written to. It handles:
-
-- Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
-- Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
-- Output redirection: >, >>, &>, 2>, etc.
-- Pipe chains with multiple commands
-- Flags and arguments parsing
-- Special commands like tee (reads stdin and writes to file)
-
-**Parameters:**
-
-- `command` (str): The bash command to parse.
-
-**Returns:**
-
-- `tuple[list[str], list[str]]`: A tuple of (readable_dirs, writable_dirs) where each is a sorted list of directory paths.
-
-**Example:**
-
-```python
-from kiss.core.useful_tools import parse_bash_command_paths
-
-# Reading and writing
-readable, writable = parse_bash_command_paths("cat input.txt > output.txt")
-# readable: ['input.txt'], writable: ['output.txt']
-
-# Complex command with pipes
-readable, writable = parse_bash_command_paths("grep 'pattern' src/*.py | tee results.txt")
-# readable: ['src/'], writable: ['results.txt']
-
-# Copy operations
-readable, writable = parse_bash_command_paths("cp -r src/ dest/")
-# readable: ['src/'], writable: ['dest/']
-```
-
-**Note:**
-
-This function is defined in `kiss.core.useful_tools` and is used internally by `UsefulTools.Bash()` and `KISSCodingAgent.run_bash_command()` to automatically determine which paths need read/write permissions before executing bash commands.
-
 ______________________________________________________________________
 
 ## SimpleFormatter
@@ -2224,6 +1938,125 @@ Print a label and value pair with distinct colors. No output if verbose mode is 
 
 ______________________________________________________________________
 
+## CompactFormatter
+
+Compact formatter implementation that shows truncated, single-line messages for more concise output. This formatter is used by default in `KISSCodingAgent` for cleaner logs during multi-agent orchestration. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting.
+
+### Constructor
+
+```python
+CompactFormatter()
+```
+
+### Methods
+
+#### `format_message()`
+
+```python
+def format_message(self, message: dict[str, Any]) -> str
+```
+
+Format a single message as a truncated single-line string. Returns empty string if verbose mode is disabled.
+
+**Parameters:**
+
+- `message` (dict): Message dictionary with 'role' and 'content' keys.
+
+**Returns:**
+
+- `str`: Truncated message in format `[role]: content...` (max 100 chars), or empty string if verbose is False.
+
+#### `format_messages()`
+
+```python
+def format_messages(self, messages: list[dict[str, Any]]) -> str
+```
+
+Format a list of messages as truncated single-line strings. Returns empty string if verbose mode is disabled.
+
+**Parameters:**
+
+- `messages` (list[dict]): List of message dictionaries.
+
+**Returns:**
+
+- `str`: Formatted messages string with each message on its own line, or empty string if verbose is False.
+
+#### `print_message()`
+
+```python
+def print_message(self, message: dict[str, Any]) -> None
+```
+
+Print a single message as a truncated single line. No output if verbose mode is disabled.
+
+**Parameters:**
+
+- `message` (dict): Message dictionary with 'role' and 'content' keys.
+
+#### `print_messages()`
+
+```python
+def print_messages(self, messages: list[dict[str, Any]]) -> None
+```
+
+Print a list of messages as truncated single lines. No output if verbose mode is disabled.
+
+**Parameters:**
+
+- `messages` (list[dict]): List of message dictionaries.
+
+#### `print_status()`
+
+```python
+def print_status(self, message: str) -> None
+```
+
+Print a status message in green. No output if verbose mode is disabled.
+
+**Parameters:**
+
+- `message` (str): The status message to print.
+
+#### `print_error()`
+
+```python
+def print_error(self, message: str) -> None
+```
+
+Print an error message in red to stderr. No output if verbose mode is disabled.
+
+**Parameters:**
+
+- `message` (str): The error message to print.
+
+#### `print_warning()`
+
+```python
+def print_warning(self, message: str) -> None
+```
+
+Print a warning message in yellow. No output if verbose mode is disabled.
+
+**Parameters:**
+
+- `message` (str): The warning message to print.
+
+#### `print_label_and_value()`
+
+```python
+def print_label_and_value(self, label: str, value: str) -> None
+```
+
+Print a label and value pair with distinct colors. No output if verbose mode is disabled.
+
+**Parameters:**
+
+- `label` (str): The label to print.
+- `value` (str): The value to print.
+
+______________________________________________________________________
+
 ______________________________________________________________________
 
 ## Configuration System
@@ -2241,7 +2074,7 @@ DEFAULT_CONFIG.agent.max_steps = 100
 DEFAULT_CONFIG.agent.max_agent_budget = 10.0
 DEFAULT_CONFIG.agent.global_max_budget = 200.0
 DEFAULT_CONFIG.agent.verbose = True
-DEFAULT_CONFIG.agent.use_web_search = True
+DEFAULT_CONFIG.agent.use_web = True
 ```
 
 ### Configuration Sections
@@ -2260,7 +2093,7 @@ DEFAULT_CONFIG.agent.use_web_search = True
 - `max_agent_budget` (float): Maximum budget per agent in USD (default: 10.0)
 - `global_max_budget` (float): Global budget limit in USD (default: 200.0)
 - `verbose` (bool): Enable verbose output (default: True)
-- `use_web_search` (bool): Enable web search tool (default: True)
+- `use_web` (bool): Enable web search tool (default: True)
 - `debug` (bool): Enable debug mode (default: False)
 - `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
 
@@ -2272,66 +2105,14 @@ DEFAULT_CONFIG.agent.use_web_search = True
 - `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 50)
 - `max_budget` (float): Maximum budget in USD for the KISS Coding Agent (default: 100.0)
 - `trials` (int): Retry attempts per task/subtask (default: 3)
-- `max_steps` (int): Maximum steps per agent (default: 50)
-- `max_budget` (float): Maximum total budget in USD (default: 100.0)
 
 #### `docker`
 
-- `default_image` (str): Default Docker image (default: "ubuntu:latest")
-- `default_workdir` (str): Default working directory in container (default: "/workspace")
+- `client_shared_path` (str): Path inside Docker container for shared volume (default: "/testbed")
 
 #### `gepa`, `kiss_evolve`, `create_and_optimize_agent`
 
 Configuration sections for evolutionary optimization systems. See respective classes for details.
-
-______________________________________________________________________
-
-## Constants
-
-### `DEFAULT_SYSTEM_PROMPT`
-
-A system prompt constant defined in `kiss.core.base` that provides coding guidelines for agents. Used by KISSCodingAgent and ClaudeCodingAgent.
-
-**Location:** `kiss.core.base.DEFAULT_SYSTEM_PROMPT`
-
-**Content:**
-
-```python
-DEFAULT_SYSTEM_PROMPT = """
-## Code Style Guidelines
-- Write simple, readable code with minimal indirection
-- Avoid unnecessary object attributes and local variables
-- No redundant abstractions or duplicate code
-- Each function should do one thing well
-- Use clear, descriptive names
-- NO need to write documentations or comments unless absolutely necessary
-
-## Testing Requirements
-- Run lint and fix any lint errors
-- Generate comprehensive tests for EVERY function and feature
-- Tests MUST NOT use mocks, patches, or any form of test doubles
-- Test with real inputs and verify real outputs
-- Test edge cases: empty inputs, None values, boundary conditions
-- Test error conditions with actual invalid inputs
-- Each test should be independent and verify actual behavior
-
-## Code Structure
-- Main implementation code first
-- Test code in a separate section using unittest or pytest
-- Include a __main__ block to run tests
-
-## Use tools when you need to:
-- Look up API documentation or library usage
-- Find examples of similar implementations
-- Understand existing code in the project
-
-## After you have implemented the task, simplify the code
- - Remove unnessary object/struct attributes, variables, config variables
- - Remove redundant and duplicate code
- - Remove unnecessary comments
- - Make sure that the code is still working correctly
-"""
-```
 
 ______________________________________________________________________
 

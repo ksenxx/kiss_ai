@@ -276,7 +276,7 @@ SWE-bench presents AI systems with real GitHub issues from major Python reposito
 KISS includes first-class support:
 
 ```bash
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py \
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py \
     --swebench_verified.model gemini-3-flash-preview \
     --swebench_verified.instance_id "django__django-11099"
 ```

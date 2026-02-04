@@ -1,12 +1,14 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.7
+**Version:** 0.1.8
 
 # When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
 ______________________________________________________________________
+
+KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
@@ -84,8 +86,8 @@ cd kiss
 # Create virtual environment
 uv venv --python 3.13
 
-# Install dependencies (including dev tools)
-uv sync --group dev
+# Install all dependencies (full installation)
+uv sync
 
 # (Optional) activate the venv for convenience (uv run works without activation)
 source .venv/bin/activate
@@ -98,11 +100,79 @@ export TOGETHER_API_KEY="your-key-here"
 export OPENROUTER_API_KEY="your-key-here"
 ```
 
+### Selective Installation (Dependency Groups)
+
+KISS supports selective installation via dependency groups for minimal footprints:
+
+```bash
+# Minimal core only (no model SDKs) - for custom integrations
+uv sync --group core
+
+# Core + specific provider support
+uv sync --group claude    # Core + Anthropic Claude
+uv sync --group openai    # Core + OpenAI Compatible Models
+uv sync --group gemini    # Core + Google Gemini
+
+# Claude Coding Agent (includes claude-agent-sdk)
+uv sync --group claude-coding-agent
+
+# Evals dependencies (for running benchmarks)
+uv sync --group evals
+
+# Development tools (mypy, ruff, pytest, jupyter, etc.)
+uv sync --group dev
+
+# Combine multiple groups as needed
+uv sync --group claude --group dev
+```
+
+**Dependency Group Contents:**
+
+| Group | Description | Key Packages |
+|-------|-------------|--------------|
+| `core` | Minimal core module | pydantic, rich, requests, beautifulsoup4, playwright, flask |
+| `claude` | Core + Anthropic | core + anthropic |
+| `openai` | Core + OpenAI | core + openai |
+| `gemini` | Core + Google | core + google-genai |
+| `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk |
+| `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
+| `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter |
+
 ## Output Formatting
 
 Unlike other agentic systems, you do not need to specify the output schema for the agent. Just create
 a suitable "finish" function with parameters. The parameters could be treated as the top level keys
 in a json format.
+
+**Example: Custom Structured Output**
+
+```python
+from kiss.core.kiss_agent import KISSAgent
+
+# Define a custom finish function with your desired output structure
+def finish(
+    sentiment: str,
+    confidence: float,
+    key_phrases: str,
+    summary: str
+) -> str:
+    """
+    Complete the analysis with structured results.
+    
+    Args:
+        sentiment: The overall sentiment ('positive', 'negative', or 'neutral')
+        confidence: Confidence score between 0.0 and 1.0
+        key_phrases: Comma-separated list of key phrases found in the text
+        summary: A brief summary of the analysis
+    
+    Returns:
+        The formatted analysis result
+    """
+    ...
+
+```
+
+The agent will automatically use your custom `finish` function instead of the default one. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
 
 ### KISSAgent API Reference
 
@@ -168,7 +238,7 @@ for iteration in range(max_iterations):
         # Get the trajectory to understand what went wrong
         trajectory = coding_agent.get_trajectory()
         
-        # Use the Prompt Refiner agent to improve our prompt
+        # Use the Dynamic GEPA Refiner agent to improve our prompt
         print("🔄 Refining prompt based on failure...")
         current_prompt = dynamic_gepa_agent(
             original_prompt_template=original_prompt,
@@ -218,28 +288,27 @@ Each agent can use a different model. Each agent has its own budget. Each agent 
 
 ### Using Agent Creator and Optimizer
 
-> 📖 **For detailed Agent Creator documentation, see [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md)**
+> 📖 **For detailed Agent Creator and Optimizer documentation, see [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md)**
 
-The Agent Creator module provides tools to automatically evolve and optimize AI agents for **token efficiency** and **execution speed** using evolutionary algorithms with Pareto frontier maintenance.
+The Agent Creator module provides tools to automatically evolve and optimize AI agents for **token efficiency**, **execution speed**, and **cost** using evolutionary algorithms with Pareto frontier maintenance.
 
-**Key Components:**
+**Key Component:**
 
-- **ImproverAgent**: Takes existing agent source code and creates optimized versions through iterative improvement
 - **AgentEvolver**: Maintains a population of agent variants and evolves them using mutation and crossover operations
 
-Both components use a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
+It uses a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
 
 ```python
 from kiss.agents.create_and_optimize_agent import AgentEvolver
 
-evolver = AgentEvolver(
+evolver = AgentEvolver()
+
+best_variant = evolver.evolve(
     task_description="Build a code analysis assistant that can parse and analyze large codebases",
     max_generations=10,
     max_frontier_size=6,
     mutation_probability=0.8,
 )
-
-best_variant = evolver.evolve()
 
 print(f"Best agent: {best_variant.folder_path}")
 print(f"Metrics: {best_variant.metrics}")
@@ -247,7 +316,7 @@ print(f"Metrics: {best_variant.metrics}")
 
 **Key Features:**
 
-- **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time)
+- **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time, cost)
 - **Pareto Frontier Maintenance**: Keeps track of all non-dominated solutions
 - **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
 - **Uses KISSCodingAgent**: Leverages the multi-agent coding system for agent improvement
@@ -255,38 +324,13 @@ print(f"Metrics: {best_variant.metrics}")
 - **Lineage Tracking**: Records parent relationships and improvement history
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
 
-**Configuration:**
-
-Configuration values can be passed directly to constructors or accessed via `DEFAULT_CONFIG`:
-
-```python
-from kiss.core.config import DEFAULT_CONFIG
-
-# Access create_and_optimize_agent config defaults
-cfg = DEFAULT_CONFIG.create_and_optimize_agent
-
-# View default settings
-print(f"Default max_steps: {cfg.improver.max_steps}")  # 50
-print(f"Default max_budget: {cfg.improver.max_budget}")  # 15.0
-print(f"Default max_generations: {cfg.evolver.max_generations}")  # 10
-
-# Override settings by passing to constructors
-improver = ImproverAgent(max_steps=150, max_budget=20.0)
-evolver = AgentEvolver(
-    task_description="...",
-    max_generations=20,
-    max_frontier_size=8,
-    mutation_probability=0.9,
-)
-```
-
 For usage examples, API reference, and configuration options, please see the [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md).
 
 ### Using GEPA for Prompt Optimization
 
 > 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
-KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: REFLECTIVE PROMPT EVOLUTION CAN OUTPERFORM REINFORCEMENT LEARNING"](https://arxiv.org/pdf/2507.19457).
+KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
 
 For usage examples, API reference, and configuration options, please see the [GEPA README](src/kiss/agents/gepa/README.md).
 
@@ -298,7 +342,7 @@ KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
-### Using KISS Coding Agent
+### Using KISS Coding Agent: The Relentless Coding Agent
 
 The KISS Coding Agent is a multi-agent system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks:
 
@@ -315,11 +359,12 @@ result = agent.run(
         that is efficient and correct.
     """,
     orchestrator_model_name="claude-sonnet-4-5",  # Model for orchestration and execution
-    dynamic_gepa_model_name="claude-sonnet-4-5",  # Model for prompt refinement on failures
+    subtasker_model_name="claude-opus-4-5"  # Model for subtasker agents
+    dynamic_gepa_model_name="claude-haiku-4-5",  # Model for prompt refinement on failures
     readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
     writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
     base_dir=".",  # Base working directory (project root)
-    max_steps=50,  # Maximum steps per agent
+    max_steps=100,  # Maximum steps per agent
     trials=3  # Number of retry attempts
 )
 print(f"Result: {result}")
@@ -353,11 +398,11 @@ print(f"Result: {result}")
 - **Efficient Orchestration**: Manages execution through smart task delegation
 - **Bash Command Parsing**: Automatically extracts readable/writable directories from bash commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
-- **Recursive Sub-tasks**: Agents can call `perform_subtask()` to further decompose work
 - **Docker Support**: Optional Docker container execution via the `docker_image` parameter for isolated bash command execution
 
 ### Using Claude Coding Agent
 
+Since everyone loves Claude Code, I thought I will provide API access to Claude Code so that you can use the best coding agent.
 The Claude Coding Agent uses the Claude Agent SDK to generate tested Python programs with file system access controls:
 
 ```python
@@ -399,7 +444,7 @@ from kiss.agents.coding_agents import GeminiCliAgent
 agent = GeminiCliAgent(name="my_coding_agent")
 
 result = agent.run(
-    model_name="gemini-2.5-flash",
+    model_name="gemini-3-pro-preview",
     prompt_template="Write a fibonacci function with tests",
     readable_paths=["src/"],
     writable_paths=["output/"],
@@ -434,7 +479,7 @@ if result:
 **Vulnerability Detector Agent (ARVO):**
 
 ```bash
-uv run python -m kiss.agents.arvo_agent.arvo_agent
+uv run python -m kiss.evals.arvo_agent.arvo_agent
 ```
 
 The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discover security vulnerabilities in C/C++ code:
@@ -448,14 +493,14 @@ The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discove
 **Programmatic Usage:**
 
 ```python
-from kiss.agents.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
+from kiss.evals.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
 
 # Get available Arvo Docker image tags
 tags = get_all_arvo_tags("n132/arvo")
 
 # Find vulnerabilities in a specific Docker image
 result = find_vulnerability(
-    model_name="gemini-2.5-flash",
+    model_name="gemini-3-pro-preview",
     image_name="n132/arvo:tag-name",
     num_trials=10,  # Number of attempts to find a vulnerability
     location="/src"  # Location of the source code in the container
@@ -470,7 +515,7 @@ else:
 **SWE-bench Verified Agent:**
 
 ```bash
-uv run src/kiss/agents/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-2.5-flash --swebench_verified.instance_id "django__django-11099"
+uv run src/kiss/evals/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-2.5-flash --swebench_verified.instance_id "django__django-11099"
 ```
 
 The SWE-bench Verified agent is a Software Engineering agent that:
@@ -482,7 +527,7 @@ The SWE-bench Verified agent is a Software Engineering agent that:
 - Automatically evaluates results using the official SWE-bench evaluation harness
 - Supports command-line configuration for model, instance selection, budget, and more
 
-See the [SWE-bench Verified README](src/kiss/agents/swe_agent_verified/README.md) for detailed documentation.
+See the [SWE-bench Verified README](src/kiss/evals/swe_agent_verified/README.md) for detailed documentation.
 
 ### Using SimpleRAG for Retrieval-Augmented Generation
 
@@ -569,7 +614,7 @@ from kiss.agents.kiss import run_bash_task_in_sandboxed_ubuntu_latest
 
 result = run_bash_task_in_sandboxed_ubuntu_latest(
     task="Install and configure nginx",
-    model_name="gemini-2.5-flash"
+    model_name="gemini-3-pro-preview"
 )
 ```
 
@@ -611,7 +656,7 @@ print(result)
 ```
 kiss/
 ├── src/kiss/
-│   ├── agents/          # Example agents
+│   ├── agents/          # Agent implementations
 │   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
 │   │   │   ├── improver_agent.py       # Agent improvement through generations
@@ -625,33 +670,29 @@ kiss/
 │   │   │   ├── kiss_evolve.py
 │   │   │   ├── novelty_prompts.py  # Prompts for novelty-based evolution
 │   │   │   ├── config.py           # KISSEvolve configuration
-│   │   │   ├── README.md           # KISSEvolve documentation
-│   │   │   └── algotune/           # AlgoTune benchmark integration
-│   │   │       ├── run_algotune.py # AlgoTune task evolution
-│   │   │       └── config.py       # AlgoTune configuration
+│   │   │   └── README.md           # KISSEvolve documentation
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── kiss_coding_agent.py   # Multi-agent coding system with orchestration
 │   │   │   ├── claude_coding_agent.py # Claude Coding Agent using Claude Agent SDK
 │   │   │   ├── gemini_cli_agent.py    # Gemini CLI Agent using Google ADK
 │   │   │   └── openai_codex_agent.py  # OpenAI Codex Agent using OpenAI Agents SDK
-│   │   ├── kiss.py                 # Utility agents (prompt refiner, bash agent)
-│   │   ├── swe_agent_verified/     # SWE-bench Verified benchmark integration
-│   │   │   ├── run_swebench.py     # Main runner with CLI support
-│   │   │   ├── config.py           # Configuration for SWE-bench runs
-│   │   │   └── README.md           # SWE-bench documentation
-│   │   └── arvo_agent/             # ARVO vulnerability detection agent
-│   │       ├── arvo_agent.py       # Arvo-based vulnerability detector
-│   │       └── arvo_tags.json      # Docker image tags for Arvo
+│   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
+│   │   │   ├── agent_evolver.py       # Agent evolution logic
+│   │   │   ├── multi_agent.py         # Multi-agent orchestration
+│   │   │   ├── config.py              # Configuration
+│   │   │   └── README.md              # Documentation
+│   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   ├── core/            # Core framework components
 │   │   ├── base.py            # Base class with common functionality for all KISS agents
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
 │   │   ├── formatter.py       # Output formatting base class
-│   │   ├── simple_formatter.py # Rich-formatted output
+│   │   ├── simple_formatter.py # Rich-formatted detailed output
+│   │   ├── compact_formatter.py # Compact single-line output formatting
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
-│   │   ├── utils.py           # Utility functions (finish, search_web, resolve_path, is_subpath, etc.)
-│   │   ├── useful_tools.py    # UsefulTools class with path-restricted bash execution
+│   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
+│   │   ├── useful_tools.py    # UsefulTools class with path-restricted bash execution, search_web, fetch_url
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface
 │   │       ├── gemini_model.py    # Gemini model implementation
@@ -660,6 +701,20 @@ kiss/
 │   │       └── model_info.py      # Model info: context lengths, pricing, and capabilities
 │   ├── docker/          # Docker integration
 │   │   └── docker_manager.py
+│   ├── evals/            # Benchmark and evaluation integrations
+│   │   ├── algotune/               # AlgoTune benchmark integration
+│   │   │   ├── run_algotune.py     # AlgoTune task evolution
+│   │   │   └── config.py           # AlgoTune configuration
+│   │   ├── arvo_agent/             # ARVO vulnerability detection agent
+│   │   │   ├── arvo_agent.py       # Arvo-based vulnerability detector
+│   │   │   └── arvo_tags.json      # Docker image tags for Arvo
+│   │   ├── hotpotqa/               # HotPotQA benchmark integration
+│   │   │   ├── hotpotqa_benchmark.py # HotPotQA benchmark runner
+│   │   │   └── README.md           # HotPotQA documentation
+│   │   └── swe_agent_verified/     # SWE-bench Verified benchmark integration
+│   │       ├── run_swebench.py     # Main runner with CLI support
+│   │       ├── config.py           # Configuration for SWE-bench runs
+│   │       └── README.md           # SWE-bench documentation
 │   ├── multiprocessing/ # Multiprocessing utilities
 │   │   └── multiprocess.py
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
@@ -672,15 +727,22 @@ kiss/
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_kissevolve_bubblesort.py
 │   │   ├── test_gepa_squad.py
+│   │   ├── test_gepa_hotpotqa.py
+│   │   ├── test_gepa_improvement.py
+│   │   ├── test_gepa_integration.py
 │   │   ├── test_docker_manager.py
 │   │   ├── test_models_quick.py   # Quick tests for models based on ModelInfo capabilities
+│   │   ├── test_model_config.py
+│   │   ├── test_a_model.py
 │   │   ├── run_all_models_test.py # Comprehensive tests for all models
 │   │   ├── test_multiprocess.py
 │   │   ├── test_internal.py
 │   │   ├── test_claude_coding_agent.py  # Tests for Claude Coding Agent
 │   │   ├── test_gemini_cli_agent.py     # Tests for Gemini CLI Agent
 │   │   ├── test_openai_codex_agent.py   # Tests for OpenAI Codex Agent
-│   │   └── test_agent_creator.py        # Tests for Agent Creator
+│   │   ├── test_agent_evolver.py        # Tests for Agent Evolver
+│   │   ├── test_search_web.py
+│   │   └── test_useful_tools.py
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
 │       ├── README.md                    # Trajectory visualizer documentation
@@ -708,7 +770,7 @@ print(f"KISS version: {__version__}")
 To update the version, simply edit `src/kiss/_version.py`:
 
 ```python
-__version__ = "0.2.0"  # Update to new version
+__version__ = "0.1.0"  # Update to new version
 ```
 
 ## Configuration
@@ -722,7 +784,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `debug`: Enable debug mode (default: False)
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
-  - `use_web_search`: Automatically add web search tool if enabled (default: True)
+  - `use_web`: Automatically add web browsing and search tool if enabled (default: True)
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.kiss_coding_agent`:
   - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-sonnet-4-5")
@@ -737,16 +799,14 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `population_size`: Number of candidates to maintain in population (default: 8)
   - `pareto_size`: Maximum size of Pareto frontier (default: 4)
   - `mutation_rate`: Probability of mutating a prompt template (default: 0.5)
-- **AlgoTune Settings**: Modify `DEFAULT_CONFIG.algotune` in `src/kiss/agents/kiss_evolve/algotune/config.py`:
-  - `task`: Specific task name to solve (default: "matrix_multiplication")
-  - `all_tasks`: Solve all tasks in AlgoTuneTasks directory (default: False)
 
 ## Available Commands
 
 ### Development
 
-- `uv sync` - Install dependencies
-- `uv sync --group dev` - Install dependencies including dev tools (mypy, ruff, pytest)
+- `uv sync` - Install all dependencies (full installation)
+- `uv sync --group dev` - Install dev tools (mypy, ruff, pytest, jupyter, etc.)
+- `uv sync --group <name>` - Install specific dependency group (see [Selective Installation](#selective-installation-dependency-groups))
 - `uv build` - Build the project package
 
 ### Testing
@@ -764,16 +824,19 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 ### Code Quality
 
 - `uv run check` - Run all code quality checks (fresh dependency install, build, lint, and type check)
+- `uv run check --clean` - Run all code quality checks (fresh dependency install, build, lint, and type check after removing previous build options)
 - `uv run ruff format src/` - Format code with ruff (line-length: 100, target: py313)
 - `uv run ruff check src/` - Lint code with ruff (selects: E, F, W, I, N, UP)
 - `uv run mypy src/` - Type check with mypy (python_version: 3.13)
+- `uv run pyright src/` - Type check with pyright (alternative to mypy, stricter checking)
 
-### Utilities
+### Notebook
 
-- `uv run python -m kiss.agents.arvo_agent.arvo_agent` - Run the ARVO Vulnerability Detector agent
-- `uv run src/kiss/agents/swe_agent_verified/run_swebench.py` - Run the SWE-bench Verified agent
-- `uv run python -m kiss.scripts.kissevolve_bubblesort` - Run the KISSEvolve bubble sort evolution example
-- `uv run python -m kiss.viz_trajectory.server artifacts` - Start the trajectory visualizer server
+- `uv run notebook --test` - Test all imports and basic functionality
+- `uv run notebook --lab` - Open the tutorial notebook in JupyterLab (recommended)
+- `uv run notebook --run` - Open the tutorial notebook in Jupyter Notebook
+- `uv run notebook --execute` - Execute notebook cells and update outputs in place
+- `uv run notebook --convert` - Convert notebook to Python script
 
 ### Cleanup
 
@@ -887,6 +950,7 @@ Contributions are welcome! Please ensure your code:
 - Passes all tests (`uv run pytest`)
 - Passes linting (`uv run ruff check src/`)
 - Passes type checking (`uv run mypy src/`)
+- Passes type checking (`uv run pyright src/`)
 
 ## License
 

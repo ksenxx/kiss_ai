@@ -18,11 +18,11 @@ class ImproverConfig(BaseModel):
         description="LLM model to use for the improver agent",
     )
     max_steps: int = Field(
-        default=50,
+        default=100,
         description="Maximum steps for the improver agent",
     )
     max_budget: float = Field(
-        default=15.0,
+        default=20.0,
         description="Maximum budget in USD for the improver agent",
     )
 
@@ -55,7 +55,7 @@ class EvolverConfig(BaseModel):
         description="Maximum steps for creating the initial agent",
     )
     initial_agent_max_budget: float = Field(
-        default=5.0,
+        default=50.0,
         description="Maximum budget in USD for creating the initial agent",
     )
 

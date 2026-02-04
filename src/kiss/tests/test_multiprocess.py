@@ -7,6 +7,8 @@
 
 import time
 import unittest
+from collections.abc import Callable
+from typing import Any
 
 from kiss.multiprocessing.multiprocess import (
     get_available_cores,
@@ -15,7 +17,14 @@ from kiss.multiprocessing.multiprocess import (
 
 
 def compute_factorial(n: int) -> int:
-    """Compute factorial of n - compute-heavy operation."""
+    """Compute factorial of n - compute-heavy operation.
+
+    Args:
+        n: The number to compute factorial for.
+
+    Returns:
+        The factorial of n.
+    """
     result = 1
     for i in range(1, n + 1):
         result *= i
@@ -23,7 +32,15 @@ def compute_factorial(n: int) -> int:
 
 
 def find_primes_in_range(start: int, end: int) -> list[int]:
-    """Find all prime numbers in the given range - compute-heavy operation."""
+    """Find all prime numbers in the given range - compute-heavy operation.
+
+    Args:
+        start: The start of the range (inclusive).
+        end: The end of the range (inclusive).
+
+    Returns:
+        A list of all prime numbers in the given range.
+    """
     primes = []
     for num in range(start, end + 1):
         if num > 1:
@@ -38,7 +55,14 @@ def find_primes_in_range(start: int, end: int) -> list[int]:
 
 
 def matrix_multiply(size: int) -> list[list[int]]:
-    """Multiply two matrices of given size - compute-heavy operation."""
+    """Multiply two matrices of given size - compute-heavy operation.
+
+    Args:
+        size: The size of the square matrices to multiply.
+
+    Returns:
+        The resulting matrix from multiplying two generated matrices.
+    """
     matrix_a = [[i * size + j for j in range(size)] for i in range(size)]
     matrix_b = [[i * size + j for j in range(size)] for i in range(size)]
 
@@ -52,7 +76,14 @@ def matrix_multiply(size: int) -> list[list[int]]:
 
 
 def fibonacci_sequence(n: int) -> int:
-    """Compute nth Fibonacci number using iterative method."""
+    """Compute nth Fibonacci number using iterative method.
+
+    Args:
+        n: The index of the Fibonacci number to compute.
+
+    Returns:
+        The nth Fibonacci number.
+    """
     if n <= 1:
         return n
     a, b = 0, 1
@@ -62,23 +93,44 @@ def fibonacci_sequence(n: int) -> int:
 
 
 def sum_of_squares(n: int) -> int:
-    """Compute sum of squares from 1 to n."""
+    """Compute sum of squares from 1 to n.
+
+    Args:
+        n: The upper limit of the range.
+
+    Returns:
+        The sum of squares from 1 to n.
+    """
     return sum(i * i for i in range(1, n + 1))
 
 
 class TestMultiprocess(unittest.TestCase):
     """Test suite for multiprocessing with compute-heavy tasks."""
 
-    def test_get_available_cores(self):
-        """Test that we can get the number of available cores."""
+    def test_get_available_cores(self) -> None:
+        """Test that we can get the number of available cores.
+
+        Verifies that get_available_cores returns a positive integer
+        representing the number of CPU cores available for processing.
+
+        Returns:
+            None
+        """
         cores = get_available_cores()
         self.assertIsInstance(cores, int)
         self.assertGreater(cores, 0)
 
-    def test_parallel_execution(self):
-        """Test parallel execution with various compute-heavy tasks."""
+    def test_parallel_execution(self) -> None:
+        """Test parallel execution with various compute-heavy tasks.
+
+        Verifies that parallel execution produces the same results as
+        sequential execution and that both complete successfully.
+
+        Returns:
+            None
+        """
         # Create diverse compute-heavy tasks
-        tasks = [
+        tasks: list[tuple[Callable[..., Any], list[Any]]] = [
             (matrix_multiply, [200]),
             (fibonacci_sequence, [200000]),
             (sum_of_squares, [20000000]),
@@ -110,8 +162,15 @@ class TestMultiprocess(unittest.TestCase):
         self.assertGreater(parallel_time, 0)
         self.assertGreater(sequential_time, 0)
 
-    def test_result_order_preservation(self):
-        """Test that results are returned in the same order as input tasks."""
+    def test_result_order_preservation(self) -> None:
+        """Test that results are returned in the same order as input tasks.
+
+        Verifies that when running tasks in parallel, the results are returned
+        in the same order as the tasks were submitted, not in completion order.
+
+        Returns:
+            None
+        """
         tasks = [
             (compute_factorial, [100]),
             (sum_of_squares, [1000]),
@@ -124,8 +183,15 @@ class TestMultiprocess(unittest.TestCase):
         self.assertEqual(results[1], sum_of_squares(1000))
         self.assertEqual(results[2], fibonacci_sequence(20))
 
-    def test_edge_cases(self):
-        """Test edge cases: single task and empty task list."""
+    def test_edge_cases(self) -> None:
+        """Test edge cases: single task and empty task list.
+
+        Verifies that the parallel execution handles edge cases correctly,
+        including running a single task and handling an empty task list.
+
+        Returns:
+            None
+        """
         # Single task
         single_tasks = [(compute_factorial, [100])]
         single_results = run_functions_in_parallel(single_tasks)
@@ -133,7 +199,7 @@ class TestMultiprocess(unittest.TestCase):
         self.assertEqual(single_results[0], compute_factorial(100))
 
         # Empty tasks
-        empty_tasks = []
+        empty_tasks: list[tuple[Callable[..., Any], list[Any]]] = []
         empty_results = run_functions_in_parallel(empty_tasks)
         self.assertEqual(len(empty_results), 0)
 

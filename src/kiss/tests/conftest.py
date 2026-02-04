@@ -11,7 +11,14 @@ DEFAULT_MODEL = "gpt-5.2"
 
 
 def pytest_addoption(parser):
-    """Add --model option to pytest."""
+    """Add --model option to pytest.
+
+    Args:
+        parser: The pytest argument parser to add options to.
+
+    Returns:
+        None
+    """
     parser.addoption(
         "--model",
         action="store",

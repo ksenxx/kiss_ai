@@ -140,7 +140,11 @@ class DockerManager:
         return None
 
     def close(self) -> None:
-        """Stop and remove the Docker container."""
+        """Stop and remove the Docker container.
+
+        Handles cleanup of both the container and any temporary directories
+        created for shared volumes.
+        """
         if self.container is None:
             print("No container to close.")
             return
@@ -170,6 +174,11 @@ class DockerManager:
         print("Container closed successfully")
 
     def __enter__(self) -> "DockerManager":
+        """Context manager entry point.
+
+        Returns:
+            DockerManager: The initialized DockerManager instance with running container.
+        """
         self.open()
         return self
 
@@ -179,4 +188,11 @@ class DockerManager:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
+        """Context manager exit point.
+
+        Args:
+            exc_type: The exception type if an exception was raised.
+            exc_val: The exception value if an exception was raised.
+            exc_tb: The traceback if an exception was raised.
+        """
         self.close()

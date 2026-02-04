@@ -16,7 +16,14 @@ from kiss.core.models.model_info import MODEL_INFO
 
 @dataclass
 class TestResult:
-    """Result of a test run."""
+    """Result of a test run.
+
+    Attributes:
+        model_name: The name of the model being tested.
+        test_type: The type of test ("non_agentic", "agentic", or "embedding").
+        passed: Whether the test passed.
+        error_message: Error message if the test failed, empty string otherwise.
+    """
 
     model_name: str
     test_type: str  # "non_agentic", "agentic", "embedding"
@@ -26,7 +33,14 @@ class TestResult:
 
 @dataclass
 class ModelTestResults:
-    """Results for all tests on a model."""
+    """Results for all tests on a model.
+
+    Attributes:
+        model_name: The name of the model being tested.
+        non_agentic: Result of non-agentic test, or None if not run.
+        agentic: Result of agentic test, or None if not run.
+        embedding: Result of embedding test, or None if not run.
+    """
 
     model_name: str
     non_agentic: TestResult | None = None
@@ -35,7 +49,19 @@ class ModelTestResults:
 
 
 def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
-    """Run a specific test for a model."""
+    """Run a specific test for a model.
+
+    Executes a pytest test for the given model and test type using subprocess.
+
+    Args:
+        model_name: The name of the model to test.
+        test_name: The name of the test to run (e.g., "test_non_agentic").
+        timeout: Maximum time in seconds to wait for the test to complete.
+
+    Returns:
+        A TestResult containing the model name, test type, pass/fail status,
+        and any error message.
+    """
     cmd = [
         sys.executable,
         "-m",
@@ -94,7 +120,17 @@ def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
 
 
 def test_model(model_name: str) -> ModelTestResults:
-    """Run all applicable tests for a model."""
+    """Run all applicable tests for a model.
+
+    Runs non-agentic, agentic, and embedding tests based on the model's
+    capabilities as defined in MODEL_INFO.
+
+    Args:
+        model_name: The name of the model to test.
+
+    Returns:
+        A ModelTestResults containing results for all applicable tests.
+    """
     info = MODEL_INFO.get(model_name)
     if info is None:
         print(f"  WARNING: {model_name} not found in MODEL_INFO")
@@ -126,8 +162,15 @@ def test_model(model_name: str) -> ModelTestResults:
     return results
 
 
-def main():
-    """Main entry point."""
+def main() -> int:
+    """Main entry point.
+
+    Iterates through all models in MODEL_INFO, runs applicable tests,
+    and prints a summary report of results.
+
+    Returns:
+        Exit code: 0 if all tests passed, 1 if any tests failed.
+    """
     all_models = list(MODEL_INFO.keys())
     print(f"Testing {len(all_models)} models from model_info.py\n")
     print("=" * 80)

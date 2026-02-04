@@ -25,6 +25,14 @@ def _parse_trajectory_yaml(file_path: Path) -> dict:
     """Parse a single saved agent trajectory YAML into the JSON shape used by the UI.
 
     This is intentionally minimal: only fields used by the browser UI are returned.
+
+    Args:
+        file_path: Path to the trajectory YAML file to parse.
+
+    Returns:
+        Dictionary containing trajectory metadata and messages formatted for the UI,
+        including name, id, timestamps, model, command, step counts, budget info,
+        and the actual messages.
     """
     with file_path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -64,7 +72,14 @@ def _parse_trajectory_yaml(file_path: Path) -> dict:
 
 
 def _parse_state_dir_timestamp(state_dir: str) -> datetime:
-    """Parse state directory name (job_YYYY_MM_DD_HH_MM_SS_random) to datetime."""
+    """Parse state directory name (job_YYYY_MM_DD_HH_MM_SS_random) to datetime.
+
+    Args:
+        state_dir: Name of the state directory to parse.
+
+    Returns:
+        Datetime object parsed from the directory name, or datetime.min if parsing fails.
+    """
     try:
         parts = state_dir.split("_")
         # Expected format: job_YYYY_MM_DD_HH_MM_SS_random
@@ -79,7 +94,12 @@ def _parse_state_dir_timestamp(state_dir: str) -> datetime:
 def list_jobs(artifact_dir: Path) -> list[dict]:
     """List all job directories with basic metadata.
 
-    Returns a list of job info dicts sorted by creation time (newest first).
+    Args:
+        artifact_dir: Path to the artifact directory containing job folders.
+
+    Returns:
+        List of job info dictionaries sorted by creation time (newest first),
+        each containing 'name' and 'trajectory_count' keys.
     """
     jobs = []
     for job_dir in artifact_dir.glob("job_*"):
@@ -106,7 +126,14 @@ def list_jobs(artifact_dir: Path) -> list[dict]:
 def load_job_trajectories(artifact_dir: Path, job_name: str) -> list[dict]:
     """Load all trajectory files for a specific job.
 
-    <artifact_dir>/<job_name>/trajectories/trajectory_*.yaml
+    Loads from <artifact_dir>/<job_name>/trajectories/trajectory_*.yaml
+
+    Args:
+        artifact_dir: Path to the artifact directory containing job folders.
+        job_name: Name of the job directory to load trajectories from.
+
+    Returns:
+        List of trajectory dictionaries sorted by run_start_timestamp in ascending order.
     """
     trajectories = []
     job_dir = artifact_dir / job_name / "trajectories"
@@ -124,13 +151,22 @@ def load_job_trajectories(artifact_dir: Path, job_name: str) -> list[dict]:
 
 @app.route("/")
 def index():
-    """Serve the main HTML page."""
+    """Serve the main HTML page.
+
+    Returns:
+        Rendered HTML template for the trajectory visualizer.
+    """
     return render_template("index.html")
 
 
 @app.route("/api/jobs")
 def get_jobs():
-    """API endpoint to list all job directories."""
+    """API endpoint to list all job directories.
+
+    Returns:
+        JSON response containing a list of job info dictionaries, or an error
+        response with status 500 if the artifact directory is not set.
+    """
     if ARTIFACT_DIR is None:
         return jsonify({"error": "Artifact directory not set"}), 500
 
@@ -139,7 +175,16 @@ def get_jobs():
 
 @app.route("/api/jobs/<job_name>/trajectories")
 def get_job_trajectories(job_name: str):
-    """API endpoint to get trajectories for a specific job."""
+    """API endpoint to get trajectories for a specific job.
+
+    Args:
+        job_name: Name of the job to retrieve trajectories for.
+
+    Returns:
+        JSON response containing a list of trajectory dictionaries, or an error
+        response with status 400 for invalid job names, 404 if job not found,
+        or 500 if the artifact directory is not set.
+    """
     if ARTIFACT_DIR is None:
         return jsonify({"error": "Artifact directory not set"}), 500
 
@@ -155,7 +200,14 @@ def get_job_trajectories(job_name: str):
 
 
 def main():
-    """Main entry point for the server."""
+    """Main entry point for the server.
+
+    Parses command-line arguments, validates the artifact directory, and starts
+    the Flask development server for trajectory visualization.
+
+    Returns:
+        None. Exits with status 1 if the artifact directory does not exist.
+    """
     global ARTIFACT_DIR
 
     parser = argparse.ArgumentParser(description="Visualize agent trajectories")

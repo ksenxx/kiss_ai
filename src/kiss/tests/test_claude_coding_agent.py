@@ -24,7 +24,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
     """Tests for ClaudeCodingAgent permission handling."""
 
     def setUp(self):
-        """Set up test fixtures."""
+        """Set up test fixtures.
+
+        Creates a temporary directory structure with separate readable and
+        writable subdirectories, and initializes a ClaudeCodingAgent instance.
+        """
         self.temp_dir = Path(tempfile.mkdtemp())
         self.readable_dir = self.temp_dir / "readable"
         self.writable_dir = self.temp_dir / "writable"
@@ -42,7 +46,10 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         )
 
     def tearDown(self):
-        """Clean up test fixtures."""
+        """Clean up test fixtures.
+
+        Removes the temporary directory and all its contents.
+        """
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_is_subpath_for_exact_match(self):
@@ -64,7 +71,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertFalse(is_subpath(unrelated, whitelist))
 
     def test_permission_handler_allows_read_in_readable_path(self):
-        """Test permission_handler allows Read for readable paths."""
+        """Test permission_handler allows Read for readable paths.
+
+        Verifies that the permission handler returns PermissionResultAllow
+        when a Read operation targets a file within the readable paths.
+        """
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 
         file_path = str(self.readable_dir / "test.txt")
@@ -73,7 +84,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultAllow)
 
     def test_permission_handler_denies_read_outside_readable_path(self):
-        """Test permission_handler denies Read outside readable paths."""
+        """Test permission_handler denies Read outside readable paths.
+
+        Verifies that the permission handler returns PermissionResultDeny
+        when a Read operation targets a file outside the readable paths.
+        """
         from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
 
         file_path = "/tmp/outside/test.txt"
@@ -82,7 +97,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_allows_write_in_writable_path(self):
-        """Test permission_handler allows Write for writable paths."""
+        """Test permission_handler allows Write for writable paths.
+
+        Verifies that the permission handler returns PermissionResultAllow
+        when a Write operation targets a file within the writable paths.
+        """
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 
         file_path = str(self.writable_dir / "output.txt")
@@ -91,7 +110,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultAllow)
 
     def test_permission_handler_denies_write_outside_writable_path(self):
-        """Test permission_handler denies Write outside writable paths."""
+        """Test permission_handler denies Write outside writable paths.
+
+        Verifies that the permission handler returns PermissionResultDeny
+        when a Write operation targets a file outside the writable paths.
+        """
         from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
 
         file_path = str(self.readable_dir / "readonly.txt")
@@ -100,7 +123,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_allows_tools_without_path(self):
-        """Test permission_handler allows tools without path parameter."""
+        """Test permission_handler allows tools without path parameter.
+
+        Verifies that tools that don't require path-based permissions
+        are allowed by default.
+        """
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 
         context = ToolPermissionContext()
@@ -108,7 +135,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultAllow)
 
     def test_permission_handler_handles_file_path_key(self):
-        """Test permission_handler handles 'file_path' key."""
+        """Test permission_handler handles 'file_path' key.
+
+        Verifies that the permission handler correctly extracts paths from
+        tool arguments using the 'file_path' key as an alternative to 'path'.
+        """
         from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 
         file_path = str(self.readable_dir / "test.txt")
@@ -119,7 +150,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultAllow)
 
     def test_permission_handler_for_grep(self):
-        """Test permission_handler handles Grep tool."""
+        """Test permission_handler handles Grep tool.
+
+        Verifies that the Grep tool is allowed for paths within readable_paths
+        and denied for paths outside readable_paths.
+        """
         from claude_agent_sdk import (
             PermissionResultAllow,
             PermissionResultDeny,
@@ -138,7 +173,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_for_glob(self):
-        """Test permission_handler handles Glob tool."""
+        """Test permission_handler handles Glob tool.
+
+        Verifies that the Glob tool is allowed for paths within readable_paths
+        and denied for paths outside readable_paths.
+        """
         from claude_agent_sdk import (
             PermissionResultAllow,
             PermissionResultDeny,
@@ -157,7 +196,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_for_edit(self):
-        """Test permission_handler handles Edit tool."""
+        """Test permission_handler handles Edit tool.
+
+        Verifies that the Edit tool is allowed for paths within writable_paths
+        and denied for paths outside writable_paths (including readable-only paths).
+        """
         from claude_agent_sdk import (
             PermissionResultAllow,
             PermissionResultDeny,
@@ -176,7 +219,11 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         self.assertIsInstance(result, PermissionResultDeny)
 
     def test_permission_handler_for_multiedit(self):
-        """Test permission_handler handles MultiEdit tool."""
+        """Test permission_handler handles MultiEdit tool.
+
+        Verifies that the MultiEdit tool is allowed for paths within writable_paths
+        and denied for paths outside writable_paths (including readable-only paths).
+        """
         from claude_agent_sdk import (
             PermissionResultAllow,
             PermissionResultDeny,
@@ -206,7 +253,11 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
     """
 
     def setUp(self):
-        """Set up test fixtures with a temp directory."""
+        """Set up test fixtures with a temp directory.
+
+        Creates a temporary directory structure with an output subdirectory
+        and stores the project root path for readable paths configuration.
+        """
         self.temp_dir = Path(tempfile.mkdtemp())
         self.output_dir = self.temp_dir / "output"
         self.output_dir.mkdir()
@@ -214,11 +265,18 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
         self.project_root = Path(DEFAULT_CONFIG.agent.artifact_dir)
 
     def tearDown(self):
-        """Clean up test fixtures."""
+        """Clean up test fixtures.
+
+        Removes the temporary directory and all its contents.
+        """
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_agent_run_simple_task(self):
-        """Test running a simple code generation task."""
+        """Test running a simple code generation task.
+
+        Verifies that the ClaudeCodingAgent can execute a basic code generation
+        task and return a non-null string result.
+        """
         agent = ClaudeCodingAgent("test-agent")
 
         task = """Write a simple Python function that adds two numbers."""
@@ -238,7 +296,11 @@ class TestClaudeCodingAgentRun(unittest.TestCase):
             self.assertIsInstance(result, str)
 
     def test_agent_run_returns_string_summary(self):
-        """Test that agent run returns a string summary."""
+        """Test that agent run returns a string summary.
+
+        Verifies that the ClaudeCodingAgent returns a string summary after
+        executing a more complex task involving code generation and testing.
+        """
         agent = ClaudeCodingAgent("test-agent")
 
         task = "Write a simple factorial function, test it, and mke it efficient."

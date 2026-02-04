@@ -14,7 +14,7 @@ from agents import Agent, Runner, function_tool
 from agents.tool import WebSearchTool
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
@@ -29,7 +29,14 @@ SANDBOX_FULL_ACCESS = "danger-full-access"
 
 
 class OpenAICodexAgent(Base):
+    """OpenAI Codex Coding Agent using the OpenAI Agents SDK."""
+
     def __init__(self, name: str) -> None:
+        """Initialize an OpenAICodexAgent instance.
+
+        Args:
+            name: The name identifier for the agent.
+        """
         super().__init__(name)
 
     def _reset(
@@ -42,6 +49,17 @@ class OpenAICodexAgent(Base):
         max_budget: float,
         formatter: Formatter | None,
     ) -> None:
+        """Reset the agent's state for a new run.
+
+        Args:
+            model_name: The model name to use.
+            readable_paths: Paths allowed for reading.
+            writable_paths: Paths allowed for writing.
+            base_dir: Base directory for path resolution.
+            max_steps: Maximum steps allowed.
+            max_budget: Maximum budget in USD.
+            formatter: Optional formatter for output display.
+        """
         tools = ["read_file", "write_file", "list_dir", "run_shell", "web_search"]
         self._init_run_state(model_name, tools)
         Path(base_dir).mkdir(parents=True, exist_ok=True)
@@ -63,7 +81,11 @@ class OpenAICodexAgent(Base):
         )
 
     def _create_tools(self) -> list[Any]:
-        """Create tools with path restrictions."""
+        """Create tools with path restrictions.
+
+        Returns:
+            list[Any]: A list of tool functions for the agent.
+        """
 
         @function_tool
         def read_file(path: str) -> str:
@@ -115,7 +137,11 @@ class OpenAICodexAgent(Base):
         return [read_file, write_file, list_dir, run_shell, WebSearchTool()]
 
     def _update_token_usage(self, result: Any) -> None:
-        """Update token counts from result."""
+        """Update token counts from result.
+
+        Args:
+            result: The result object with optional raw_responses.
+        """
         if hasattr(result, "raw_responses"):
             for response in result.raw_responses:
                 if hasattr(response, "usage") and response.usage:
@@ -123,7 +149,12 @@ class OpenAICodexAgent(Base):
                     self.total_tokens_used += getattr(response.usage, "output_tokens", 0)
 
     def _process_run_result(self, result: Any, timestamp: int) -> None:
-        """Process run result and update state."""
+        """Process run result and update state.
+
+        Args:
+            result: The run result from the agent.
+            timestamp: Unix timestamp for the result.
+        """
         for item in result.new_items:
             self.step_count += 1
             item_type = type(item).__name__
@@ -186,7 +217,7 @@ class OpenAICodexAgent(Base):
 
             agent = Agent(
                 name=self.name,
-                instructions=DEFAULT_SYSTEM_PROMPT,
+                instructions=CODING_INSTRUCTIONS,
                 model=model_name,
                 tools=self._create_tools(),
             )
@@ -218,6 +249,7 @@ class OpenAICodexAgent(Base):
 
 
 def main() -> None:
+    """Example usage of the OpenAICodexAgent."""
     agent = OpenAICodexAgent("Example agent")
     task_description = """
     can you write, test, and optimize a fibonacci function in Python that is efficient and correct?

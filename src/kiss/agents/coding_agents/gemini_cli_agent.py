@@ -17,7 +17,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.base import DEFAULT_SYSTEM_PROMPT, Base
+from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
@@ -31,6 +31,11 @@ class GeminiCliAgent(Base):
     """Gemini CLI Agent using the Google ADK (Agent Development Kit)."""
 
     def __init__(self, name: str) -> None:
+        """Initialize a GeminiCliAgent instance.
+
+        Args:
+            name: The name identifier for the agent.
+        """
         super().__init__(name)
 
     def _reset(
@@ -43,6 +48,17 @@ class GeminiCliAgent(Base):
         max_budget: float,
         formatter: Formatter | None,
     ) -> None:
+        """Reset the agent's state for a new run.
+
+        Args:
+            model_name: The model name to use.
+            readable_paths: Paths allowed for reading.
+            writable_paths: Paths allowed for writing.
+            base_dir: Base directory for path resolution.
+            max_steps: Maximum steps allowed.
+            max_budget: Maximum budget in USD.
+            formatter: Optional formatter for output display.
+        """
         self._init_run_state(
             model_name, ["read_file", "write_file", "list_dir", "run_shell", "web_search"]
         )
@@ -67,7 +83,11 @@ class GeminiCliAgent(Base):
         )
 
     def _create_tools(self) -> list[Any]:
-        """Create tools with path restrictions for the Gemini agent."""
+        """Create tools with path restrictions for the Gemini agent.
+
+        Returns:
+            list[Any]: A list of tool functions for the agent.
+        """
 
         def read_file(path: str) -> dict[str, Any]:
             """Read file contents.
@@ -180,7 +200,15 @@ class GeminiCliAgent(Base):
         return [read_file, write_file, list_dir, run_shell, web_search]
 
     def _process_events(self, events: list[Any], timestamp: int) -> str | None:
-        """Process events from the runner and update state."""
+        """Process events from the runner and update state.
+
+        Args:
+            events: List of events from the ADK runner.
+            timestamp: Unix timestamp for the events.
+
+        Returns:
+            str | None: The final text result if available.
+        """
         final_text = None
 
         for event in events:
@@ -266,7 +294,7 @@ class GeminiCliAgent(Base):
             agent = Agent(
                 model=model_name,
                 name=self.name,
-                instruction=DEFAULT_SYSTEM_PROMPT,
+                instruction=CODING_INSTRUCTIONS,
                 description="An expert Python programmer that writes clean, simple, robust code.",
                 tools=tools,
             )
@@ -321,6 +349,7 @@ class GeminiCliAgent(Base):
 
 
 def main() -> None:
+    """Example usage of the GeminiCliAgent."""
     agent = GeminiCliAgent("example_gemini_agent")
     task_description = """
     can you write, test, and optimize a fibonacci function in Python that is efficient and correct?

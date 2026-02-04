@@ -22,9 +22,16 @@ TEST_TIMEOUT = 60
 
 
 @pytest.fixture
-def model_name(request):
-    """Get the model name from command line or use default."""
-    return request.config.getoption("--model")
+def model_name(request: pytest.FixtureRequest) -> str:
+    """Get the model name from command line or use default.
+
+    Args:
+        request: Pytest fixture request object containing configuration.
+
+    Returns:
+        The model name specified via command line option.
+    """
+    return str(request.config.getoption("--model"))
 
 
 class TestAModel(unittest.TestCase):
@@ -33,8 +40,15 @@ class TestAModel(unittest.TestCase):
     model_name = DEFAULT_MODEL
 
     @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_non_agentic(self):
-        """Test non-agentic mode."""
+    def test_non_agentic(self) -> None:
+        """Test non-agentic mode.
+
+        Verifies that the model can respond to simple questions without
+        using tools when running in non-agentic mode.
+
+        Returns:
+            None
+        """
         agent = KISSAgent(f"Test Agent for {self.model_name}")
         result = agent.run(
             model_name=self.model_name,
@@ -49,8 +63,15 @@ class TestAModel(unittest.TestCase):
         self.assertGreater(len(trajectory), 0)
 
     @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_agentic(self):
-        """Test agentic mode with tool calling."""
+    def test_agentic(self) -> None:
+        """Test agentic mode with tool calling.
+
+        Verifies that the model can use the simple_calculator tool to
+        perform calculations and return results through the finish tool.
+
+        Returns:
+            None
+        """
         agent = KISSAgent(f"Test Agent for {self.model_name}")
         result = agent.run(
             model_name=self.model_name,
@@ -69,8 +90,16 @@ class TestAModel(unittest.TestCase):
         self.assertGreaterEqual(len(trajectory), 5)
 
     @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_embedding(self):
-        """Test embedding mode."""
+    def test_embedding(self) -> None:
+        """Test embedding mode.
+
+        Verifies that models that support embedding can generate embeddings
+        and perform semantic search using SimpleRAG. Skips if the model
+        does not support embedding.
+
+        Returns:
+            None
+        """
 
         # Test that embedding works with SimpleRAG using this model
         from kiss.core.models.model_info import MODEL_INFO
@@ -97,8 +126,15 @@ class TestAModel(unittest.TestCase):
         self.assertIn("Paris", results[0]["text"])
 
 
-def pytest_configure(config):
-    """Configure the test class with the model name from command line."""
+def pytest_configure(config: pytest.Config) -> None:
+    """Configure the test class with the model name from command line.
+
+    Args:
+        config: Pytest configuration object containing command line options.
+
+    Returns:
+        None
+    """
     model = config.getoption("--model", default=DEFAULT_MODEL)
     TestAModel.model_name = model
 

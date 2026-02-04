@@ -8,11 +8,11 @@
 
 import unittest
 
-from kiss.agents.gepa.hotpotqa import (
+from kiss.evals.hotpotqa import (
     HotPotQABenchmark,
     evaluate_hotpotqa_result,
 )
-from kiss.agents.gepa.hotpotqa.hotpotqa_benchmark import (
+from kiss.evals.hotpotqa.hotpotqa_benchmark import (
     compute_f1,
     normalize_answer,
 )
@@ -22,14 +22,28 @@ class TestHotPotQAEvaluation(unittest.TestCase):
     """Test HotPotQA evaluation functions."""
 
     def test_normalize_answer(self):
-        """Test answer normalization."""
+        """Test answer normalization.
+
+        Verifies that normalize_answer correctly handles articles,
+        punctuation, extra whitespace, and case conversion.
+
+        Returns:
+            None
+        """
         self.assertEqual(normalize_answer("The Answer"), "answer")
         self.assertEqual(normalize_answer("Barack Obama"), "barack obama")
         self.assertEqual(normalize_answer("   extra   spaces   "), "extra spaces")
         self.assertEqual(normalize_answer("Hello, World!"), "hello world")
 
     def test_compute_f1(self):
-        """Test F1 score computation."""
+        """Test F1 score computation.
+
+        Verifies that compute_f1 returns correct scores for exact matches,
+        partial matches, and non-matching answers.
+
+        Returns:
+            None
+        """
         # Exact match
         self.assertAlmostEqual(compute_f1("Barack Obama", "Barack Obama"), 1.0)
 
@@ -42,7 +56,14 @@ class TestHotPotQAEvaluation(unittest.TestCase):
         self.assertAlmostEqual(compute_f1("John Smith", "Barack Obama"), 0.0)
 
     def test_evaluate_hotpotqa_result(self):
-        """Test HotPotQA result evaluation."""
+        """Test HotPotQA result evaluation.
+
+        Verifies that evaluate_hotpotqa_result correctly parses YAML results
+        and computes success, exact_match, and f1 scores.
+
+        Returns:
+            None
+        """
         # Test successful exact match
         result_yaml = """
 status: success
@@ -69,7 +90,14 @@ class TestHotPotQABenchmark(unittest.TestCase):
     """Test HotPotQA benchmark functionality."""
 
     def test_load_dataset(self):
-        """Test loading HotPotQA dataset."""
+        """Test loading HotPotQA dataset.
+
+        Verifies that HotPotQABenchmark correctly loads examples with
+        required fields (id, question, answer, question_type, level).
+
+        Returns:
+            None
+        """
         benchmark = HotPotQABenchmark(
             split="validation",
             num_examples=3,
@@ -95,7 +123,14 @@ class TestHotPotQABenchmark(unittest.TestCase):
         print(f"Level: {example.level}")
 
     def test_create_evaluation_fn(self):
-        """Test evaluation function creation."""
+        """Test evaluation function creation.
+
+        Verifies that create_evaluation_fn returns a function that correctly
+        evaluates results against the expected answer for an example.
+
+        Returns:
+            None
+        """
         benchmark = HotPotQABenchmark(num_examples=1)
         example = benchmark.get_example(0)
         eval_fn = benchmark.create_evaluation_fn(example)
@@ -176,7 +211,14 @@ class TestGEPAHotPotQA(unittest.TestCase):
         print(f"Average scores across all examples: {avg_scores}")
 
     def test_gepa_optimization_produces_valid_prompts(self):
-        """Test that GEPA optimization produces valid, well-formed prompts."""
+        """Test that GEPA optimization produces valid, well-formed prompts.
+
+        Verifies that the optimized prompt preserves required placeholders,
+        has reasonable length, and all Pareto frontier candidates have scores.
+
+        Returns:
+            None
+        """
         benchmark = HotPotQABenchmark(
             split="validation",
             num_examples=3,

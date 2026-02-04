@@ -32,7 +32,14 @@ class TestEvaluateCorrectnessOfCode(unittest.TestCase):
         self.assertEqual(result["error"], "None")
 
     def test_correct_sorting_code(self):
-        """Test correct sorting implementation passes."""
+        """Test correct sorting implementation passes.
+
+        Verifies that a correct sorting implementation using Python's
+        built-in sorted() passes correctness evaluation.
+
+        Returns:
+            None
+        """
         correct_code = """
 def sort_array(arr):
     return sorted(arr)
@@ -41,7 +48,14 @@ def sort_array(arr):
         self.assertTrue(result["correctness"])
 
     def test_incorrect_sorting_code(self):
-        """Test incorrect sorting implementation fails."""
+        """Test incorrect sorting implementation fails.
+
+        Verifies that code that doesn't sort correctly fails evaluation
+        with an appropriate error message.
+
+        Returns:
+            None
+        """
         incorrect_code = """
 def sort_array(arr):
     return arr  # Does not sort
@@ -51,7 +65,14 @@ def sort_array(arr):
         self.assertIn("Incorrect result", result["error"])
 
     def test_missing_function(self):
-        """Test code without sort_array function fails."""
+        """Test code without sort_array function fails.
+
+        Verifies that code missing the required sort_array function
+        fails with a 'not found' error message.
+
+        Returns:
+            None
+        """
         no_function_code = """
 def other_function(arr):
     return arr
@@ -61,7 +82,14 @@ def other_function(arr):
         self.assertIn("not found", result["error"])
 
     def test_syntax_error(self):
-        """Test code with syntax error fails."""
+        """Test code with syntax error fails.
+
+        Verifies that code with Python syntax errors fails evaluation
+        with a 'Syntax error' message.
+
+        Returns:
+            None
+        """
         syntax_error_code = """
 def sort_array(arr)  # Missing colon
     return arr
@@ -71,7 +99,14 @@ def sort_array(arr)  # Missing colon
         self.assertIn("Syntax error", result["error"])
 
     def test_runtime_error(self):
-        """Test code with runtime error fails."""
+        """Test code with runtime error fails.
+
+        Verifies that code that raises an exception at runtime fails
+        evaluation with an 'Exception' error message.
+
+        Returns:
+            None
+        """
         runtime_error_code = """
 def sort_array(arr):
     raise ValueError("Intentional error")
@@ -85,7 +120,14 @@ class TestEvaluatePerformanceOfCode(unittest.TestCase):
     """Tests for evaluate_performance_of_code function."""
 
     def test_initial_code_performance(self):
-        """Test that initial code returns valid performance metrics."""
+        """Test that initial code returns valid performance metrics.
+
+        Verifies that INITIAL_CODE performance evaluation returns positive
+        fitness and includes expected metric keys.
+
+        Returns:
+            None
+        """
         result = evaluate_performance_of_code(INITIAL_CODE)
         self.assertGreater(result["fitness"], 0.0)
         self.assertIn("total_time_seconds", result["metrics"])
@@ -94,7 +136,14 @@ class TestEvaluatePerformanceOfCode(unittest.TestCase):
         self.assertIn("test_sizes", result["artifacts"])
 
     def test_faster_algorithm_has_higher_fitness(self):
-        """Test that a faster algorithm gets higher fitness."""
+        """Test that a faster algorithm gets higher fitness.
+
+        Verifies that Python's built-in sorted() achieves higher fitness
+        than the O(n²) bubble sort implementation.
+
+        Returns:
+            None
+        """
         # Python's built-in sort is O(n log n) and highly optimized
         fast_code = """
 def sort_array(arr):
@@ -107,7 +156,14 @@ def sort_array(arr):
         self.assertGreater(fast_result["fitness"], slow_result["fitness"])
 
     def test_missing_function_returns_zero_fitness(self):
-        """Test code without sort_array function returns zero fitness."""
+        """Test code without sort_array function returns zero fitness.
+
+        Verifies that code missing sort_array gets zero fitness with
+        a 'not found' error message.
+
+        Returns:
+            None
+        """
         no_function_code = """
 def other_function(arr):
     return arr
@@ -117,7 +173,14 @@ def other_function(arr):
         self.assertIn("not found", result["error"])
 
     def test_syntax_error_returns_zero_fitness(self):
-        """Test code with syntax error returns zero fitness."""
+        """Test code with syntax error returns zero fitness.
+
+        Verifies that code with syntax errors gets zero fitness with
+        a 'Syntax error' message.
+
+        Returns:
+            None
+        """
         syntax_error_code = """
 def sort_array(arr)
     return arr
@@ -131,17 +194,38 @@ class TestAnalyzeComplexity(unittest.TestCase):
     """Tests for analyze_complexity function."""
 
     def test_empty_metrics(self):
-        """Test with empty metrics returns Unknown."""
+        """Test with empty metrics returns Unknown.
+
+        Verifies that analyze_complexity handles empty or None metrics
+        gracefully by returning 'Unknown'.
+
+        Returns:
+            None
+        """
         self.assertEqual(analyze_complexity({}), "Unknown")
         self.assertEqual(analyze_complexity(None), "Unknown")
 
     def test_missing_times_by_size(self):
-        """Test with missing times_by_size returns Unknown."""
+        """Test with missing times_by_size returns Unknown.
+
+        Verifies that analyze_complexity returns 'Unknown' when the
+        required times_by_size key is missing from metrics.
+
+        Returns:
+            None
+        """
         metrics = {"total_time_seconds": 1.0}
         self.assertEqual(analyze_complexity(metrics), "Unknown")
 
     def test_invalid_times_by_size(self):
-        """Test with invalid times_by_size returns Unknown."""
+        """Test with invalid times_by_size returns Unknown.
+
+        Verifies that analyze_complexity returns 'Unknown' when
+        times_by_size is not a valid dict or has insufficient data.
+
+        Returns:
+            None
+        """
         metrics = {"times_by_size": "not a dict"}
         self.assertEqual(analyze_complexity(metrics), "Unknown")
 
@@ -149,7 +233,14 @@ class TestAnalyzeComplexity(unittest.TestCase):
         self.assertEqual(analyze_complexity(metrics), "Unknown")
 
     def test_quadratic_complexity_detection(self):
-        """Test detection of O(n²) complexity."""
+        """Test detection of O(n²) complexity.
+
+        Verifies that analyze_complexity correctly identifies quadratic
+        time complexity based on timing growth patterns.
+
+        Returns:
+            None
+        """
         # Simulate O(n²) growth: time grows as square of size
         metrics = {
             "times_by_size": {
@@ -161,7 +252,14 @@ class TestAnalyzeComplexity(unittest.TestCase):
         self.assertIn("n²", result)
 
     def test_nlogn_complexity_detection(self):
-        """Test detection of O(n log n) complexity."""
+        """Test detection of O(n log n) complexity.
+
+        Verifies that analyze_complexity correctly identifies n log n
+        time complexity based on timing growth patterns.
+
+        Returns:
+            None
+        """
         # Simulate O(n log n) growth
         import math
 
@@ -180,11 +278,25 @@ class TestInitialCode(unittest.TestCase):
     """Tests for the INITIAL_CODE constant."""
 
     def test_initial_code_contains_sort_array(self):
-        """Test that INITIAL_CODE defines sort_array function."""
+        """Test that INITIAL_CODE defines sort_array function.
+
+        Verifies that INITIAL_CODE contains the required function signature
+        for the sort_array function.
+
+        Returns:
+            None
+        """
         self.assertIn("def sort_array", INITIAL_CODE)
 
     def test_initial_code_is_bubble_sort(self):
-        """Test that INITIAL_CODE implements bubble sort."""
+        """Test that INITIAL_CODE implements bubble sort.
+
+        Verifies that INITIAL_CODE contains characteristic bubble sort
+        patterns: nested loops and element comparison/swap logic.
+
+        Returns:
+            None
+        """
         self.assertIn("for i in range", INITIAL_CODE)
         self.assertIn("for j in range", INITIAL_CODE)
         self.assertIn("arr[j] > arr[j + 1]", INITIAL_CODE)
@@ -194,13 +306,27 @@ class TestKISSEvolveIntegration(unittest.TestCase):
     """Integration tests for KISSEvolve with sorting algorithms using real LLM."""
 
     def _test_correctness(self, code: str) -> bool:
-        """Test if code is correct, returning a boolean."""
+        """Test if code is correct, returning a boolean.
+
+        Args:
+            code: Python code string containing sort_array function.
+
+        Returns:
+            True if code passes correctness evaluation, False otherwise.
+        """
         result = evaluate_correctness_of_code(code)
         return bool(result.get("correctness", False))
 
     @pytest.mark.timeout(300)  # 5 minutes for LLM-based evolution
     def test_kiss_evolve_improves_performance(self):
-        """Test that KISSEvolve improves performance over the initial code."""
+        """Test that KISSEvolve improves performance over the initial code.
+
+        Verifies that after evolution, the best variant has higher fitness
+        than the initial code and remains correct.
+
+        Returns:
+            None
+        """
         from kiss.agents.kiss import get_run_simple_coding_agent
 
         # Evaluate initial code performance
@@ -243,7 +369,14 @@ class TestKISSEvolveIntegration(unittest.TestCase):
 
     @pytest.mark.timeout(300)  # 5 minutes for LLM-based evolution
     def test_kiss_evolve_population_stats(self):
-        """Test that KISSEvolve maintains valid population statistics."""
+        """Test that KISSEvolve maintains valid population statistics.
+
+        Verifies that population stats (size, best/avg/worst fitness) are
+        valid after evolution completes.
+
+        Returns:
+            None
+        """
         from kiss.agents.kiss import get_run_simple_coding_agent
 
         optimizer = KISSEvolve(

@@ -13,7 +13,7 @@ from typing import Any, Union, get_args, get_origin
 
 
 class Model(ABC):
-    """A model is a LLM provider."""
+    """Abstract base class for LLM provider implementations."""
 
     def __init__(
         self,
@@ -21,6 +21,13 @@ class Model(ABC):
         model_description: str = "",
         model_config: dict[str, Any] | None = None,
     ):
+        """Initialize a Model instance.
+
+        Args:
+            model_name: The name/identifier of the model.
+            model_description: Optional description of the model.
+            model_config: Optional dictionary of model configuration parameters.
+        """
         self.model_name = model_name
         self.model_description = model_description
         self.model_config = model_config or {}
@@ -35,45 +42,89 @@ class Model(ABC):
 
     @abstractmethod
     def initialize(self, prompt: str) -> None:
-        """Initializes the conversation with an initial user prompt."""
+        """Initializes the conversation with an initial user prompt.
+
+        Args:
+            prompt: The initial user prompt to start the conversation.
+        """
         pass
 
     @abstractmethod
     def generate(self) -> tuple[str, Any]:
-        """Generates content from prompt."""
+        """Generates content from prompt.
+
+        Returns:
+            tuple[str, Any]: A tuple of (generated_text, raw_response).
+        """
         pass
 
     @abstractmethod
     def generate_and_process_with_tools(
         self, function_map: dict[str, Callable[..., Any]]
     ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Generates content with tools, processes the response, and adds it to conversation."""
+        """Generates content with tools, processes the response, and adds it to conversation.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            tuple[list[dict[str, Any]], str, Any]: A tuple of
+                (function_calls, response_text, raw_response).
+        """
         pass
 
     @abstractmethod
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
-        """Adds function results to the conversation state."""
+        """Adds function results to the conversation state.
+
+        Args:
+            function_results: List of tuples containing (function_name, result_dict).
+        """
         pass
 
     @abstractmethod
     def add_message_to_conversation(self, role: str, content: str) -> None:
-        """Adds a message to the conversation state."""
+        """Adds a message to the conversation state.
+
+        Args:
+            role: The role of the message sender (e.g., 'user', 'assistant').
+            content: The message content.
+        """
         pass
 
     @abstractmethod
     def extract_input_output_token_counts_from_response(self, response: Any) -> tuple[int, int]:
-        """Extracts input and output token counts from an API response."""
+        """Extracts input and output token counts from an API response.
+
+        Args:
+            response: The raw API response object.
+
+        Returns:
+            tuple[int, int]: A tuple of (input_tokens, output_tokens).
+        """
         pass
 
     @abstractmethod
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
-        """Generates an embedding vector for the given text."""
+        """Generates an embedding vector for the given text.
+
+        Args:
+            text: The text to generate an embedding for.
+            embedding_model: Optional model name to use for embedding generation.
+
+        Returns:
+            list[float]: The embedding vector as a list of floats.
+        """
         pass
 
     def set_usage_info_for_messages(self, usage_info: str) -> None:
-        """Sets token information to append to messages sent to the LLM."""
+        """Sets token information to append to messages sent to the LLM.
+
+        Args:
+            usage_info: The usage information string to append.
+        """
         self.usage_info_for_messages = usage_info
 
     # =========================================================================
@@ -83,7 +134,14 @@ class Model(ABC):
     def _build_openai_tools_schema(
         self, function_map: dict[str, Callable[..., Any]]
     ) -> list[dict[str, Any]]:
-        """Builds the OpenAI-compatible tools schema from a function map."""
+        """Builds the OpenAI-compatible tools schema from a function map.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            list[dict[str, Any]]: A list of tool schemas in OpenAI format.
+        """
         tools = []
         for func in function_map.values():
             tool_schema = self._function_to_openai_tool(func)
@@ -91,7 +149,14 @@ class Model(ABC):
         return tools
 
     def _function_to_openai_tool(self, func: Callable[..., Any]) -> dict[str, Any]:
-        """Converts a Python function to an OpenAI tool schema."""
+        """Converts a Python function to an OpenAI tool schema.
+
+        Args:
+            func: The Python function to convert.
+
+        Returns:
+            dict[str, Any]: The tool schema in OpenAI format.
+        """
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
 
@@ -133,7 +198,14 @@ class Model(ABC):
         }
 
     def _parse_docstring_params(self, docstring: str) -> dict[str, str]:
-        """Parses parameter descriptions from a docstring."""
+        """Parses parameter descriptions from a docstring.
+
+        Args:
+            docstring: The docstring to parse.
+
+        Returns:
+            dict[str, str]: A dictionary mapping parameter names to descriptions.
+        """
         param_descriptions: dict[str, str] = {}
         lines = docstring.split("\n")
         in_args_section = False
@@ -163,7 +235,14 @@ class Model(ABC):
         return param_descriptions
 
     def _python_type_to_json_schema(self, python_type: Any) -> dict[str, Any]:
-        """Converts a Python type annotation to a JSON schema type."""
+        """Converts a Python type annotation to a JSON schema type.
+
+        Args:
+            python_type: The Python type annotation to convert.
+
+        Returns:
+            dict[str, Any]: The JSON schema type definition.
+        """
         if python_type is inspect.Parameter.empty:
             return {"type": "string"}
 

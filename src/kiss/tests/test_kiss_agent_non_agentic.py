@@ -20,12 +20,25 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
 
     agent: KISSAgent
 
-    def setUp(self):
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method.
+
+        Creates a fresh KISSAgent instance before each test.
+
+        Returns:
+            None
+        """
         self.agent = KISSAgent("Non-Agentic Test Agent")
 
+    def test_non_agentic_simple_response(self) -> None:
+        """Test non-agentic mode returns a response without tools.
 
-    def test_non_agentic_simple_response(self):
-        """Test non-agentic mode returns a response without tools."""
+        Verifies that the agent can respond to simple questions without
+        using any tools when running in non-agentic mode.
+
+        Returns:
+            None
+        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template="What is 2 + 2? Reply with just the number.",
@@ -33,8 +46,15 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
         )
         self.assertIn("4", result)
 
-    def test_non_agentic_with_arguments(self):
-        """Test non-agentic mode with single and multiple template arguments."""
+    def test_non_agentic_with_arguments(self) -> None:
+        """Test non-agentic mode with single and multiple template arguments.
+
+        Verifies that the agent correctly substitutes both single and multiple
+        template arguments into the prompt and generates appropriate responses.
+
+        Returns:
+            None
+        """
         # Single argument
         result = self.agent.run(
             model_name=TEST_MODEL,
@@ -53,8 +73,15 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
         )
         self.assertIn("40", result)
 
-    def test_non_agentic_with_tools_raises_error(self):
-        """Test that providing tools to non-agentic agent raises KISSError."""
+    def test_non_agentic_with_tools_raises_error(self) -> None:
+        """Test that providing tools to non-agentic agent raises KISSError.
+
+        Verifies that attempting to provide tools when running in non-agentic
+        mode raises an appropriate error, as tools are not supported in this mode.
+
+        Returns:
+            None
+        """
         try:
             self.agent.run(
                 model_name=TEST_MODEL,

@@ -23,6 +23,13 @@ class AnthropicModel(Model):
         api_key: str,
         model_config: dict[str, Any] | None = None,
     ):
+        """Initialize an AnthropicModel instance.
+
+        Args:
+            model_name: The name of the Claude model to use.
+            api_key: The Anthropic API key for authentication.
+            model_config: Optional dictionary of model configuration parameters.
+        """
         super().__init__(model_name, model_config=model_config)
         self.api_key = api_key
 
@@ -32,11 +39,23 @@ class AnthropicModel(Model):
     __repr__ = __str__
 
     def initialize(self, prompt: str) -> None:
+        """Initializes the conversation with an initial user prompt.
+
+        Args:
+            prompt: The initial user prompt to start the conversation.
+        """
         self.client = Anthropic(api_key=self.api_key)
         self.conversation = [{"role": "user", "content": prompt}]
 
     def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
-        """Normalize Anthropic content blocks to JSON-serializable dicts."""
+        """Normalize Anthropic content blocks to JSON-serializable dicts.
+
+        Args:
+            content: The content blocks from an Anthropic response.
+
+        Returns:
+            list[dict[str, Any]]: Normalized content blocks as dictionaries.
+        """
         blocks: list[dict[str, Any]] = []
         if content is None:
             return blocks
@@ -64,12 +83,27 @@ class AnthropicModel(Model):
         return blocks
 
     def _extract_text_from_blocks(self, blocks: list[dict[str, Any]]) -> str:
+        """Extract text content from normalized content blocks.
+
+        Args:
+            blocks: List of normalized content blocks.
+
+        Returns:
+            str: Concatenated text from all text blocks.
+        """
         return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
     def _build_anthropic_tools_schema(
         self, function_map: dict[str, Callable[..., Any]]
     ) -> list[dict[str, Any]]:
-        """Build Anthropic tools schema from a function map."""
+        """Build Anthropic tools schema from a function map.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            list[dict[str, Any]]: A list of tool schemas in Anthropic format.
+        """
         tools = []
         for tool in self._build_openai_tools_schema(function_map):
             fn = tool.get("function", {})
@@ -83,6 +117,14 @@ class AnthropicModel(Model):
         return tools
 
     def _build_create_kwargs(self, tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Build keyword arguments for the Anthropic API create call.
+
+        Args:
+            tools: Optional list of tool schemas to include.
+
+        Returns:
+            dict[str, Any]: The keyword arguments for the API call.
+        """
         kwargs = self.model_config.copy()
 
         # Anthropic requires max_tokens; accept OpenAI-style "max_completion_tokens" too.
@@ -112,6 +154,11 @@ class AnthropicModel(Model):
         return kwargs
 
     def generate(self) -> tuple[str, Any]:
+        """Generates content from the current conversation.
+
+        Returns:
+            tuple[str, Any]: A tuple of (generated_text, raw_response).
+        """
         kwargs = self._build_create_kwargs()
         response = self.client.messages.create(**kwargs)
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
@@ -122,6 +169,15 @@ class AnthropicModel(Model):
     def generate_and_process_with_tools(
         self, function_map: dict[str, Callable[..., Any]]
     ) -> tuple[list[dict[str, Any]], str, Any]:
+        """Generates content with tools and processes the response.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            tuple[list[dict[str, Any]], str, Any]: A tuple of
+                (function_calls, response_text, raw_response).
+        """
         tools = self._build_anthropic_tools_schema(function_map)
         kwargs = self._build_create_kwargs(tools=tools or None)
         response = self.client.messages.create(**kwargs)
@@ -189,11 +245,25 @@ class AnthropicModel(Model):
         self.conversation.append({"role": "user", "content": tool_results_blocks})
 
     def add_message_to_conversation(self, role: str, content: str) -> None:
+        """Adds a message to the conversation state.
+
+        Args:
+            role: The role of the message sender (e.g., 'user', 'assistant').
+            content: The message content.
+        """
         if role == "user" and self.usage_info_for_messages:
             content = f"{content}\n\n{self.usage_info_for_messages}"
         self.conversation.append({"role": role, "content": content})
 
     def extract_input_output_token_counts_from_response(self, response: Any) -> tuple[int, int]:
+        """Extracts input and output token counts from an API response.
+
+        Args:
+            response: The raw Anthropic API response object.
+
+        Returns:
+            tuple[int, int]: A tuple of (input_tokens, output_tokens).
+        """
         if hasattr(response, "usage") and response.usage:
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,
@@ -202,4 +272,13 @@ class AnthropicModel(Model):
         return 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
+        """Generates an embedding vector for the given text.
+
+        Args:
+            text: The text to generate an embedding for.
+            embedding_model: Optional model name (not used by Anthropic).
+
+        Raises:
+            KISSError: Anthropic does not provide an embeddings API.
+        """
         raise KISSError("Anthropic does not provide an embeddings API.")

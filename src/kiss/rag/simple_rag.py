@@ -101,6 +101,9 @@ class SimpleRAG:
                 - "text": Document text content (str)
                 - "metadata": Optional metadata dictionary (dict)
             batch_size: Number of documents to process in each batch (default: 100).
+
+        Returns:
+            None.
         """
         if not documents:
             return
@@ -114,7 +117,14 @@ class SimpleRAG:
         """Add a batch of documents to the vector store.
 
         Args:
-            documents: List of document dictionaries.
+            documents: List of document dictionaries containing 'id', 'text',
+                and optional 'metadata' fields.
+
+        Returns:
+            None.
+
+        Raises:
+            KISSError: If a document is missing required fields or has a duplicate ID.
         """
         batch_embeddings = []
 
@@ -228,6 +238,9 @@ class SimpleRAG:
 
         Args:
             document_ids: List of document IDs to delete.
+
+        Returns:
+            None.
         """
         if not document_ids:
             return
@@ -269,7 +282,11 @@ class SimpleRAG:
         }
 
     def clear_collection(self) -> None:
-        """Clear all documents from the collection."""
+        """Clear all documents from the collection.
+
+        Returns:
+            None.
+        """
         self.documents = []
         self.embeddings = None
 

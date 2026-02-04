@@ -22,6 +22,8 @@ from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
 
 class ModelInfo:
+    """Container for model metadata including pricing and capabilities."""
+
     def __init__(
         self,
         context_length: int,
@@ -31,6 +33,16 @@ class ModelInfo:
         is_embedding_supported: bool,
         is_generation_supported: bool,
     ):
+        """Initialize a ModelInfo instance.
+
+        Args:
+            context_length: Maximum context window size in tokens.
+            input_price_per_million: Cost per million input tokens in USD.
+            output_price_per_million: Cost per million output tokens in USD.
+            is_function_calling_supported: Whether the model supports function calling.
+            is_embedding_supported: Whether the model supports embedding generation.
+            is_generation_supported: Whether the model supports text generation.
+        """
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
         self.output_price_per_1M = output_price_per_million
@@ -61,7 +73,15 @@ def _mi(
 
 
 def _emb(ctx: int, inp: float) -> ModelInfo:
-    """Helper to create embedding-only ModelInfo."""
+    """Helper to create embedding-only ModelInfo.
+
+    Args:
+        ctx: Maximum context length in tokens.
+        inp: Input price per million tokens.
+
+    Returns:
+        ModelInfo: A ModelInfo configured for embedding models.
+    """
     return ModelInfo(ctx, inp, 0.0, False, True, False)
 
 
@@ -383,6 +403,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2": _mi(131072, 0.50, 2.40, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-0905": _mi(262144, 0.39, 1.90, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.32, 0.48, fc=False),  # SLOW
+    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.50, 2.80),  # Multimodal + agentic
     # ==========================================================================
     # OpenRouter models - Nous Research (unreliable function calling)
     # ==========================================================================
@@ -523,17 +544,42 @@ FLAKY_MODELS: dict[str, str] = {
 
 
 def is_model_flaky(model_name: str) -> bool:
-    """Check if a model is known to be flaky."""
+    """Check if a model is known to be flaky.
+
+    Args:
+        model_name: The name of the model to check.
+
+    Returns:
+        bool: True if the model is known to have reliability issues.
+    """
     return model_name in FLAKY_MODELS
 
 
 def get_flaky_reason(model_name: str) -> str:
-    """Get the reason why a model is flaky."""
+    """Get the reason why a model is flaky.
+
+    Args:
+        model_name: The name of the model to check.
+
+    Returns:
+        str: The reason for flakiness, or empty string if not flaky.
+    """
     return FLAKY_MODELS.get(model_name, "")
 
 
 def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
-    """Get a model instance based on model name prefix."""
+    """Get a model instance based on model name prefix.
+
+    Args:
+        model_name: The name of the model (with provider prefix if applicable).
+        model_config: Optional dictionary of model configuration parameters.
+
+    Returns:
+        Model: An appropriate Model instance for the specified model.
+
+    Raises:
+        KISSError: If the model name is not recognized.
+    """
     # OpenRouter models (strip "openrouter/" prefix for API calls)
     if model_name.startswith("openrouter/"):
         return OpenAICompatibleModel(

@@ -13,7 +13,7 @@ HotPotQA challenges models to perform multi-hop reasoning by:
 ## Quick Start
 
 ```python
-from kiss.agents.gepa.hotpotqa import HotPotQABenchmark
+from kiss.evals.hotpotqa import HotPotQABenchmark
 
 # Load benchmark with a few examples
 benchmark = HotPotQABenchmark(

@@ -69,6 +69,12 @@ class TestGEPAHuggingFace(unittest.TestCase):
         - Training examples are split into dev (feedback) and val (selection) sets
         - Candidates are evaluated on dev minibatches for trajectory feedback
         - Selection is based on val set scores
+
+        Verifies that optimization runs successfully and produces valid
+        candidates with scores and preserved placeholders.
+
+        Returns:
+            None
         """
         # Load a small sample from SQuAD dataset
         print("Loading SQuAD dataset...")
@@ -113,7 +119,15 @@ as the 'result' argument.
         agent_counter = [0]
 
         def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
-            """Agent wrapper that handles expected answer embedding."""
+            """Agent wrapper that handles expected answer embedding.
+
+            Args:
+                prompt_template: The prompt template to use for the agent.
+                arguments: Dict with context, question, and _expected_answer keys.
+
+            Returns:
+                Tuple of (result string with expected/actual, empty trajectory list).
+            """
             expected_answer = arguments.get("_expected_answer", "")
             agent_args = {
                 "context": arguments["context"],
@@ -133,7 +147,14 @@ as the 'result' argument.
             return result_with_expected, []
 
         def evaluation_fn(result: str) -> dict[str, float]:
-            """Evaluation function that extracts expected answer from result."""
+            """Evaluation function that extracts expected answer from result.
+
+            Args:
+                result: Result string in format 'EXPECTED:...\nRESULT:...'
+
+            Returns:
+                Dict with 'success' and 'answer_match' scores.
+            """
             try:
                 if result.startswith("EXPECTED:"):
                     parts = result.split("\nRESULT:", 1)

@@ -38,7 +38,7 @@ improver = ImproverAgent(
 
 success, report = improver.improve(
     source_folder="/path/to/agent",
-    target_folder="/path/to/improved_agent",
+    work_dir="/path/to/improved_agent",
     task_description="Build a code analysis assistant that can parse and analyze large codebases",
 )
 
@@ -78,8 +78,8 @@ The `ImproverAgent` optimizes existing agent code by analyzing and improving it 
 
 **Methods:**
 
-- `improve(source_folder, target_folder, task_description, report_path, feedback)`: Improve an agent's code
-- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, primary_feedback, secondary_feedback, target_folder, task_description)`: Combine ideas from two agents
+- `improve(source_folder, work_dir, task_description, report_path, feedback)`: Improve an agent's code
+- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, primary_feedback, secondary_feedback, work_dir, task_description)`: Combine ideas from two agents
 
 ### AgentEvolver
 
@@ -147,47 +147,36 @@ cfg.evolver.mutation_probability = 0.8
 ### Architecture Overview
 
 ```
-┌───────────────────────────────────────────────────┐
-│                 Task Description                  │
-└─────────────────────────┬─────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────────────────┐
-│            Initial Agent Creation                 │
-│   (Claude Code / Gemini CLI / OpenAI Codex)       │
-│       + Web Search for Best Practices             │
-└─────────────────────────┬─────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────────────────┐
-│                Evolution Loop              ◄──┐   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │  Mutation (80%)   │   Crossover (20%)   │  │   │
-│  │  Single parent    │   Two parents       │  │   │
-│  │  Targeted changes │   Combine best ideas│  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      ▼                        │   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │             Evaluation                  │  │   │
-│  │  Measure: tokens_used, execution_time   │  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      ▼                        │   │
-│  ┌─────────────────────────────────────────┐  │   │
-│  │       Pareto Frontier Update            │  │   │
-│  │    Keep non-dominated solutions         │  │   │
-│  │    Trim using crowding distance         │  │   │
-│  └───────────────────┬─────────────────────┘  │   │
-│                      │                        │   │
-│                      └── More generations? ───┘   │
-└─────────────────────────┬─────────────────────────┘
-                          │ Done
-                          ▼
-┌───────────────────────────────────────────────────┐
-│             Optimal Agent Output                  │
-│        Best trade-off on Pareto frontier          │
-└───────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                           Task Description                                               │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│            Initial Agent Creation (KISS Coding Agent) + Web Search for Best Practices                    │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                          Evolution Loop                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────◄──┐   │
+│  │    Mutation (80%): Single parent, Targeted changes   │   Crossover (20%): Two parents, Combine │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  ▼                                                   │   │ 
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐  │   │
+│  │                         Evaluation: Measure tokens_used, execution_time                        │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  ▼                                                   │   │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐  │   │
+│  │            Pareto Frontier Update: Keep non-dominated solutions, Trim by crowding distance     │  │   │
+│  └───────────────────────────────────────────────┬────────────────────────────────────────────────┘  │   │
+│                                                  └───────────────── More generations? ───────────────┘   │
+└─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                      │ Done
+                                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                            Optimal Agent Output: Best trade-off on Pareto frontier                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Algorithm Pseudocode
@@ -378,7 +367,7 @@ class ImproverAgent:
     def improve(
         self,
         source_folder: str,
-        target_folder: str,
+        work_dir: str,
         task_description: str,
         report_path: str | None = None,
         feedback: str = "",
@@ -391,7 +380,7 @@ class ImproverAgent:
         secondary_report_path: str,
         primary_feedback: str,
         secondary_feedback: str,
-        target_folder: str,
+        work_dir: str,
         task_description: str,
     ) -> tuple[bool, ImprovementReport | None]: ...
 ```

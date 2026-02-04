@@ -46,7 +46,13 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
     """Extract reasoning and final answer from DeepSeek R1 response.
 
     DeepSeek R1 models wrap their reasoning in <think>...</think> tags.
-    Returns (reasoning, final_answer) tuple.
+
+    Args:
+        content: The raw response content from a DeepSeek R1 model.
+
+    Returns:
+        A tuple of (reasoning, final_answer) where reasoning is the content
+        within <think> tags and final_answer is the remaining content.
     """
     think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
     match = think_pattern.search(content)
@@ -61,7 +67,12 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
     """Build a text-based tools description for models without native function calling.
 
-    Returns a prompt section describing available tools and how to call them.
+    Args:
+        function_map: Dictionary mapping function names to callable functions.
+
+    Returns:
+        A formatted prompt string describing available tools and how to call them,
+        or an empty string if no functions are provided.
     """
     if not function_map:
         return ""
@@ -108,7 +119,13 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     """Parse tool calls from text-based model output.
 
     Looks for JSON objects with tool_calls array in the content.
-    Returns list of function call dictionaries.
+
+    Args:
+        content: The text content to parse for tool calls.
+
+    Returns:
+        A list of function call dictionaries, each containing 'id', 'name',
+        and 'arguments' keys. Returns empty list if no valid tool calls found.
     """
     function_calls: list[dict[str, Any]] = []
 
@@ -191,12 +208,21 @@ class OpenAICompatibleModel(Model):
         )
 
     def __str__(self) -> str:
+        """Return a string representation of the model.
+
+        Returns:
+            A string showing the class name, model name, and base URL.
+        """
         return f"{self.__class__.__name__}(name={self.model_name}, base_url={self.base_url})"
 
     __repr__ = __str__
 
     def initialize(self, prompt: str) -> None:
-        """Initializes the conversation with an initial user prompt."""
+        """Initialize the conversation with an initial user prompt.
+
+        Args:
+            prompt: The initial user prompt to start the conversation.
+        """
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
@@ -204,11 +230,20 @@ class OpenAICompatibleModel(Model):
         self.conversation = [{"role": "user", "content": prompt}]
 
     def _is_deepseek_reasoning_model(self) -> bool:
-        """Check if this is a DeepSeek R1 reasoning model."""
+        """Check if this is a DeepSeek R1 reasoning model.
+
+        Returns:
+            True if the model name is in the DEEPSEEK_REASONING_MODELS set, False otherwise.
+        """
         return self.model_name in DEEPSEEK_REASONING_MODELS
 
     def generate(self) -> tuple[str, Any]:
-        """Generates content from prompt without tools."""
+        """Generate content from prompt without tools.
+
+        Returns:
+            A tuple of (content, response) where content is the generated text
+            and response is the raw API response object.
+        """
         kwargs = self.model_config.copy()
         kwargs.update(
             {
@@ -229,7 +264,16 @@ class OpenAICompatibleModel(Model):
     def generate_and_process_with_tools(
         self, function_map: dict[str, Callable[..., Any]]
     ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Generates content with tools, processes the response, and adds it to conversation."""
+        """Generate content with tools, process the response, and add it to conversation.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            A tuple of (function_calls, content, response) where function_calls is a list
+            of dictionaries containing tool call information, content is the text response,
+            and response is the raw API response object.
+        """
         # Use text-based tool calling for DeepSeek R1 models
         if self._is_deepseek_reasoning_model():
             return self._generate_with_text_based_tools(function_map)
@@ -293,6 +337,14 @@ class OpenAICompatibleModel(Model):
 
         This method injects tool descriptions into the conversation and parses
         tool calls from the model's text output.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            A tuple of (function_calls, content, response) where function_calls is a list
+            of dictionaries containing parsed tool call information, content is the raw
+            text response, and response is the raw API response object.
         """
         # Build tools prompt and inject it into the system/user context
         tools_prompt = _build_text_based_tools_prompt(function_map)
@@ -354,7 +406,12 @@ class OpenAICompatibleModel(Model):
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
-        """Adds function results to the conversation state."""
+        """Add function results to the conversation state.
+
+        Args:
+            function_results: A list of tuples where each tuple contains the function name
+                and a dictionary with the function result.
+        """
         # Find tool call IDs from the last assistant message
         tool_call_map: dict[str, str] = {}
         for msg in reversed(self.conversation):
@@ -375,19 +432,44 @@ class OpenAICompatibleModel(Model):
             )
 
     def add_message_to_conversation(self, role: str, content: str) -> None:
-        """Adds a message to the conversation state."""
+        """Add a message to the conversation state.
+
+        Args:
+            role: The role of the message sender ('user', 'assistant', or 'system').
+            content: The content of the message to add.
+        """
         if role == "user" and self.usage_info_for_messages:
             content = f"{content}\n\n{self.usage_info_for_messages}"
         self.conversation.append({"role": role, "content": content})
 
     def extract_input_output_token_counts_from_response(self, response: Any) -> tuple[int, int]:
-        """Extracts input and output token counts from an API response."""
+        """Extract input and output token counts from an API response.
+
+        Args:
+            response: The raw API response object.
+
+        Returns:
+            A tuple of (input_tokens, output_tokens) counts. Returns (0, 0) if
+            usage information is not available.
+        """
         if hasattr(response, "usage") and response.usage:
             return response.usage.prompt_tokens or 0, response.usage.completion_tokens or 0
         return 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
-        """Generates an embedding vector for the given text."""
+        """Generate an embedding vector for the given text.
+
+        Args:
+            text: The text to generate an embedding for.
+            embedding_model: Optional model name for embedding generation. Uses the
+                model's name if not specified.
+
+        Returns:
+            A list of floating point numbers representing the embedding vector.
+
+        Raises:
+            KISSError: If the embedding generation fails.
+        """
         model_to_use = embedding_model or self.model_name
         try:
             response = self.client.embeddings.create(model=model_to_use, input=text)

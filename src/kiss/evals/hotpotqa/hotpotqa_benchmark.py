@@ -37,7 +37,12 @@ class HotPotQAExample:
 
     @property
     def formatted_context(self) -> str:
-        """Format the context paragraphs into a readable string."""
+        """Format the context paragraphs into a readable string.
+
+        Returns:
+            A formatted string with numbered paragraphs containing titles
+            and their sentences.
+        """
         paragraphs = []
         titles = self.context.get("title", [])
         sentences_list = self.context.get("sentences", [])
@@ -53,6 +58,13 @@ def normalize_answer(s: str) -> str:
     """Normalize answer string for comparison.
 
     Lowercases, removes punctuation, articles, and extra whitespace.
+
+    Args:
+        s: The answer string to normalize.
+
+    Returns:
+        The normalized string with lowercase, no punctuation, no articles,
+        and collapsed whitespace.
     """
     # Convert to string if not already (handles bool, int, etc.)
     s = str(s)
@@ -68,7 +80,15 @@ def normalize_answer(s: str) -> str:
 
 
 def compute_f1(prediction: str, ground_truth: str) -> float:
-    """Compute token-level F1 score between prediction and ground truth."""
+    """Compute token-level F1 score between prediction and ground truth.
+
+    Args:
+        prediction: The predicted answer string.
+        ground_truth: The expected ground truth answer string.
+
+    Returns:
+        The F1 score as a float between 0.0 and 1.0.
+    """
     pred_tokens = normalize_answer(prediction).split()
     truth_tokens = normalize_answer(ground_truth).split()
 
@@ -186,7 +206,15 @@ class HotPotQABenchmark:
         self._load_dataset()
 
     def _load_dataset(self) -> None:
-        """Load HotPotQA dataset from HuggingFace."""
+        """Load HotPotQA dataset from HuggingFace.
+
+        Loads the dataset using the configured split, config_name, and
+        num_examples, then populates self.examples with HotPotQAExample
+        instances.
+
+        Returns:
+            None. Populates self.examples in place.
+        """
         print(f"Loading HotPotQA dataset ({self.config_name}, {self.split})...")
         dataset = load_dataset(
             "hotpotqa/hotpot_qa",
@@ -216,7 +244,14 @@ class HotPotQABenchmark:
         print(f"Loaded {len(self.examples)} examples")
 
     def get_example(self, index: int) -> HotPotQAExample:
-        """Get a specific example by index."""
+        """Get a specific example by index.
+
+        Args:
+            index: The index of the example to retrieve.
+
+        Returns:
+            The HotPotQAExample at the specified index.
+        """
         return self.examples[index]
 
     def create_evaluation_fn(self, example: HotPotQAExample) -> Callable[[str], dict[str, float]]:
@@ -350,7 +385,17 @@ class HotPotQABenchmark:
         model_name: str = "gpt-4o-mini",
         example_indices: list[int] | None = None,
     ) -> dict[str, float]:
-        """Evaluate a prompt template across multiple examples."""
+        """Evaluate a prompt template across multiple examples.
+
+        Args:
+            prompt_template: The prompt template to evaluate.
+            model_name: The model to use for evaluation.
+            example_indices: Specific indices to evaluate (uses all if None).
+
+        Returns:
+            Dictionary of average scores across all evaluated examples,
+            with keys like 'success', 'exact_match', and 'f1'.
+        """
         indices = example_indices or list(range(len(self.examples)))
         all_scores: list[dict[str, float]] = []
         call_counter = [0]

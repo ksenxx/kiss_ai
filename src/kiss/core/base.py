@@ -20,13 +20,22 @@ from kiss.core.utils import config_to_dict
 
 
 def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
+    """Custom YAML string presenter that uses literal block style for multiline strings.
+
+    Args:
+        dumper: The YAML dumper instance.
+        data: The string data to represent.
+
+    Returns:
+        ScalarNode: A YAML scalar node with literal block style.
+    """
     return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")  # type: ignore[reportUnknownMemberType]
 
 
 yaml.add_representer(str, _str_presenter)
 
 
-DEFAULT_SYSTEM_PROMPT = """
+CODING_INSTRUCTIONS = """
 ## Code Style Guidelines
 - Write simple, readable code with minimal indirection
 - Avoid unnecessary object attributes and local variables
@@ -48,6 +57,7 @@ DEFAULT_SYSTEM_PROMPT = """
 - Main implementation code first
 - Test code in a separate section using unittest or pytest
 - Include a __main__ block to run tests
+- Do not use 'exit' for early termination, rather throw an exception.
 
 ## Use tools when you need to:
 - Look up API documentation or library usage
@@ -56,6 +66,8 @@ DEFAULT_SYSTEM_PROMPT = """
 
 ## After you have implemented the task, simplify the code
  - Remove unnessary object/struct attributes, variables, config variables
+ - Avoid object/struct attribute redirections
+ - Remove unnessary conditional checks
  - Remove redundant and duplicate code
  - Remove unnecessary comments
  - Make sure that the code is still working correctly
@@ -70,13 +82,23 @@ class Base:
     global_budget_used: ClassVar[float] = 0.0
 
     def __init__(self, name: str) -> None:
+        """Initialize a Base agent instance.
+
+        Args:
+            name: The name identifier for the agent.
+        """
         self.name = name
         self.id = Base.agent_counter
         Base.agent_counter += 1
         self.base_dir = ""
 
     def _init_run_state(self, model_name: str, function_map: list[str]) -> None:
-        """Initialize common run state variables."""
+        """Initialize common run state variables.
+
+        Args:
+            model_name: The name of the model being used.
+            function_map: List of function names available to the agent.
+        """
         self.model_name = model_name
         self.function_map = function_map
         self.messages: list[dict[str, Any]] = []
@@ -86,7 +108,11 @@ class Base:
         self.run_start_timestamp = int(time.time())
 
     def _build_state_dict(self) -> dict[str, Any]:
-        """Build state dictionary for saving."""
+        """Build state dictionary for saving.
+
+        Returns:
+            dict[str, Any]: A dictionary containing all agent state for persistence.
+        """
         try:
             max_tokens = get_max_context_length(self.model_name)
         except Exception:
@@ -116,7 +142,10 @@ class Base:
         }
 
     def _save(self) -> None:
-        """Save the agent's state to a file."""
+        """Save the agent's state to a YAML file in the artifacts directory.
+
+        The file is saved to {artifact_dir}/trajectories/trajectory_{name}_{id}_{timestamp}.yaml
+        """
         folder_path = Path(DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
         folder_path.mkdir(parents=True, exist_ok=True)
         name_safe = self.name.replace(" ", "_").replace("/", "_")
@@ -125,11 +154,21 @@ class Base:
             yaml.dump(self._build_state_dict(), f, indent=2)
 
     def get_trajectory(self) -> str:
-        """Return the trajectory as JSON for visualization."""
+        """Return the trajectory as JSON for visualization.
+
+        Returns:
+            str: A JSON-formatted string of all messages in the agent's history.
+        """
         return json.dumps(self.messages, indent=2)
 
     def _add_message(self, role: str, content: Any, timestamp: int | None = None) -> None:
-        """Add a message to the history."""
+        """Add a message to the history.
+
+        Args:
+            role: The role of the message sender (e.g., 'user', 'model').
+            content: The content of the message.
+            timestamp: Optional Unix timestamp. If None, uses current time.
+        """
         self.messages.append(
             {
                 "unique_id": len(self.messages),

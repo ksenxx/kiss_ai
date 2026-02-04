@@ -54,10 +54,18 @@ AGENTIC_MODELS = [m for m in ALL_GENERATION_MODELS if MODEL_INFO[m].is_function_
 
 
 class TestModelsQuickNonAgentic(unittest.TestCase):
-    """Test selected models in non-agentic mode."""
+    """Test selected models in non-agentic mode (simple generation without tools)."""
 
     def _test_model_non_agentic(self, model_name: str):
-        """Test a single model in non-agentic mode."""
+        """Test a single model in non-agentic mode with a simple math question.
+
+        Args:
+            model_name: The name of the model to test (e.g., 'gpt-4.1-mini').
+
+        Returns:
+            None. Asserts are used to verify the model returns a valid response
+            containing the expected answer and generates a non-empty trajectory.
+        """
         agent = KISSAgent(f"Test Agent for {model_name}")
         result = agent.run(
             model_name=model_name,
@@ -74,8 +82,23 @@ class TestModelsQuickNonAgentic(unittest.TestCase):
 
 # Dynamically create test methods for each generation model (non-agentic)
 def _create_non_agentic_test(model_name: str):
+    """Create a test method for non-agentic testing of a specific model.
+
+    Args:
+        model_name: The name of the model to create a test for.
+
+    Returns:
+        callable: A test method function decorated with pytest timeout that tests
+        the specified model in non-agentic mode.
+    """
+
     @pytest.mark.timeout(TEST_TIMEOUT)
     def test_method(self):
+        """Dynamically generated test for non-agentic model behavior.
+
+        Returns:
+            None. Uses assertions to verify model response.
+        """
         self._test_model_non_agentic(model_name)
 
     return test_method
@@ -89,10 +112,18 @@ for model_name in ALL_GENERATION_MODELS:
 
 
 class TestModelsQuickAgentic(unittest.TestCase):
-    """Test selected models in agentic mode with tool calling."""
+    """Test selected models in agentic mode with tool calling capabilities."""
 
     def _test_model_agentic(self, model_name: str):
-        """Test a single model in agentic mode."""
+        """Test a single model in agentic mode using the simple_calculator tool.
+
+        Args:
+            model_name: The name of the model to test (e.g., 'gpt-4.1-mini').
+
+        Returns:
+            None. Asserts are used to verify the model correctly uses the calculator
+            tool to compute the expected result and generates a valid trajectory.
+        """
         agent = KISSAgent(f"Test Agent for {model_name}")
         result = agent.run(
             model_name=model_name,
@@ -113,8 +144,23 @@ class TestModelsQuickAgentic(unittest.TestCase):
 
 # Dynamically create test methods for each agentic model
 def _create_agentic_test(model_name: str):
+    """Create a test method for agentic testing of a specific model.
+
+    Args:
+        model_name: The name of the model to create a test for.
+
+    Returns:
+        callable: A test method function decorated with pytest timeout that tests
+        the specified model in agentic mode with tool calling.
+    """
+
     @pytest.mark.timeout(TEST_TIMEOUT)
     def test_method(self):
+        """Dynamically generated test for agentic model behavior.
+
+        Returns:
+            None. Uses assertions to verify tool calling and result.
+        """
         self._test_model_agentic(model_name)
 
     return test_method
@@ -128,10 +174,19 @@ for model_name in AGENTIC_MODELS:
 
 
 class TestModelsQuickEmbedding(unittest.TestCase):
-    """Test embedding models using SimpleRAG."""
+    """Test embedding models using SimpleRAG for document similarity queries."""
 
     def _test_embedding_model(self, model_name: str):
-        """Test a single embedding model with SimpleRAG."""
+        """Test a single embedding model with SimpleRAG document storage and retrieval.
+
+        Args:
+            model_name: The name of the embedding model to test (e.g., 'text-embedding-3-small').
+
+        Returns:
+            None. Asserts are used to verify documents are added correctly,
+            collection stats are valid, and similarity queries return valid results
+            with reasonable cosine similarity scores.
+        """
         rag = SimpleRAG(model_name=model_name)
         # Initialize the model's client (required for embedding calls)
         rag._model.initialize("dummy prompt for initialization")
@@ -179,8 +234,23 @@ class TestModelsQuickEmbedding(unittest.TestCase):
 
 # Dynamically create test methods for each embedding model
 def _create_embedding_test(model_name: str):
+    """Create a test method for embedding model testing.
+
+    Args:
+        model_name: The name of the embedding model to create a test for.
+
+    Returns:
+        callable: A test method function decorated with pytest timeout that tests
+        the specified embedding model with document storage and retrieval.
+    """
+
     @pytest.mark.timeout(TEST_TIMEOUT)
     def test_method(self):
+        """Dynamically generated test for embedding model behavior.
+
+        Returns:
+            None. Uses assertions to verify embedding operations.
+        """
         self._test_embedding_model(model_name)
 
     return test_method
