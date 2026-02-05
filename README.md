@@ -10,6 +10,38 @@ ______________________________________________________________________
 
 KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
 
+## 📑 Table of Contents
+
+- [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
+- [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
+- [Blogs](#-blogs)
+- [Multi-Agent Orchestration](#-multi-agent-orchestration)
+- [Using Agent Creator and Optimizer](#-using-agent-creator-and-optimizer)
+- [Using Relentless Coding Agent](#-using-relentless-coding-agent)
+- [Output Formatting](#-output-formatting)
+- [Overview](#-overview)
+- [Installation](#-installation)
+- [KISSAgent API Reference](#-kissagent-api-reference)
+- [Using GEPA for Prompt Optimization](#-using-gepa-for-prompt-optimization)
+- [Using KISSEvolve for Algorithm Discovery](#-using-kissevolve-for-algorithm-discovery)
+- [Using Self-Evolving Multi-Agent](#-using-self-evolving-multi-agent)
+- [Using KISS Coding Agent](#-using-kiss-coding-agent)
+- [Using Claude Coding Agent](#-using-claude-coding-agent)
+- [Using Gemini CLI Agent](#-using-gemini-cli-agent)
+- [Using OpenAI Codex Agent](#-using-openai-codex-agent)
+- [Using SimpleRAG for Retrieval-Augmented Generation](#-using-simplerag-for-retrieval-augmented-generation)
+- [Multiprocessing](#-multiprocessing)
+- [Docker Manager](#-docker-manager)
+- [Project Structure](#-project-structure)
+- [Versioning](#-versioning)
+- [Configuration](#-configuration)
+- [Available Commands](#-available-commands)
+- [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
+- [Models Supported](#-models-supported)
+- [Contributing](#-contributing)
+- [License](#-license)
+- [Authors](#-authors)
+
 ## 🎯 The Problem with AI Agent Frameworks Today
 
 Let's be honest. The AI agent ecosystem has become a jungle.
