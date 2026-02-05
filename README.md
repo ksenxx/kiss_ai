@@ -14,7 +14,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 Let's be honest. The AI agent ecosystem has become a jungle.
 
-Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, configuration files that rival tax forms, and dependency trees that make `node_modules` look tidy. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm. Try the interactive Jupyter by running `uv run notebook --lab`.
+Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, configuration files that rival tax forms, and dependency trees that make `node_modules` look tidy. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm. 
 
 **What if there was another way?**
 
@@ -22,7 +22,9 @@ What if building AI agents could be as straightforward as the name suggests?
 
 Enter **KISS** — the *Keep It Simple, Stupid* Agent Framework.
 
-## 🚀 Your First Agent in 30 Seconds
+## 🚀 Your First Agent in 30 Seconds. 
+
+Try the interactive Jupyter notebook by running `uv run notebook --lab`.
 
 Let me show you something beautiful:
 
@@ -45,7 +47,7 @@ print(result)  # 127.05
 
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 
-KISS uses **native function calling** from the LLM providers. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. Everything just works.
+KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations.  Everything just works.
 
 ## Blogs
 
@@ -99,7 +101,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 
 📖 **For detailed Agent Creator and Optimizer documentation, see [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md)**
 
-The Agent Creator module provides tools to automatically evolve and optimize AI agents for **token efficiency**, **execution speed**, and **cost** using evolutionary algorithms with Pareto frontier maintenance.
+The Agent Creator and Optimizer module provides tools to automatically evolve and optimize AI agents for **token efficiency**, **execution speed**, and **cost** using evolutionary algorithms with Pareto frontier maintenance.
 
 **Key Component:**
 
@@ -133,7 +135,7 @@ print(f"Metrics: {best_variant.metrics}")
 - **Lineage Tracking**: Records parent relationships and improvement history
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
 
-For usage examples, API reference, and configuration options, please see the [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md).
+For usage examples, API reference, and configuration options, please see the [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md).
 
 
 ## Output Formatting
@@ -170,15 +172,15 @@ def finish(
 
 ```
 
-The agent will automatically use your custom `finish` function instead of the default one. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
+The agent will automatically use your custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
 
 ## Overview
 
-KISS is a lightweight multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
+KISS is a lightweight, yet powerful, multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
 
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
-- **Multi-Agent Coding System**: RelentlessCodingAgent with orchestration, sub-agent management, and automatic task hand-off
-- **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier
+- **Multi-Agent Coding System**: Relentless Coding Agent with orchestration, sub-agent management, and automatic task hand-off (new idea)
+- **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier (new idea)
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
@@ -284,7 +286,7 @@ KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
-### Using RelentlessCodingAgent
+### Using Relentless Coding Agent
 
 For very very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task:
 
@@ -331,7 +333,7 @@ print(f"Result: {result}")
 **Key Features:**
 
 - **Multi-Agent Architecture**: Orchestrator delegates tasks to executor sub-agents for parallel task handling
-- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, allowing seamless task handoff with context preservation
+- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, allowing seamless task handoff with context preservation (new idea)
 - **Retry with Context**: Failed tasks automatically retry with previous summary appended to the prompt
 - **Configurable Trials**: Set high trial counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
@@ -626,8 +628,58 @@ result = run_simple_coding_agent(
 )
 print(result)
 ```
-
 ## Project Structure -->
+
+## Multiprocessing
+
+KISS provides utilities for parallel execution of Python functions using multiprocessing. This is useful for running multiple independent tasks concurrently to maximize CPU utilization.
+
+### Basic Usage
+
+```python
+from kiss.multiprocessing import run_functions_in_parallel
+
+def add(a, b):
+    return a + b
+
+def multiply(x, y):
+    return x * y
+
+# Define tasks as (function, arguments) tuples
+tasks = [(add, [1, 2]), (multiply, [3, 4])]
+results = run_functions_in_parallel(tasks)
+print(results)  # [3, 12]
+```
+
+### With Keyword Arguments
+
+```python
+from kiss.multiprocessing import run_functions_in_parallel_with_kwargs
+
+def greet(name, title="Mr."):
+    return f"Hello, {title} {name}!"
+
+functions = [greet, greet]
+args_list = [["Alice"], ["Bob"]]
+kwargs_list = [{"title": "Dr."}, {}]
+
+results = run_functions_in_parallel_with_kwargs(functions, args_list, kwargs_list)
+print(results)  # ["Hello, Dr. Alice!", "Hello, Mr. Bob!"]
+```
+
+### Checking Available Cores
+
+```python
+from kiss.multiprocessing import get_available_cores
+
+num_cores = get_available_cores()
+print(f"Available CPU cores: {num_cores}")
+```
+
+The multiprocessing utilities automatically scale to the number of available CPU cores, using at most as many workers as there are tasks to avoid unnecessary overhead.
+
+
+
 
 ```
 kiss/
