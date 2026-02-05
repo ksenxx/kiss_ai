@@ -278,7 +278,7 @@ export TOGETHER_API_KEY="your-key-here"
 export OPENROUTER_API_KEY="your-key-here"
 ```
 
-### Selective Installation (Dependency Groups)
+### 📋 Selective Installation (Dependency Groups)
 
 KISS supports selective installation via dependency groups for minimal footprints:
 
@@ -320,7 +320,7 @@ uv sync --group claude --group dev
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
 
-### KISSAgent API Reference
+### 📚 KISSAgent API Reference
 
 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
 
@@ -333,7 +333,7 @@ KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pa
 
 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
-### Using KISSEvolve for Algorithm Discovery
+## 🧪 Using KISSEvolve for Algorithm Discovery
 
 
 KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
@@ -342,6 +342,65 @@ For usage examples, API reference, and configuration options, please see the [KI
 
 📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
 
+## 🔄 Using Self-Evolving Multi-Agent
+
+The Self-Evolving Multi-Agent is an advanced coding agent with planning, error recovery, dynamic tool creation, and the ability to evolve itself for better efficiency and accuracy using KISSEvolve.
+
+📖 **For detailed Self-Evolving Multi-Agent documentation, see [Self-Evolving Multi-Agent README](src/kiss/agents/self_evolving_multi_agent/README.md)**
+
+```python
+from kiss.agents.self_evolving_multi_agent import SelfEvolvingMultiAgent
+
+# Create and run the agent
+agent = SelfEvolvingMultiAgent()
+result = agent.run("""
+    Create a Python script that:
+    1. Generates the first 20 Fibonacci numbers
+    2. Saves them to a file called 'fibonacci.txt'
+    3. Reads the file back and prints the sum
+""")
+print(result)
+
+# Access execution statistics
+stats = agent.get_stats()
+print(f"Completed todos: {stats['completed']}/{stats['total_todos']}")
+print(f"Dynamic tools created: {stats['dynamic_tools']}")
+```
+
+**Key Features:**
+
+- **Planning & Task Tracking**: Creates and manages a todo list with status tracking (pending → in_progress → completed/failed)
+- **Sub-Agent Delegation**: Spawns focused sub-agents for individual task execution
+- **Dynamic Tool Creation**: Creates reusable tools at runtime when prompted by the orchestrator
+- **Error Recovery**: Automatic retry logic with configurable max retries
+- **Docker Isolation**: Runs code execution in isolated Docker containers
+- **Self-Evolution**: Uses KISSEvolve to optimize for efficiency and accuracy
+
+
+**Evolving the Agent:**
+
+```python
+from kiss.agents.self_evolving_multi_agent.agent_evolver import AgentEvolver
+
+# Create evolver
+evolver = AgentEvolver(
+    package_name="kiss.agents.self_evolving_multi_agent",
+    agent_file_path="multi_agent.py",
+    model_name="gemini-3-flash-preview",
+    focus_on_efficiency=True,
+)
+
+# Run baseline evaluation first
+baseline = evolver.run_baseline_evaluation()
+print(f"Baseline fitness: {baseline['fitness']:.4f}")
+
+# Evolve the agent
+best = evolver.evolve()
+print(f"Evolved fitness: {best.fitness:.4f}")
+
+# Save the best variant
+evolver.save_best(best)
+```
 
 ## 💻 Using KISS Coding Agent
 
@@ -636,7 +695,7 @@ print(result)
 
 KISS provides utilities for parallel execution of Python functions using multiprocessing. This is useful for running multiple independent tasks concurrently to maximize CPU utilization.
 
-### Basic Usage
+### 🚀 Basic Usage
 
 ```python
 from kiss.multiprocessing import run_functions_in_parallel
@@ -653,7 +712,7 @@ results = run_functions_in_parallel(tasks)
 print(results)  # [3, 12]
 ```
 
-### With Keyword Arguments
+### 🔑 With Keyword Arguments
 
 ```python
 from kiss.multiprocessing import run_functions_in_parallel_with_kwargs
@@ -669,7 +728,7 @@ results = run_functions_in_parallel_with_kwargs(functions, args_list, kwargs_lis
 print(results)  # ["Hello, Dr. Alice!", "Hello, Mr. Bob!"]
 ```
 
-### Checking Available Cores
+### 💻 Checking Available Cores
 
 ```python
 from kiss.multiprocessing import get_available_cores
@@ -684,7 +743,7 @@ The multiprocessing utilities automatically scale to the number of available CPU
 
 KISS provides a `DockerManager` class for managing Docker containers and executing commands inside them. This is useful for running code in isolated environments, testing with specific dependencies, or working with SWE-bench tasks.
 
-### Basic Usage
+### 🚀 Basic Usage
 
 ```python
 from kiss.docker import DockerManager
@@ -699,7 +758,7 @@ with DockerManager(image_name="ubuntu", tag="22.04", workdir="/app") as docker:
     print(output)
 ```
 
-### Manual Lifecycle Management
+### 🔧 Manual Lifecycle Management
 
 ```python
 from kiss.docker import DockerManager
@@ -715,7 +774,7 @@ finally:
     docker.close()  # Stop and remove container
 ```
 
-### Port Mapping
+### 🔌 Port Mapping
 
 ```python
 from kiss.docker import DockerManager
@@ -730,7 +789,7 @@ with DockerManager(image_name="nginx", ports={80: 8080}) as docker:
     print(f"Server available at http://localhost:{host_port}")
 ```
 
-### Configuration Options
+### ⚙️ Configuration Options
 
 - `image_name`: Docker image name (e.g., 'ubuntu', 'python:3.11')
 - `tag`: Image tag/version (default: 'latest')
@@ -945,14 +1004,14 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 
 ## 🛠️ Available Commands
 
-### Development
+### 💻 Development
 
 - `uv sync` - Install all dependencies (full installation)
 - `uv sync --group dev` - Install dev tools (mypy, ruff, pytest, jupyter, etc.)
 - `uv sync --group <name>` - Install specific dependency group (see [Selective Installation](#selective-installation-dependency-groups))
 - `uv build` - Build the project package
 
-### Testing
+### 🧪 Testing
 
 - `uv run pytest` - Run all tests (uses testpaths from pyproject.toml)
 - `uv run pytest src/kiss/tests/ -v` - Run all tests with verbose output
@@ -964,7 +1023,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run python -m unittest src.kiss.tests.test_docker_manager -v` - Run docker manager tests (unittest)
 - `uv run python -m unittest discover -s src/kiss/tests -v` - Run all tests using unittest
 
-### Code Quality
+### ✅ Code Quality
 
 - `uv run check` - Run all code quality checks (fresh dependency install, build, lint, and type check)
 - `uv run check --clean` - Run all code quality checks (fresh dependency install, build, lint, and type check after removing previous build options)
@@ -973,7 +1032,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run mypy src/` - Type check with mypy (python_version: 3.13)
 - `uv run pyright src/` - Type check with pyright (alternative to mypy, stricter checking)
 
-### Notebook
+### 📓 Notebook
 
 - `uv run notebook --test` - Test all imports and basic functionality
 - `uv run notebook --lab` - Open the tutorial notebook in JupyterLab (recommended)
@@ -981,7 +1040,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run notebook --execute` - Execute notebook cells and update outputs in place
 - `uv run notebook --convert` - Convert notebook to Python script
 
-### Cleanup
+### 🧹 Cleanup
 
 ```bash
 rm -rf build/ dist/ .pytest_cache .mypy_cache .ruff_cache && \
@@ -999,7 +1058,7 @@ Agent trajectories are automatically saved to the artifacts directory (default: 
 - Timestamps
 - Budget and token usage statistics
 
-### Visualizing Trajectories
+### 👁️ Visualizing Trajectories
 
 The framework includes a web-based trajectory visualizer for viewing agent execution histories:
 
@@ -1068,7 +1127,7 @@ Each model in `MODEL_INFO` includes capability flags:
 
 Token counts are extracted directly from API responses, ensuring accuracy and supporting multiple agents sharing the same model instance.
 
-### Embedding Support
+### 🔢 Embedding Support
 
 The framework provides embedding generation capabilities through the `get_embedding()` method on model instances:
 
