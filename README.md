@@ -174,6 +174,62 @@ def finish(
 
 The agent will automatically use your custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
 
+## 💪 Using Relentless Coding Agent
+
+For very very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task:
+
+```python
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent(name="Simple Coding Agent")
+
+result = agent.run(
+    prompt_template="""
+        Create a Python script that reads a CSV file,
+        filters rows where age > 18, and writes to a new file.
+    """,
+    orchestrator_model_name="gpt-4o",
+    subtasker_model_name="gpt-4o-mini",
+    work_dir="./workspace",
+    max_steps=200,
+    trials=200
+)
+print(f"Result: {result}")
+```
+
+**Running with Docker:**
+
+You can optionally run bash commands inside a Docker container for isolation:
+
+```python
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent(name="Dockered Relenetless Coding Agent")
+
+result = agent.run(
+    prompt_template="""
+        Install numpy and create a script that generates 
+        a random matrix and computes its determinant.
+    """,
+    docker_image="python:3.11-slim",  # Bash commands run in Docker
+    max_steps=200,
+    trials=2000
+)
+print(f"Result: {result}")
+```
+
+**Key Features:**
+
+- **Multi-Agent Architecture**: Orchestrator delegates tasks to executor sub-agents for parallel task handling
+- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, allowing seamless task handoff with context preservation (💡 new idea)
+- **Retry with Context**: Failed tasks automatically retry with previous summary appended to the prompt
+- **Configurable Trials**: Set high trial counts (e.g., 200+) for truly relentless execution
+- **Docker Support**: Optional isolated execution via Docker containers
+- **Path Access Control**: Enforces read/write permissions on file system paths
+- **Built-in Tools**: Bash, Edit, and MultiEdit tools for file operations
+- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-agents
+
+
 ## 📖 Overview
 
 KISS is a lightweight, yet powerful, multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
@@ -286,60 +342,6 @@ KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
-### Using Relentless Coding Agent
-
-For very very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task:
-
-```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
-
-agent = RelentlessCodingAgent(name="Simple Coding Agent")
-
-result = agent.run(
-    prompt_template="""
-        Create a Python script that reads a CSV file,
-        filters rows where age > 18, and writes to a new file.
-    """,
-    orchestrator_model_name="gpt-4o",
-    subtasker_model_name="gpt-4o-mini",
-    work_dir="./workspace",
-    max_steps=200,
-    trials=200
-)
-print(f"Result: {result}")
-```
-
-**Running with Docker:**
-
-You can optionally run bash commands inside a Docker container for isolation:
-
-```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
-
-agent = RelentlessCodingAgent(name="Dockered Relenetless Coding Agent")
-
-result = agent.run(
-    prompt_template="""
-        Install numpy and create a script that generates 
-        a random matrix and computes its determinant.
-    """,
-    docker_image="python:3.11-slim",  # Bash commands run in Docker
-    max_steps=200,
-    trials=2000
-)
-print(f"Result: {result}")
-```
-
-**Key Features:**
-
-- **Multi-Agent Architecture**: Orchestrator delegates tasks to executor sub-agents for parallel task handling
-- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, allowing seamless task handoff with context preservation (💡 new idea)
-- **Retry with Context**: Failed tasks automatically retry with previous summary appended to the prompt
-- **Configurable Trials**: Set high trial counts (e.g., 200+) for truly relentless execution
-- **Docker Support**: Optional isolated execution via Docker containers
-- **Path Access Control**: Enforces read/write permissions on file system paths
-- **Built-in Tools**: Bash, Edit, and MultiEdit tools for file operations
-- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-agents
 
 ### Using KISS Coding Agent
 
