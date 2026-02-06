@@ -25,7 +25,7 @@ from claude_agent_sdk import (
     query,
 )
 
-from kiss.core import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.utils import is_subpath, resolve_path
@@ -207,9 +207,9 @@ class ClaudeCodingAgent(Base):
         model_name: str,
         prompt_template: str,
         arguments: dict[str, str] | None = None,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-        base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "claude_workdir"),
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
     ) -> str | None:
@@ -229,7 +229,22 @@ class ClaudeCodingAgent(Base):
         Returns:
             The result of the task.
         """
-        self._reset(model_name, readable_paths, writable_paths, base_dir, max_steps, max_budget)
+        cfg = config_module.DEFAULT_CONFIG.agent
+        actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
+        actual_max_budget = max_budget if max_budget is not None else cfg.max_agent_budget
+        actual_base_dir = (
+            base_dir
+            if base_dir is not None
+            else str(Path(cfg.artifact_dir).resolve() / "claude_workdir")
+        )
+        self._reset(
+            model_name,
+            readable_paths,
+            writable_paths,
+            actual_base_dir,
+            actual_max_steps,
+            actual_max_budget,
+        )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
 

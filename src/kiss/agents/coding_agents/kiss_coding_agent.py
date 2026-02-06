@@ -13,9 +13,9 @@ from pathlib import Path
 import yaml
 
 from kiss.agents.kiss import prompt_refiner_agent
+from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.compact_formatter import CompactFormatter
-from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
@@ -131,14 +131,14 @@ class KISSCodingAgent(Base):
 
     def _reset(
         self,
-        orchestrator_model_name: str,
-        subtasker_model_name: str,
-        refiner_model_name: str,
-        trials: int,
-        max_steps: int,
-        max_budget: float,
-        work_dir: str,
-        base_dir: str,
+        orchestrator_model_name: str | None,
+        subtasker_model_name: str | None,
+        refiner_model_name: str | None,
+        trials: int | None,
+        max_steps: int | None,
+        max_budget: float | None,
+        work_dir: str | None,
+        base_dir: str | None,
         readable_paths: list[str] | None,
         writable_paths: list[str] | None,
         docker_image: str | None,
@@ -158,26 +158,46 @@ class KISSCodingAgent(Base):
             writable_paths: Paths allowed for writing.
             docker_image: Optional Docker image for sandboxed execution.
         """
-        Path(base_dir).mkdir(parents=True, exist_ok=True)
-        Path(work_dir).mkdir(parents=True, exist_ok=True)
-        self.base_dir = str(Path(base_dir).resolve())
-        self.work_dir = str(Path(work_dir).resolve())
+        # Apply config defaults for None values
+        cfg = config_module.DEFAULT_CONFIG
+        kiss_cfg = cfg.agent.kiss_coding_agent
+        default_work_dir = str(Path(cfg.agent.artifact_dir).resolve() / "kiss_workdir")
+
+        actual_base_dir = base_dir if base_dir is not None else default_work_dir
+        actual_work_dir = work_dir if work_dir is not None else default_work_dir
+
+        Path(actual_base_dir).mkdir(parents=True, exist_ok=True)
+        Path(actual_work_dir).mkdir(parents=True, exist_ok=True)
+        self.base_dir = str(Path(actual_base_dir).resolve())
+        self.work_dir = str(Path(actual_work_dir).resolve())
         self.readable_paths = [resolve_path(p, self.base_dir) for p in readable_paths or []]
         self.writable_paths = [resolve_path(p, self.base_dir) for p in writable_paths or []]
         self.readable_paths.append(Path(self.work_dir))
         self.writable_paths.append(Path(self.work_dir))
         self.is_agentic = True
 
-        self.trials = trials
-        self.max_steps = max_steps
-        self.max_budget = max_budget
-        self.orchestrator_model_name = orchestrator_model_name
-        self.subtasker_model_name = subtasker_model_name
-        self.refiner_model_name = refiner_model_name
+        self.trials = trials if trials is not None else kiss_cfg.trials
+        self.max_steps = max_steps if max_steps is not None else cfg.agent.max_steps
+        self.max_budget = max_budget if max_budget is not None else cfg.agent.max_agent_budget
+        self.orchestrator_model_name = (
+            orchestrator_model_name
+            if orchestrator_model_name is not None
+            else kiss_cfg.orchestrator_model_name
+        )
+        self.subtasker_model_name = (
+            subtasker_model_name
+            if subtasker_model_name is not None
+            else kiss_cfg.subtasker_model_name
+        )
+        self.refiner_model_name = (
+            refiner_model_name
+            if refiner_model_name is not None
+            else kiss_cfg.refiner_model_name
+        )
         self.max_tokens = max(
-            get_max_context_length(orchestrator_model_name),
-            get_max_context_length(subtasker_model_name),
-            get_max_context_length(refiner_model_name),
+            get_max_context_length(self.orchestrator_model_name),
+            get_max_context_length(self.subtasker_model_name),
+            get_max_context_length(self.refiner_model_name),
         )
 
         self.budget_used: float = 0.0
@@ -326,18 +346,14 @@ class KISSCodingAgent(Base):
         self,
         prompt_template: str,
         arguments: dict[str, str] | None = None,
-        orchestrator_model_name: str = (
-            DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name
-        ),
-        subtasker_model_name: str = (DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name),
-        refiner_model_name: str = (
-            DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name
-        ),
-        trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-        work_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
-        base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
+        orchestrator_model_name: str | None = None,
+        subtasker_model_name: str | None = None,
+        refiner_model_name: str | None = None,
+        trials: int | None = None,
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        work_dir: str | None = None,
+        base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
         docker_image: str | None = None,

@@ -101,7 +101,7 @@ from kiss.agents.create_and_optimize_agent.improver_agent import (
     ImprovementReport,
     ImproverAgent,
 )
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.utils import get_config_value
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -239,7 +239,7 @@ class AgentEvolver:
         Returns:
             None. Initializes instance attributes.
         """
-        cfg = getattr(DEFAULT_CONFIG, "create_and_optimize_agent", None)
+        cfg = getattr(config_module.DEFAULT_CONFIG, "create_and_optimize_agent", None)
         evolver_cfg = getattr(cfg, "evolver", None)
 
         self.task_description = task_description
@@ -255,7 +255,7 @@ class AgentEvolver:
         )
 
         self.work_dir = Path(tempfile.mkdtemp())
-        self.optimal_dir = Path(DEFAULT_CONFIG.agent.artifact_dir) / "optimal_agent"
+        self.optimal_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "optimal_agent"
 
         self.pareto_frontier: list[AgentVariant] = []
         self._variant_counter = 0

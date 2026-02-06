@@ -13,7 +13,7 @@ import anyio
 from agents import Agent, Runner, function_tool
 from agents.tool import WebSearchTool
 
-from kiss.core import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
 from kiss.core.models.model_info import get_max_context_length
@@ -181,9 +181,9 @@ class OpenAICodexAgent(Base):
         model_name: str = DEFAULT_CODEX_MODEL,
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-        base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "codex_workdir"),
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
         formatter: Formatter | None = None,
@@ -204,8 +204,22 @@ class OpenAICodexAgent(Base):
         Returns:
             The result of the task.
         """
+        cfg = config_module.DEFAULT_CONFIG.agent
+        actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
+        actual_max_budget = max_budget if max_budget is not None else cfg.max_agent_budget
+        actual_base_dir = (
+            base_dir
+            if base_dir is not None
+            else str(Path(cfg.artifact_dir).resolve() / "codex_workdir")
+        )
         self._reset(
-            model_name, readable_paths, writable_paths, base_dir, max_steps, max_budget, formatter
+            model_name,
+            readable_paths,
+            writable_paths,
+            actual_base_dir,
+            actual_max_steps,
+            actual_max_budget,
+            formatter,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
@@ -224,11 +238,11 @@ class OpenAICodexAgent(Base):
 
             self._formatter.print_label_and_value("CODEX AGENT", f"Starting in {self.base_dir}")
             self._formatter.print_label_and_value(
-                "CODEX AGENT", f"Model: {model_name}, Max turns: {max_steps}"
+                "CODEX AGENT", f"Model: {model_name}, Max turns: {actual_max_steps}"
             )
 
             try:
-                result = await Runner.run(agent, input=task, max_turns=max_steps)
+                result = await Runner.run(agent, input=task, max_turns=actual_max_steps)
                 timestamp = int(time.time())
                 self._process_run_result(result, timestamp)
 

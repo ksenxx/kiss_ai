@@ -13,7 +13,7 @@ FLAKY MODEL MARKERS:
 
 from typing import Any
 
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.gemini_model import GeminiModel
@@ -890,14 +890,14 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
         return OpenAICompatibleModel(
             model_name=model_name,
             base_url="https://openrouter.ai/api/v1",
-            api_key=DEFAULT_CONFIG.agent.api_keys.OPENROUTER_API_KEY,
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENROUTER_API_KEY,
             model_config=model_config,
         )
     # Google Gemini embedding models (text-embedding-004 is Gemini, not OpenAI)
     elif model_name == "text-embedding-004":
         return GeminiModel(
             model_name=model_name,
-            api_key=DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
             model_config=model_config,
         )
     # OpenAI models (generation and embedding)
@@ -907,7 +907,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
         return OpenAICompatibleModel(
             model_name=model_name,
             base_url="https://api.openai.com/v1",
-            api_key=DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY,
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY,
             model_config=model_config,
         )
     # Together AI models (generation and embedding)
@@ -937,21 +937,21 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
         return OpenAICompatibleModel(
             model_name=model_name,
             base_url="https://api.together.xyz/v1",
-            api_key=DEFAULT_CONFIG.agent.api_keys.TOGETHER_API_KEY,
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.TOGETHER_API_KEY,
             model_config=model_config,
         )
     # Anthropic Claude models (direct Anthropic API)
     elif model_name.startswith("claude-"):
         return AnthropicModel(
             model_name=model_name,
-            api_key=DEFAULT_CONFIG.agent.api_keys.ANTHROPIC_API_KEY,
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.ANTHROPIC_API_KEY,
             model_config=model_config,
         )
     # Google Gemini models (direct Google API)
     elif model_name.startswith("gemini-"):
         return GeminiModel(
             model_name=model_name,
-            api_key=DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
             model_config=model_config,
         )
     else:

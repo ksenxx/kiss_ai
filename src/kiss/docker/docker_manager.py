@@ -14,7 +14,7 @@ from typing import Any
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.simple_formatter import SimpleFormatter
 
@@ -48,7 +48,7 @@ class DockerManager:
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
         self.ports = ports
-        self.client_shared_path = DEFAULT_CONFIG.docker.client_shared_path
+        self.client_shared_path = config_module.DEFAULT_CONFIG.docker.client_shared_path
         self.host_shared_path = tempfile.mkdtemp() if mount_shared_volume else None
 
         if ":" in image_name:

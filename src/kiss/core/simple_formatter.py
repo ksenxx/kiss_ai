@@ -15,7 +15,7 @@ from rich.markdown import Heading, Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.formatter import Formatter
 
 
@@ -60,7 +60,7 @@ class SimpleFormatter(Formatter):
         Returns:
             str: The formatted message string, or empty string if not verbose.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             return f'\n## role="{message.get("role", "")}" #\n{message.get("content", "")}\n'
         return ""
 
@@ -73,7 +73,7 @@ class SimpleFormatter(Formatter):
         Returns:
             str: The formatted messages joined by newlines, or empty string if not verbose.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             return "\n".join(self.format_message(m) for m in messages)
         return ""
 
@@ -83,7 +83,7 @@ class SimpleFormatter(Formatter):
         Args:
             message: A dictionary containing message data with 'role' and 'content' keys.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             role = message.get("role", "")
             content = message.get("content", "")
             if self._console:
@@ -99,7 +99,7 @@ class SimpleFormatter(Formatter):
         Args:
             messages: A list of message dictionaries.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             if self._console:
                 self._console.print()
                 self._console.print(Markdown("\n#  Agent Messages #"), style="bold")
@@ -115,7 +115,7 @@ class SimpleFormatter(Formatter):
         Args:
             message: The status message to print.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             if self._console:
                 self._console.print(message, style="green")
             else:
@@ -127,7 +127,7 @@ class SimpleFormatter(Formatter):
         Args:
             message: The error message to print.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             if self._stderr_console:
                 self._stderr_console.print(message, style="red")
             else:
@@ -139,7 +139,7 @@ class SimpleFormatter(Formatter):
         Args:
             message: The warning message to print.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             if self._console:
                 self._console.print(message, style="yellow")
             else:
@@ -152,7 +152,7 @@ class SimpleFormatter(Formatter):
             label: The label text.
             value: The value text.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             md = Markdown(f"__**{label}**__: {value}")
             if self._console:
                 self._console.print(md)

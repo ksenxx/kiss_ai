@@ -18,7 +18,7 @@ from datasets import load_dataset
 import kiss.core.utils as utils
 import kiss.evals.swe_agent_verified.config  # noqa: F401
 from kiss.agents.kiss import prompt_refiner_agent
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.docker.docker_manager import DockerManager
@@ -507,7 +507,7 @@ def main() -> None:
     Returns:
         None.
     """
-    config = DEFAULT_CONFIG.swebench_verified  # type: ignore[attr-defined]
+    config = config_module.DEFAULT_CONFIG.swebench_verified  # type: ignore[attr-defined]
 
     result = run_swebench(config=config)
 

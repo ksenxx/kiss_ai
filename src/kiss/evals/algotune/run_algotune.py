@@ -17,7 +17,7 @@ import kiss.agents.kiss_evolve.config  # noqa: F401
 import kiss.evals.algotune.config  # noqa: F401
 from kiss.agents.kiss import get_run_simple_coding_agent
 from kiss.agents.kiss_evolve.kiss_evolve import KISSEvolve
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 
 # Required dependencies for AlgoTune tasks
 ALGOTUNE_DEPENDENCIES = ["orjson", "scipy", "scikit-learn"]
@@ -443,25 +443,25 @@ def run_algotune(
 
     _check_and_install_dependencies()
 
-    algotune_path = Path(DEFAULT_CONFIG.algotune.algotune_path)  # type: ignore[attr-defined]
-    _ensure_algotune_installed(algotune_path, DEFAULT_CONFIG.algotune.algotune_repo_url)  # type: ignore[attr-defined]
+    algotune_cfg = config_module.DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
+    algotune_path = Path(algotune_cfg.algotune_path)
+    _ensure_algotune_installed(algotune_path, algotune_cfg.algotune_repo_url)
 
     print("=" * 80)
-    print(f"AlgoTune Optimization: {DEFAULT_CONFIG.algotune.task}")  # type: ignore[attr-defined]
+    print(f"AlgoTune Optimization: {algotune_cfg.task}")
     print("=" * 80)
 
     # Load task
-    print(f"\nLoading task: {DEFAULT_CONFIG.algotune.task}...")  # type: ignore[attr-defined]
-    task_class = get_task_class(DEFAULT_CONFIG.algotune.task)  # type: ignore[attr-defined]
+    print(f"\nLoading task: {algotune_cfg.task}...")
+    task_class = get_task_class(algotune_cfg.task)
     task_instance = task_class()
 
     # Load description
-    desc_path = algotune_path / "AlgoTuneTasks" / DEFAULT_CONFIG.algotune.task / "description.txt"  # type: ignore[attr-defined]
-    description = desc_path.read_text() if desc_path.exists() else DEFAULT_CONFIG.algotune.task  # type: ignore[attr-defined]
+    desc_path = algotune_path / "AlgoTuneTasks" / algotune_cfg.task / "description.txt"
+    description = desc_path.read_text() if desc_path.exists() else algotune_cfg.task
     description = description.replace("{", "{{").replace("}", "}}")
 
     # Generate test problems
-    algotune_cfg = DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
     num_problems = algotune_cfg.num_test_problems
     problem_size = algotune_cfg.problem_size
     random_seed = algotune_cfg.random_seed
@@ -512,7 +512,7 @@ def run_algotune(
 {description[:1500]}
 """
 
-    evolve_config = DEFAULT_CONFIG.kiss_evolve  # type: ignore[attr-defined]
+    evolve_config = config_module.DEFAULT_CONFIG.kiss_evolve  # type: ignore[attr-defined]
     pop_size = evolve_config.population_size
     max_gen = evolve_config.max_generations
     print(f"\nStarting KISSEvolve (pop={pop_size}, gen={max_gen})...")
@@ -569,7 +569,7 @@ def run_algotune(
     print("-" * 80)
 
     return {
-        "task_name": DEFAULT_CONFIG.algotune.task,  # type: ignore[attr-defined]
+        "task_name": config_module.DEFAULT_CONFIG.algotune.task,  # type: ignore[attr-defined]
         "initial_fitness": initial_result["fitness"],
         "best_fitness": best.fitness,
         "initial_time": initial_time,
@@ -592,8 +592,9 @@ def run_all_tasks(max_retries: int = 3) -> list[dict[str, Any]]:
     # Check and install required dependencies before starting
     _check_and_install_dependencies()
 
-    algotune_path = Path(DEFAULT_CONFIG.algotune.algotune_path)  # type: ignore[attr-defined]
-    _ensure_algotune_installed(algotune_path, DEFAULT_CONFIG.algotune.algotune_repo_url)  # type: ignore[attr-defined]
+    algotune_cfg = config_module.DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
+    algotune_path = Path(algotune_cfg.algotune_path)
+    _ensure_algotune_installed(algotune_path, algotune_cfg.algotune_repo_url)
 
     task_names = get_all_task_names(algotune_path)
     if not task_names:
@@ -663,7 +664,7 @@ def main():
     Reads configuration from DEFAULT_CONFIG.algotune and runs either
     all tasks (if all_tasks is True) or a single task optimization.
     """
-    config = DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
+    config = config_module.DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
 
     if config.all_tasks:
         results = run_all_tasks()

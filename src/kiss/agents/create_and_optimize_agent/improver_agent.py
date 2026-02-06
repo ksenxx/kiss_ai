@@ -16,8 +16,8 @@ import time
 from pathlib import Path
 
 from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
+from kiss.core import config as config_module
 from kiss.core.compact_formatter import CompactFormatter
-from kiss.core.config import DEFAULT_CONFIG
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -354,7 +354,7 @@ class ImproverAgent:
         agent = KISSCodingAgent("Agent Improver")
 
         print(f"Running improvement on {work_dir}")
-        if not DEFAULT_CONFIG.create_and_optimize_agent.evolve_to_solve_task:
+        if not config_module.DEFAULT_CONFIG.create_and_optimize_agent.evolve_to_solve_task:
             agent_evolver_prompt = (
                 AGENT_EVOLVER_PROMPT_PART1 + AGENT_EVOLVER_PROMPT_PART2 + AGENT_EVOLVER_PROMPT_PART3
             )

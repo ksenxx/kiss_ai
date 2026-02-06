@@ -10,8 +10,8 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
+from kiss.core import config as config_module
 from kiss.core.base import Base
-from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
@@ -73,8 +73,8 @@ class KISSAgent(Base):
         tools: list[Callable[..., Any]] | None = None,
         formatter: Formatter | None = None,
         is_agentic: bool = True,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+        max_steps: int | None = None,
+        max_budget: float | None = None,
         model_config: dict[str, Any] | None = None,
     ) -> str:
         """
@@ -130,8 +130,8 @@ class KISSAgent(Base):
         model_name: str,
         formatter: Formatter | None,
         is_agentic: bool,
-        max_steps: int,
-        max_budget: float,
+        max_steps: int | None,
+        max_budget: float | None,
         model_config: dict[str, Any] | None,
     ) -> None:
         """Initialize run parameters.
@@ -140,15 +140,23 @@ class KISSAgent(Base):
             model_name: The name of the model to use.
             formatter: Optional formatter for output display.
             is_agentic: Whether the agent operates in agentic mode with tools.
-            max_steps: Maximum number of steps allowed in the ReAct loop.
-            max_budget: Maximum budget in dollars for this run.
+            max_steps: Maximum steps allowed in the ReAct loop. If None, uses default.
+            max_budget: Maximum budget in dollars for this run. If None, uses default.
             model_config: Optional model-specific configuration dictionary.
         """
         self.model = model(model_name, model_config=model_config)
         self._formatter = formatter or SimpleFormatter()
         self.is_agentic = is_agentic
-        self.max_steps = max_steps
-        self.max_budget = max_budget
+        self.max_steps = (
+            max_steps
+            if max_steps is not None
+            else config_module.DEFAULT_CONFIG.agent.max_steps
+        )
+        self.max_budget = (
+            max_budget
+            if max_budget is not None
+            else config_module.DEFAULT_CONFIG.agent.max_agent_budget
+        )
 
     def _setup_tools(self, tools: list[Callable[..., Any]] | None) -> None:
         """Setup tools for agentic mode.
@@ -166,7 +174,7 @@ class KISSAgent(Base):
 
         if "finish" not in tool_names:
             tools.append(self.finish)
-        if DEFAULT_CONFIG.agent.use_web and "search_web" not in tool_names:
+        if config_module.DEFAULT_CONFIG.agent.use_web and "search_web" not in tool_names:
             tools.append(fetch_url)
             tools.append(search_web)
 
@@ -178,7 +186,7 @@ class KISSAgent(Base):
         Returns:
             str: The generated response text from the model.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             self._formatter.print_status(f"Asking {self.model.model_name}...\n")
         start_timestamp = int(time.time())
         self.step_count = 1
@@ -222,7 +230,7 @@ class KISSAgent(Base):
         Returns:
             str | None: The result string if the task is finished, None otherwise.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             self._formatter.print_status(f"Asking {self.model.model_name}...\n")
         start_timestamp = int(time.time())
 
@@ -321,7 +329,7 @@ class KISSAgent(Base):
         """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if Base.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
+        if Base.global_budget_used > config_module.DEFAULT_CONFIG.agent.global_max_budget:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -374,7 +382,7 @@ class KISSAgent(Base):
             budget_info = f"[Agent budget usage: ${self.budget_used:.4f}/${self.max_budget:.2f}]"
             global_budget_info = (
                 f"[Global budget usage: ${Base.global_budget_used:.4f}/"
-                f"${DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
+                f"${config_module.DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
             )
             return (
                 "#### Usage Information\n"
@@ -384,7 +392,7 @@ class KISSAgent(Base):
                 f"  - {step_info}\n"
             )
         except Exception:
-            if DEFAULT_CONFIG.agent.verbose:
+            if config_module.DEFAULT_CONFIG.agent.verbose:
                 self._formatter.print_error(f"Error getting usage info: {traceback.format_exc()}")
             return f"#### Usage Information\n  - {step_info}\n"
 

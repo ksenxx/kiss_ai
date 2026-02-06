@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import kiss.agents.self_evolving_multi_agent.config  # noqa: F401
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.docker.docker_manager import DockerManager
@@ -94,7 +94,7 @@ class SelfEvolvingMultiAgent:
 
     def __init__(self) -> None:
         """Initialize the SelfEvolvingMultiAgent with configuration from DEFAULT_CONFIG."""
-        cfg = DEFAULT_CONFIG.self_evolving_multi_agent
+        cfg = config_module.DEFAULT_CONFIG.self_evolving_multi_agent
         self.model_name = cfg.model
         self.docker_image = cfg.docker_image
         self.workdir = cfg.workdir

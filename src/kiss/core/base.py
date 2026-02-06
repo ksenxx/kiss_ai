@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 import yaml
 from yaml.nodes import ScalarNode
 
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.utils import config_to_dict
 
@@ -131,13 +131,15 @@ class Base:
             "is_agentic": getattr(self, "is_agentic", True),
             "model": self.model_name,
             "budget_used": self.budget_used,
-            "total_budget": getattr(self, "max_budget", DEFAULT_CONFIG.agent.max_agent_budget),
+            "total_budget": getattr(
+                self, "max_budget", config_module.DEFAULT_CONFIG.agent.max_agent_budget
+            ),
             "global_budget_used": Base.global_budget_used,
-            "global_max_budget": DEFAULT_CONFIG.agent.global_max_budget,
+            "global_max_budget": config_module.DEFAULT_CONFIG.agent.global_max_budget,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
             "step_count": self.step_count,
-            "max_steps": getattr(self, "max_steps", DEFAULT_CONFIG.agent.max_steps),
+            "max_steps": getattr(self, "max_steps", config_module.DEFAULT_CONFIG.agent.max_steps),
             "command": " ".join(sys.argv),
         }
 
@@ -146,7 +148,7 @@ class Base:
 
         The file is saved to {artifact_dir}/trajectories/trajectory_{name}_{id}_{timestamp}.yaml
         """
-        folder_path = Path(DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
+        folder_path = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
         folder_path.mkdir(parents=True, exist_ok=True)
         name_safe = self.name.replace(" ", "_").replace("/", "_")
         filename = folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"

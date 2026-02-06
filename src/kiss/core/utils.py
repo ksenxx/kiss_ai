@@ -11,7 +11,7 @@ from typing import Any, TypeVar, cast
 
 import yaml
 
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 
 T = TypeVar("T")
@@ -95,7 +95,7 @@ def config_to_dict() -> dict[Any, Any]:
             }
         return obj
 
-    return cast(dict[Any, Any], convert_to_json(DEFAULT_CONFIG))
+    return cast(dict[Any, Any], convert_to_json(config_module.DEFAULT_CONFIG))
 
 
 def fc(file_path: str) -> str:

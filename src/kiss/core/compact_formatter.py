@@ -11,7 +11,7 @@ from typing import Any
 from rich.console import Console
 from rich.markdown import Markdown
 
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.formatter import Formatter
 
 LINE_LENGTH = 100
@@ -34,7 +34,7 @@ class CompactFormatter(Formatter):
         Returns:
             str: The formatted truncated message string, or empty string if not verbose.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             content = message.get("content", "").replace(chr(10), chr(92) + "n")
             return f'[{message.get("role", "unknown")}]: {content}'[:LINE_LENGTH] + " ..."
         return ""
@@ -48,7 +48,7 @@ class CompactFormatter(Formatter):
         Returns:
             str: The formatted messages joined by newlines, or empty string if not verbose.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             return "\n".join(self.format_message(m) for m in messages)
         return ""
 
@@ -58,7 +58,7 @@ class CompactFormatter(Formatter):
         Args:
             message: A dictionary containing message data with 'role' and 'content' keys.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             print(self.format_message(message))
 
     def print_messages(self, messages: list[dict[str, Any]]) -> None:
@@ -67,7 +67,7 @@ class CompactFormatter(Formatter):
         Args:
             messages: A list of message dictionaries.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             print(self.format_messages(messages))
 
     def print_status(self, message: str) -> None:
@@ -76,7 +76,7 @@ class CompactFormatter(Formatter):
         Args:
             message: The status message to print.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             if self._console:
                 self._console.print(message, style="green")
             else:
@@ -88,7 +88,7 @@ class CompactFormatter(Formatter):
         Args:
             message: The error message to print.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             if self._stderr_console:
                 self._stderr_console.print(message, style="red")
             else:
@@ -100,7 +100,7 @@ class CompactFormatter(Formatter):
         Args:
             message: The warning message to print.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             if self._console:
                 self._console.print(message, style="yellow")
             else:
@@ -113,7 +113,7 @@ class CompactFormatter(Formatter):
             label: The label text.
             value: The value text.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             md = Markdown(f"__**{label}**__: {value}")
             if self._console:
                 self._console.print(md)
