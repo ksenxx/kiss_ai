@@ -162,7 +162,7 @@ print(f"Metrics: {best_variant.metrics}")
 - **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time, cost)
 - **Pareto Frontier Maintenance**: Keeps track of all non-dominated solutions
 - **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
-- **Uses KISSCodingAgent**: Leverages the multi-agent coding system for agent improvement
+- **Uses RelentlessCodingAgent**: Leverages the relentless multi-agent coding system for agent improvement
 - **Automatic Pruning**: Removes dominated variants to manage memory and storage
 - **Lineage Tracking**: Records parent relationships and improvement history
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.

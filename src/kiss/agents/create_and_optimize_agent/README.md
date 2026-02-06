@@ -138,7 +138,7 @@ cfg.evolver.mutation_probability = 0.8
                                                       │
                                                       ▼
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│            Initial Agent Creation (KISS Coding Agent) + Web Search for Best Practices                    │
+│         Initial Agent Creation (Relentless Coding Agent) + Web Search for Best Practices                 │
 └─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
                                                       │
                                                       ▼

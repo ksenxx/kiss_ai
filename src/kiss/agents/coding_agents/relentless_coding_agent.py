@@ -38,7 +38,8 @@ perform_subtask() will return a yaml encoded dictionary containing the keys
 
 # **Important**: If you have used 50% of your max_tokens,
 call 'finish' with 'success' set to False and 'summary' set to a summary of
-the work have done so far and the work you need to do next.
+the work you have done so far and the work you need to do next.  The user
+prompt and the summary will be given to a new agent to continue the task.
 """
 
 TASKING_PROMPT = """
@@ -57,7 +58,8 @@ Description: {description}
 
 # **Important**: If you have used 50% of your max_tokens,
 call 'finish' with 'success' set to False and 'summary' set to a summary of
-the work have done so far and the work you need to do next.
+the work you have done so far and the work you need to do next.  The user
+prompt and the summary will be given to a new agent to continue the task.
 """
 
 
@@ -250,7 +252,7 @@ class RelentlessCodingAgent(Base):
             ret = yaml.safe_load(result)
             success = ret.get("success", False)
             if not success:
-                task_prompt_template = ORCHESTRATOR_PROMPT + "\n\n" + result
+                task_prompt_template = ORCHESTRATOR_PROMPT + "\n\n" + ret["summary"]
                 continue
             return result
         raise KISSError(f"Task {self.task_description} failed after {self.trials} trials")
@@ -308,7 +310,7 @@ class RelentlessCodingAgent(Base):
             ret = yaml.safe_load(result)
             success = ret.get("success", False)
             if not success:
-                task_prompt_template = TASKING_PROMPT + "\n\n" + result
+                task_prompt_template = TASKING_PROMPT + "\n\n" + ret["summary"]
                 continue
             return result
         raise KISSError(f"Subtask {subtask.name} failed after {self.trials} trials")

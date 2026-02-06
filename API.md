@@ -1267,7 +1267,7 @@ AgentEvolver()
 
 AgentEvolver is instantiated without parameters. All configuration is passed to the `evolve()` method.
 
-**Note:** AgentEvolver uses KISSCodingAgent internally for agent improvement. Evaluation is done internally by loading and running the generated `agent.py` which must implement `agent_run(task: str) -> dict[str, Any]`.
+**Note:** AgentEvolver uses RelentlessCodingAgent internally for agent improvement. Evaluation is done internally by loading and running the generated `agent.py` which must implement `agent_run(task: str) -> dict[str, Any]`.
 
 ### Methods
 

@@ -15,7 +15,7 @@ import shutil
 import time
 from pathlib import Path
 
-from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 from kiss.core import config as config_module
 from kiss.core.compact_formatter import CompactFormatter
 
@@ -32,7 +32,7 @@ You have to optimize an AI agent for long-running complex tasks.
     then look at code under the src folder as required.
     {kiss_folder}/src/kiss/core/models/model_info.py contains information
     about different LLM models and their context lengths, costs, etc.
-    {kiss_folder}/src/kiss/agents/coding_agents/kiss_coding_agent.py  and
+    {kiss_folder}/src/kiss/agents/coding_agents/relentless_coding_agent.py  and
     {kiss_folder}/src/kiss/agents/self_evolving_multi_agent/multi_agent.py
     have examples of long-running complex task agents.
   - The agent **MUST** be tested for success on the given task description.
@@ -44,9 +44,8 @@ AGENT_EVOLVER_PROMPT_PART2 = """
 """
 
 AGENT_EVOLVER_PROMPT_PART3 = """
-  - You MUST use KISSAgent, or RelentlessCodingAgent, or ClaudeCodingAgent, or
-    GeminiCliAgent, or OpenAICodexAgent or a mixture of them to implement
-    the agent.
+  - You MUST use RelentlessCodingAgent, KISSAgent, or a mixture of them
+    to implement the agent.
   - You MUST not use multithreading or multiprocessing or docker manager
     or 'anyio' or 'async' or 'await' in the agent implementation.
   - You may need to use the web to search on how to write such agents
@@ -334,7 +333,7 @@ class ImproverAgent:
     ) -> tuple[bool, ImprovementReport | None]:
         """Run the improvement process using a coding agent.
 
-        Executes the KISSCodingAgent with the AGENT_EVOLVER_PROMPT to create
+        Executes the RelentlessCodingAgent with the AGENT_EVOLVER_PROMPT to create
         or improve agent code. Tracks metrics including tokens used, cost,
         and execution time.
 
@@ -351,7 +350,7 @@ class ImproverAgent:
             documenting the changes. Returns (False, None) on failure.
         """
 
-        agent = KISSCodingAgent("Agent Improver")
+        agent = RelentlessCodingAgent("Agent Improver")
 
         print(f"Running improvement on {work_dir}")
         if not config_module.DEFAULT_CONFIG.create_and_optimize_agent.evolve_to_solve_task:
