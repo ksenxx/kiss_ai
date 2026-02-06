@@ -439,7 +439,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/mistralai/mistral-small-24b-instruct-2501": _mi(32768, 0.03, 0.11, fc=False),
     "openrouter/mistralai/mistral-small-3.1-24b-instruct": _mi(131072, 0.03, 0.11, fc=False),
     "openrouter/mistralai/mistral-small-3.2-24b-instruct": _mi(131072, 0.06, 0.18, fc=False),
-    "openrouter/mistralai/mistral-small-creative": _mi(32768, 0.10, 0.30, fc=False),  # Creative writing
+    "openrouter/mistralai/mistral-small-creative": _mi(32768, 0.10, 0.30, fc=False),
     "openrouter/mistralai/mistral-tiny": _mi(32768, 0.25, 0.25, fc=False),
     "openrouter/mistralai/mixtral-8x22b-instruct": _mi(65536, 2.00, 6.00, fc=False),
     "openrouter/mistralai/mixtral-8x7b-instruct": _mi(32768, 0.54, 0.54, fc=False),
@@ -582,9 +582,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - OpenAI (additional)
     # ==========================================================================
     "openrouter/openai/gpt-5-pro": _mi(400000, 15.00, 120.00),
-    "openrouter/openai/gpt-5.1": _mi(400000, 1.25, 10.00),
     "openrouter/openai/gpt-5.1-chat": _mi(128000, 1.25, 10.00),
-    "openrouter/openai/gpt-5.2": _mi(400000, 1.75, 14.00),
     "openrouter/openai/gpt-5.2-chat": _mi(128000, 1.75, 14.00),
     "openrouter/openai/gpt-5.2-pro": _mi(400000, 21.00, 168.00),
     "openrouter/openai/gpt-5-codex": _mi(400000, 1.25, 10.00),
@@ -601,10 +599,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - Perplexity (additional)
     # ==========================================================================
     "openrouter/perplexity/sonar-pro-search": _mi(200000, 3.00, 15.00, fc=False),  # Agentic search
-    # ==========================================================================
-    # OpenRouter models - Prime Intellect
-    # ==========================================================================
-    "openrouter/prime-intellect/intellect-3": _mi(131072, 0.20, 1.10, fc=False),
     # ==========================================================================
     # OpenRouter models - TNG Tech
     # ==========================================================================
@@ -646,7 +640,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Baidu (additional)
     # ==========================================================================
-    "openrouter/baidu/ernie-4.5-21b-a3b-thinking": _mi(131072, 0.07, 0.28, fc=False),  # SLOW: thinking
+    "openrouter/baidu/ernie-4.5-21b-a3b-thinking": _mi(131072, 0.07, 0.28, fc=False),
     "openrouter/baidu/ernie-4.5-300b-a47b": _mi(123000, 0.28, 1.10, fc=False),
     "openrouter/baidu/ernie-4.5-vl-28b-a3b": _mi(30000, 0.14, 0.56),  # Vision model
     "openrouter/baidu/ernie-4.5-vl-424b-a47b": _mi(123000, 0.42, 1.25, fc=False),  # Vision model
@@ -665,11 +659,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Google (additional)
     # ==========================================================================
-    "openrouter/google/gemini-2.5-flash-image": _mi(32768, 0.30, 2.50, fc=False, gen=False),  # Image gen
+    "openrouter/google/gemini-2.5-flash-image": _mi(32768, 0.30, 2.50, fc=False, gen=False),
     "openrouter/google/gemini-2.5-flash-lite-preview-09-2025": _mi(1048576, 0.10, 0.40, fc=False),
     "openrouter/google/gemini-2.5-flash-preview-09-2025": _mi(1048576, 0.30, 2.50, fc=False),
     "openrouter/google/gemini-2.5-pro-preview-05-06": _mi(1048576, 1.25, 10.00, fc=False),
-    "openrouter/google/gemini-3-pro-image-preview": _mi(65536, 2.00, 12.00, fc=False, gen=False),  # Image
+    "openrouter/google/gemini-3-pro-image-preview": _mi(65536, 2.00, 12.00, fc=False, gen=False),
     "openrouter/google/gemma-2-27b-it": _mi(8192, 0.65, 0.65, fc=False),
     "openrouter/google/gemma-2-9b-it": _mi(8192, 0.03, 0.09, fc=False),
     # ==========================================================================
@@ -701,7 +695,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - Meta Llama (additional)
     # ==========================================================================
     "openrouter/meta-llama/llama-3.1-405b": _mi(32768, 4.00, 4.00, fc=False),
-    "openrouter/meta-llama/llama-3.2-11b-vision-instruct": _mi(131072, 0.05, 0.05, fc=False),  # Vision
+    "openrouter/meta-llama/llama-3.2-11b-vision-instruct": _mi(131072, 0.05, 0.05, fc=False),
     "openrouter/meta-llama/llama-3.2-1b-instruct": _mi(60000, 0.03, 0.20, fc=False),
     "openrouter/meta-llama/llama-guard-2-8b": _mi(8192, 0.20, 0.20, fc=False),  # Safety model
     "openrouter/meta-llama/llama-guard-3-8b": _mi(131072, 0.02, 0.06, fc=False),  # Safety model
@@ -791,7 +785,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-30b-a3b-thinking-2507": _mi(32768, 0.05, 0.34),  # SLOW: thinking
     "openrouter/qwen/qwen3-next-80b-a3b-thinking": _mi(128000, 0.15, 1.20),  # SLOW: thinking
     "openrouter/qwen/qwen3-vl-235b-a22b-instruct": _mi(262144, 0.20, 0.88),  # Vision model
-    "openrouter/qwen/qwen3-vl-235b-a22b-thinking": _mi(262144, 0.45, 3.50, fc=False),  # SLOW: thinking
+    "openrouter/qwen/qwen3-vl-235b-a22b-thinking": _mi(262144, 0.45, 3.50, fc=False),
     "openrouter/qwen/qwen3-vl-30b-a3b-instruct": _mi(262144, 0.15, 0.60),  # Vision model
     "openrouter/qwen/qwen3-vl-30b-a3b-thinking": _mi(131072, 0.20, 1.00),  # SLOW: thinking
     "openrouter/qwen/qwen3-vl-8b-instruct": _mi(131072, 0.08, 0.50),  # Vision model

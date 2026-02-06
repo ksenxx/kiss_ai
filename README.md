@@ -46,7 +46,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 Let's be honest. The AI agent ecosystem has become a jungle.
 
-Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, configuration files that rival tax forms, and dependency trees that make `node_modules` look tidy. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm. 
+Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, configuration files that rival tax forms, and dependency trees that make `node_modules` look tidy. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm.
 
 **What if there was another way?**
 
@@ -54,7 +54,7 @@ What if building AI agents could be as straightforward as the name suggests?
 
 Enter **KISS** — the *Keep It Simple, Stupid* Agent Framework.
 
-## 🚀 Your First Agent in 30 Seconds. 
+## 🚀 Your First Agent in 30 Seconds.
 
 Try the interactive Jupyter notebook by running `uv run notebook --lab`.
 
@@ -79,7 +79,7 @@ print(result)  # 127.05
 
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 
-KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations.  Everything just works.
+KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works.
 
 ## 📝 Blogs
 
@@ -168,8 +168,6 @@ print(f"Metrics: {best_variant.metrics}")
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
 
 For usage examples, API reference, and configuration options, please see the [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md).
-
-
 
 ## 💪 Using Relentless Coding Agent
 
@@ -356,17 +354,13 @@ uv sync --group claude --group dev
 
 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
 
-
-
 ## 🎯 Using GEPA for Prompt Optimization
-
 
 KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
 
 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
-
 
 KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
@@ -407,7 +401,6 @@ print(f"Dynamic tools created: {stats['dynamic_tools']}")
 - **Error Recovery**: Automatic retry logic with configurable max retries
 - **Docker Isolation**: Runs code execution in isolated Docker containers
 - **Self-Evolution**: Uses KISSEvolve to optimize for efficiency and accuracy
-
 
 **Evolving the Agent:**
 
@@ -600,6 +593,7 @@ The SWE-bench Verified agent is a Software Engineering agent that:
 
 See the [SWE-bench Verified README](src/kiss/evals/swe_agent_verified/README.md) for detailed documentation.
  -->
+
 ## 🔍 Using SimpleRAG for Retrieval-Augmented Generation
 
 SimpleRAG provides a lightweight RAG system with in-memory vector storage and similarity search:
@@ -832,8 +826,6 @@ with DockerManager(image_name="nginx", ports={80: 8080}) as docker:
 The Docker manager automatically handles image pulling, container lifecycle, and cleanup of temporary directories.
 
 ## 📁 Project Structure -->
-
-
 
 ```
 kiss/
@@ -1114,7 +1106,6 @@ The visualizer provides:
 - **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
 
 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
-
 
 ## 🤖 Models Supported
 
