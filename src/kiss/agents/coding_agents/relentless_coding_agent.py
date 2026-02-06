@@ -18,6 +18,7 @@ from kiss.core.compact_formatter import CompactFormatter
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
@@ -241,6 +242,7 @@ class RelentlessCodingAgent(Base):
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
                 formatter=self.formatter,
+                token_callback=self.token_callback,
             )
             self.budget_used += executor.budget_used  # type: ignore
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
@@ -298,6 +300,7 @@ class RelentlessCodingAgent(Base):
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
                 formatter=self.formatter,
+                token_callback=self.token_callback,
             )
             self.budget_used += executor.budget_used  # type: ignore
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
@@ -325,6 +328,7 @@ class RelentlessCodingAgent(Base):
         writable_paths: list[str] | None = None,
         docker_image: str | None = None,
         formatter: Formatter | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str:
         """Run the multi-agent coding system.
 
@@ -347,6 +351,8 @@ class RelentlessCodingAgent(Base):
                 If provided, bash commands will be executed inside the Docker container.
                 Example: "ubuntu:latest", "python:3.11-slim".
             formatter: The formatter to use for the agent. If None, the default formatter is used.
+            token_callback: Optional async callback invoked with each streamed text token.
+                Default is None.
         Returns:
             The result of the task.
         """
@@ -366,6 +372,7 @@ class RelentlessCodingAgent(Base):
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
         self.formatter = formatter or CompactFormatter()
+        self.token_callback = token_callback
 
         # Run with Docker container if docker_image is provided
         if self.docker_image:

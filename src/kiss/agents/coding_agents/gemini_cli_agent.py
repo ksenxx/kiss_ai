@@ -19,6 +19,7 @@ from google.genai import types
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.useful_tools import UsefulTools
@@ -199,7 +200,9 @@ class GeminiCliAgent(Base):
 
         return [read_file, write_file, list_dir, run_shell, web_search]
 
-    def _process_events(self, events: list[Any], timestamp: int) -> str | None:
+    def _process_events(
+        self, events: list[Any], timestamp: int
+    ) -> tuple[str | None, list[str]]:
         """Process events from the runner and update state.
 
         Args:
@@ -207,9 +210,11 @@ class GeminiCliAgent(Base):
             timestamp: Unix timestamp for the events.
 
         Returns:
-            str | None: The final text result if available.
+            A tuple of (final_text, streamed_texts) where streamed_texts
+            are text chunks suitable for streaming to token_callback.
         """
         final_text = None
+        streamed_texts: list[str] = []
 
         for event in events:
             self.step_count += 1
@@ -230,6 +235,7 @@ class GeminiCliAgent(Base):
                             final_text = part.text
                             self._formatter.print_label_and_value("FINAL", f"{part.text[:200]}...")
                             self._add_message("model", part.text, timestamp)
+                            streamed_texts.append(part.text)
 
             # Process content parts
             elif event.content and event.content.parts:
@@ -237,6 +243,7 @@ class GeminiCliAgent(Base):
                     if hasattr(part, "text") and part.text:
                         self._formatter.print_label_and_value("MESSAGE", f"{part.text[:200]}...")
                         self._add_message("model", part.text, timestamp)
+                        streamed_texts.append(part.text)
                     elif hasattr(part, "function_call") and part.function_call:
                         name = part.function_call.name
                         args = part.function_call.args
@@ -247,8 +254,9 @@ class GeminiCliAgent(Base):
                         display = str(response)[:200]
                         self._formatter.print_label_and_value("TOOL RESULT", f"{display}...")
                         self._add_message("user", str(response), timestamp)
+                        streamed_texts.append(str(response))
 
-        return final_text
+        return final_text, streamed_texts
 
     def run(
         self,
@@ -261,6 +269,7 @@ class GeminiCliAgent(Base):
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
         formatter: Formatter | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str | None:
         """Run the Gemini CLI agent for a given task.
 
@@ -274,6 +283,8 @@ class GeminiCliAgent(Base):
                 paths are resolved if they are not absolute.
             readable_paths: The paths from which the agent is allowed to read from.
             writable_paths: The paths to which the agent is allowed to write to.
+            token_callback: Optional async callback invoked with each streamed text token.
+                Default is None.
 
         Returns:
             The result of the task.
@@ -297,6 +308,7 @@ class GeminiCliAgent(Base):
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
+        self.token_callback = token_callback
 
         async def _run_async() -> str | None:
             task = prompt_template.format(**(arguments or {}))
@@ -345,7 +357,11 @@ class GeminiCliAgent(Base):
                     timestamp = int(time.time())
 
                 # Process all collected events
-                final_result = self._process_events(events_list, timestamp)
+                final_result, streamed_texts = self._process_events(events_list, timestamp)
+
+                if self.token_callback:
+                    for text in streamed_texts:
+                        await self.token_callback(text)
 
                 self._formatter.print_label_and_value(
                     "GEMINI AGENT", f"Completed with {self.step_count} steps"

@@ -40,6 +40,7 @@ CODING_INSTRUCTIONS = """
 - Run lint and typecheckers and fix any lint and typecheck errors
 - Generate comprehensive tests so that you achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, or any form of test doubles
+- Integration tests are highly encouraged
 - You MUST not add tests that are redundant or duplicate of existing
   tests or does not add new coverage over existing tests
 - Generate meaningful stress tests for the code if you are
@@ -61,7 +62,7 @@ CODING_INSTRUCTIONS = """
 - Find examples of similar implementations
 - Understand existing code in the project
 
-## After you have implemented the task, simplify and clean up the code
+## After you have implemented the task, aggresively and carefully simplify and clean up the code
  - Remove unnessary object/struct attributes, variables, config variables
  - Avoid object/struct attribute redirections
  - Remove unnessary conditional checks

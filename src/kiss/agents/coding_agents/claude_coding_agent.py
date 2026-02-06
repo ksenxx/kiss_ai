@@ -27,6 +27,7 @@ from claude_agent_sdk import (
 
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.utils import is_subpath, resolve_path
 
@@ -142,12 +143,15 @@ class ClaudeCodingAgent(Base):
             self.total_tokens_used += getattr(message.usage, "input_tokens", 0)
             self.total_tokens_used += getattr(message.usage, "output_tokens", 0)
 
-    def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> None:
+    def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> str:
         """Process assistant message and update state.
 
         Args:
             message: The assistant message from the Claude SDK.
             timestamp: Unix timestamp for the message.
+
+        Returns:
+            str: The extracted thought text (for streaming to token_callback).
         """
         self.step_count += 1
         self._update_token_usage(message)
@@ -163,13 +167,17 @@ class ClaudeCodingAgent(Base):
                 print(f"[THOUGHT] {block.text}")
 
         self._add_message("model", thought + tool_call, timestamp)
+        return thought
 
-    def _process_user_message(self, message: UserMessage, timestamp: int) -> None:
+    def _process_user_message(self, message: UserMessage, timestamp: int) -> str:
         """Process user message (tool results) and update state.
 
         Args:
             message: The user message containing tool results.
             timestamp: Unix timestamp for the message.
+
+        Returns:
+            str: The concatenated tool result text (for streaming to token_callback).
         """
         result = ""
         for block in message.content:
@@ -181,6 +189,7 @@ class ClaudeCodingAgent(Base):
                 result += f"{status}\n{content}\n"
 
         self._add_message("user", result, timestamp)
+        return result
 
     def _process_result_message(self, message: ResultMessage, timestamp: int) -> str | None:
         """Process final result message and return the result.
@@ -212,6 +221,7 @@ class ClaudeCodingAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str | None:
         """Run the claude coding agent for a given task.
 
@@ -225,6 +235,8 @@ class ClaudeCodingAgent(Base):
                 paths are resolved if they are not absolute.
             readable_paths: The paths from which the agent is allowed to read from.
             writable_paths: The paths to which the agent is allowed to write to.
+            token_callback: Optional async callback invoked with each streamed text token.
+                Default is None.
 
         Returns:
             The result of the task.
@@ -247,6 +259,7 @@ class ClaudeCodingAgent(Base):
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
+        self.token_callback = token_callback
 
         async def _run_async() -> str | None:
             options = ClaudeAgentOptions(
@@ -266,12 +279,16 @@ class ClaudeCodingAgent(Base):
             final_result: str | None = None
 
             async for message in query(prompt=prompt_stream(), options=options):
+                text = ""
                 if isinstance(message, AssistantMessage):
-                    self._process_assistant_message(message, timestamp)
+                    text = self._process_assistant_message(message, timestamp)
                 elif isinstance(message, UserMessage):
-                    self._process_user_message(message, timestamp)
+                    text = self._process_user_message(message, timestamp)
                 elif isinstance(message, ResultMessage):
                     final_result = self._process_result_message(message, timestamp)
+                    text = final_result or ""
+                if self.token_callback and text:
+                    await self.token_callback(text)
                 timestamp = int(time.time())
 
             self._save()

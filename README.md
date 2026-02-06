@@ -971,6 +971,7 @@ kiss/
 │   │   ├── test_openai_codex_agent.py     # Tests for OpenAI Codex Agent
 │   │   ├── test_agent_evolver.py          # Tests for Agent Evolver
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
+│   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents
 │   │   ├── test_search_web.py
 │   │   └── test_useful_tools.py
 │   ├── py.typed          # PEP 561 marker for type checking

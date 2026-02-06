@@ -212,6 +212,7 @@ def run(
     writable_paths: list[str] | None = None,
     docker_image: str | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str
 ```
 
@@ -232,6 +233,7 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
 - `formatter` (Formatter | None): Custom formatter for output. Default is `CompactFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. The callback is passed through to the underlying KISSAgent instances for both orchestrator and executor sub-agents. Default is None.
 
 **Returns:**
 
@@ -298,6 +300,7 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 - `docker_image` (str | None): The Docker image name if Docker execution is enabled.
 - `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
 - `useful_tools` (UsefulTools): The UsefulTools instance used for bash/edit operations.
+- `token_callback` (TokenCallback | None): The token callback passed to `run()`.
 
 ### Key Features
 
@@ -418,6 +421,7 @@ def run(
     writable_paths: list[str] | None = None,
     docker_image: str | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str
 ```
 
@@ -439,6 +443,7 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
 - `formatter` (Formatter | None): Custom formatter for output. Default is `CompactFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. The callback is passed through to the underlying KISSAgent instances for both orchestrator and executor sub-agents. Default is None.
 
 **Returns:**
 
@@ -510,6 +515,7 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 - `docker_image` (str | None): The Docker image name if Docker execution is enabled.
 - `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
 - `useful_tools` (UsefulTools): The UsefulTools instance used for bash/edit operations.
+- `token_callback` (TokenCallback | None): The token callback passed to `run()`.
 
 ### Key Features
 
@@ -609,6 +615,7 @@ def run(
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str | None
 ```
 
@@ -624,6 +631,7 @@ Run the Claude coding agent for a given task.
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/claude_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for Read/Grep/Glob.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for Write/Edit/MultiEdit.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with assistant text, tool result text, and the final result. Default is None.
 
 **Returns:**
 
@@ -720,6 +728,7 @@ def run(
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str | None
 ```
 
@@ -736,6 +745,7 @@ Run the Gemini CLI agent for a given task.
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with text content and tool response text from ADK events. Default is None.
 
 **Returns:**
 
@@ -828,6 +838,7 @@ def run(
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str | None
 ```
 
@@ -844,6 +855,7 @@ Run the OpenAI Codex agent for a given task.
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with message text and tool output text from the Agents SDK result. Default is None.
 
 **Returns:**
 
@@ -2384,6 +2396,15 @@ When passed to `KISSAgent.run()`, the callback receives:
 
 1. **Model response tokens** as they are generated.
 1. **Tool execution output** after each tool call completes (including error messages from failed tool calls).
+
+### Coding Agent Integration
+
+All coding agents support `token_callback` in their `run()` methods:
+
+- **KISSCodingAgent / RelentlessCodingAgent**: The callback is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents. Streamed content includes model response tokens and tool output from all sub-agents.
+- **ClaudeCodingAgent**: The callback receives assistant thought text, tool result text, and the final result message as they are processed from the Claude Agent SDK message stream.
+- **GeminiCliAgent**: The callback receives text content and tool response text from ADK events after all events are collected and processed.
+- **OpenAICodexAgent**: The callback receives message text and tool output text from the Agents SDK run result after processing.
 
 ### Example
 
