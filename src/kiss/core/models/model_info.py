@@ -15,7 +15,7 @@ from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model
+from kiss.core.models.model import Model, TokenCallback
 
 try:
     from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -884,12 +884,17 @@ def get_flaky_reason(model_name: str) -> str:
     return FLAKY_MODELS.get(model_name, "")
 
 
-def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
+def model(
+    model_name: str,
+    model_config: dict[str, Any] | None = None,
+    token_callback: TokenCallback | None = None,
+) -> Model:
     """Get a model instance based on model name prefix.
 
     Args:
         model_name: The name of the model (with provider prefix if applicable).
         model_config: Optional dictionary of model configuration parameters.
+        token_callback: Optional async callback invoked with each streamed text token.
 
     Returns:
         Model: An appropriate Model instance for the specified model.
@@ -908,6 +913,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
             base_url="https://openrouter.ai/api/v1",
             api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENROUTER_API_KEY,
             model_config=model_config,
+            token_callback=token_callback,
         )
     # Google Gemini embedding models (text-embedding-004 is Gemini, not OpenAI)
     elif model_name == "text-embedding-004":
@@ -919,6 +925,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
             model_name=model_name,
             api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
             model_config=model_config,
+            token_callback=token_callback,
         )
     # OpenAI models (generation and embedding)
     elif model_name.startswith(
@@ -933,6 +940,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
             base_url="https://api.openai.com/v1",
             api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY,
             model_config=model_config,
+            token_callback=token_callback,
         )
     # Together AI models (generation and embedding)
     elif model_name.startswith(
@@ -967,6 +975,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
             base_url="https://api.together.xyz/v1",
             api_key=config_module.DEFAULT_CONFIG.agent.api_keys.TOGETHER_API_KEY,
             model_config=model_config,
+            token_callback=token_callback,
         )
     # Anthropic Claude models (direct Anthropic API)
     elif model_name.startswith("claude-"):
@@ -978,6 +987,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
             model_name=model_name,
             api_key=config_module.DEFAULT_CONFIG.agent.api_keys.ANTHROPIC_API_KEY,
             model_config=model_config,
+            token_callback=token_callback,
         )
     # Google Gemini models (direct Google API)
     elif model_name.startswith("gemini-"):
@@ -989,6 +999,7 @@ def model(model_name: str, model_config: dict[str, Any] | None = None) -> Model:
             model_name=model_name,
             api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
             model_config=model_config,
+            token_callback=token_callback,
         )
     else:
         raise KISSError(f"Unknown model name: {model_name}")

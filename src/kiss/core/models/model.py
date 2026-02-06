@@ -5,11 +5,15 @@
 
 """Abstract base class for LLM provider model implementations."""
 
+import asyncio
 import inspect
 import types as types_module
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any, Union, get_args, get_origin
+
+# Type alias for the async token streaming callback.
+TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
 
 
 class Model(ABC):
@@ -20,6 +24,7 @@ class Model(ABC):
         model_name: str,
         model_description: str = "",
         model_config: dict[str, Any] | None = None,
+        token_callback: TokenCallback | None = None,
     ):
         """Initialize a Model instance.
 
@@ -27,13 +32,36 @@ class Model(ABC):
             model_name: The name/identifier of the model.
             model_description: Optional description of the model.
             model_config: Optional dictionary of model configuration parameters.
+            token_callback: Optional async callback invoked with each streamed text token.
         """
         self.model_name = model_name
         self.model_description = model_description
         self.model_config = model_config or {}
+        self.token_callback = token_callback
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
+        # Reusable event loop for invoking the async callback from sync code.
+        self._callback_loop: asyncio.AbstractEventLoop | None = None
+
+    def _invoke_token_callback(self, token: str) -> None:
+        """Invoke the async token_callback synchronously.
+
+        Args:
+            token: The text token to pass to the callback.
+        """
+        if self.token_callback is None:
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop and running_loop.is_running():
+            running_loop.create_task(self.token_callback(token))
+            return
+        if self._callback_loop is None or self._callback_loop.is_closed():
+            self._callback_loop = asyncio.new_event_loop()
+        self._callback_loop.run_until_complete(self.token_callback(token))
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.model_name})"

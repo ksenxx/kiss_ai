@@ -310,6 +310,7 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Native Function Calling**: Seamless tool integration using native function calling APIs (OpenAI, Anthropic, Gemini, Together AI, and OpenRouter)
 - **Docker Integration**: Built-in Docker manager for running agents in isolated environments
 - **Trajectory Tracking**: Automatic saving of agent execution trajectories with unified state management
+- **Token Streaming**: Real-time token streaming via async callback for all providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter), including tool execution output
 - **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
 - **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
 - **Self-Evolution**: Framework for agents to evolve and refine other multi agents
@@ -915,7 +916,7 @@ kiss/
 │   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
 │   │   ├── useful_tools.py    # UsefulTools class with path-restricted bash execution, search_web, fetch_url
 │   │   └── models/            # Model implementations
-│   │       ├── model.py           # Model interface
+│   │       ├── model.py           # Model interface with TokenCallback streaming support
 │   │       ├── gemini_model.py    # Gemini model implementation
 │   │       ├── openai_compatible_model.py # OpenAI-compatible API model (OpenAI, Together AI, OpenRouter)
 │   │       ├── anthropic_model.py # Anthropic model implementation
@@ -969,6 +970,7 @@ kiss/
 │   │   ├── test_gemini_cli_agent.py       # Tests for Gemini CLI Agent
 │   │   ├── test_openai_codex_agent.py     # Tests for OpenAI Codex Agent
 │   │   ├── test_agent_evolver.py          # Tests for Agent Evolver
+│   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_search_web.py
 │   │   └── test_useful_tools.py
 │   ├── py.typed          # PEP 561 marker for type checking

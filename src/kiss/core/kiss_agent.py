@@ -14,6 +14,7 @@ from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.useful_tools import fetch_url, search_web
@@ -76,6 +77,7 @@ class KISSAgent(Base):
         max_steps: int | None = None,
         max_budget: float | None = None,
         model_config: dict[str, Any] | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -96,12 +98,15 @@ class KISSAgent(Base):
                 Default is DEFAULT_CONFIG.agent.max_agent_budget.
             model_config (dict[str, Any] | None): The model configuration to use for the agent.
                 Default is None.
+            token_callback (TokenCallback | None): Optional async callback invoked with each
+                streamed text token. Default is None.
         Returns:
             str: The result of the agent's task.
         """
         try:
             self._initialize_run(
-                model_name, formatter, is_agentic, max_steps, max_budget, model_config
+                model_name, formatter, is_agentic, max_steps, max_budget, model_config,
+                token_callback
             )
 
             if not self.is_agentic and tools is not None:
@@ -133,6 +138,7 @@ class KISSAgent(Base):
         max_steps: int | None,
         max_budget: float | None,
         model_config: dict[str, Any] | None,
+        token_callback: TokenCallback | None = None,
     ) -> None:
         """Initialize run parameters.
 
@@ -143,8 +149,9 @@ class KISSAgent(Base):
             max_steps: Maximum steps allowed in the ReAct loop. If None, uses default.
             max_budget: Maximum budget in dollars for this run. If None, uses default.
             model_config: Optional model-specific configuration dictionary.
+            token_callback: Optional async callback invoked with each streamed text token.
         """
-        self.model = model(model_name, model_config=model_config)
+        self.model = model(model_name, model_config=model_config, token_callback=token_callback)
         self._formatter = formatter or SimpleFormatter()
         self.is_agentic = is_agentic
         self.max_steps = (
@@ -297,6 +304,9 @@ class KISSAgent(Base):
             function_response = str(self._tool_map[function_name](**function_args))
         except Exception as e:
             function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
+
+        # Stream tool output through the same token callback.
+        self.model._invoke_token_callback(function_response)
 
         model_content = response_text + "\n" + call_repr + "\n" + usage_info
         self._add_message_with_formatter("model", model_content, start_timestamp)

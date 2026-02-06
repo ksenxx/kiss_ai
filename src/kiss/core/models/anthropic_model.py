@@ -11,7 +11,7 @@ from typing import Any
 from anthropic import Anthropic
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model
+from kiss.core.models.model import Model, TokenCallback
 
 
 class AnthropicModel(Model):
@@ -22,6 +22,7 @@ class AnthropicModel(Model):
         model_name: str,
         api_key: str,
         model_config: dict[str, Any] | None = None,
+        token_callback: TokenCallback | None = None,
     ):
         """Initialize an AnthropicModel instance.
 
@@ -29,8 +30,9 @@ class AnthropicModel(Model):
             model_name: The name of the Claude model to use.
             api_key: The Anthropic API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
+            token_callback: Optional async callback invoked with each streamed text token.
         """
-        super().__init__(model_name, model_config=model_config)
+        super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.api_key = api_key
 
     def initialize(self, prompt: str) -> None:
@@ -148,6 +150,22 @@ class AnthropicModel(Model):
             kwargs["tools"] = tools
         return kwargs
 
+    def _create_message(self, kwargs: dict[str, Any]) -> Any:
+        """Create a message, streaming tokens to the callback when set.
+
+        Args:
+            kwargs: Keyword arguments for the Anthropic API call.
+
+        Returns:
+            The raw Anthropic response message.
+        """
+        if self.token_callback is not None:
+            with self.client.messages.stream(**kwargs) as stream:
+                for text in stream.text_stream:
+                    self._invoke_token_callback(text)
+            return stream.get_final_message()
+        return self.client.messages.create(**kwargs)
+
     def generate(self) -> tuple[str, Any]:
         """Generates content from the current conversation.
 
@@ -155,7 +173,8 @@ class AnthropicModel(Model):
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
         kwargs = self._build_create_kwargs()
-        response = self.client.messages.create(**kwargs)
+        response = self._create_message(kwargs)
+
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
         content = self._extract_text_from_blocks(blocks)
         self.conversation.append({"role": "assistant", "content": blocks or content})
@@ -175,7 +194,7 @@ class AnthropicModel(Model):
         """
         tools = self._build_anthropic_tools_schema(function_map)
         kwargs = self._build_create_kwargs(tools=tools or None)
-        response = self.client.messages.create(**kwargs)
+        response = self._create_message(kwargs)
 
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
         content = self._extract_text_from_blocks(blocks)

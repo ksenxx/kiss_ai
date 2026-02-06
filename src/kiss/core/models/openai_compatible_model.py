@@ -15,7 +15,7 @@ from typing import Any
 from openai import OpenAI
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model
+from kiss.core.models.model import Model, TokenCallback
 
 # DeepSeek R1 reasoning models use <think>...</think> tags for chain-of-thought
 # These models need text-based tool calling instead of native function calling
@@ -190,6 +190,7 @@ class OpenAICompatibleModel(Model):
         base_url: str,
         api_key: str,
         model_config: dict[str, Any] | None = None,
+        token_callback: TokenCallback | None = None,
     ):
         """Initialize an OpenAI-compatible model.
 
@@ -198,8 +199,9 @@ class OpenAICompatibleModel(Model):
             base_url: The base URL for the API endpoint (e.g., "http://localhost:11434/v1").
             api_key: API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
+            token_callback: Optional async callback invoked with each streamed text token.
         """
-        super().__init__(model_name, model_config=model_config)
+        super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.base_url = base_url
         self.api_key = api_key
         # For OpenRouter, strip the "openrouter/" prefix from model name for API calls
@@ -237,6 +239,116 @@ class OpenAICompatibleModel(Model):
         """
         return self.model_name in DEEPSEEK_REASONING_MODELS
 
+    @staticmethod
+    def _parse_tool_call_accum(
+        accum: dict[int, dict[str, str]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Parse accumulated streaming tool-call deltas into structured lists.
+
+        Args:
+            accum: Mapping of tool-call index to accumulated id/name/arguments strings.
+
+        Returns:
+            A tuple of (function_calls, raw_tool_calls) for conversation storage.
+        """
+        function_calls: list[dict[str, Any]] = []
+        raw_tool_calls: list[dict[str, Any]] = []
+        for idx in sorted(accum):
+            tc = accum[idx]
+            try:
+                arguments = json.loads(tc["arguments"])
+            except json.JSONDecodeError:
+                arguments = {}
+            function_calls.append({"id": tc["id"], "name": tc["name"], "arguments": arguments})
+            raw_tool_calls.append(
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                }
+            )
+        return function_calls, raw_tool_calls
+
+    @staticmethod
+    def _parse_tool_calls_from_message(
+        message: Any,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Extract tool calls from a non-streamed OpenAI message.
+
+        Args:
+            message: The message object from a chat completion response.
+
+        Returns:
+            A tuple of (function_calls, raw_tool_calls) for conversation storage.
+        """
+        if not message.tool_calls:
+            return [], []
+        function_calls: list[dict[str, Any]] = []
+        raw_tool_calls: list[dict[str, Any]] = []
+        for tc in message.tool_calls:
+            try:
+                arguments = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+            function_calls.append({"id": tc.id, "name": tc.function.name, "arguments": arguments})
+            raw_tool_calls.append(
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+            )
+        return function_calls, raw_tool_calls
+
+    @staticmethod
+    def _finalize_stream_response(response: Any | None, last_chunk: Any | None) -> Any:
+        """Pick the best response object from a stream.
+
+        Args:
+            response: The chunk containing usage info, if seen.
+            last_chunk: The last chunk seen in the stream.
+
+        Returns:
+            A response-like object with usage info when available.
+        """
+        if response is not None:
+            return response
+        if last_chunk is not None:
+            return last_chunk
+        raise KISSError("Streaming response was empty.")
+
+    def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:
+        """Stream a chat completion, invoking the token callback for each text delta.
+
+        When no callback is set, falls back to a normal (non-streaming) call.
+
+        Args:
+            kwargs: Keyword arguments for the OpenAI chat completions API.
+
+        Returns:
+            A tuple of (content, response).
+        """
+        if self.token_callback is None:
+            response = self.client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content or "", response
+
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+        content = ""
+        response = None
+        last_chunk = None
+        for chunk in self.client.chat.completions.create(**kwargs):
+            last_chunk = chunk
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    content += delta.content
+                    self._invoke_token_callback(delta.content)
+            if chunk.usage is not None:
+                response = chunk
+        response = self._finalize_stream_response(response, last_chunk)
+        return content, response
+
     def generate(self) -> tuple[str, Any]:
         """Generate content from prompt without tools.
 
@@ -251,8 +363,8 @@ class OpenAICompatibleModel(Model):
                 "messages": self.conversation,
             }
         )
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content or ""
+
+        content, response = self._stream_text(kwargs)
 
         # For DeepSeek R1 reasoning models, extract the final answer (strip <think> tags)
         if self._is_deepseek_reasoning_model():
@@ -288,46 +400,58 @@ class OpenAICompatibleModel(Model):
                 "tools": tools or None,
             }
         )
-        response = self.client.chat.completions.create(**kwargs)
 
-        message = response.choices[0].message
-        content = message.content or ""
-        function_calls: list[dict[str, Any]] = []
+        if self.token_callback is not None:
+            # Streaming path: accumulate text and tool-call deltas.
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+            content = ""
+            tool_calls_accum: dict[int, dict[str, str]] = {}
+            response = None
+            last_chunk = None
+            for chunk in self.client.chat.completions.create(**kwargs):
+                last_chunk = chunk
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta:
+                        if delta.content:
+                            content += delta.content
+                            self._invoke_token_callback(delta.content)
+                        if delta.tool_calls:
+                            for tc_delta in delta.tool_calls:
+                                idx = tc_delta.index
+                                if idx not in tool_calls_accum:
+                                    tool_calls_accum[idx] = {
+                                        "id": "",
+                                        "name": "",
+                                        "arguments": "",
+                                    }
+                                if tc_delta.id:
+                                    tool_calls_accum[idx]["id"] = tc_delta.id
+                                if tc_delta.function:
+                                    if tc_delta.function.name:
+                                        tool_calls_accum[idx]["name"] = tc_delta.function.name
+                                    if tc_delta.function.arguments:
+                                        tool_calls_accum[idx]["arguments"] += (
+                                            tc_delta.function.arguments
+                                        )
+                if chunk.usage is not None:
+                    response = chunk
+            response = self._finalize_stream_response(response, last_chunk)
+            function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
+        else:
+            # Non-streaming path.
+            response = self.client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+            content = message.content or ""
+            function_calls, raw_tool_calls = self._parse_tool_calls_from_message(message)
 
-        if message.tool_calls:
-            for tc in message.tool_calls:
-                try:
-                    arguments = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
-                function_calls.append(
-                    {
-                        "id": tc.id,
-                        "name": tc.function.name,
-                        "arguments": arguments,
-                    }
-                )
-
+        if function_calls:
             self.conversation.append(
-                {
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in message.tool_calls
-                    ],
-                }
+                {"role": "assistant", "content": content, "tool_calls": raw_tool_calls}
             )
         else:
             self.conversation.append({"role": "assistant", "content": content})
-
         return function_calls, content, response
 
     def _generate_with_text_based_tools(
@@ -368,10 +492,8 @@ class OpenAICompatibleModel(Model):
                 "messages": modified_conversation,
             }
         )
-        response = self.client.chat.completions.create(**kwargs)
 
-        message = response.choices[0].message
-        content = message.content or ""
+        content, response = self._stream_text(kwargs)
 
         # For DeepSeek R1, extract reasoning and final answer
         _, content_clean = _extract_deepseek_reasoning(content)

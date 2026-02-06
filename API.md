@@ -61,6 +61,7 @@ def run(
     max_steps: int | None = None,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str
 ```
 
@@ -77,6 +78,7 @@ Runs the agent's main ReAct loop to solve the task.
 - `max_steps` (int | None): Maximum number of ReAct loop iterations. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
 - `max_budget` (float | None): Maximum budget in USD for this agent run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`, which is 10.0).
 - `model_config` (dict[str, Any] | None): Optional model configuration to pass to the model. Default is None.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. When set, model responses are streamed and each text delta is passed to this callback. Tool execution output is also streamed through this callback. The callback signature is `async def callback(token: str) -> None`. Default is None.
 
 **Returns:**
 
@@ -2352,6 +2354,61 @@ Print a label and value pair with distinct colors. No output if verbose mode is 
 - `value` (str): The value to print.
 
 ______________________________________________________________________
+
+## Token Streaming Callback
+
+The KISS framework supports real-time token streaming through an async callback mechanism. When a `token_callback` is provided, model responses are streamed token-by-token instead of waiting for the full response. Tool execution output is also streamed through the same callback.
+
+### TokenCallback Type
+
+```python
+from kiss.core.models.model import TokenCallback
+
+# Type alias:
+TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
+```
+
+A `TokenCallback` is an async function that receives a single string token and returns nothing. It is invoked synchronously from the model layer using an internal event loop bridge.
+
+### Streaming Behavior by Provider
+
+- **Anthropic (Claude)**: Uses `messages.stream()` with `text_stream` for both `generate()` and `generate_and_process_with_tools()`.
+- **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
+- **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`.
+
+When `token_callback` is `None`, all providers fall back to their original non-streaming code paths with no behavioral change.
+
+### KISSAgent Integration
+
+When passed to `KISSAgent.run()`, the callback receives:
+
+1. **Model response tokens** as they are generated.
+1. **Tool execution output** after each tool call completes (including error messages from failed tool calls).
+
+### Example
+
+```python
+import asyncio
+from kiss.core.kiss_agent import KISSAgent
+
+# Collect tokens into a list
+tokens: list[str] = []
+
+async def my_callback(token: str) -> None:
+    tokens.append(token)
+    print(token, end="", flush=True)  # Print tokens as they arrive
+
+agent = KISSAgent("streaming-agent")
+result = agent.run(
+    model_name="gpt-4o",
+    prompt_template="Write a haiku about programming.",
+    is_agentic=False,
+    token_callback=my_callback,
+)
+
+# tokens now contains each streamed text delta
+print(f"\nTotal tokens received: {len(tokens)}")
+```
 
 ______________________________________________________________________
 

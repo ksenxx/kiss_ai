@@ -5,6 +5,7 @@
 
 """Gemini model implementation for Google's GenAI models."""
 
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -12,7 +13,7 @@ from google import genai
 from google.genai import types
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model
+from kiss.core.models.model import Model, TokenCallback
 
 
 class GeminiModel(Model):
@@ -23,6 +24,7 @@ class GeminiModel(Model):
         model_name: str,
         api_key: str,
         model_config: dict[str, Any] | None = None,
+        token_callback: TokenCallback | None = None,
     ):
         """Initialize a GeminiModel instance.
 
@@ -30,8 +32,9 @@ class GeminiModel(Model):
             model_name: The name of the Gemini model to use.
             api_key: The Google API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
+            token_callback: Optional async callback invoked with each streamed text token.
         """
-        super().__init__(model_name, model_config=model_config)
+        super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
 
@@ -143,6 +146,35 @@ class GeminiModel(Model):
 
         return contents
 
+    @staticmethod
+    def _parts_from_response(response: Any) -> list[Any]:
+        """Extract parts from a Gemini response or chunk."""
+        if response and response.candidates:
+            candidate = response.candidates[0]
+            if candidate.content and candidate.content.parts:
+                return list(candidate.content.parts)
+        return []
+
+    def _parse_parts(self, parts: list[Any]) -> tuple[str, list[dict[str, Any]]]:
+        """Build content and function calls from Gemini parts."""
+        content = ""
+        function_calls: list[dict[str, Any]] = []
+        for part in parts:
+            if part.text:
+                content += part.text
+            if part.function_call:
+                call_id = f"call_{uuid.uuid4().hex[:8]}"
+                if part.thought_signature:
+                    self._thought_signatures[call_id] = part.thought_signature
+                function_calls.append(
+                    {
+                        "id": call_id,
+                        "name": part.function_call.name,
+                        "arguments": part.function_call.args,
+                    }
+                )
+        return content, function_calls
+
     def generate(self) -> tuple[str, Any]:
         """Generates content from prompt without tools.
 
@@ -158,11 +190,28 @@ class GeminiModel(Model):
             stop_sequences=self.model_config.get("stop"),
         )
 
-        response = self.client.models.generate_content(
-            model=self.model_name, contents=contents, config=config
-        )
+        if self.token_callback is not None:
+            content = ""
+            response = None
+            for chunk in self.client.models.generate_content_stream(
+                model=self.model_name, contents=contents, config=config
+            ):
+                if chunk.text:
+                    content += chunk.text
+                    self._invoke_token_callback(chunk.text)
+                response = chunk  # keep last chunk for usage_metadata
+            if response is None:
+                # Should not happen, but guard against empty stream
+                response = self.client.models.generate_content(
+                    model=self.model_name, contents=contents, config=config
+                )
+                content = response.text or ""
+        else:
+            response = self.client.models.generate_content(
+                model=self.model_name, contents=contents, config=config
+            )
+            content = response.text or ""
 
-        content = response.text or ""
         self.conversation.append({"role": "assistant", "content": content})
         return content, response
 
@@ -210,43 +259,34 @@ class GeminiModel(Model):
             tools=gemini_tools if gemini_tools else None,  # type: ignore[arg-type]
         )
 
-        response = self.client.models.generate_content(
-            model=self.model_name, contents=contents, config=config
-        )
+        all_parts: list[Any] = []
+        if self.token_callback is not None:
+            # Stream to get text token callbacks, then collect parts.
+            response = None
+            for chunk in self.client.models.generate_content_stream(
+                model=self.model_name, contents=contents, config=config
+            ):
+                response = chunk  # keep last for usage_metadata
+                parts = self._parts_from_response(chunk)
+                for part in parts:
+                    if part.text:
+                        self._invoke_token_callback(part.text)
+                all_parts.extend(parts)
+            if response is None:
+                response = self.client.models.generate_content(
+                    model=self.model_name, contents=contents, config=config
+                )
+                all_parts = self._parts_from_response(response)
+                for part in all_parts:
+                    if part.text:
+                        self._invoke_token_callback(part.text)
+        else:
+            response = self.client.models.generate_content(
+                model=self.model_name, contents=contents, config=config
+            )
+            all_parts = self._parts_from_response(response)
 
-        function_calls: list[dict[str, Any]] = []
-        content = ""
-
-        # Extract content and function calls from response
-        # response.candidates[0].content.parts
-        has_parts = (
-            response.candidates
-            and response.candidates[0].content
-            and response.candidates[0].content.parts
-        )
-        if has_parts:
-            for part in response.candidates[0].content.parts:
-                if part.text:
-                    content += part.text
-                if part.function_call:
-                    # Create a unique ID for the tool call
-                    # (Gemini doesn't provide one natively per call usually)
-                    # OpenAI uses IDs to map responses. We need to generate one.
-                    import uuid
-
-                    call_id = f"call_{uuid.uuid4().hex[:8]}"
-
-                    # Store thought_signature if present (required for Gemini 3.x models)
-                    if part.thought_signature:
-                        self._thought_signatures[call_id] = part.thought_signature
-
-                    function_calls.append(
-                        {
-                            "id": call_id,
-                            "name": part.function_call.name,
-                            "arguments": part.function_call.args,
-                        }
-                    )
+        content, function_calls = self._parse_parts(all_parts)
 
         self.conversation.append(
             {
