@@ -5,6 +5,6 @@
 
 """GEPA (Genetic-Pareto) prompt optimization package."""
 
-from kiss.agents.gepa.gepa import GEPA, PromptCandidate
+from kiss.agents.gepa.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate
 
-__all__ = ["GEPA", "PromptCandidate"]
+__all__ = ["GEPA", "GEPAPhase", "GEPAProgress", "PromptCandidate"]

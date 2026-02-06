@@ -24,7 +24,7 @@ Repeatedly:
 ## Quick Start
 
 ```python
-from kiss.agents.gepa import GEPA
+from kiss.agents.gepa import GEPA, GEPAProgress
 from kiss.core.kiss_agent import KISSAgent
 import json
 
@@ -41,6 +41,11 @@ def agent_wrapper(prompt_template: str, arguments: dict[str, str]):
 def evaluate(result: str) -> dict[str, float]:
     return {"success": 1.0 if "success" in result.lower() else 0.0}
 
+def on_progress(progress: GEPAProgress) -> None:
+    """Optional callback to track optimization progress."""
+    print(f"Gen {progress.generation}/{progress.max_generations} | "
+          f"{progress.phase.value} | Best: {progress.best_val_accuracy}")
+
 # Create optimizer
 gepa = GEPA(
     agent_wrapper=agent_wrapper,
@@ -48,6 +53,7 @@ gepa = GEPA(
     evaluation_fn=evaluate,
     max_generations=5,
     population_size=4,
+    progress_callback=on_progress,  # Optional progress tracking
 )
 
 # Run optimization
@@ -84,6 +90,7 @@ GEPA(
     use_merge: bool = True,
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 2,
+    progress_callback: Callable[[GEPAProgress], None] | None = None,
 )
 ```
 
@@ -102,6 +109,7 @@ GEPA(
 - `use_merge`: Enable structural merge from Pareto frontier (default: True)
 - `max_merge_invocations`: Maximum merge attempts per optimization run (default: 5)
 - `merge_val_overlap_floor`: Minimum shared validation instances for merge (default: 2)
+- `progress_callback`: Optional callback function called with `GEPAProgress` during optimization
 
 ### `GEPA.optimize`
 
@@ -117,11 +125,42 @@ optimize(
 - `train_examples`: Training examples (split into dev/val)
 - `dev_minibatch_size`: Dev examples per evaluation (default: all)
 
+### `GEPAPhase`
+
+Enum representing the current phase of GEPA optimization:
+
+```python
+class GEPAPhase(Enum):
+    DEV_EVALUATION = "dev_evaluation"    # Evaluating on dev set
+    VAL_EVALUATION = "val_evaluation"    # Evaluating on validation set
+    REFLECTION = "reflection"            # LLM reflecting to generate mutations
+    MUTATION_GATING = "mutation_gating"  # Testing if mutation should be accepted
+    MERGE = "merge"                      # Structural merge from Pareto frontier
+```
+
+### `GEPAProgress`
+
+Progress information passed to the callback during optimization:
+
+```python
+@dataclass
+class GEPAProgress:
+    generation: int              # Current generation number (0-indexed)
+    max_generations: int         # Total number of generations
+    phase: GEPAPhase             # Current optimization phase
+    candidate_id: int | None     # ID of current candidate (if applicable)
+    candidate_index: int | None  # Index in population (if applicable)
+    population_size: int         # Current population size
+    best_val_accuracy: float | None     # Best validation accuracy so far
+    current_val_accuracy: float | None  # Current candidate's validation accuracy
+    pareto_frontier_size: int    # Size of Pareto frontier
+    num_candidates_evaluated: int  # Candidates evaluated this generation
+    message: str                 # Description of current activity
+```
+
 ### `PromptCandidate`
 
 ```python
-from dataclasses import dataclass, field
-
 @dataclass
 class PromptCandidate:
     prompt_template: str
@@ -142,27 +181,61 @@ class PromptCandidate:
 - **Weighted Selection**: Parents selected by number of instance wins
 - **Trajectory-Based Reflection**: Uses agent trajectories (tool calls, reasoning steps) to guide prompt improvements
 - **Structural 3-Way Merge**: Combines complementary candidates using ancestry tracking and conflict resolution
+- **Progress Callbacks**: Real-time visibility into optimization progress for UI integration
+
+## Progress Callback Example
+
+Use the progress callback to integrate with progress bars or logging:
+
+```python
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from kiss.agents.gepa import GEPA, GEPAProgress, GEPAPhase
+
+# Track progress with Rich
+with Progress(
+    SpinnerColumn(),
+    TextColumn("[progress.description]{task.description}"),
+) as progress:
+    task = progress.add_task("Optimizing...", total=None)
+
+    def on_progress(p: GEPAProgress) -> None:
+        progress.update(
+            task,
+            description=(
+                f"Gen {p.generation+1}/{p.max_generations} | "
+                f"{p.phase.value} | "
+                f"Best: {p.best_val_accuracy:.2%}" if p.best_val_accuracy else "..."
+            ),
+        )
+
+    gepa = GEPA(
+        agent_wrapper=agent_wrapper,
+        initial_prompt_template=initial_prompt,
+        progress_callback=on_progress,
+    )
+    best = gepa.optimize(train_examples)
+```
 
 ## How It Works
 
 ### Phase 1: Reflective Mutation
 
 1. **Split** training examples into dev (feedback) and val (selection) sets
-1. **Evaluate** candidates on dev minibatch, collect trajectories
-1. **Skip** mutation if candidate achieves perfect score
-1. **Reflect** using LLM to propose improved prompt based on trajectories and feedback
-1. **Gate**: accept only if not worse than parent on dev
-1. **Evaluate** on val set for selection
-1. **Update** instance-level Pareto frontier
+2. **Evaluate** candidates on dev minibatch, collect trajectories
+3. **Skip** mutation if candidate achieves perfect score
+4. **Reflect** using LLM to propose improved prompt based on trajectories and feedback
+5. **Gate**: accept only if not worse than parent on dev
+6. **Evaluate** on val set for selection
+7. **Update** instance-level Pareto frontier
 
 ### Phase 2: Structural Merge (per generation)
 
 8. **Find merge candidates**: Pareto frontier pairs with common ancestor and sufficient validation overlap
-1. **Score complementarity**: Prioritize pairs excelling on different instances
-1. **3-way merge**: Use ancestry to determine merged prompt (prefer changed prompts, resolve conflicts by score)
-1. **Gate on overlap**: Evaluate merged prompt on shared validation instances
-1. **Accept if improved**: Add to frontier if merge doesn't degrade (within 5% tolerance)
-1. **Repeat** for specified generations
+9. **Score complementarity**: Prioritize pairs excelling on different instances
+10. **3-way merge**: Use ancestry to determine merged prompt (prefer changed prompts, resolve conflicts by score)
+11. **Gate on overlap**: Evaluate merged prompt on shared validation instances
+12. **Accept if improved**: Add to frontier if merge doesn't degrade (within 5% tolerance)
+13. **Repeat** for specified generations
 
 ## Configuration
 
@@ -171,4 +244,3 @@ Default values in `src/kiss/agents/gepa/config.py`.
 ## Authors
 
 - Koushik Sen (ksen@berkeley.edu)
-- Cursor AI (cursor@cursor.com)
