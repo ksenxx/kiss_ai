@@ -210,3 +210,64 @@ requires_openrouter_api_key = pytest.mark.skipif(
     not has_openrouter_api_key(),
     reason="OPENROUTER_API_KEY environment variable not set",
 )
+
+
+# =============================================================================
+# Shared test fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def temp_dir(tmp_path):
+    """Provides a temporary directory that's automatically cleaned up.
+
+    The fixture also changes to the temp directory during the test and
+    restores the original directory afterward.
+
+    Yields:
+        Path: The resolved path to the temporary directory.
+    """
+    original_dir = os.getcwd()
+    resolved_path = tmp_path.resolve()
+    os.chdir(resolved_path)
+    yield resolved_path
+    os.chdir(original_dir)
+
+
+@pytest.fixture
+def verbose_config():
+    """Saves and restores the verbose config setting.
+
+    Yields:
+        None: Use config_module.DEFAULT_CONFIG.agent.verbose in the test.
+    """
+    from kiss.core import config as config_module
+
+    original = config_module.DEFAULT_CONFIG.agent.verbose
+    yield
+    config_module.DEFAULT_CONFIG.agent.verbose = original
+
+
+def simple_test_tool(message: str) -> str:
+    """A simple test tool that echoes a message.
+
+    Args:
+        message: The message to echo back.
+
+    Returns:
+        The echoed message with a prefix.
+    """
+    return f"Echo: {message}"
+
+
+def add_numbers(a: int, b: int) -> str:
+    """Add two numbers together.
+
+    Args:
+        a: First number.
+        b: Second number.
+
+    Returns:
+        The sum as a string.
+    """
+    return str(a + b)

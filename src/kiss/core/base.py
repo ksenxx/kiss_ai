@@ -45,13 +45,18 @@ CODING_INSTRUCTIONS = """
 - NO need to write documentations or comments unless absolutely necessary
 
 ## Testing Requirements
-- Run lint and fix any lint errors
-- Generate comprehensive tests for EVERY function and feature
+- Run lint and typecheckers and fix any lint and typecheck errors
+- Generate comprehensive tests so that you achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, or any form of test doubles
+- You MUST not add tests that are redundant or duplicate of existing
+  tests or does not add new coverage over existing tests
+- Generate meaningful stress tests for the code if you are
+  optimizing the code for performance
 - Test with real inputs and verify real outputs
 - Test edge cases: empty inputs, None values, boundary conditions
 - Test error conditions with actual invalid inputs
 - Each test should be independent and verify actual behavior
+- Simplify and clean up the test code
 
 ## Code Structure
 - Main implementation code first
@@ -64,7 +69,7 @@ CODING_INSTRUCTIONS = """
 - Find examples of similar implementations
 - Understand existing code in the project
 
-## After you have implemented the task, simplify the code
+## After you have implemented the task, simplify and clean up the code
  - Remove unnessary object/struct attributes, variables, config variables
  - Avoid object/struct attribute redirections
  - Remove unnessary conditional checks

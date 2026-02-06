@@ -52,14 +52,14 @@ if success and report:
 ```python
 from kiss.agents.create_and_optimize_agent import AgentEvolver
 
-evolver = AgentEvolver(
+evolver = AgentEvolver()
+
+best_variant = evolver.evolve(
     task_description="Build a code analysis assistant that can parse and analyze large codebases",
     max_generations=10,
     max_frontier_size=6,
     mutation_probability=0.8,
 )
-
-best_variant = evolver.evolve()
 
 print(f"Best agent: {best_variant.folder_path}")
 print(f"Metrics: {best_variant.metrics}")
@@ -69,33 +69,20 @@ print(f"Metrics: {best_variant.metrics}")
 
 ### ImproverAgent
 
-The `ImproverAgent` optimizes existing agent code by analyzing and improving it for token efficiency and execution speed.
-
-**Parameters:**
-
-- `max_steps`: Maximum steps for the improvement agent (default: `150`)
-- `max_budget`: Maximum USD budget for improvement (default: `15.0`)
+The `ImproverAgent` optimizes existing agent code by analyzing and improving it for token efficiency and execution speed. Configuration (model, max_steps, max_budget) is read from `DEFAULT_CONFIG.create_and_optimize_agent.improver`.
 
 **Methods:**
 
-- `improve(source_folder, work_dir, task_description, report_path, feedback)`: Improve an agent's code
-- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, primary_feedback, secondary_feedback, work_dir, task_description)`: Combine ideas from two agents
+- `improve(source_folder, work_dir, task_description, report_path)`: Improve an agent's code
+- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, work_dir, task_description)`: Combine ideas from two agents
 
 ### AgentEvolver
 
-The `AgentEvolver` creates and evolves agent populations from a task description.
-
-**Parameters:**
-
-- `task_description`: Description of the task the agent should solve
-- `evaluation_fn`: Optional function to evaluate agent variants (default: placeholder evaluation)
-- `max_generations`: Maximum evolutionary generations (default: `10`)
-- `max_frontier_size`: Maximum Pareto frontier size (default: `6`)
-- `mutation_probability`: Probability of mutation vs crossover (default: `0.8`)
+The `AgentEvolver` creates and evolves agent populations from a task description. Configuration is read from `DEFAULT_CONFIG.create_and_optimize_agent.evolver`.
 
 **Methods:**
 
-- `evolve()`: Run the evolutionary optimization, returns the best variant
+- `evolve(task_description, max_generations, initial_frontier_size, max_frontier_size, mutation_probability)`: Run the evolutionary optimization, returns the best variant. All parameters except `task_description` are optional and fall back to config defaults.
 - `get_best_variant()`: Get the current best variant by combined score
 - `get_pareto_frontier()`: Get all variants in the Pareto frontier
 - `save_state(path)`: Save evolver state to JSON
@@ -104,23 +91,21 @@ The `AgentEvolver` creates and evolves agent populations from a task description
 
 **ImprovementReport**: Tracks improvements made to an agent
 
+- `metrics`: Dictionary of metric values (e.g., tokens_used, cost, execution_time)
 - `implemented_ideas`: List of successful optimizations with idea and source
 - `failed_ideas`: List of failed optimizations with idea and reason
-- `generation`: The generation number of this improvement
-- `improved_tokens`: Token usage improvement (default: 0)
-- `improved_time`: Execution time improvement (default: 0.0)
-- `summary`: Summary of the improvement
+- `generation`: The generation number of this improvement (default: 0)
+- `summary`: Summary of the improvement (default: "")
 
 **AgentVariant**: Represents an agent variant in the Pareto frontier
 
 - `folder_path`: Path to the variant's source code
 - `report_path`: Path to the variant's improvement report
 - `report`: The ImprovementReport instance
-- `tokens_used`: Token usage for this variant (default: 0)
-- `execution_time`: Execution time for this variant (default: 0.0)
-- `id`: Unique variant identifier
-- `generation`: Generation when created
+- `metrics`: Dictionary of metric values (e.g., success, tokens_used, execution_time)
 - `parent_ids`: List of parent variant IDs
+- `id`: Unique variant identifier (default: 0)
+- `generation`: Generation when created (default: 0)
 
 ## Configuration
 
@@ -297,6 +282,7 @@ The `AgentEvolver` creates agents with these patterns:
 
 ```json
 {
+    "metrics": {"tokens_used": 8000, "execution_time": 25.0, "cost": 0.5},
     "implemented_ideas": [
         {"idea": "Reduced prompt verbosity", "source": "improver"}
     ],
@@ -304,8 +290,6 @@ The `AgentEvolver` creates agents with these patterns:
         {"idea": "Aggressive caching", "reason": "Caused correctness issues"}
     ],
     "generation": 5,
-    "improved_tokens": 8000,
-    "improved_time": 25.0,
     "summary": "Optimized prompts and added caching for repeated operations"
 }
 ```
@@ -322,15 +306,13 @@ The `AgentEvolver` creates agents with these patterns:
             "folder_path": "/path/to/variant_3",
             "report_path": "/path/to/variant_3/improvement_report.json",
             "report": {
+                "metrics": {"tokens_used": 5000, "execution_time": 12.5},
                 "implemented_ideas": [...],
                 "failed_ideas": [...],
                 "generation": 4,
-                "improved_tokens": 5000,
-                "improved_time": 12.5,
                 "summary": "..."
             },
-            "tokens_used": 5000,
-            "execution_time": 12.5,
+            "metrics": {"success": 0, "tokens_used": 5000, "execution_time": 12.5},
             "id": 3,
             "generation": 4,
             "parent_ids": [1]
@@ -358,19 +340,12 @@ The improver applies various optimization strategies:
 
 ```python
 class ImproverAgent:
-    def __init__(
-        self,
-        max_steps: int | None = None,
-        max_budget: float | None = None,
-    ): ...
-
     def improve(
         self,
         source_folder: str,
         work_dir: str,
         task_description: str,
         report_path: str | None = None,
-        feedback: str = "",
     ) -> tuple[bool, ImprovementReport | None]: ...
 
     def crossover_improve(
@@ -378,8 +353,6 @@ class ImproverAgent:
         primary_folder: str,
         primary_report_path: str,
         secondary_report_path: str,
-        primary_feedback: str,
-        secondary_feedback: str,
         work_dir: str,
         task_description: str,
     ) -> tuple[bool, ImprovementReport | None]: ...
@@ -389,16 +362,15 @@ class ImproverAgent:
 
 ```python
 class AgentEvolver:
-    def __init__(
+    def evolve(
         self,
         task_description: str,
-        evaluation_fn: Callable[[str], tuple[int, float]] | None = None,
         max_generations: int | None = None,
+        initial_frontier_size: int | None = None,
         max_frontier_size: int | None = None,
         mutation_probability: float | None = None,
-    ): ...
+    ) -> AgentVariant: ...
 
-    def evolve(self) -> AgentVariant: ...
     def get_best_variant(self) -> AgentVariant: ...
     def get_pareto_frontier(self) -> list[AgentVariant]: ...
     def save_state(self, path: str) -> None: ...
@@ -407,14 +379,15 @@ class AgentEvolver:
 ### ImprovementReport
 
 ```python
-@dataclass
 class ImprovementReport:
-    implemented_ideas: list[dict[str, str]] = field(default_factory=list)
-    failed_ideas: list[dict[str, str]] = field(default_factory=list)
-    generation: int = 0
-    improved_tokens: int = 0
-    improved_time: float = 0.0
-    summary: str = ""
+    def __init__(
+        self,
+        metrics: dict[str, float],
+        implemented_ideas: list[dict[str, str]],
+        failed_ideas: list[dict[str, str]],
+        generation: int = 0,
+        summary: str = "",
+    ): ...
 ```
 
 ### AgentVariant
@@ -425,11 +398,10 @@ class AgentVariant:
     folder_path: str
     report_path: str
     report: ImprovementReport
-    tokens_used: int = 0
-    execution_time: float = 0.0
+    metrics: dict[str, float]
+    parent_ids: list[int]
     id: int = 0
     generation: int = 0
-    parent_ids: list[int] = field(default_factory=list)
 ```
 
 ## License

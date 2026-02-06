@@ -323,13 +323,13 @@ exit 0
 
 
 def _extract_directory(path_str: str) -> str | None:
-    """Extract directory from a file path, resolving relative paths.
+    """Resolve a file path to an absolute canonical path for security validation.
 
     Args:
-        path_str: A file or directory path
+        path_str: A file or directory path (can be relative or absolute)
 
     Returns:
-        The resolved absolute directory path, or None if invalid
+        The resolved absolute path, or None if the path is invalid
     """
     try:
         path = Path(path_str)
@@ -340,30 +340,7 @@ def _extract_directory(path_str: str) -> str | None:
             path = Path.cwd() / path
 
         # Resolve to get canonical path (handles .., ., etc.)
-        path = path.resolve()
-
-        # Check if path exists to determine if it's a file or directory
-        if path.exists():
-            return str(path)
-        else:
-            # Path doesn't exist - use heuristics
-            if path_str.endswith("/"):
-                # Trailing slash indicates directory
-                return str(path)
-            else:
-                # Check if it has a file extension
-                if path.suffix:
-                    # Has extension - likely a file
-                    return str(path)
-                else:
-                    # No extension - could be directory
-                    # Check if parent exists and is a directory
-                    if path.parent.exists() and path.parent.is_dir():
-                        # Parent exists, so this is likely a file or subdir
-                        return str(path)
-                    else:
-                        # Parent doesn't exist either - assume it's a directory path
-                        return str(path)
+        return str(path.resolve())
 
     except Exception:
         return None
@@ -382,7 +359,12 @@ SAFARI_HEADERS = {
 }
 
 
-def fetch_url(url: str, headers: dict[str, str], max_characters: int = 10000) -> str:
+def fetch_url(
+    url: str,
+    headers: dict[str, str],
+    max_characters: int = 10000,
+    timeout_seconds: float = 10.0,
+) -> str:
     """
     Fetch and extract text content from a URL using BeautifulSoup.
 
@@ -390,6 +372,7 @@ def fetch_url(url: str, headers: dict[str, str], max_characters: int = 10000) ->
         url: The URL to fetch.
         headers: HTTP headers to use for the request.
         max_characters: Maximum number of characters to return.
+        timeout_seconds: Request timeout in seconds.
 
     Returns:
         Extracted text content from the page.
@@ -400,7 +383,9 @@ def fetch_url(url: str, headers: dict[str, str], max_characters: int = 10000) ->
     from bs4 import BeautifulSoup
 
     try:
-        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        response = requests.get(
+            url, headers=headers, timeout=timeout_seconds, allow_redirects=True
+        )
         response.raise_for_status()
         response.encoding = response.apparent_encoding or "utf-8"
 
@@ -899,6 +884,7 @@ class UsefulTools:
         old_string: str,
         new_string: str,
         replace_all: bool = False,
+        timeout_seconds: float = 30,
     ) -> str:
         """Performs precise string replacements in files with exact matching.
 
@@ -907,6 +893,7 @@ class UsefulTools:
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
+            timeout_seconds: Timeout in seconds for the edit command.
 
         Returns:
             The output of the edit operation.
@@ -944,7 +931,7 @@ class UsefulTools:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout_seconds,
             )
             return result.stdout
         except subprocess.TimeoutExpired:
@@ -968,6 +955,7 @@ class UsefulTools:
         old_string: str,
         new_string: str,
         replace_all: bool = False,
+        timeout_seconds: float = 30,
     ) -> str:
         """Performs precise string replacements in files with exact matching.
 
@@ -976,6 +964,7 @@ class UsefulTools:
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
+            timeout_seconds: Timeout in seconds for the edit command.
 
         Returns:
             The output of the edit operation.
@@ -1012,7 +1001,7 @@ class UsefulTools:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout_seconds,
             )
             return result.stdout
         except subprocess.TimeoutExpired:
@@ -1029,12 +1018,13 @@ class UsefulTools:
             except Exception:
                 pass
 
-    def Bash(self, command: str, description: str) -> str:  # noqa: N802
+    def Bash(self, command: str, description: str, timeout_seconds: float = 30) -> str:  # noqa: N802
         """Runs a bash command and returns its output.
 
         Args:
             command: The bash command to run.
             description: A brief description of the command.
+            timeout_seconds: Timeout in seconds for the command.
 
         Returns:
             The output of the command.
@@ -1060,6 +1050,7 @@ class UsefulTools:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=timeout_seconds,
             )
             return result.stdout
         except subprocess.TimeoutExpired:

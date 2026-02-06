@@ -77,7 +77,7 @@ print(f"Val scores: {best.val_scores}")
 
 ```python
 GEPA(
-    agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list]],
+    agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]],
     initial_prompt_template: str,
     evaluation_fn: Callable[[str], dict[str, float]] | None = None,
     max_generations: int | None = None,
@@ -165,13 +165,13 @@ class GEPAProgress:
 @dataclass
 class PromptCandidate:
     prompt_template: str
-    id: int = 0
     dev_scores: dict[str, float] = field(default_factory=dict)
     val_scores: dict[str, float] = field(default_factory=dict)
     per_item_val_scores: list[dict[str, float]] = field(default_factory=list)
     val_instance_wins: set[int] = field(default_factory=set)
     evaluated_val_ids: set[int] = field(default_factory=set)
     parents: list[int] = field(default_factory=list)
+    id: int = 0
 ```
 
 ## Key Features

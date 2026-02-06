@@ -73,11 +73,6 @@ class GeminiModel(Model):
                 gemini_role = "user"
                 if isinstance(content, str):
                     parts.append(types.Part.from_text(text=content))
-                elif isinstance(content, list):
-                    # Handle list of blocks (e.g. tool results)
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            pass
 
             elif role == "assistant":
                 gemini_role = "model"

@@ -59,8 +59,11 @@ def create_agent_wrapper_with_expected(model_name: str = "gpt-4o", max_steps: in
     return agent_wrapper, call_counter
 
 
-def create_mock_agent_wrapper():
-    """Create a mock agent wrapper for fast testing without LLM calls.
+def create_deterministic_agent_wrapper():
+    """Create a deterministic agent wrapper for testing callback behavior.
+
+    This uses a real but simple implementation (no mocking) that returns
+    predictable results for testing progress callback functionality.
 
     Returns:
         Tuple of (agent_wrapper function, call_counter list for tracking calls).
@@ -68,19 +71,24 @@ def create_mock_agent_wrapper():
     call_counter = [0]
 
     def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
-        """Mock agent that returns deterministic results.
+        """Simple agent that returns deterministic results based on input.
 
         Args:
-            prompt_template: The prompt template (ignored).
+            prompt_template: The prompt template to use.
             arguments: Dict of arguments including '_expected' for the expected answer.
 
         Returns:
-            Tuple of (result string, empty trajectory list).
+            Tuple of (result string, trajectory list).
         """
         expected = arguments.get("_expected", "unknown")
         call_counter[0] += 1
-        # Return a result that sometimes matches expected
-        return f"EXPECTED:{expected}\nRESULT:result={expected}", []
+        # Build a simple trajectory showing the prompt was processed
+        trajectory = [
+            {"role": "user", "content": f"Prompt: {prompt_template[:50]}..."},
+            {"role": "assistant", "content": f"Processing arguments: {list(arguments.keys())}"},
+        ]
+        # Return a result that matches expected (simulates successful agent)
+        return f"EXPECTED:{expected}\nRESULT:result={expected}", trajectory
 
     return agent_wrapper, call_counter
 
@@ -122,24 +130,37 @@ def create_evaluation_fn():
     return evaluation_fn
 
 
-def create_mock_evaluation_fn():
-    """Create a mock evaluation function for fast testing.
+def create_simple_evaluation_fn():
+    """Create a simple evaluation function for testing callback behavior.
+
+    This is a real evaluation function (not a mock) that checks if
+    the result contains the expected format.
 
     Returns:
-        Evaluation function that returns high scores for matching results.
+        Evaluation function that returns scores based on result format.
     """
 
     def evaluation_fn(result: str) -> dict[str, float]:
-        """Simple evaluation based on result format.
+        """Evaluate result based on format and content matching.
 
         Args:
-            result: Result string.
+            result: Result string in format 'EXPECTED:...\nRESULT:...'.
 
         Returns:
-            Dict with 'accuracy' score.
+            Dict with 'accuracy' score based on whether result matches expected.
         """
-        if "result=" in result:
-            return {"accuracy": 0.8}
+        try:
+            if "EXPECTED:" in result and "RESULT:" in result:
+                parts = result.split("\nRESULT:", 1)
+                expected = parts[0].replace("EXPECTED:", "").strip().lower()
+                actual = parts[1].strip().lower() if len(parts) > 1 else ""
+                # Check if expected value appears in the result
+                if expected in actual:
+                    return {"accuracy": 1.0}
+                elif "result=" in actual:
+                    return {"accuracy": 0.8}
+        except Exception:
+            pass
         return {"accuracy": 0.2}
 
     return evaluation_fn
@@ -243,8 +264,8 @@ class TestGEPAPhaseEnum(unittest.TestCase):
         self.assertEqual(GEPAPhase.MERGE.value, "merge")
 
 
-class TestGEPAProgressCallbackMock(unittest.TestCase):
-    """Test GEPA progress callback with mock agent (no LLM calls)."""
+class TestGEPAProgressCallbackDeterministic(unittest.TestCase):
+    """Test GEPA progress callback with deterministic agent (fast, no LLM calls)."""
 
     def test_callback_is_called_during_optimization(self):
         """Test that progress callback is called during optimization.
@@ -254,7 +275,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Solve: {problem}"
 
@@ -274,7 +295,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=2,
             population_size=1,
             mutation_rate=0.0,  # No mutations for simpler test
@@ -294,7 +315,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Calculate: {expr}"
 
@@ -313,7 +334,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=1,
             population_size=1,
             mutation_rate=0.0,
@@ -334,7 +355,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Answer: {q}"
 
@@ -355,7 +376,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=3,
             population_size=1,
             mutation_rate=0.0,
@@ -375,7 +396,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Eval: {x}"
 
@@ -397,7 +418,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=2,
             population_size=1,
             mutation_rate=0.0,
@@ -420,7 +441,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Test: {t}"
 
@@ -432,7 +453,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=1,
             population_size=1,
             mutation_rate=0.0,
@@ -451,7 +472,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Compute: {c}"
 
@@ -470,7 +491,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=2,
             population_size=2,
             pareto_size=3,
@@ -491,7 +512,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Do: {d}"
 
@@ -510,7 +531,7 @@ class TestGEPAProgressCallbackMock(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=1,
             population_size=1,
             mutation_rate=0.0,
@@ -659,16 +680,20 @@ class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
         Returns:
             None
         """
-        # Use mock agent with varying results to build diverse pareto frontier
+        # Use agent with varying results to build diverse pareto frontier
         call_count = [0]
 
-        def varying_mock_agent(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
-            """Mock agent that returns different results to build diverse pareto frontier."""
+        def varying_agent(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
+            """Agent that returns different results to build diverse pareto frontier."""
             expected = arguments.get("_expected", "unknown")
             call_count[0] += 1
             # Return slightly different results to create diverse candidates
             suffix = "a" if call_count[0] % 2 == 0 else "b"
-            return f"EXPECTED:{expected}\nRESULT:result={expected}{suffix}", []
+            trajectory = [
+                {"role": "user", "content": f"Processing: {expected}"},
+                {"role": "assistant", "content": f"Result variant: {suffix}"},
+            ]
+            return f"EXPECTED:{expected}\nRESULT:result={expected}{suffix}", trajectory
 
         initial_prompt = "Calc: {c}"
 
@@ -698,7 +723,7 @@ class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
         # Use 3 generations with high mutation to build diverse pareto frontier
         # Merge requires at least 2 candidates in pareto frontier with val_overlap
         gepa = GEPA(
-            agent_wrapper=varying_mock_agent,
+            agent_wrapper=varying_agent,
             initial_prompt_template=initial_prompt,
             evaluation_fn=varying_eval_fn,
             max_generations=3,
@@ -834,7 +859,7 @@ class TestProgressCallbackRichExample(unittest.TestCase):
         Returns:
             None
         """
-        agent_wrapper, _ = create_mock_agent_wrapper()
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
         initial_prompt = "Solve: {problem}"
 
@@ -872,7 +897,7 @@ class TestProgressCallbackRichExample(unittest.TestCase):
         gepa = GEPA(
             agent_wrapper=agent_wrapper,
             initial_prompt_template=initial_prompt,
-            evaluation_fn=create_mock_evaluation_fn(),
+            evaluation_fn=create_simple_evaluation_fn(),
             max_generations=3,
             population_size=2,
             mutation_rate=0.0,

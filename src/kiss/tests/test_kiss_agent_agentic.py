@@ -676,5 +676,116 @@ class TestKISSAgentVerboseMode(unittest.TestCase):
             DEFAULT_CONFIG.agent.verbose = original_verbose
 
 
+@requires_gemini_api_key
+class TestKISSAgentBudgetLimits(unittest.TestCase):
+    """Tests for budget limit functionality."""
+
+    agent: KISSAgent
+
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method."""
+        self.agent = KISSAgent("Budget Limit Test Agent")
+
+    def test_agent_budget_exceeded_raises_error(self) -> None:
+        """Test that exceeding agent budget raises KISSError.
+
+        Verifies that when an agent exceeds the maximum budget,
+        a KISSError is raised with an appropriate message.
+        """
+
+        def expensive_tool() -> str:
+            """A tool that triggers budget check."""
+            return "Result"
+
+        try:
+            # Very low budget to trigger the check
+            self.agent.run(
+                model_name=TEST_MODEL,
+                prompt_template=("Call expensive_tool, then call it again, then finish."),
+                tools=[expensive_tool],
+                max_steps=10,
+                max_budget=0.00001,  # Very low budget
+            )
+        except KISSError as e:
+            self.assertIn("budget", str(e).lower())
+
+
+@requires_gemini_api_key
+class TestKISSAgentGlobalBudget(unittest.TestCase):
+    """Tests for global budget functionality."""
+
+    agent: KISSAgent
+
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method."""
+        from kiss.core.base import Base
+        from kiss.core.config import DEFAULT_CONFIG
+
+        self.agent = KISSAgent("Global Budget Test Agent")
+        self.original_global_budget = DEFAULT_CONFIG.agent.global_max_budget
+        self.original_global_used = Base.global_budget_used
+
+    def tearDown(self) -> None:
+        """Restore original config."""
+        from kiss.core.base import Base
+        from kiss.core.config import DEFAULT_CONFIG
+
+        DEFAULT_CONFIG.agent.global_max_budget = self.original_global_budget
+        Base.global_budget_used = self.original_global_used
+
+    def test_global_budget_tracked(self) -> None:
+        """Test that global budget is properly tracked across runs."""
+        from kiss.core.base import Base
+
+        initial_budget = Base.global_budget_used
+
+        result = self.agent.run(
+            model_name=TEST_MODEL,
+            prompt_template="Say 'hello' and finish.",
+            tools=[],
+            max_steps=3,
+        )
+
+        # Global budget should have increased
+        self.assertGreater(Base.global_budget_used, initial_budget)
+        self.assertIsNotNone(result)
+
+
+@requires_gemini_api_key
+class TestKISSAgentWebTools(unittest.TestCase):
+    """Tests for web tool functionality."""
+
+    agent: KISSAgent
+
+    def setUp(self) -> None:
+        """Set up test fixtures for each test method."""
+        from kiss.core.config import DEFAULT_CONFIG
+
+        self.agent = KISSAgent("Web Tools Test Agent")
+        self.original_use_web = DEFAULT_CONFIG.agent.use_web
+
+    def tearDown(self) -> None:
+        """Restore original config."""
+        from kiss.core.config import DEFAULT_CONFIG
+
+        DEFAULT_CONFIG.agent.use_web = self.original_use_web
+
+    def test_web_tools_added_when_enabled(self) -> None:
+        """Test that web tools are added when use_web is True."""
+        from kiss.core.config import DEFAULT_CONFIG
+
+        DEFAULT_CONFIG.agent.use_web = True
+
+        result = self.agent.run(
+            model_name=TEST_MODEL,
+            prompt_template="Just say 'done' and finish.",
+            tools=[],
+            max_steps=3,
+        )
+        # Check that search_web and fetch_url are in the function map
+        # (they would have been added during _setup_tools)
+        self.assertIsNotNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

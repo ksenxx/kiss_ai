@@ -19,6 +19,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Using Agent Creator and Optimizer](#-using-agent-creator-and-optimizer)
 - [Using Relentless Coding Agent](#-using-relentless-coding-agent)
 - [Output Formatting](#-output-formatting)
+- [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
 - [Overview](#-overview)
 - [Installation](#-installation)
 - [KISSAgent API Reference](#-kissagent-api-reference)
@@ -36,7 +37,6 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Versioning](#-versioning)
 - [Configuration](#-configuration)
 - [Available Commands](#-available-commands)
-- [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
 - [License](#-license)
@@ -157,6 +157,7 @@ print(f"Best agent: {best_variant.folder_path}")
 print(f"Metrics: {best_variant.metrics}")
 ```
 
+
 **Key Features:**
 
 - **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time, cost)
@@ -259,6 +260,43 @@ def finish(
 ```
 
 The agent will automatically use your custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
+
+## 📊 Trajectory Saving and Visualization
+
+Agent trajectories are automatically saved to the artifacts directory (default: `artifacts/`). Each trajectory includes:
+
+- Complete message history with token usage and budget information appended to each message
+- Tool calls and results
+- Configuration used
+- Timestamps
+- Budget and token usage statistics
+
+### Visualizing Trajectories
+
+The framework includes a web-based trajectory visualizer for viewing agent execution histories:
+
+```bash
+# Run the visualizer server
+uv run python -m kiss.viz_trajectory.server artifacts
+
+# Or with custom host/port
+uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 5050
+```
+
+Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
+
+The visualizer provides:
+
+- **Modern UI**: Dark theme with smooth animations
+- **Sidebar Navigation**: List of all trajectories sorted by start time
+- **Markdown Rendering**: Full markdown support for message content
+- **Code Highlighting**: Syntax highlighting for fenced code blocks
+- **Message Display**: Clean, organized view of agent conversations
+- **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
+
+![Trajectory Visualizer](assets/image-0478c494-2550-4bbe-8559-f205a4544bec.png)
+
+📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
 ## 📖 Overview
 
@@ -908,19 +946,25 @@ kiss/
 │   │   ├── test_gepa_hotpotqa.py
 │   │   ├── test_gepa_improvement.py
 │   │   ├── test_gepa_integration.py
+│   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
 │   │   ├── test_docker_manager.py
 │   │   ├── test_models_quick.py   # Quick tests for models based on ModelInfo capabilities
 │   │   ├── test_model_config.py
+│   │   ├── test_model_implementations.py  # Integration tests for model implementations
 │   │   ├── test_a_model.py
 │   │   ├── run_all_models_test.py # Comprehensive tests for all models
 │   │   ├── test_multiprocess.py
 │   │   ├── test_internal.py
-│   │   ├── test_claude_coding_agent.py  # Tests for Claude Coding Agent
-│   │   ├── test_gemini_cli_agent.py     # Tests for Gemini CLI Agent
-│   │   ├── test_openai_codex_agent.py   # Tests for OpenAI Codex Agent
-│   │   ├── test_agent_evolver.py        # Tests for Agent Evolver
+│   │   ├── test_core_branch_coverage.py   # Branch coverage tests for core components
+│   │   ├── test_gemini_model_internals.py # Tests for Gemini model internals
+│   │   ├── test_cli_options.py            # Tests for CLI option parsing
+│   │   ├── test_claude_coding_agent.py    # Tests for Claude Coding Agent
+│   │   ├── test_gemini_cli_agent.py       # Tests for Gemini CLI Agent
+│   │   ├── test_openai_codex_agent.py     # Tests for OpenAI Codex Agent
+│   │   ├── test_agent_evolver.py          # Tests for Agent Evolver
 │   │   ├── test_search_web.py
 │   │   └── test_useful_tools.py
+│   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
 │       ├── README.md                    # Trajectory visualizer documentation
@@ -1072,80 +1116,52 @@ find . -type d -name __pycache__ -exec rm -r {} + && \
 find . -type f -name "*.pyc" -delete
 ```
 
-## 📊 Trajectory Saving and Visualization
-
-Agent trajectories are automatically saved to the artifacts directory (default: `artifacts/`). Each trajectory includes:
-
-- Complete message history with token usage and budget information appended to each message
-- Tool calls and results
-- Configuration used
-- Timestamps
-- Budget and token usage statistics
-
-### Visualizing Trajectories
-
-The framework includes a web-based trajectory visualizer for viewing agent execution histories:
-
-```bash
-# Run the visualizer server
-uv run python -m kiss.viz_trajectory.server artifacts
-
-# Or with custom host/port
-uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 5050
-```
-
-Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
-
-The visualizer provides:
-
-- **Modern UI**: Dark theme with smooth animations
-- **Sidebar Navigation**: List of all trajectories sorted by start time
-- **Markdown Rendering**: Full markdown support for message content
-- **Code Highlighting**: Syntax highlighting for fenced code blocks
-- **Message Display**: Clean, organized view of agent conversations
-- **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
-
-📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
-
 ## 🤖 Models Supported
 
 **Supported Models**: The framework includes context length, pricing, and capability flags for:
 
 **Generation Models** (text generation with function calling support):
 
-- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5, gpt-5.1, gpt-5.2, gpt-5.3-codex
-- **Anthropic**: claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5, claude-opus-4-6
-- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
+- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro, gpt-5.3-codex
+- **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, codex-mini-latest
+- **OpenAI (Reasoning)**: o1, o1-mini, o1-pro, o3, o3-mini, o3-mini-high, o3-pro, o3-deep-research, o4-mini, o4-mini-high, o4-mini-deep-research
+- **OpenAI (Open Source)**: openai/gpt-oss-20b, openai/gpt-oss-120b
+- **Anthropic**: claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
+- **Anthropic (Legacy)**: claude-3-5-sonnet-20241022, claude-3-5-haiku-20241022, claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307
+- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-1.5-pro, gemini-1.5-flash
 - **Gemini (preview, unreliable function calling)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-2.5-flash-lite
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
-- **Together AI (Qwen)**: Qwen2.5-72B-Instruct-Turbo, Qwen3 series (with function calling)
-- **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3.1 (with function calling)
-- **Together AI (Other)**: Kimi-K2-Instruct, GLM-4.5/4.6, Nemotron-Nano-9B
-- **OpenRouter**: Access to 325+ models from 50+ providers via unified API:
-  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2, gpt-5-codex, o1, o3, o3-pro, o4-mini, codex-mini, gpt-audio)
+- **Together AI (Qwen)**: Qwen2.5-72B/7B-Instruct-Turbo, Qwen2.5-Coder-32B, Qwen2.5-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, QwQ-32B (with function calling)
+- **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3-0324, DeepSeek-V3.1 (with function calling)
+- **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Thinking, Kimi-K2.5
+- **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.2/v0.3, Mistral-Small-24B
+- **Together AI (Other)**: GLM-4.5-Air/4.7, Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2, essentialai/rnj-1, marin-community/marin-8b
+- **OpenRouter**: Access to 400+ models from 60+ providers via unified API:
+  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2/5.3 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
   - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6)
-  - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-2-9b/27b, gemma-3-4b/12b/27b)
+  - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-2-9b/27b, gemma-3-4b/12b/27b, gemma-3n-e4b)
   - Meta Llama (llama-3-8b/70b, llama-3.1-8b/70b/405b, llama-3.2-1b/3b/11b-vision, llama-3.3-70b, llama-4-maverick/scout, llama-guard-2/3/4)
-  - DeepSeek (deepseek-chat, deepseek-r1/r1-turbo, deepseek-r1-distill variants, deepseek-v3/v3.2/v3.2-speciale, deepseek-coder-v2, deepseek-prover-v2)
-  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next, qwen3-vl variants, qwq-32b)
+  - DeepSeek (deepseek-chat/v3/v3.1/v3.2/v3.2-speciale, deepseek-r1/r1-0528/r1-turbo, deepseek-r1-distill variants, deepseek-coder-v2, deepseek-prover-v2)
+  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next/coder-flash, qwen3-vl variants, qwq-32b, qwen3-next/max)
   - Amazon Nova (nova-micro/lite/pro, nova-2-lite, nova-premier)
   - Cohere (command-r, command-r-plus, command-a, command-r7b)
   - X.AI Grok (grok-3/3-mini, grok-4/4-fast, grok-4.1-fast, grok-code-fast)
   - MiniMax (minimax-01, minimax-m1, minimax-m2/m2.1/m2-her)
   - ByteDance Seed (seed-1.6, seed-1.6-flash, seed-2.0, seed-2.0-thinking)
   - MoonshotAI (kimi-k2, kimi-k2-thinking, kimi-k2.5, kimi-dev-72b)
-  - Mistral (codestral, devstral, mistral-large/medium/small, mixtral-8x7b/8x22b, ministral-3b/8b/14b, pixtral, voxtral)
-  - NVIDIA (llama-3.1-nemotron-70b, llama-3.3-nemotron-super-49b, nemotron-nano-9b/12b-vl, nemotron-3-nano-30b)
-  - Z.AI/GLM (glm-4-32b, glm-4.5/4.5-air, glm-4.6/4.6v, glm-4.7/4.7-flash)
-  - AllenAI (olmo-3-7b/32b-instruct/think, olmo-3.1-32b-instruct/think, molmo-2-8b)
+  - Mistral (codestral, devstral/devstral-medium/devstral-small, mistral-large/medium/small, mixtral-8x7b/8x22b, ministral-3b/8b/14b, pixtral, voxtral)
+  - NVIDIA (llama-3.1-nemotron-70b/ultra-253b, llama-3.3-nemotron-super-49b, nemotron-nano-9b/12b-vl, nemotron-3-nano-30b)
+  - Z.AI/GLM (glm-4-32b, glm-4.5/4.5-air/4.5v, glm-4.6/4.6v, glm-4.7/4.7-flash)
+  - AllenAI (olmo-2/3-7b/32b-instruct/think, olmo-3.1-32b-instruct/think, molmo-2-8b)
   - Perplexity (sonar, sonar-pro, sonar-pro-search, sonar-deep-research, sonar-reasoning-pro)
-  - Prime Intellect (intellect-3)
-  - And 30+ more providers (aion-labs, arcee-ai, baidu, ibm-granite, inflection, liquid, morph, nousresearch, opengvlab, relace, sao10k, stepfun, tencent, thedrummer, tngtech, writer, etc.)
+  - NousResearch (hermes-2-pro/3/4-llama series, deephermes-3)
+  - Baidu ERNIE (ernie-4.5 series including VL and thinking variants)
+  - And 30+ more providers (ai21, aion-labs, arcee-ai, deepcogito, essentialai, ibm-granite, inception, inflection, liquid, morph, opengvlab, prime-intellect, relace, sao10k, stepfun, tencent, thedrummer, tngtech, upstage, writer, xiaomi, etc.)
 
 **Embedding Models** (for RAG and semantic search):
 
 - **OpenAI**: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
-- **Google**: text-embedding-004
+- **Google**: text-embedding-004, gemini-embedding-001
 - **Together AI**: BAAI/bge-large-en-v1.5, BAAI/bge-base-en-v1.5, m2-bert-80M-32k-retrieval, multilingual-e5-large-instruct, gte-modernbert-base
 
 Each model in `MODEL_INFO` includes capability flags:
@@ -1169,7 +1185,7 @@ The framework provides embedding generation capabilities through the `get_embedd
   - Default model: `togethercomputer/m2-bert-80M-32k-retrieval` (can be customized)
   - Usage: `model.get_embedding(text, embedding_model="togethercomputer/m2-bert-80M-32k-retrieval")`
 - **Gemini Models**: Full embedding support via Google's embedding API
-  - Default model: `text-embedding-004` (can be customized)
+  - Default model: `text-embedding-004` (can be customized; `gemini-embedding-001` also available)
   - Usage: `model.get_embedding(text, embedding_model="text-embedding-004")`
 - **Anthropic Models**: Embeddings not supported (raises `NotImplementedError`)
 

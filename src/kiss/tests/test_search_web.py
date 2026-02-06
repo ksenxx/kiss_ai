@@ -171,6 +171,11 @@ class TestSearchWeb(unittest.TestCase):
         self.assertIn("Title:", result)
         self.assertIn("URL:", result)
 
+    def test_search_web_captcha_query_returns_no_results(self) -> None:
+        """Test that captcha-like queries skip providers and return no results."""
+        result = search_web("captcha", max_results=0)
+        self.assertEqual(result, "No search results found.")
+
 
 @pytest.mark.timeout(180)
 class TestSearchWebIntegration(unittest.TestCase):
