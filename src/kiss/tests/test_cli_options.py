@@ -167,7 +167,7 @@ class TestCoreConfigCLI(CLITestBase):
         sys.argv = [
             "test",
             "--agent.kiss-coding-agent.orchestrator-model-name",
-            "claude-opus-4-5",
+            "claude-opus-4-6",
             "--agent.kiss-coding-agent.subtasker-model-name",
             "claude-sonnet-4-5",
             "--agent.kiss-coding-agent.refiner-model-name",
@@ -180,7 +180,7 @@ class TestCoreConfigCLI(CLITestBase):
         add_config("dummy", DummyConfig)
         self.assertEqual(
             config_module.DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name,
-            "claude-opus-4-5",
+            "claude-opus-4-6",
         )
         self.assertEqual(
             config_module.DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
@@ -339,9 +339,9 @@ class TestSWEBenchConfigCLI(CLITestBase):
     def test_swebench_model(self):
         """Test --swebench-verified.model CLI option."""
         swebench_config = self._get_swebench_config()
-        sys.argv = ["test", "--swebench-verified.model", "claude-opus-4-5"]
+        sys.argv = ["test", "--swebench-verified.model", "claude-opus-4-6"]
         add_config("swebench_verified", swebench_config)
-        self.assertEqual(config_module.DEFAULT_CONFIG.swebench_verified.model, "claude-opus-4-5")
+        self.assertEqual(config_module.DEFAULT_CONFIG.swebench_verified.model, "claude-opus-4-6")
 
     def test_swebench_max_steps(self):
         """Test --swebench-verified.max-steps CLI option."""
@@ -617,11 +617,11 @@ class TestAgentCreatorConfigCLI(CLITestBase):
     def test_evolver_model_name(self):
         """Test --create-and-optimize-agent.evolver.model-name CLI option."""
         agent_creator_config = self._get_agent_creator_config()
-        sys.argv = ["test", "--create-and-optimize-agent.evolver.model-name", "claude-opus-4-5"]
+        sys.argv = ["test", "--create-and-optimize-agent.evolver.model-name", "claude-opus-4-6"]
         add_config("create_and_optimize_agent", agent_creator_config)
         self.assertEqual(
             config_module.DEFAULT_CONFIG.create_and_optimize_agent.evolver.model_name,
-            "claude-opus-4-5",
+            "claude-opus-4-6",
         )
 
     def test_evolver_max_generations(self):

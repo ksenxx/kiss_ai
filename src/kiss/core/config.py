@@ -82,7 +82,7 @@ class RelentlessCodingAgentConfig(BaseModel):
         description="LLM model to use for Relentless Coding Agent",
     )
     subtasker_model_name: str = Field(
-        default="claude-opus-4-5",
+        default="claude-opus-4-6",
         description="LLM model to use for subtask generation and execution",
     )
     max_steps: int = Field(
@@ -105,7 +105,7 @@ class KISSCodingAgentConfig(BaseModel):
         description="LLM model to use for KISS Coding Agent",
     )
     subtasker_model_name: str = Field(
-        default="claude-opus-4-5",
+        default="claude-opus-4-6",
         description="LLM model to use for subtask generation and execution",
     )
     refiner_model_name: str = Field(

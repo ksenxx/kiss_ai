@@ -353,7 +353,7 @@ class ImproverAgent:
         agent = RelentlessCodingAgent("Agent Improver")
 
         print(f"Running improvement on {work_dir}")
-        if not config_module.DEFAULT_CONFIG.create_and_optimize_agent.evolve_to_solve_task:
+        if not config_module.DEFAULT_CONFIG.create_and_optimize_agent.evolver.evolve_to_solve_task:
             agent_evolver_prompt = (
                 AGENT_EVOLVER_PROMPT_PART1 + AGENT_EVOLVER_PROMPT_PART2 + AGENT_EVOLVER_PROMPT_PART3
             )

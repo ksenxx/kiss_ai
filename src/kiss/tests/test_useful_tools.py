@@ -14,9 +14,12 @@ from pathlib import Path
 import pytest
 
 from kiss.core.useful_tools import (
+    SAFE_SPECIAL_PATHS,
+    SAFE_SPECIAL_PREFIXES,
     UsefulTools,
     _extract_directory,
     _extract_search_results,
+    _is_safe_special_path,
     _render_page_with_playwright,
     fetch_url,
     parse_bash_command_paths,
@@ -230,6 +233,42 @@ class TestParseBashCommandPaths:
         assert readable == []
         assert writable == []
 
+    @pytest.mark.parametrize("path", sorted(SAFE_SPECIAL_PATHS))
+    def test_safe_special_paths_ignored_in_redirect(self, path):
+        """Test that all safe special paths are filtered from write redirects."""
+        readable, writable = parse_bash_command_paths(f"echo hello > {path}")
+        assert writable == []
+
+    @pytest.mark.parametrize("path", sorted(SAFE_SPECIAL_PATHS))
+    def test_safe_special_paths_ignored_in_input_redirect(self, path):
+        """Test that all safe special paths are filtered from input redirects."""
+        readable, writable = parse_bash_command_paths(f"cat < {path}")
+        assert readable == []
+
+    @pytest.mark.parametrize("path", sorted(SAFE_SPECIAL_PATHS))
+    def test_safe_special_paths_ignored_in_command_args(self, path):
+        """Test that safe special paths are filtered from command arguments."""
+        readable, writable = parse_bash_command_paths(f"cat {path}")
+        assert readable == []
+
+    def test_safe_prefix_paths_ignored_in_redirect(self):
+        """Test that safe prefix paths (/dev/fd/*, /proc/self/*) are filtered."""
+        readable, writable = parse_bash_command_paths("echo hello > /dev/fd/3")
+        assert writable == []
+        readable, writable = parse_bash_command_paths("cat < /proc/self/status")
+        assert readable == []
+
+    def test_safe_special_paths_ignored_in_dd(self):
+        """Test that safe special paths are filtered from dd if= and of=."""
+        readable, writable = parse_bash_command_paths("dd if=/dev/zero of=/dev/null")
+        assert readable == []
+        assert writable == []
+
+        cmd = "dd if=/dev/urandom of=/dev/null bs=1024 count=10"
+        readable, writable = parse_bash_command_paths(cmd)
+        assert readable == []
+        assert writable == []
+
     def test_multiple_files(self, temp_test_dir):
         """Test command with multiple file arguments."""
         file1 = temp_test_dir / "file1.txt"
@@ -267,6 +306,25 @@ class TestParseBashCommandPaths:
         readable, writable = parse_bash_command_paths(1)  # type: ignore[arg-type]
         assert readable == []
         assert writable == []
+
+
+class TestIsSafeSpecialPath:
+    """Test the _is_safe_special_path function."""
+
+    @pytest.mark.parametrize("path", sorted(SAFE_SPECIAL_PATHS))
+    def test_exact_safe_paths(self, path):
+        assert _is_safe_special_path(path) is True
+
+    @pytest.mark.parametrize("prefix", SAFE_SPECIAL_PREFIXES)
+    def test_prefix_safe_paths(self, prefix):
+        assert _is_safe_special_path(prefix + "something") is True
+
+    def test_non_safe_paths(self):
+        assert _is_safe_special_path("/etc/passwd") is False
+        assert _is_safe_special_path("/dev/sda") is False
+        assert _is_safe_special_path("/tmp/file") is False
+        assert _is_safe_special_path("/proc/1/status") is False
+        assert _is_safe_special_path("") is False
 
 
 class TestSearchResultExtraction:
@@ -360,6 +418,26 @@ class TestUsefulTools:
         assert "Error:" not in result
         assert test_file.exists()
         assert test_file.read_text().strip() == "writable content"
+
+    def test_bash_allows_dev_null_redirect(self, tools_sandbox):
+        """Test that redirecting to /dev/null is allowed without whitelisting."""
+        tools, _, _, _ = tools_sandbox
+        result = tools.Bash("echo hello > /dev/null", "Redirect to /dev/null")
+        assert "Error:" not in result
+
+    def test_bash_allows_reading_dev_urandom(self, tools_sandbox):
+        """Test that reading from /dev/urandom is allowed without whitelisting."""
+        tools, _, _, _ = tools_sandbox
+        cmd = "dd if=/dev/urandom bs=8 count=1 2>/dev/null | od -An -tx1"
+        result = tools.Bash(cmd, "Read /dev/urandom")
+        assert "Error: Access denied" not in result
+
+    def test_bash_allows_dev_zero(self, tools_sandbox):
+        """Test that reading from /dev/zero is allowed without whitelisting."""
+        tools, _, _, _ = tools_sandbox
+        cmd = "dd if=/dev/zero bs=8 count=1 2>/dev/null | od -An -tx1"
+        result = tools.Bash(cmd, "Read /dev/zero")
+        assert "Error: Access denied" not in result
 
     def test_bash_timeout(self, tools_sandbox):
         """Test Bash timeout handling."""

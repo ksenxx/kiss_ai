@@ -6,7 +6,6 @@
 """Multi-agent coding system with orchestration, and sub-agents using KISSAgent."""
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -36,10 +35,14 @@ Call perform_subtask() to perform a sub-task.
 perform_subtask() will return a yaml encoded dictionary containing the keys
 'success' (boolean) and 'summary' (string).
 
-# **Important**: If you have used 50% of your max_tokens,
-call 'finish' with 'success' set to False and 'summary' set to a summary of
-the work you have done so far and the work you need to do next.  The user
-prompt and the summary will be given to a new agent to continue the task.
+# **Important Instructions**:
+ - If you have used 50% of your max_tokens, call 'finish' with 'success'
+   set to False and 'summary' set to a summary of the work you have done
+   so far and the work you need to do next.  Be specific about what you have done
+   and what you need to do next.
+ - The user's original prompt and the summary will be given to a new agent
+   to continue the task.
+ - DO NOT repeat any work that your predecessor agent has already done.
 """
 
 TASKING_PROMPT = """
@@ -56,10 +59,14 @@ Description: {description}
 
 {coding_instructions}
 
-# **Important**: If you have used 50% of your max_tokens,
-call 'finish' with 'success' set to False and 'summary' set to a summary of
-the work you have done so far and the work you need to do next.  The user
-prompt and the summary will be given to a new agent to continue the task.
+# **Important Instructions**:
+ - If you have used 50% of your max_tokens, call 'finish' with 'success'
+   set to False and 'summary' set to a summary of the work you have done
+   so far and the work you need to do next.  Be specific about what you have done
+   and what you need to do next.
+ - The user's original prompt and the summary will be given to a new agent
+   to continue the task.
+ - DO NOT repeat any work that your predecessor agent has already done.
 """
 
 
@@ -402,29 +409,40 @@ def main() -> None:
 
     agent = RelentlessCodingAgent("Example Multi-Agent")
     task_description = """
-    Create, test, and document a Python script that:
-    1. Reads a CSV file with two columns (name, age)
-    2. Filters rows where age > 18
-    3. Writes the filtered results to a new CSV file
-    4. Includes error handling for missing files
-    Return a summary of your work.
+ **Task:** Create a robust database engine using only Bash scripts.
+
+ **Requirements:**
+ 1.  Create a script named `db.sh` that interacts with a local data folder.
+ 2.  **Basic Operations:** Implement `db.sh set <key> <value>`,
+     `db.sh get <key>`, and `db.sh delete <key>`.
+ 3.  **Atomicity:** Implement transaction support.
+     *   `db.sh begin` starts a session where writes are cached but not visible to others.
+     *   `db.sh commit` atomically applies all cached changes.
+     *   `db.sh rollback` discards pending changes.
+ 4.  **Concurrency:** Ensure that if two different terminal windows run `db.sh`
+     simultaneously, the data is never corrupted (use `mkdir`-based mutex locking).
+ 5.  **Validation:** Write a test script `test_stress.sh` that launches 10
+     concurrent processes to spam the database, verifying no data is lost.
+
+ **Constraints:**
+ *   No external database tools (no sqlite3, no python).
+ *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
+ *   Safe: Operate entirely within a `./my_db` directory.
     """
 
     work_dir = tempfile.mkdtemp()
-    try:
-        result = agent.run(
-            prompt_template=task_description,
-            work_dir=work_dir,
-            formatter=CompactFormatter()
-        )
-    finally:
-        shutil.rmtree(work_dir)
+    result = agent.run(
+        prompt_template=task_description,
+        work_dir=work_dir,
+        formatter=CompactFormatter()
+    )
 
 
     agent.formatter.print_status("FINAL RESULT:")
     result = yaml.safe_load(result)
     agent.formatter.print_status("Completed successfully: " + str(result["success"]))
     agent.formatter.print_status(result["summary"])
+    agent.formatter.print_status("Work directory was: " + work_dir)
 
 
 if __name__ == "__main__":

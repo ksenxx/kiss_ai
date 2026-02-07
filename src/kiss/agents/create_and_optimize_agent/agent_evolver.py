@@ -92,7 +92,9 @@ import random
 import shutil
 import sys
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +107,98 @@ from kiss.core import config as config_module
 from kiss.core.utils import get_config_value
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+
+
+class EvolverPhase(Enum):
+    """Enum representing the current phase of AgentEvolver optimization."""
+
+    INITIALIZING = "initializing"
+    EVALUATING = "evaluating"
+    MUTATION = "mutation"
+    CROSSOVER = "crossover"
+    PARETO_UPDATE = "pareto_update"
+    COMPLETE = "complete"
+
+
+@dataclass
+class EvolverProgress:
+    """Progress information for AgentEvolver optimization callbacks."""
+
+    generation: int
+    """Current generation number (1-indexed during evolution, 0 during initialization)."""
+
+    max_generations: int
+    """Total number of generations to run."""
+
+    phase: EvolverPhase
+    """Current phase of the optimization."""
+
+    variant_id: int | None = None
+    """ID of the variant currently being processed (if applicable)."""
+
+    parent_ids: list[int] = field(default_factory=list)
+    """Parent variant IDs for the current operation (if applicable)."""
+
+    frontier_size: int = 0
+    """Current size of the Pareto frontier."""
+
+    best_score: float | None = None
+    """Best combined score seen so far (lower is better)."""
+
+    current_metrics: dict[str, float] = field(default_factory=dict)
+    """Metrics of the current variant (if applicable)."""
+
+    added_to_frontier: bool | None = None
+    """Whether the current variant was added to the Pareto frontier (if applicable)."""
+
+    message: str = ""
+    """Optional message describing the current activity."""
+
+
+def create_progress_callback(
+    verbose: bool = False,
+) -> Callable[[EvolverProgress], None]:
+    """Create a standard progress callback for AgentEvolver optimization.
+
+    Args:
+        verbose: If True, prints all phases. If False, only prints evaluation
+            completion and Pareto update messages.
+
+    Returns:
+        A callback function that prints progress updates during optimization.
+
+    Example:
+        >>> evolver = AgentEvolver()
+        >>> best = evolver.evolve(
+        ...     task_description="Build a code assistant",
+        ...     progress_callback=create_progress_callback(verbose=True),
+        ... )
+        Gen 0/10 | initializing   | Best: N/A    | Initializing variant 1
+        Gen 0/10 | evaluating     | Best: N/A    | Evaluating variant 1
+    """
+    import sys as _sys
+
+    def progress_callback(progress: EvolverProgress) -> None:
+        is_eval_complete = (
+            progress.phase == EvolverPhase.EVALUATING
+            and progress.current_metrics
+        )
+        is_pareto_update = progress.phase == EvolverPhase.PARETO_UPDATE
+        is_complete = progress.phase == EvolverPhase.COMPLETE
+        if verbose or is_eval_complete or is_pareto_update or is_complete:
+            best_str = (
+                f"{progress.best_score:.2f}"
+                if progress.best_score is not None
+                else "N/A"
+            )
+            print(
+                f"  Gen {progress.generation}/{progress.max_generations} | "
+                f"{progress.phase.value:15} | Best: {best_str:>8} | {progress.message}",
+                flush=True,
+            )
+            _sys.stdout.flush()
+
+    return progress_callback
 
 
 @dataclass
@@ -218,6 +312,7 @@ class AgentEvolver:
         initial_frontier_size: int | None = None,
         max_frontier_size: int | None = None,
         mutation_probability: float | None = None,
+        progress_callback: Callable[[EvolverProgress], None] | None = None,
     ) -> None:
         """Initialize or reset the AgentEvolver state.
 
@@ -235,6 +330,9 @@ class AgentEvolver:
                 uses config default.
             mutation_probability: Probability of mutation vs crossover (0.0 to 1.0).
                 If None, uses config default.
+            progress_callback: Optional callback function called with EvolverProgress
+                during optimization. Use this to track progress, display progress bars,
+                or log intermediate results.
 
         Returns:
             None. Initializes instance attributes.
@@ -261,6 +359,41 @@ class AgentEvolver:
         self._variant_counter = 0
         self._generation = 0
         self.improver = ImproverAgent()
+
+        self.progress_callback = progress_callback
+        self._best_score: float | None = None
+
+    def _report_progress(
+        self,
+        generation: int,
+        phase: EvolverPhase,
+        variant: AgentVariant | None = None,
+        added_to_frontier: bool | None = None,
+        message: str = "",
+    ) -> None:
+        """Report progress via callback if one is registered."""
+        if not self.progress_callback:
+            return
+
+        self.progress_callback(EvolverProgress(
+            generation=generation,
+            max_generations=self.max_generations,
+            phase=phase,
+            variant_id=variant.id if variant else None,
+            parent_ids=variant.parent_ids if variant else [],
+            frontier_size=len(self.pareto_frontier),
+            best_score=self._best_score,
+            current_metrics=variant.metrics if variant else {},
+            added_to_frontier=added_to_frontier,
+            message=message,
+        ))
+
+    def _update_best_score(self) -> None:
+        """Update best score tracking from the current Pareto frontier."""
+        if self.pareto_frontier:
+            best = min(v.score() for v in self.pareto_frontier)
+            if self._best_score is None or best < self._best_score:
+                self._best_score = best
 
     def _next_variant_id(self) -> int:
         """Get the next unique variant ID.
@@ -609,6 +742,7 @@ class AgentEvolver:
         initial_frontier_size: int | None = None,
         max_frontier_size: int | None = None,
         mutation_probability: float | None = None,
+        progress_callback: Callable[[EvolverProgress], None] | None = None,
     ) -> AgentVariant:
         """Run the evolutionary optimization.
 
@@ -626,6 +760,9 @@ class AgentEvolver:
                 uses config default.
             mutation_probability: Probability of mutation vs crossover (0.0 to 1.0).
                 If None, uses config default.
+            progress_callback: Optional callback function called with EvolverProgress
+                during optimization. Use this to track progress, display progress bars,
+                or log intermediate results.
 
         Returns:
             The best AgentVariant from the final Pareto frontier (lowest score).
@@ -636,18 +773,55 @@ class AgentEvolver:
             initial_frontier_size=initial_frontier_size,
             max_frontier_size=max_frontier_size,
             mutation_probability=mutation_probability,
+            progress_callback=progress_callback,
         )
         print(f"Starting AgentEvolver with {self.max_generations} generations")
         print(f"Max frontier size: {self.max_frontier_size}, Task: {self.task_description}")
         while len(self.pareto_frontier) < self.initial_frontier_size:
             variant_id = self._next_variant_id()
             print(f"\nInitializing variant_{variant_id} agent")
+
+            self._report_progress(
+                generation=0,
+                phase=EvolverPhase.INITIALIZING,
+                message=f"Creating initial variant {variant_id}",
+            )
+
             initial = self._create_initial_agent(variant_id=variant_id)
+
+            self._report_progress(
+                generation=0,
+                phase=EvolverPhase.EVALUATING,
+                variant=initial,
+                message=f"Evaluating initial variant {variant_id}",
+            )
+
             eval_result = self._evaluate_variant(initial)
             initial.metrics = eval_result["metrics"]
-            self._update_pareto_frontier(initial)
+            added = self._update_pareto_frontier(initial)
+            self._update_best_score()
             metrics_str = self._format_metrics(initial.metrics)
             print(f"Initial agent variant_{variant_id} metrics: {metrics_str}")
+
+            self._report_progress(
+                generation=0,
+                phase=EvolverPhase.EVALUATING,
+                variant=initial,
+                added_to_frontier=added,
+                message=f"Initial variant {variant_id}: {metrics_str}",
+            )
+
+            self._report_progress(
+                generation=0,
+                phase=EvolverPhase.PARETO_UPDATE,
+                variant=initial,
+                added_to_frontier=added,
+                message=(
+                    f"{'Added' if added else 'Rejected'} variant {variant_id} "
+                    f"(frontier size: {len(self.pareto_frontier)})"
+                ),
+            )
+
             self._copy_best_to_optimal(initial)
 
         # Evolution loop
@@ -661,16 +835,47 @@ class AgentEvolver:
                 print("Operation: Mutation")
                 parent = self._sample_from_frontier()
                 print(f"  Parent: variant_{parent.id} ({self._format_metrics(parent.metrics)})")
+
+                self._report_progress(
+                    generation=gen,
+                    phase=EvolverPhase.MUTATION,
+                    variant=parent,
+                    message=f"Mutating variant {parent.id}",
+                )
+
                 new_variant = self._mutate(parent)
             else:
                 print("Operation: Crossover")
                 primary, secondary = self._sample_two_from_frontier()
                 print(f"  Primary: variant_{primary.id}, Secondary: variant_{secondary.id}")
+
+                self._report_progress(
+                    generation=gen,
+                    phase=EvolverPhase.CROSSOVER,
+                    variant=primary,
+                    message=(
+                        f"Crossing over variant {primary.id} "
+                        f"with variant {secondary.id}"
+                    ),
+                )
+
                 new_variant = self._crossover(primary, secondary)
 
             if new_variant is None:
                 print("  Failed to create new variant")
+                self._report_progress(
+                    generation=gen,
+                    phase=EvolverPhase.EVALUATING,
+                    message="Failed to create new variant",
+                )
                 continue
+
+            self._report_progress(
+                generation=gen,
+                phase=EvolverPhase.EVALUATING,
+                variant=new_variant,
+                message=f"Evaluating variant {new_variant.id}",
+            )
 
             eval_result = self._evaluate_variant(new_variant)
             new_variant.metrics = eval_result["metrics"]
@@ -678,7 +883,27 @@ class AgentEvolver:
             print(f"  New variant_{new_variant.id}: {metrics_str}")
 
             added = self._update_pareto_frontier(new_variant)
+            self._update_best_score()
             print(f"  {'Added to' if added else 'Not added to'} Pareto frontier")
+
+            self._report_progress(
+                generation=gen,
+                phase=EvolverPhase.EVALUATING,
+                variant=new_variant,
+                added_to_frontier=added,
+                message=f"Variant {new_variant.id}: {metrics_str}",
+            )
+
+            self._report_progress(
+                generation=gen,
+                phase=EvolverPhase.PARETO_UPDATE,
+                variant=new_variant,
+                added_to_frontier=added,
+                message=(
+                    f"{'Added' if added else 'Rejected'} variant {new_variant.id} "
+                    f"(frontier size: {len(self.pareto_frontier)})"
+                ),
+            )
 
             best = self.get_best_variant()
             print(f"  Best: variant_{best.id} ({self._format_metrics(best.metrics)})")
@@ -690,6 +915,17 @@ class AgentEvolver:
             print(f"  variant_{v.id}: {self._format_metrics(v.metrics)}")
 
         best = self.get_best_variant()
+
+        self._report_progress(
+            generation=self.max_generations,
+            phase=EvolverPhase.COMPLETE,
+            variant=best,
+            message=(
+                f"Evolution complete. Best variant {best.id}: "
+                f"{self._format_metrics(best.metrics)}"
+            ),
+        )
+
         return best
 
     def _copy_best_to_optimal(self, best: AgentVariant) -> None:
@@ -809,6 +1045,7 @@ def main() -> None:
         initial_frontier_size=4,
         max_frontier_size=6,
         mutation_probability=0.8,
+        progress_callback=create_progress_callback(verbose=True),
     )
 
     print("\n=== Final Result ===")

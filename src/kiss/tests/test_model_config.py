@@ -109,7 +109,7 @@ class TestModelConfig(unittest.TestCase):
             None. Uses assertions to verify model type and config storage.
         """
         config = {"temperature": 0.2}
-        model_instance = get_model("claude-opus-4-5", model_config=config)
+        model_instance = get_model("claude-opus-4-6", model_config=config)
         self.assertIsInstance(model_instance, AnthropicModel)
         self.assertEqual(model_instance.model_config, config)
 

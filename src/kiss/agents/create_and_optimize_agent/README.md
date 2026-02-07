@@ -18,6 +18,7 @@ Both components use a **Pareto frontier** approach to track non-dominated soluti
 - **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
 - **Automatic Pruning**: Removes dominated variants to manage memory and storage
 - **Lineage Tracking**: Records parent relationships and improvement history
+- **Progress Callbacks**: Optional callbacks for tracking optimization progress, building UIs, or logging
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
 
 ## Installation
@@ -50,7 +51,7 @@ if success and report:
 ### Evolving a New Agent from Scratch
 
 ```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver, create_progress_callback
 
 evolver = AgentEvolver()
 
@@ -59,6 +60,7 @@ best_variant = evolver.evolve(
     max_generations=10,
     max_frontier_size=6,
     mutation_probability=0.8,
+    progress_callback=create_progress_callback(verbose=True),  # Optional progress tracking
 )
 
 print(f"Best agent: {best_variant.folder_path}")
@@ -82,12 +84,34 @@ The `AgentEvolver` creates and evolves agent populations from a task description
 
 **Methods:**
 
-- `evolve(task_description, max_generations, initial_frontier_size, max_frontier_size, mutation_probability)`: Run the evolutionary optimization, returns the best variant. All parameters except `task_description` are optional and fall back to config defaults.
+- `evolve(task_description, max_generations, initial_frontier_size, max_frontier_size, mutation_probability, progress_callback)`: Run the evolutionary optimization, returns the best variant. All parameters except `task_description` are optional and fall back to config defaults.
 - `get_best_variant()`: Get the current best variant by combined score
 - `get_pareto_frontier()`: Get all variants in the Pareto frontier
 - `save_state(path)`: Save evolver state to JSON
 
 ### Data Classes
+
+**EvolverProgress**: Progress information passed to the callback during optimization
+
+- `generation`: Current generation number (0 during initialization, 1-indexed during evolution)
+- `max_generations`: Total number of generations to run
+- `phase`: Current phase (`EvolverPhase` enum)
+- `variant_id`: ID of the variant currently being processed (if applicable)
+- `parent_ids`: Parent variant IDs for the current operation (if applicable)
+- `frontier_size`: Current size of the Pareto frontier
+- `best_score`: Best combined score seen so far (lower is better)
+- `current_metrics`: Metrics of the current variant (if applicable)
+- `added_to_frontier`: Whether the current variant was added to the Pareto frontier (if applicable)
+- `message`: Descriptive message about the current activity
+
+**EvolverPhase**: Enum representing the current phase of optimization
+
+- `INITIALIZING`: Creating initial agent variants
+- `EVALUATING`: Evaluating a variant
+- `MUTATION`: Mutating a variant
+- `CROSSOVER`: Crossing over two variants
+- `PARETO_UPDATE`: Updating the Pareto frontier
+- `COMPLETE`: Evolution complete
 
 **ImprovementReport**: Tracks improvements made to an agent
 
@@ -369,12 +393,50 @@ class AgentEvolver:
         initial_frontier_size: int | None = None,
         max_frontier_size: int | None = None,
         mutation_probability: float | None = None,
+        progress_callback: Callable[[EvolverProgress], None] | None = None,
     ) -> AgentVariant: ...
 
     def get_best_variant(self) -> AgentVariant: ...
     def get_pareto_frontier(self) -> list[AgentVariant]: ...
     def save_state(self, path: str) -> None: ...
 ```
+
+### EvolverPhase
+
+```python
+class EvolverPhase(Enum):
+    INITIALIZING = "initializing"    # Creating initial agent variants
+    EVALUATING = "evaluating"        # Evaluating a variant
+    MUTATION = "mutation"            # Mutating a variant
+    CROSSOVER = "crossover"          # Crossing over two variants
+    PARETO_UPDATE = "pareto_update"  # Updating the Pareto frontier
+    COMPLETE = "complete"            # Evolution complete
+```
+
+### EvolverProgress
+
+```python
+@dataclass
+class EvolverProgress:
+    generation: int                           # Current generation (0 = init, 1+ = evolution)
+    max_generations: int                      # Total generations to run
+    phase: EvolverPhase                       # Current optimization phase
+    variant_id: int | None = None             # ID of current variant (if applicable)
+    parent_ids: list[int] = field(default_factory=list)  # Parent variant IDs
+    frontier_size: int = 0                    # Current Pareto frontier size
+    best_score: float | None = None           # Best combined score (lower is better)
+    current_metrics: dict[str, float] = field(default_factory=dict)  # Current variant metrics
+    added_to_frontier: bool | None = None     # Whether variant was added to frontier
+    message: str = ""                         # Descriptive activity message
+```
+
+### create_progress_callback
+
+```python
+def create_progress_callback(verbose: bool = False) -> Callable[[EvolverProgress], None]
+```
+
+Creates a standard progress callback for console output. With `verbose=False` (default), prints only evaluation completions, Pareto updates, and completion. With `verbose=True`, prints all phases.
 
 ### ImprovementReport
 

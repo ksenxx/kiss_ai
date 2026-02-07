@@ -142,7 +142,7 @@ The Agent Creator and Optimizer module provides tools to automatically evolve an
 It uses a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
 
 ```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver, create_progress_callback
 
 evolver = AgentEvolver()
 
@@ -151,6 +151,7 @@ best_variant = evolver.evolve(
     max_generations=10,
     max_frontier_size=6,
     mutation_probability=0.8,
+    progress_callback=create_progress_callback(verbose=True),  # Optional progress tracking
 )
 
 print(f"Best agent: {best_variant.folder_path}")
@@ -165,6 +166,7 @@ print(f"Metrics: {best_variant.metrics}")
 - **Uses RelentlessCodingAgent**: Leverages the relentless multi-agent coding system for agent improvement
 - **Automatic Pruning**: Removes dominated variants to manage memory and storage
 - **Lineage Tracking**: Records parent relationships and improvement history
+- **Progress Callbacks**: Optional `progress_callback` for tracking optimization progress, building UIs, or logging
 - **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
 
 For usage examples, API reference, and configuration options, please see the [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md).
@@ -970,6 +972,7 @@ kiss/
 │   │   ├── test_gemini_cli_agent.py       # Tests for Gemini CLI Agent
 │   │   ├── test_openai_codex_agent.py     # Tests for OpenAI Codex Agent
 │   │   ├── test_agent_evolver.py          # Tests for Agent Evolver
+│   │   ├── test_evolver_progress_callback.py # Tests for AgentEvolver progress callbacks
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents
 │   │   ├── test_search_web.py
@@ -1022,13 +1025,13 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.relentless_coding_agent`:
   - `orchestrator_model_name`: Model for orchestration (default: "claude-sonnet-4-5")
-  - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-5")
+  - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-6")
   - `trials`: Number of retry attempts for failed subtasks (default: 200)
   - `max_steps`: Maximum steps per agent (default: 200)
   - `max_budget`: Maximum budget in USD (default: 200.0)
 - **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.kiss_coding_agent`:
   - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-sonnet-4-5")
-  - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-5")
+  - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-6")
   - `refiner_model_name`: Model for prompt refinement on failures (default: "claude-sonnet-4-5")
   - `trials`: Number of retry attempts per task/subtask (default: 200)
   - `max_steps`: Maximum steps per agent (default: 200)

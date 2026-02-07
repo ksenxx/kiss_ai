@@ -125,9 +125,11 @@ The best agent is always available—even while evolution continues.
 Using Agent Evolver is straightforward:
 
 ```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver, create_progress_callback
 
-evolver = AgentEvolver(
+evolver = AgentEvolver()
+
+best_agent = evolver.evolve(
     task_description="""
     Build a code review agent that can:
     1. Analyze pull requests for bugs and style issues
@@ -138,9 +140,9 @@ evolver = AgentEvolver(
     initial_frontier_size=4,
     max_frontier_size=6,
     mutation_probability=0.8,
+    progress_callback=create_progress_callback(verbose=True),  # Track optimization progress
 )
 
-best_agent = evolver.evolve()
 print(f"Optimal agent: {best_agent.folder_path}")
 print(f"Token efficiency: {best_agent.metrics['tokens_used']}")
 print(f"Speed: {best_agent.metrics['execution_time']:.2f}s")

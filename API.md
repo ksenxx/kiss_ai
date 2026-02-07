@@ -223,7 +223,7 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `orchestrator_model_name` (str | None): Model for the main orchestrator agent. Default is None (uses config default: "claude-sonnet-4-5").
-- `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-5").
+- `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-6").
 - `trials` (int | None): Number of continuation attempts for each task/subtask. Default is None (uses config default: 200).
 - `max_steps` (int | None): Maximum number of steps per agent. Default is None (uses config default: 200).
 - `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses config default: 200.0).
@@ -432,7 +432,7 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `orchestrator_model_name` (str | None): Model for the main orchestrator agent. Default is None (uses config default: "claude-sonnet-4-5").
-- `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-5").
+- `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-6").
 - `refiner_model_name` (str | None): Model for dynamic prompt refinement when tasks fail. Default is None (uses config default: "claude-sonnet-4-5").
 - `trials` (int | None): Number of retry attempts for each task/subtask. Default is None (uses config default: 200).
 - `max_steps` (int | None): Maximum number of steps per agent. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
@@ -1281,6 +1281,7 @@ def evolve(
     initial_frontier_size: int | None = None,
     max_frontier_size: int | None = None,
     mutation_probability: float | None = None,
+    progress_callback: Callable[[EvolverProgress], None] | None = None,
 ) -> AgentVariant
 ```
 
@@ -1293,6 +1294,7 @@ Run the evolutionary optimization process.
 - `initial_frontier_size` (int | None): Number of initial agents to create. Uses config default if None.
 - `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
 - `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
+- `progress_callback` (Callable\[[EvolverProgress], None\] | None): Optional callback function called with `EvolverProgress` during optimization. Use this to track progress, display progress bars, or log intermediate results.
 
 **Returns:**
 
@@ -1384,24 +1386,98 @@ class ImprovementReport:
 - `generation` (int): Generation number.
 - `summary` (str): Summary of the improvement.
 
+### EvolverPhase
+
+```python
+class EvolverPhase(Enum):
+    INITIALIZING = "initializing"    # Creating initial agent variants
+    EVALUATING = "evaluating"        # Evaluating a variant
+    MUTATION = "mutation"            # Mutating a variant
+    CROSSOVER = "crossover"          # Crossing over two variants
+    PARETO_UPDATE = "pareto_update"  # Updating the Pareto frontier
+    COMPLETE = "complete"            # Evolution complete
+```
+
+Enum representing the current phase of AgentEvolver optimization, similar to `GEPAPhase` for GEPA.
+
+### EvolverProgress
+
+```python
+@dataclass
+class EvolverProgress:
+    generation: int                           # Current generation (0 = init, 1+ = evolution)
+    max_generations: int                      # Total generations to run
+    phase: EvolverPhase                       # Current optimization phase
+    variant_id: int | None = None             # ID of current variant (if applicable)
+    parent_ids: list[int] = field(default_factory=list)  # Parent variant IDs
+    frontier_size: int = 0                    # Current Pareto frontier size
+    best_score: float | None = None           # Best combined score (lower is better)
+    current_metrics: dict[str, float] = field(default_factory=dict)  # Current variant metrics
+    added_to_frontier: bool | None = None     # Whether variant was added to frontier
+    message: str = ""                         # Descriptive activity message
+```
+
+Progress information passed to the callback during optimization.
+
+**Attributes:**
+
+- `generation` (int): Current generation number (0 during initialization, 1-indexed during evolution).
+- `max_generations` (int): Total number of generations to run.
+- `phase` (EvolverPhase): Current phase of the optimization.
+- `variant_id` (int | None): ID of the variant currently being processed.
+- `parent_ids` (list[int]): Parent variant IDs for the current operation.
+- `frontier_size` (int): Current size of the Pareto frontier.
+- `best_score` (float | None): Best combined score seen so far (lower is better).
+- `current_metrics` (dict[str, float]): Metrics of the current variant.
+- `added_to_frontier` (bool | None): Whether the current variant was added to the Pareto frontier.
+- `message` (str): Descriptive message about the current activity.
+
+### create_progress_callback()
+
+```python
+def create_progress_callback(verbose: bool = False) -> Callable[[EvolverProgress], None]
+```
+
+Create a standard progress callback for console output.
+
+**Parameters:**
+
+- `verbose` (bool): If True, prints all phases. If False (default), only prints evaluation completions, Pareto updates, and completion messages.
+
+**Returns:**
+
+- `Callable[[EvolverProgress], None]`: A callback function for use with `evolve()`.
+
 ### Example
 
 ```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver, EvolverProgress, create_progress_callback
 
 evolver = AgentEvolver()
 
+# Using the built-in progress callback
 best = evolver.evolve(
     task_description="Build a code analysis assistant that reviews Python files",
     max_generations=5,
     initial_frontier_size=2,
     max_frontier_size=4,
     mutation_probability=0.8,
+    progress_callback=create_progress_callback(verbose=True),
 )
 
 print(f"Best variant: {best.folder_path}")
 print(f"Metrics: {best.metrics}")
 print(f"Generation: {best.generation}")
+
+# Or use a custom callback
+def my_callback(progress: EvolverProgress) -> None:
+    if progress.phase.value == "complete":
+        print(f"Done! Best score: {progress.best_score}")
+
+best = evolver.evolve(
+    task_description="Build a code analysis assistant",
+    progress_callback=my_callback,
+)
 
 # Save state for later analysis
 evolver.save_state("evolver_state.json")
@@ -2474,7 +2550,7 @@ DEFAULT_CONFIG.agent.use_web = True
 #### `agent.relentless_coding_agent`
 
 - `orchestrator_model_name` (str): Model for orchestration (default: "claude-sonnet-4-5")
-- `subtasker_model_name` (str): Model for subtask execution (default: "claude-opus-4-5")
+- `subtasker_model_name` (str): Model for subtask execution (default: "claude-opus-4-6")
 - `max_steps` (int): Maximum steps for the Relentless Coding Agent (default: 200)
 - `max_budget` (float): Maximum budget in USD for the Relentless Coding Agent (default: 200.0)
 - `trials` (int): Continuation attempts per task/subtask (default: 200)
@@ -2482,7 +2558,7 @@ DEFAULT_CONFIG.agent.use_web = True
 #### `agent.kiss_coding_agent`
 
 - `orchestrator_model_name` (str): Model for main orchestration (default: "claude-sonnet-4-5")
-- `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-5")
+- `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-6")
 - `refiner_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
 - `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 200)
 - `max_budget` (float): Maximum budget in USD for the KISS Coding Agent (default: 100.0)

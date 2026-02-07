@@ -161,6 +161,27 @@ exit 0
 
 
 
+SAFE_SPECIAL_PATHS = {
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/tty",
+}
+
+SAFE_SPECIAL_PREFIXES = (
+    "/dev/fd/",
+    "/proc/self/",
+)
+
+
+def _is_safe_special_path(path: str) -> bool:
+    return path in SAFE_SPECIAL_PATHS or path.startswith(SAFE_SPECIAL_PREFIXES)
+
+
 def _extract_directory(path_str: str) -> str | None:
     """Resolve a file path to an absolute canonical path for security validation.
 
@@ -565,7 +586,7 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                     if redirect_match:
                         path = redirect_match.group(1).strip()
                         path = path.strip("'\"")
-                        if path and path != "/dev/null":
+                        if path and not _is_safe_special_path(path):
                             dir_path = _extract_directory(path)
                             if dir_path:
                                 writable_paths.add(dir_path)
@@ -575,7 +596,7 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
             if input_redirect_match:
                 path = input_redirect_match.group(1).strip()
                 path = path.strip("'\"")
-                if path and path != "/dev/null":
+                if path and not _is_safe_special_path(path):
                     dir_path = _extract_directory(path)
                     if dir_path:
                         readable_paths.add(dir_path)
@@ -627,7 +648,7 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                     # Check if it looks like a path
                     if "/" in token or not any(c in token for c in ["=", "$", "(", ")"]):
                         token = token.strip("'\"")
-                        if token and token != "/dev/null":
+                        if token and not _is_safe_special_path(token):
                             paths.append(token)
 
                     i += 1
@@ -660,14 +681,16 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                             for token in tokens:
                                 if token.startswith("of="):
                                     output_file = token[3:]
-                                    dir_path = _extract_directory(output_file)
-                                    if dir_path:
-                                        writable_paths.add(dir_path)
+                                    if not _is_safe_special_path(output_file):
+                                        dir_path = _extract_directory(output_file)
+                                        if dir_path:
+                                            writable_paths.add(dir_path)
                                 elif token.startswith("if="):
                                     input_file = token[3:]
-                                    dir_path = _extract_directory(input_file)
-                                    if dir_path:
-                                        readable_paths.add(dir_path)
+                                    if not _is_safe_special_path(input_file):
+                                        dir_path = _extract_directory(input_file)
+                                        if dir_path:
+                                            readable_paths.add(dir_path)
                         else:
                             # Other write commands
                             for path in paths:
@@ -824,11 +847,15 @@ class UsefulTools:
         readable, writable = parse_bash_command_paths(command)
 
         for path_str in readable:
+            if _is_safe_special_path(path_str):
+                continue
             resolved = Path(path_str).resolve()
             if not is_subpath(resolved, self.readable_paths):
                 return f"Error: Access denied for reading {path_str}"
 
         for path_str in writable:
+            if _is_safe_special_path(path_str):
+                continue
             resolved = Path(path_str).resolve()
             if not is_subpath(resolved, self.writable_paths):
                 return f"Error: Access denied for writing to {path_str}"
