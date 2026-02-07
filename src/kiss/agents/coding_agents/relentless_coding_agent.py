@@ -5,7 +5,6 @@
 
 """Multi-agent coding system with orchestration, and sub-agents using KISSAgent."""
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -257,9 +256,10 @@ class RelentlessCodingAgent(Base):
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
 
             ret = yaml.safe_load(result)
-            success = ret.get("success", False)
+            payload = ret if isinstance(ret, dict) else {}
+            success = payload.get("success", False)
             if not success:
-                task_prompt_template = ORCHESTRATOR_PROMPT + "\n\n" + ret["summary"]
+                task_prompt_template = ORCHESTRATOR_PROMPT + "\n\n" + payload.get("summary", "")
                 continue
             return result
         raise KISSError(f"Task {self.task_description} failed after {self.trials} trials")
@@ -315,9 +315,10 @@ class RelentlessCodingAgent(Base):
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
 
             ret = yaml.safe_load(result)
-            success = ret.get("success", False)
+            payload = ret if isinstance(ret, dict) else {}
+            success = payload.get("success", False)
             if not success:
-                task_prompt_template = TASKING_PROMPT + "\n\n" + ret["summary"]
+                task_prompt_template = TASKING_PROMPT + "\n\n" + payload.get("summary", "")
                 continue
             return result
         raise KISSError(f"Subtask {subtask.name} failed after {self.trials} trials")
@@ -392,13 +393,7 @@ class RelentlessCodingAgent(Base):
                 finally:
                     self.docker_manager = None
         else:
-            old_cwd = os.getcwd()
-            try:
-                if self.work_dir:
-                    os.chdir(self.work_dir)
-                return self.perform_task()
-            finally:
-                os.chdir(old_cwd)
+            return self.perform_task()
 
 
 def main() -> None:

@@ -225,7 +225,7 @@ class KISSAgent(Base):
             except (KISSError, RuntimeError) as e:
                 content = f"Failed to get response from Model: {e}.\nPlease try again.\n"
                 self.model.add_message_to_conversation("user", content)
-                self._add_message_with_formatter("model", content)
+                self._add_message_with_formatter("user", content)
 
             self._check_limits()
 
@@ -292,7 +292,8 @@ class KISSAgent(Base):
             str | None: The result string if the finish tool was called, None otherwise.
         """
         function_name = function_call["name"]
-        function_args = function_call.get("arguments", {})
+        raw_args = function_call.get("arguments")
+        function_args = raw_args if isinstance(raw_args, dict) else {}
 
         args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
         call_repr = f"```python\n{function_name}({args_str})\n```"

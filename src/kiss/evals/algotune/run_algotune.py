@@ -429,12 +429,14 @@ def create_correctness_test_fn(task_instance, test_problems: list):
 
 def run_algotune(
     max_retries: int = 3,
+    task: str | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Run KISSEvolve on an AlgoTune task.
 
     Args:
         max_retries: Maximum number of retries for network errors.
+        task: Task name to run. If None, uses config default.
         **kwargs: Override config parameters.
 
     Returns:
@@ -447,18 +449,20 @@ def run_algotune(
     algotune_path = Path(algotune_cfg.algotune_path)
     _ensure_algotune_installed(algotune_path, algotune_cfg.algotune_repo_url)
 
+    task_name = task if task is not None else algotune_cfg.task
+
     print("=" * 80)
-    print(f"AlgoTune Optimization: {algotune_cfg.task}")
+    print(f"AlgoTune Optimization: {task_name}")
     print("=" * 80)
 
     # Load task
-    print(f"\nLoading task: {algotune_cfg.task}...")
-    task_class = get_task_class(algotune_cfg.task)
+    print(f"\nLoading task: {task_name}...")
+    task_class = get_task_class(task_name)
     task_instance = task_class()
 
     # Load description
-    desc_path = algotune_path / "AlgoTuneTasks" / algotune_cfg.task / "description.txt"
-    description = desc_path.read_text() if desc_path.exists() else algotune_cfg.task
+    desc_path = algotune_path / "AlgoTuneTasks" / task_name / "description.txt"
+    description = desc_path.read_text() if desc_path.exists() else task_name
     description = description.replace("{", "{{").replace("}", "}}")
 
     # Generate test problems
@@ -474,7 +478,6 @@ def run_algotune(
     # Create initial code
     print("Creating initial solver from reference implementation...")
     solve_source = inspect.getsource(task_instance.solve)
-    task_name = algotune_cfg.task
     task_file = algotune_path / "AlgoTuneTasks" / task_name / f"{task_name}.py"
     initial_code = _create_initial_code(task_name, description, solve_source, task_file)
 
@@ -548,11 +551,12 @@ def run_algotune(
 
     # Results
     if best.metrics:
-        evolved_time = best.metrics.get("total_time_seconds", initial_time)
+        evolved_time = best.metrics.get("total_time_seconds")
     else:
+        evolved_time = None
+    if evolved_time is None:
         evolved_time = initial_time
-    # Ensure evolved_time is a float for calculations
-    evolved_time = float(evolved_time or initial_time)
+    evolved_time = float(evolved_time)
     speedup = initial_time / evolved_time if evolved_time > 0 else 1.0
 
     print("\n" + "=" * 80)
@@ -569,7 +573,7 @@ def run_algotune(
     print("-" * 80)
 
     return {
-        "task_name": config_module.DEFAULT_CONFIG.algotune.task,  # type: ignore[attr-defined]
+        "task_name": task_name,
         "initial_fitness": initial_result["fitness"],
         "best_fitness": best.fitness,
         "initial_time": initial_time,

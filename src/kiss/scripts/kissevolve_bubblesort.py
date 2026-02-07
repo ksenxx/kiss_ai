@@ -164,8 +164,9 @@ def evaluate_performance_of_code(code: str) -> dict:
         num_runs = 3
 
         for size in sizes:
-            # Generate random test data
-            test_data = [random.randint(-1000, 1000) for _ in range(size)]
+            # Generate random test data with fixed seed for fair cross-variant comparison
+            rng = random.Random(42 + size)
+            test_data = [rng.randint(-1000, 1000) for _ in range(size)]
 
             # Run multiple times and take average
             times = []
@@ -386,7 +387,7 @@ def main() -> None:
     if best_variant.metrics and "total_time_seconds" in best_variant.metrics:
         initial_time = initial_result["metrics"].get("total_time_seconds", 0)
         evolved_time = best_variant.metrics.get("total_time_seconds", 0)
-        if initial_time > 0:
+        if initial_time > 0 and evolved_time > 0:
             speedup = initial_time / evolved_time
             print(f"Speedup: {speedup:.2f}x")
             print(f"Initial total time: {initial_time * 1000:.4f} ms")

@@ -5,7 +5,6 @@
 
 """Multi-agent coding system with orchestration, and sub-agents using KISSAgent."""
 
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -249,7 +248,8 @@ class KISSCodingAgent(Base):
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
 
             ret = yaml.safe_load(result)
-            success = ret.get("success", False)
+            payload = ret if isinstance(ret, dict) else {}
+            success = payload.get("success", False)
             if not success:
                 self.formatter.print_error("Task failed, refining prompt and retrying...")
                 task_prompt_template = prompt_refiner_agent(
@@ -314,7 +314,8 @@ class KISSCodingAgent(Base):
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
 
             ret = yaml.safe_load(result)
-            success = ret.get("success", False)
+            payload = ret if isinstance(ret, dict) else {}
+            success = payload.get("success", False)
             if not success:
                 self.formatter.print_error(
                     f"Subtask {subtask.name} failed, refining prompt and retrying..."
@@ -402,13 +403,7 @@ class KISSCodingAgent(Base):
                 finally:
                     self.docker_manager = None
         else:
-            old_cwd = os.getcwd()
-            try:
-                if self.work_dir:
-                    os.chdir(self.work_dir)
-                return self.perform_task()
-            finally:
-                os.chdir(old_cwd)
+            return self.perform_task()
 
 
 def main() -> None:
@@ -434,12 +429,10 @@ def main() -> None:
             work_dir=work_dir,
             formatter=CompactFormatter()
         )
+        agent.formatter.print_status("FINAL RESULT:")
+        agent.formatter.print_status(result)
     finally:
         shutil.rmtree(work_dir)
-
-
-    agent.formatter.print_status("FINAL RESULT:")
-    agent.formatter.print_status(result)
 
 
 if __name__ == "__main__":

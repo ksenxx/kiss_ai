@@ -99,7 +99,6 @@ def clean_build_artifacts() -> None:
         ".pytest_cache",
         ".ruff_cache",
         "*.egg-info",
-        ".cursor",
         ".claude",
         "artifacts",
         "uv_cache",
@@ -179,13 +178,9 @@ def main() -> int:
     # Find all markdown files for linting
     md_files = find_markdown_files()
 
-    # Find all Python files for syntax checking
-    project_root = Path(__file__).parent.parent.parent.parent
-    py_files = [str(f) for f in (project_root / "src").rglob("*.py") if not _should_skip_path(f)]
-
     checks = [
         (["uv", "sync"], "Install dependencies (uv sync)"),
-        (["uv", "run", "python", "-m", "py_compile", *py_files], "Syntax check (py_compile)"),
+        (["uv", "run", "python", "-m", "compileall", "-q", "src/"], "Syntax check (compileall)"),
         (["uv", "run", "ruff", "check", "src/"], "Lint code (ruff)"),
         (["uv", "run", "mypy", "src/"], "Type check (mypy)"),
         (["uv", "run", "pyright", "src/"], "Type check (pyright)"),

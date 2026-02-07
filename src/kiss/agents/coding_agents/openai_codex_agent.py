@@ -131,7 +131,8 @@ class OpenAICodexAgent(Base):
         def run_shell(command: str, timeout: int = 60) -> str:
             """Execute shell command. Args: command - shell command, timeout - seconds."""
             output = self.useful_tools.Bash(
-                command=command, description=f"Executing: {command[:50]}..."
+                command=command, description=f"Executing: {command[:50]}...",
+                timeout_seconds=float(timeout),
             )
             return output
 

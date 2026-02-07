@@ -23,6 +23,7 @@ Algorithm:
 
 import json
 import random
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -535,7 +536,15 @@ class GEPA:
                 "placeholders": ", ".join(self.valid_placeholders),
             },
         )
-        return result
+        return self._sanitize_prompt_template(result, fallback=prompt)
+
+    def _sanitize_prompt_template(self, prompt: str, fallback: str) -> str:
+        """Normalize and validate placeholders in a prompt template."""
+        normalized = re.sub(r"{\s*([\"'])([^{}]+?)\1\s*}", r"{\2}", prompt)
+        placeholders = set(get_template_field_names(normalized))
+        if placeholders != self.valid_placeholders:
+            return fallback
+        return normalized
 
     def _compute_val_overlap(
         self, c1: PromptCandidate, c2: PromptCandidate

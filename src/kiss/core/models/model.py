@@ -63,6 +63,15 @@ class Model(ABC):
             self._callback_loop = asyncio.new_event_loop()
         self._callback_loop.run_until_complete(self.token_callback(token))
 
+    def close_callback_loop(self) -> None:
+        """Close the reusable event loop if it exists."""
+        if self._callback_loop is not None and not self._callback_loop.is_closed():
+            self._callback_loop.close()
+        self._callback_loop = None
+
+    def __del__(self) -> None:
+        self.close_callback_loop()
+
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.model_name})"
 

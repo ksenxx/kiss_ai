@@ -49,7 +49,7 @@ class DockerManager:
         self.mount_shared_volume = mount_shared_volume
         self.ports = ports
         self.client_shared_path = config_module.DEFAULT_CONFIG.docker.client_shared_path
-        self.host_shared_path = tempfile.mkdtemp() if mount_shared_volume else None
+        self.host_shared_path: str | None = None
 
         if ":" in image_name:
             self.image, self.tag = image_name.rsplit(":", 1)
@@ -82,6 +82,8 @@ class DockerManager:
             "stdin_open": True,
             "command": "/bin/bash",
         }
+        if self.mount_shared_volume:
+            self.host_shared_path = tempfile.mkdtemp()
         if self.mount_shared_volume and self.host_shared_path:
             container_kwargs["volumes"] = {
                 self.host_shared_path: {"bind": self.client_shared_path, "mode": "rw"}
@@ -115,10 +117,18 @@ class DockerManager:
             workdir=self.workdir,
         )
 
-        stdout_bytes, stderr_bytes = exec_result.output
+        output_payload = exec_result.output
+        if output_payload:
+            stdout_bytes, stderr_bytes = output_payload
+        else:
+            stdout_bytes, stderr_bytes = None, None
         stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
         stderr = stderr_bytes.decode("utf-8") if stderr_bytes else ""
-        return stdout + "\n" + stderr
+        exit_code = exec_result.exit_code
+        output = stdout + "\n" + stderr
+        if exit_code != 0:
+            output += f"\n[exit code: {exit_code}]"
+        return output
 
     def get_host_port(self, container_port: int) -> int | None:
         """Get the host port mapped to a container port.

@@ -305,7 +305,7 @@ class AgentEvolver:
     (combining ideas from two variants) to create new variants.
     """
 
-    def __reset__(
+    def _reset(
         self,
         task_description: str,
         max_generations: int | None = None,
@@ -767,7 +767,7 @@ class AgentEvolver:
         Returns:
             The best AgentVariant from the final Pareto frontier (lowest score).
         """
-        self.__reset__(
+        self._reset(
             task_description=task_description,
             max_generations=max_generations,
             initial_frontier_size=initial_frontier_size,
@@ -775,6 +775,18 @@ class AgentEvolver:
             mutation_probability=mutation_probability,
             progress_callback=progress_callback,
         )
+        try:
+            return self._run_evolution()
+        finally:
+            if self.work_dir.exists():
+                shutil.rmtree(self.work_dir, ignore_errors=True)
+
+    def _run_evolution(self) -> AgentVariant:
+        """Execute the evolution loop (called by evolve()).
+
+        Returns:
+            The best AgentVariant from the final Pareto frontier (lowest score).
+        """
         print(f"Starting AgentEvolver with {self.max_generations} generations")
         print(f"Max frontier size: {self.max_frontier_size}, Task: {self.task_description}")
         while len(self.pareto_frontier) < self.initial_frontier_size:

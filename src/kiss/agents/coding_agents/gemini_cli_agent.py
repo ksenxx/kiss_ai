@@ -164,7 +164,8 @@ class GeminiCliAgent(Base):
                 dict: A dict with 'status', 'stdout', 'stderr', and 'exit_code'.
             """
             output = self.useful_tools.Bash(
-                command=command, description=f"Executing: {command[:50]}..."
+                command=command, description=f"Executing: {command[:50]}...",
+                timeout_seconds=float(timeout),
             )
 
             if output.startswith("Error:"):
@@ -312,8 +313,8 @@ class GeminiCliAgent(Base):
         self.token_callback = token_callback
 
         async def _run_async() -> str | None:
-            task = prompt_template.format(**(arguments or {}))
             timestamp = int(time.time())
+            task = prompt_template.format(**(arguments or {}))
             self._add_message("user", task, timestamp)
 
             # Create the ADK agent with tools

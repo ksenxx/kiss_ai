@@ -50,13 +50,13 @@ class TodoItem:
     id: int
     description: str
     status: str = "pending"  # pending, in_progress, completed, failed
+    error_count: int = 0
 
 @dataclass
 class AgentState:
     """Mutable state for the coding agent."""
     todos: list[TodoItem] = field(default_factory=list)
     dynamic_tools: dict[str, Callable[..., str]] = field(default_factory=dict)
-    error_count: int = 0
     last_error: str = ""
     completed_tasks: list[str] = field(default_factory=list)
 
@@ -183,9 +183,9 @@ class SelfEvolvingMultiAgent:
                 self.state.completed_tasks.append(f"[{todo_id}] {todo.description}: {res}")
                 return f"Todo {todo_id} finished: {res}"
             except Exception as e:
-                self.state.error_count += 1
+                todo.error_count += 1
                 self.state.last_error = str(e)
-                if self.state.error_count <= self.max_retries:
+                if todo.error_count <= self.max_retries:
                     todo.status = "pending"
                     return f"Attempt failed, retrying {todo_id}: {e}"
                 todo.status = "failed"
@@ -205,11 +205,26 @@ class SelfEvolvingMultiAgent:
             self.state.dynamic_tools[name] = dynamic_tool
             return f"Tool '{name}' ready."
 
+        def run_dynamic_tool(tool_name: str, arg: str = "") -> str:
+            """Run a previously created dynamic tool by name.
+
+            Args:
+                tool_name: Name of the dynamic tool to run.
+                arg: Argument to pass to the tool.
+
+            Returns:
+                The output of the tool, or an error message if the tool is not found.
+            """
+            tool = self.state.dynamic_tools.get(tool_name)
+            if tool is None:
+                available = ", ".join(self.state.dynamic_tools.keys()) or "none"
+                return f"Error: Tool '{tool_name}' not found. Available: {available}"
+            return tool(arg)
+
         tools: list[Callable[..., str]] = [
             plan_task, execute_todo, complete_todo, run_bash,
-            create_tool, read_file, write_file
+            create_tool, run_dynamic_tool, read_file, write_file
         ]
-        tools.extend(self.state.dynamic_tools.values())
         return tools
 
     def run(self, task: str) -> str:
@@ -229,7 +244,10 @@ class SelfEvolvingMultiAgent:
             self.docker = docker
             docker.run_bash_command("mkdir -p /workspace", "Init")
             docker.workdir = self.workdir
-            return self._run_orchestrator(task)
+            try:
+                return self._run_orchestrator(task)
+            finally:
+                self.docker = None
 
     def _run_orchestrator(self, task: str) -> str:
         """Run the orchestrator agent on a task.
@@ -267,7 +285,7 @@ class SelfEvolvingMultiAgent:
             "total_todos": len(todos),
             "completed": sum(t.status == "completed" for t in todos),
             "failed": sum(t.status == "failed" for t in todos),
-            "error_count": self.state.error_count,
+            "error_count": sum(t.error_count for t in todos),
             "dynamic_tools": len(self.state.dynamic_tools),
         }
 

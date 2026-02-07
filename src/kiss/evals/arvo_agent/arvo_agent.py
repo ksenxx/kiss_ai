@@ -76,10 +76,13 @@ def get_all_arvo_tags(image_name: str = "n132/arvo") -> list[str]:
     tags: list[str] = []
     url = f"https://hub.docker.com/v2/repositories/{image_name}/tags?page_size=100"
     while url:
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=30)
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to fetch tags from Docker Hub: {resp.status_code}")
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise RuntimeError("Failed to parse Docker Hub response JSON") from exc
         results = data.get("results", [])
         tags.extend(
             [f"{image_name}:{tag['name']}" for tag in results if not tag["name"].endswith("-fix")]
@@ -116,7 +119,7 @@ def find_vulnerability(
         The Python script that found the vulnerability if successful,
         or None if no vulnerability was found after all trials.
     """
-    global prompt_template_vuln_agent
+    current_prompt = prompt_template_vuln_agent
 
     with DockerManager(image_name) as env:
 
@@ -141,7 +144,7 @@ def find_vulnerability(
         for _ in range(num_trials):
             result_str = vuln_agent.run(
                 model_name=model_name,
-                prompt_template=prompt_template_vuln_agent,
+                prompt_template=current_prompt,
                 arguments={"location": location},
                 tools=[env.run_bash_command, run_test, utils.finish],
             )
@@ -152,14 +155,13 @@ def find_vulnerability(
                 or cast(dict[str, object], result).get("status") != "success"
             ):
                 trajectory = vuln_agent.get_trajectory()
-                refined_prompt_template = prompt_refiner_agent(
+                current_prompt = prompt_refiner_agent(
                     original_prompt_template=original_prompt_template,
-                    previous_prompt_template=prompt_template_vuln_agent,
+                    previous_prompt_template=current_prompt,
                     agent_trajectory_summary=trajectory,
                     model_name=model_name,
                 )
-                print(f"Refined prompt template: {refined_prompt_template}")
-                prompt_template_vuln_agent = refined_prompt_template
+                print(f"Refined prompt template: {current_prompt}")
             else:
                 result_value = cast(dict[str, object], result).get("result")
                 if isinstance(result_value, str):

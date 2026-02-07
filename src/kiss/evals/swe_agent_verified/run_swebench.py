@@ -7,6 +7,7 @@
 """SWE-bench Verified runner using KISS agents to solve GitHub issues."""
 
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -195,7 +196,14 @@ def solve_instance(
         - error: Error message (if failed)
         - trajectory: Agent trajectory (if save_trajectories is True)
     """
-    instance_id = instance["instance_id"]
+    instance_id = instance.get("instance_id")
+    if not instance_id:
+        return {
+            "instance_id": "unknown",
+            "model_name_or_path": f"{config.model}_sample_{sample_idx}",
+            "status": "failure",
+            "error": "Missing instance_id in dataset entry.",
+        }
     image_name = get_docker_image_name(instance, config.docker_image_base)
 
     result: dict[str, Any] = {
@@ -228,7 +236,10 @@ def solve_instance(
                 return sub_result
 
             swe_agent = KISSAgent(name="KISS SWE Agent")
-            issue_statement = instance["problem_statement"]
+            issue_statement = instance.get("problem_statement")
+            if not issue_statement:
+                result["error"] = "Missing problem_statement in dataset entry."
+                return result
 
             agent_result_str = swe_agent.run(
                 model_name=config.model,
@@ -241,11 +252,15 @@ def solve_instance(
 
             agent_result = yaml.safe_load(agent_result_str)
 
-            if agent_result.get("status") == "success":
+            if isinstance(agent_result, dict) and agent_result.get("status") == "success":
                 result["model_patch"] = agent_result.get("result", "")
                 result["status"] = "success"
             else:
-                result["error"] = agent_result.get("analysis", "Unknown failure")
+                result["error"] = (
+                    agent_result.get("analysis", "Unknown failure")
+                    if isinstance(agent_result, dict)
+                    else "Unknown failure"
+                )
 
             if config.save_trajectories:
                 result["trajectory"] = swe_agent.get_trajectory()
@@ -349,19 +364,24 @@ def run_swebench(
     # Filter instances if specified
     # Single instance_id takes precedence
     if config.instance_id:
-        instances = [i for i in instances if i["instance_id"] == config.instance_id]
+        instances = [
+            i for i in instances if i.get("instance_id") == config.instance_id
+        ]
         print(f"Filtered to instance: {config.instance_id}")
     elif config.instance_ids:
-        instances = [i for i in instances if i["instance_id"] in config.instance_ids]
+        instances = [
+            i for i in instances if i.get("instance_id") in config.instance_ids
+        ]
         print(f"Filtered to {len(instances)} specified instances")
 
     if config.max_instances > 0:
         instances = instances[: config.max_instances]
         print(f"Limited to first {len(instances)} instances")
 
-    # Setup output directory
+    # Setup output directory (cleaned up at end unless results are needed)
     output_dir = Path(tempfile.mkdtemp())
     results_path = output_dir / "swebench_results.jsonl"
+    _cleanup_output_dir = True
 
     print(f"\nOutput directory: {output_dir}")
     print(f"Model: {config.model}")
@@ -375,7 +395,7 @@ def run_swebench(
     prompt_template = SWE_PROMPT_TEMPLATE
 
     for i, instance in enumerate(instances, 1):
-        instance_id = instance["instance_id"]
+        instance_id = instance.get("instance_id", "unknown")
         print(f"\n[{i}/{len(instances)}] Processing: {instance_id}")
         print("-" * 40)
 
@@ -412,7 +432,7 @@ def run_swebench(
                         prompt_template = prompt_refiner_agent(
                             original_prompt_template=SWE_PROMPT_TEMPLATE,
                             previous_prompt_template=prompt_template,
-                            agent_trajectory_summary=result.get("error", ""),
+                            agent_trajectory_summary=result["trajectory"],
                             model_name=config.model,
                         )
                     except Exception:
@@ -435,6 +455,7 @@ def run_swebench(
     evaluation_results: dict[str, Any] = {}
     if config.run_evaluation and results_path.exists():
         evaluation_results = evaluate_results(results_path, config)
+        _cleanup_output_dir = False  # Keep output_dir if evaluation was run
 
         if evaluation_results:
             print("\n" + "=" * 60)
@@ -451,6 +472,10 @@ def run_swebench(
                 resolution_rate = (resolved / submitted) * 100
                 print(f"Resolution rate: {resolution_rate:.2f}%")
             print("=" * 60)
+
+    # Clean up temp directory if no evaluation results need to be preserved
+    if _cleanup_output_dir and output_dir.exists():
+        shutil.rmtree(output_dir, ignore_errors=True)
 
     return {
         "total_instances": len(instances),

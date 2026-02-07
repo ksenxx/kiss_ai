@@ -358,7 +358,7 @@ class ImproverAgent:
                 AGENT_EVOLVER_PROMPT_PART1 + AGENT_EVOLVER_PROMPT_PART2 + AGENT_EVOLVER_PROMPT_PART3
             )
         else:
-            agent_evolver_prompt = AGENT_EVOLVER_PROMPT_PART1 + AGENT_EVOLVER_PROMPT_PART2
+            agent_evolver_prompt = AGENT_EVOLVER_PROMPT_PART1 + AGENT_EVOLVER_PROMPT_PART3
 
         start_time = time.time()
 

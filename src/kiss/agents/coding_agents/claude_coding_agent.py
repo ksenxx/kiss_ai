@@ -202,7 +202,7 @@ class ClaudeCodingAgent(Base):
             str | None: The final result string.
         """
         self._update_token_usage(message)
-        if hasattr(message, "cost") and message.total_cost_usd:
+        if hasattr(message, "total_cost_usd") and message.total_cost_usd:
             cost = message.total_cost_usd
             self.budget_used += cost
             Base.global_budget_used += cost
