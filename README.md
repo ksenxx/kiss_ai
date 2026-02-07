@@ -1,14 +1,46 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.9
+**Version:** 0.1.10
 
-# When Simplicity Becomes Your Superpower: Meet KISS Agent Framework
+# When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Evolutionary Framework
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
 ______________________________________________________________________
 
 KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
+
+## 📑 Table of Contents
+
+- [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
+- [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
+- [Blogs](#-blogs)
+- [Multi-Agent Orchestration](#-multi-agent-orchestration)
+- [Using Agent Creator and Optimizer](#-using-agent-creator-and-optimizer)
+- [Using Relentless Coding Agent](#-using-relentless-coding-agent)
+- [Output Formatting](#-output-formatting)
+- [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
+- [Overview](#-overview)
+- [Installation](#-installation)
+- [KISSAgent API Reference](#-kissagent-api-reference)
+- [Using GEPA for Prompt Optimization](#-using-gepa-for-prompt-optimization)
+- [Using KISSEvolve for Algorithm Discovery](#-using-kissevolve-for-algorithm-discovery)
+- [Using Self-Evolving Multi-Agent](#-using-self-evolving-multi-agent)
+- [Using KISS Coding Agent](#-using-kiss-coding-agent)
+- [Using Claude Coding Agent](#-using-claude-coding-agent)
+- [Using Gemini CLI Agent](#-using-gemini-cli-agent)
+- [Using OpenAI Codex Agent](#-using-openai-codex-agent)
+- [Using SimpleRAG for Retrieval-Augmented Generation](#-using-simplerag-for-retrieval-augmented-generation)
+- [Multiprocessing](#-multiprocessing)
+- [Docker Manager](#-docker-manager)
+- [Project Structure](#-project-structure)
+- [Versioning](#-versioning)
+- [Configuration](#-configuration)
+- [Available Commands](#-available-commands)
+- [Models Supported](#-models-supported)
+- [Contributing](#-contributing)
+- [License](#-license)
+- [Authors](#-authors)
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
@@ -22,7 +54,9 @@ What if building AI agents could be as straightforward as the name suggests?
 
 Enter **KISS** — the *Keep It Simple, Stupid* Agent Framework.
 
-## 🚀 Your First Agent in 30 Seconds
+## 🚀 Your First Agent in 30 Seconds.
+
+Try the interactive Jupyter notebook by running `uv run notebook --lab`.
 
 Let me show you something beautiful:
 
@@ -45,26 +79,241 @@ print(result)  # 127.05
 
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 
-KISS uses **native function calling** from the LLM providers. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. Everything just works.
+KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works.
 
-## Blogs
+## 📝 Blogs
 
 - [Meet KISS Agent Framework](https://dev.to/koushik_sen_d549bf321e6fb/meet-the-kiss-agent-framework-2ij6/)
 - [Agent Evolver: The Darwin of AI Agents](https://dev.to/koushik_sen_d549bf321e6fb/agent-evolver-the-darwin-of-ai-agents-4iio)
 
-## Overview
+## 🤝 Multi-Agent Orchestration
 
-KISS is a lightweight agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
+Here's where KISS really shines — composing multiple agents into systems greater than the sum of their parts.
+
+Since agents are just functions, you orchestrate them with plain Python. Here's a complete **research-to-article pipeline** with three agents:
+
+```python
+from kiss.core.kiss_agent import KISSAgent
+
+# Agent 1: Research a topic
+researcher = KISSAgent(name="Researcher")
+research = researcher.run(
+    model_name="gpt-4o",
+    prompt_template="List 3 key facts about {topic}. Be concise.",
+    arguments={"topic": "Python asyncio"},
+    is_agentic=False  # Simple generation, no tools
+)
+
+# Agent 2: Write a draft using the research
+writer = KISSAgent(name="Writer")
+draft = writer.run(
+    model_name="claude-sonnet-4-5",
+    prompt_template="Write a 2-paragraph intro based on:\n{research}",
+    arguments={"research": research},
+    is_agentic=False
+)
+
+# Agent 3: Polish the draft
+editor = KISSAgent(name="Editor")
+final = editor.run(
+    model_name="gemini-2.5-flash",
+    prompt_template="Improve clarity and fix any errors:\n{draft}",
+    arguments={"draft": draft},
+    is_agentic=False
+)
+
+print(final)
+```
+
+**That's it.** Each agent can use a different model. Each agent saves its own trajectory. And you compose them with the most powerful orchestration tool ever invented: **regular Python code**.
+
+No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
+
+## 🧬 Using Agent Creator and Optimizer
+
+📖 **For detailed Agent Creator and Optimizer documentation, see [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md)**
+
+The Agent Creator and Optimizer module provides tools to automatically evolve and optimize AI agents for **token efficiency**, **execution speed**, and **cost** using evolutionary algorithms with Pareto frontier maintenance.
+
+**Key Component:**
+
+- **AgentEvolver**: Maintains a population of agent variants and evolves them using mutation and crossover operations
+
+It uses a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
+
+```python
+from kiss.agents.create_and_optimize_agent import AgentEvolver, create_progress_callback
+
+evolver = AgentEvolver()
+
+best_variant = evolver.evolve(
+    task_description="Build a code analysis assistant that can parse and analyze large codebases",
+    max_generations=10,
+    max_frontier_size=6,
+    mutation_probability=0.8,
+    progress_callback=create_progress_callback(verbose=True),  # Optional progress tracking
+)
+
+print(f"Best agent: {best_variant.folder_path}")
+print(f"Metrics: {best_variant.metrics}")
+```
+
+**Key Features:**
+
+- **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time, cost)
+- **Pareto Frontier Maintenance**: Keeps track of all non-dominated solutions
+- **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
+- **Uses RelentlessCodingAgent**: Leverages the relentless multi-agent coding system for agent improvement
+- **Automatic Pruning**: Removes dominated variants to manage memory and storage
+- **Lineage Tracking**: Records parent relationships and improvement history
+- **Progress Callbacks**: Optional `progress_callback` for tracking optimization progress, building UIs, or logging
+- **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
+
+For usage examples, API reference, and configuration options, please see the [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md).
+
+## 💪 Using Relentless Coding Agent
+
+For very very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task:
+
+```python
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent(name="Simple Coding Agent")
+
+result = agent.run(
+    prompt_template="""
+        Create a Python script that reads a CSV file,
+        filters rows where age > 18, and writes to a new file.
+    """,
+    orchestrator_model_name="gpt-4o",
+    subtasker_model_name="gpt-4o-mini",
+    work_dir="./workspace",
+    max_steps=200,
+    trials=200
+)
+print(f"Result: {result}")
+```
+
+**Running with Docker:**
+
+You can optionally run bash commands inside a Docker container for isolation:
+
+```python
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+
+agent = RelentlessCodingAgent(name="Dockered Relenetless Coding Agent")
+
+result = agent.run(
+    prompt_template="""
+        Install numpy and create a script that generates 
+        a random matrix and computes its determinant.
+    """,
+    docker_image="python:3.11-slim",  # Bash commands run in Docker
+    max_steps=200,
+    trials=2000
+)
+print(f"Result: {result}")
+```
+
+**Key Features:**
+
+- **Multi-Agent Architecture**: Orchestrator delegates tasks to executor sub-agents for parallel task handling
+- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, providing structured summaries with "Work Done" and "Work to Do Next" sections for seamless handoff (💡 new idea)
+- **Cost-Saving Guidance**: Orchestrator avoids unnecessary sub-agent delegation when it can handle work directly
+- **Retry with Context**: Failed tasks automatically retry with previous summary appended to the prompt
+- **Configurable Trials**: Set high trial counts (e.g., 200+) for truly relentless execution
+- **Docker Support**: Optional isolated execution via Docker containers
+- **Path Access Control**: Enforces read/write permissions on file system paths
+- **Built-in Tools**: Bash, Edit, and MultiEdit tools for file operations
+- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-agents
+
+## 🎨 Output Formatting
+
+Unlike other agentic systems, you do not need to specify the output schema for the agent. Just create
+a suitable "finish" function with parameters. The parameters could be treated as the top level keys
+in a json format.
+
+**Example: Custom Structured Output**
+
+```python
+from kiss.core.kiss_agent import KISSAgent
+
+# Define a custom finish function with your desired output structure
+def finish(
+    sentiment: str,
+    confidence: float,
+    key_phrases: str,
+    summary: str
+) -> str:
+    """
+    Complete the analysis with structured results.
+    
+    Args:
+        sentiment: The overall sentiment ('positive', 'negative', or 'neutral')
+        confidence: Confidence score between 0.0 and 1.0
+        key_phrases: Comma-separated list of key phrases found in the text
+        summary: A brief summary of the analysis
+    
+    Returns:
+        The formatted analysis result
+    """
+    ...
+
+```
+
+The agent will automatically use your custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
+
+## 📊 Trajectory Saving and Visualization
+
+Agent trajectories are automatically saved to the artifacts directory (default: `artifacts/`). Each trajectory includes:
+
+- Complete message history with token usage and budget information appended to each message
+- Tool calls and results
+- Configuration used
+- Timestamps
+- Budget and token usage statistics
+
+### Visualizing Trajectories
+
+The framework includes a web-based trajectory visualizer for viewing agent execution histories:
+
+```bash
+# Run the visualizer server
+uv run python -m kiss.viz_trajectory.server artifacts
+
+# Or with custom host/port
+uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 5050
+```
+
+Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
+
+The visualizer provides:
+
+- **Modern UI**: Dark theme with smooth animations
+- **Sidebar Navigation**: List of all trajectories sorted by start time
+- **Markdown Rendering**: Full markdown support for message content
+- **Code Highlighting**: Syntax highlighting for fenced code blocks
+- **Message Display**: Clean, organized view of agent conversations
+- **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
+
+![Trajectory Visualizer](assets/image-0478c494-2550-4bbe-8559-f205a4544bec.png)
+
+📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
+
+## 📖 Overview
+
+KISS is a lightweight, yet powerful, multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
 
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
-- **Multi-Agent Coding System**: KISSCodingAgent with orchestration, sub-agent management, and automatic prompt refinement
-- **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier
+- **Multi-Agent Coding System**: Relentless Coding Agent with orchestration, sub-agent management, and automatic task hand-off (💡 new idea)
+- **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier (💡 new idea)
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
 - **Native Function Calling**: Seamless tool integration using native function calling APIs (OpenAI, Anthropic, Gemini, Together AI, and OpenRouter)
 - **Docker Integration**: Built-in Docker manager for running agents in isolated environments
 - **Trajectory Tracking**: Automatic saving of agent execution trajectories with unified state management
+- **Token Streaming**: Real-time token streaming via async callback for all providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter), including tool execution output
 - **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
 - **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
 - **Self-Evolution**: Framework for agents to evolve and refine other multi agents
@@ -74,7 +323,7 @@ KISS is a lightweight agent framework that implements a ReAct (Reasoning and Act
 - **Multiprocessing Support**: Utilities for parallel execution of functions using multiprocessing
 - **Trajectory Visualization**: Web-based visualizer for viewing agent execution trajectories with modern UI
 
-## Installation
+## 📦 Installation
 
 ```bash
 # Install uv if you haven't already
@@ -140,268 +389,88 @@ uv sync --group claude --group dev
 | `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk |
 | `docker` | Docker integration | docker, types-docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
-| `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter |
+| `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
 
-## Output Formatting
+> **Optional Dependencies:** All LLM provider SDKs (`openai`, `anthropic`, `google-genai`) are optional. You can import `kiss.core` and `kiss.agents` without installing all of them. When you try to use a model whose SDK is not installed, KISS raises a clear `KISSError` telling you which package to install. Similarly, the coding agents (`ClaudeCodingAgent`, `GeminiCliAgent`, `OpenAICodexAgent`) only require their respective SDKs — you won't get import errors for agents whose SDKs you haven't installed.
 
-Unlike other agentic systems, you do not need to specify the output schema for the agent. Just create
-a suitable "finish" function with parameters. The parameters could be treated as the top level keys
-in a json format.
+## 📚 KISSAgent API Reference
 
-**Example: Custom Structured Output**
+📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
 
-```python
-from kiss.core.kiss_agent import KISSAgent
-
-# Define a custom finish function with your desired output structure
-def finish(
-    sentiment: str,
-    confidence: float,
-    key_phrases: str,
-    summary: str
-) -> str:
-    """
-    Complete the analysis with structured results.
-    
-    Args:
-        sentiment: The overall sentiment ('positive', 'negative', or 'neutral')
-        confidence: Confidence score between 0.0 and 1.0
-        key_phrases: Comma-separated list of key phrases found in the text
-        summary: A brief summary of the analysis
-    
-    Returns:
-        The formatted analysis result
-    """
-    ...
-
-```
-
-The agent will automatically use your custom `finish` function instead of the default one. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
-
-### KISSAgent API Reference
-
-> 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
-
-## 🤝 Multi-Agent Orchestration
-
-Here's where KISS really shines — composing multiple agents into systems greater than the sum of their parts.
-
-KISS includes utility agents that work beautifully together. Let's build a **self-improving coding agent** that writes code, tests it, and refines its own prompts based on failures:
-
-```python
-from kiss.core.kiss_agent import KISSAgent
-from kiss.agents.kiss import prompt_refiner_agent
-
-# Step 1: Define a test function for our coding task
-def test_fibonacci(code: str) -> bool:
-    """Test if the generated fibonacci code is correct."""
-    try:
-        namespace = {}
-        exec(code, namespace)
-        fib = namespace.get('fibonacci')
-        if not fib:
-            return False
-        # Test cases
-        return (fib(0) == 0 and fib(1) == 1 and 
-                fib(10) == 55 and fib(20) == 6765)
-    except Exception:
-        return False
-
-# Step 2: Define our initial prompt
-prompt_template = """
-Write a Python function called 'fibonacci' that returns the nth Fibonacci number.
-Requirements: {requirements}
-"""
-
-# Step 3: The self-improving loop
-original_prompt = prompt_template
-current_prompt = prompt_template
-max_iterations = 3
-
-for iteration in range(max_iterations):
-    print(f"\n{'='*50}")
-    print(f"Iteration {iteration + 1}")
-    print(f"{'='*50}")
-    
-    # Create and run the coding agent
-    coding_agent = KISSAgent(name=f"Coder-{iteration}")
-    try:
-        result = coding_agent.run(
-            model_name="gpt-4o",
-            prompt_template=current_prompt,
-            arguments={"requirements": "Use recursion with memoization for efficiency"},
-            tools=[test_fibonacci]
-        )
-        print(f"✅ Code generated successfully!")
-        print(f"Result: {result[:100]}...")
-        break  # Success! Exit the loop
-        
-    except Exception as e:
-        print(f"❌ Attempt failed: {e}")
-        
-        # Get the trajectory to understand what went wrong
-        trajectory = coding_agent.get_trajectory()
-        
-        # Use the Prompt Refiner agent to improve our prompt
-        print("🔄 Refining prompt based on failure...")
-        current_prompt = prompt_refiner_agent(
-            original_prompt_template=original_prompt,
-            previous_prompt_template=current_prompt,
-            agent_trajectory_summary=trajectory,
-            model_name="gemini-2.5-flash"
-        )
-        print(f"📝 New prompt:\n{current_prompt[:200]}...")
-```
-
-**What's happening here?**
-
-1. **Coding Agent** [KISSAgent](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/kiss_agent.py): Generates code and validates it against test cases using the provided test function as a tool
-1. **Prompt Refiner Agent** [`prompt_refiner_agent`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/kiss.py): Analyzes failures and refines the prompt based on the agent's trajectory
-1. **Orchestration**: A simple Python loop (not to be confused with the ReAct loop) coordinates the agents
-
-No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
-
-### Why This Matters
-
-Most multi-agent frameworks require you to learn a new paradigm: graphs, workflows, channels, and supervisors. KISS takes a different approach: **agents are just functions**.
-
-```python
-# Agent 1: Research
-research_result = research_agent.run(
-    model_name="gpt-4o",
-    prompt_template="Research this topic and return key points: {topic}",
-    arguments={"topic": "PostgreSQL indexing strategies"},
-)
-
-# Agent 2: Write (uses research)
-draft = writer_agent.run(
-    model_name="claude-sonnet-4-5",
-    prompt_template="Write a short article using this research:\n{research}",
-    arguments={"research": research_result},
-)
-
-# Agent 3: Edit (uses draft)
-final = editor_agent.run(
-    model_name="gemini-2.5-flash",
-    prompt_template="Edit and polish this draft:\n{draft}",
-    arguments={"draft": draft},
-)
-```
-
-Each agent can use a different model. Each agent has its own budget. Each agent saves its own trajectory. And you compose them with the most powerful orchestration tool ever invented: **regular Python code**.
-
-### Using Agent Creator and Optimizer
-
-> 📖 **For detailed Agent Creator and Optimizer documentation, see [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md)**
-
-The Agent Creator module provides tools to automatically evolve and optimize AI agents for **token efficiency**, **execution speed**, and **cost** using evolutionary algorithms with Pareto frontier maintenance.
-
-**Key Component:**
-
-- **AgentEvolver**: Maintains a population of agent variants and evolves them using mutation and crossover operations
-
-It uses a **Pareto frontier** approach to track non-dominated solutions, optimizing for multiple objectives simultaneously without requiring a single combined metric.
-
-```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver
-
-evolver = AgentEvolver()
-
-best_variant = evolver.evolve(
-    task_description="Build a code analysis assistant that can parse and analyze large codebases",
-    max_generations=10,
-    max_frontier_size=6,
-    mutation_probability=0.8,
-)
-
-print(f"Best agent: {best_variant.folder_path}")
-print(f"Metrics: {best_variant.metrics}")
-```
-
-**Key Features:**
-
-- **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time, cost)
-- **Pareto Frontier Maintenance**: Keeps track of all non-dominated solutions
-- **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
-- **Uses KISSCodingAgent**: Leverages the multi-agent coding system for agent improvement
-- **Automatic Pruning**: Removes dominated variants to manage memory and storage
-- **Lineage Tracking**: Records parent relationships and improvement history
-- **Configurable Parameters**: Extensive configuration options for generations, frontier size, thresholds, etc.
-
-For usage examples, API reference, and configuration options, please see the [Agent Creator README](src/kiss/agents/create_and_optimize_agent/README.md).
-
-### Using GEPA for Prompt Optimization
-
-> 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
+## 🎯 Using GEPA for Prompt Optimization
 
 KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
 
-For usage examples, API reference, and configuration options, please see the [GEPA README](src/kiss/agents/gepa/README.md).
+📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
-### Using KISSEvolve for Algorithm Discovery
-
-> 📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
+## 🧪 Using KISSEvolve for Algorithm Discovery
 
 KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
-### Using RelentlessCodingAgent
+📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
 
-For very very long running tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task:
+## 🔄 Using Self-Evolving Multi-Agent
 
-```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+The Self-Evolving Multi-Agent is an advanced coding agent with planning, error recovery, dynamic tool creation, and the ability to evolve itself for better efficiency and accuracy using KISSEvolve.
 
-agent = RelentlessCodingAgent(name="Simple Coding Agent")
-
-result = agent.run(
-    prompt_template="""
-        Create a Python script that reads a CSV file,
-        filters rows where age > 18, and writes to a new file.
-    """,
-    orchestrator_model_name="gpt-4o",
-    subtasker_model_name="gpt-4o-mini",
-    work_dir="./workspace",
-    max_steps=200,
-    trials=200
-)
-print(f"Result: {result}")
-```
-
-**Running with Docker:**
-
-You can optionally run bash commands inside a Docker container for isolation:
+📖 **For detailed Self-Evolving Multi-Agent documentation, see [Self-Evolving Multi-Agent README](src/kiss/agents/self_evolving_multi_agent/README.md)**
 
 ```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+from kiss.agents.self_evolving_multi_agent import SelfEvolvingMultiAgent
 
-agent = RelentlessCodingAgent(name="Dockered Relenetless Coding Agent")
+# Create and run the agent
+agent = SelfEvolvingMultiAgent()
+result = agent.run("""
+    Create a Python script that:
+    1. Generates the first 20 Fibonacci numbers
+    2. Saves them to a file called 'fibonacci.txt'
+    3. Reads the file back and prints the sum
+""")
+print(result)
 
-result = agent.run(
-    prompt_template="""
-        Install numpy and create a script that generates 
-        a random matrix and computes its determinant.
-    """,
-    docker_image="python:3.11-slim",  # Bash commands run in Docker
-    max_steps=200,
-    trials=2000
-)
-print(f"Result: {result}")
+# Access execution statistics
+stats = agent.get_stats()
+print(f"Completed todos: {stats['completed']}/{stats['total_todos']}")
+print(f"Dynamic tools created: {stats['dynamic_tools']}")
 ```
 
 **Key Features:**
 
-- **Multi-Agent Architecture**: Orchestrator delegates tasks to executor sub-agents for parallel task handling
-- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, allowing seamless task handoff with context preservation
-- **Retry with Context**: Failed tasks automatically retry with previous summary appended to the prompt
-- **Configurable Trials**: Set high trial counts (e.g., 200+) for truly relentless execution
-- **Docker Support**: Optional isolated execution via Docker containers
-- **Path Access Control**: Enforces read/write permissions on file system paths
-- **Built-in Tools**: Bash, Edit, and MultiEdit tools for file operations
-- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-agents
+- **Planning & Task Tracking**: Creates and manages a todo list with status tracking (pending → in_progress → completed/failed)
+- **Sub-Agent Delegation**: Spawns focused sub-agents for individual task execution
+- **Dynamic Tool Creation**: Creates reusable tools at runtime when prompted by the orchestrator
+- **Error Recovery**: Automatic retry logic with configurable max retries
+- **Docker Isolation**: Runs code execution in isolated Docker containers
+- **Self-Evolution**: Uses KISSEvolve to optimize for efficiency and accuracy
 
-### Using KISS Coding Agent
+**Evolving the Agent:**
+
+```python
+from kiss.agents.self_evolving_multi_agent.agent_evolver import AgentEvolver
+
+# Create evolver
+evolver = AgentEvolver(
+    package_name="kiss.agents.self_evolving_multi_agent",
+    agent_file_path="multi_agent.py",
+    model_name="gemini-3-flash-preview",
+    focus_on_efficiency=True,
+)
+
+# Run baseline evaluation first
+baseline = evolver.run_baseline_evaluation()
+print(f"Baseline fitness: {baseline['fitness']:.4f}")
+
+# Evolve the agent
+best = evolver.evolve()
+print(f"Evolved fitness: {best.fitness:.4f}")
+
+# Save the best variant
+evolver.save_best(best)
+```
+
+## 💻 Using KISS Coding Agent
 
 The KISS Coding Agent is a multi-agent system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks and includes automatic prompt refinement on failures:
 
@@ -418,7 +487,7 @@ result = agent.run(
         that is efficient and correct.
     """,
     orchestrator_model_name="claude-sonnet-4-5",  # Model for orchestration and execution
-    subtasker_model_name="claude-opus-4-5"  # Model for subtasker agents
+    subtasker_model_name="claude-opus-4-5",  # Model for subtask generation and execution
     refiner_model_name="claude-haiku-4-5",  # Model for prompt refinement on failures
     readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
     writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
@@ -438,7 +507,9 @@ print(f"Result: {result}")
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
 - **Docker Support**: Optional Docker container execution via the `docker_image` parameter for isolated bash command execution
 
-### Using Claude Coding Agent
+## 🧠 Using Claude Coding Agent
+
+> **Requires:** `claude-agent-sdk` and `anthropic` packages. Install with `uv sync --group claude-coding-agent`.
 
 Since everyone loves Claude Code, I thought I will provide API access to Claude Code so that you can use the best coding agent.
 The Claude Coding Agent uses the Claude Agent SDK to generate tested Python programs with file system access controls:
@@ -471,7 +542,9 @@ if result:
 - `Bash`: Shell command execution
 - `WebSearch`, `WebFetch`: Web access
 
-### Using Gemini CLI Agent
+## 🤖 Using Gemini CLI Agent
+
+> **Requires:** `google-adk` and `google-genai` packages. Install with `uv sync --group gemini`.
 
 The Gemini CLI Agent uses the Google ADK (Agent Development Kit) to generate tested Python programs:
 
@@ -492,7 +565,9 @@ if result:
     print(f"Result: {result}")
 ```
 
-### Using OpenAI Codex Agent
+## 🌐 Using OpenAI Codex Agent
+
+> **Requires:** `openai-agents` package. Install with `uv sync --group openai`.
 
 The OpenAI Codex Agent uses the OpenAI Agents SDK to generate tested Python programs:
 
@@ -502,7 +577,7 @@ from kiss.agents.coding_agents import OpenAICodexAgent
 agent = OpenAICodexAgent(name="My Coding Agent")
 
 result = agent.run(
-    model_name="gpt-5.2-codex",
+    model_name="gpt-5.3-codex",
     prompt_template="Write a fibonacci function with tests",
     readable_paths=["src/"],
     writable_paths=["output/"],
@@ -512,62 +587,7 @@ if result:
     print(f"Result: {result}")
 ```
 
-### Running Agent Examples
-
-**Vulnerability Detector Agent (ARVO):**
-
-```bash
-uv run python -m kiss.evals.arvo_agent.arvo_agent
-```
-
-The ARVO Vulnerability Detector agent uses the Arvo fuzzing framework to discover security vulnerabilities in C/C++ code:
-
-- Runs in a Docker container with Arvo fuzzing framework
-- Analyzes code to create hypotheses for potential vulnerabilities
-- Generates Python scripts to create test inputs for fuzzing
-- Detects ASAN crashes to identify security vulnerabilities
-- Automatically refines prompts when vulnerabilities are not found
-
-**Programmatic Usage:**
-
-```python
-from kiss.evals.arvo_agent.arvo_agent import find_vulnerability, get_all_arvo_tags
-
-# Get available Arvo Docker image tags
-tags = get_all_arvo_tags("n132/arvo")
-
-# Find vulnerabilities in a specific Docker image
-result = find_vulnerability(
-    model_name="gemini-3-pro-preview",
-    image_name="n132/arvo:tag-name",
-    num_trials=10,  # Number of attempts to find a vulnerability
-    location="/src"  # Location of the source code in the container
-)
-
-if result:
-    print(f"Vulnerability found! POC script: {result}")
-else:
-    print("No vulnerability found after all trials")
-```
-
-**SWE-bench Verified Agent:**
-
-```bash
-uv run src/kiss/evals/swe_agent_verified/run_swebench.py --swebench_verified.model gemini-2.5-flash --swebench_verified.instance_id "django__django-11099"
-```
-
-The SWE-bench Verified agent is a Software Engineering agent that:
-
-- Runs in pre-built SWE-bench Docker containers with repositories pre-installed
-- Executes bash commands to solve real-world GitHub issues
-- Can read, edit, and create files in the `/testbed` directory
-- Follows a structured workflow for issue resolution
-- Automatically evaluates results using the official SWE-bench evaluation harness
-- Supports command-line configuration for model, instance selection, budget, and more
-
-See the [SWE-bench Verified README](src/kiss/evals/swe_agent_verified/README.md) for detailed documentation.
-
-### Using SimpleRAG for Retrieval-Augmented Generation
+## 🔍 Using SimpleRAG for Retrieval-Augmented Generation
 
 SimpleRAG provides a lightweight RAG system with in-memory vector storage and similarity search:
 
@@ -628,68 +648,115 @@ doc = rag.get_document("3")
 rag.clear_collection()
 ```
 
-### Using Useful Agents
+## ⚡ Multiprocessing
 
-The framework includes pre-built utility agents for common tasks:
+KISS provides utilities for parallel execution of Python functions using multiprocessing. This is useful for running multiple independent tasks concurrently to maximize CPU utilization.
 
-**Prompt Refiner Agent:**
-
-```python
-from kiss.agents.kiss import prompt_refiner_agent
-
-refined_prompt = prompt_refiner_agent(
-    original_prompt_template="Original prompt...",
-    previous_prompt_template="Previous version...",
-    agent_trajectory_summary=agent.get_trajectory(),  # Returns JSON string
-    model_name="gemini-2.5-flash"
-)
-```
-
-**General Bash Agent:**
+### Basic Usage
 
 ```python
-from kiss.agents.kiss import run_bash_task_in_sandboxed_ubuntu_latest
+from kiss.multiprocessing import run_functions_in_parallel
 
-result = run_bash_task_in_sandboxed_ubuntu_latest(
-    task="Install and configure nginx",
-    model_name="gemini-3-pro-preview"
-)
+def add(a, b):
+    return a + b
+
+def multiply(x, y):
+    return x * y
+
+# Define tasks as (function, arguments) tuples
+tasks = [(add, [1, 2]), (multiply, [3, 4])]
+results = run_functions_in_parallel(tasks)
+print(results)  # [3, 12]
 ```
 
-**Simple Coding Agent:**
+### With Keyword Arguments
 
 ```python
-from kiss.agents.kiss import get_run_simple_coding_agent
+from kiss.multiprocessing import run_functions_in_parallel_with_kwargs
 
-def test_fn(code: str) -> bool:
-    """Test if the generated code is correct."""
-    try:
-        namespace = {}
-        exec(code, namespace)
-        func = namespace.get('my_function')
-        if not func:
-            return False
-        # Add your test logic here
-        return func(42) == 84  # Example test
-    except Exception:
-        return False
+def greet(name, title="Mr."):
+    return f"Hello, {title} {name}!"
 
-prompt_template = """
-Write a Python function called 'my_function' that doubles its input.
-The function should be: def my_function(x): return x * 2
-"""
+functions = [greet, greet]
+args_list = [["Alice"], ["Bob"]]
+kwargs_list = [{"title": "Dr."}, {}]
 
-# get_run_simple_coding_agent returns a function that can be used to run the agent
-run_simple_coding_agent = get_run_simple_coding_agent(test_fn)
-result = run_simple_coding_agent(
-    prompt_template=prompt_template,
-    arguments={},
-    model_name="gemini-2.5-flash"
-)
-print(result)
+results = run_functions_in_parallel_with_kwargs(functions, args_list, kwargs_list)
+print(results)  # ["Hello, Dr. Alice!", "Hello, Mr. Bob!"]
 ```
 
-## Project Structure
+### 💻 Checking Available Cores
+
+```python
+from kiss.multiprocessing import get_available_cores
+
+num_cores = get_available_cores()
+print(f"Available CPU cores: {num_cores}")
+```
+
+The multiprocessing utilities automatically scale to the number of available CPU cores, using at most as many workers as there are tasks to avoid unnecessary overhead.
+
+## 🐳 Docker Manager
+
+KISS provides a `DockerManager` class for managing Docker containers and executing commands inside them. This is useful for running code in isolated environments, testing with specific dependencies, or working with SWE-bench tasks.
+
+### Basic Usage
+
+```python
+from kiss.docker import DockerManager
+
+# Create a Docker manager for an Ubuntu container
+with DockerManager(image_name="ubuntu", tag="22.04", workdir="/app") as docker:
+    # Run commands inside the container
+    output = docker.run_bash_command("echo 'Hello from Docker!'", "Print greeting")
+    print(output)
+    
+    output = docker.run_bash_command("python3 --version", "Check Python version")
+    print(output)
+```
+
+### Manual Lifecycle Management
+
+```python
+from kiss.docker import DockerManager
+
+docker = DockerManager(image_name="python", tag="3.11", workdir="/workspace")
+docker.open()  # Pull image and start container
+
+try:
+    output = docker.run_bash_command("pip install numpy", "Install numpy")
+    output = docker.run_bash_command("python -c 'import numpy; print(numpy.__version__)'", "Check numpy")
+    print(output)
+finally:
+    docker.close()  # Stop and remove container
+```
+
+### Port Mapping
+
+```python
+from kiss.docker import DockerManager
+
+# Map container port 8080 to host port 8080
+with DockerManager(image_name="nginx", ports={80: 8080}) as docker:
+    # Start a web server
+    docker.run_bash_command("nginx", "Start nginx")
+    
+    # Get the actual host port (useful when Docker assigns a random port)
+    host_port = docker.get_host_port(80)
+    print(f"Server available at http://localhost:{host_port}")
+```
+
+### Configuration Options
+
+- `image_name`: Docker image name (e.g., 'ubuntu', 'python:3.11')
+- `tag`: Image tag/version (default: 'latest')
+- `workdir`: Working directory inside the container (default: '/')
+- `mount_shared_volume`: Whether to mount a shared volume for file transfer (default: True)
+- `ports`: Port mapping from container to host (e.g., `{8080: 8080}`)
+
+The Docker manager automatically handles image pulling, container lifecycle, and cleanup of temporary directories.
+
+## 📁 Project Structure
 
 ```
 kiss/
@@ -699,6 +766,7 @@ kiss/
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
 │   │   │   ├── improver_agent.py       # Agent improvement through generations
 │   │   │   ├── config.py               # Agent creator configuration
+│   │   │   ├── BLOG.md                 # Blog post about agent evolution
 │   │   │   └── README.md               # Agent creator documentation
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
 │   │   │   ├── gepa.py
@@ -726,14 +794,14 @@ kiss/
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
 │   │   ├── formatter.py       # Output formatting base class
 │   │   ├── simple_formatter.py # Rich-formatted detailed output
-│   │   ├── compact_formatter.py # Compact single-line output formatting
+│   │   ├── compact_formatter.py # Compact output with markdown stripping and AST-based tool parsing
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
 │   │   ├── useful_tools.py    # UsefulTools class with path-restricted bash execution, search_web, fetch_url
 │   │   └── models/            # Model implementations
-│   │       ├── model.py           # Model interface
+│   │       ├── model.py           # Model interface with TokenCallback streaming support
 │   │       ├── gemini_model.py    # Gemini model implementation
 │   │       ├── openai_compatible_model.py # OpenAI-compatible API model (OpenAI, Together AI, OpenRouter)
 │   │       ├── anthropic_model.py # Anthropic model implementation
@@ -760,38 +828,50 @@ kiss/
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
+│   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
 │   │   └── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
 │   ├── tests/           # Test suite
+│   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_kissevolve_bubblesort.py
 │   │   ├── test_gepa_squad.py
 │   │   ├── test_gepa_hotpotqa.py
-│   │   ├── test_gepa_improvement.py
 │   │   ├── test_gepa_integration.py
+│   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
 │   │   ├── test_docker_manager.py
-│   │   ├── test_models_quick.py   # Quick tests for models based on ModelInfo capabilities
 │   │   ├── test_model_config.py
+│   │   ├── test_model_implementations.py  # Integration tests for model implementations
 │   │   ├── test_a_model.py
 │   │   ├── run_all_models_test.py # Comprehensive tests for all models
 │   │   ├── test_multiprocess.py
 │   │   ├── test_internal.py
-│   │   ├── test_claude_coding_agent.py  # Tests for Claude Coding Agent
-│   │   ├── test_gemini_cli_agent.py     # Tests for Gemini CLI Agent
-│   │   ├── test_openai_codex_agent.py   # Tests for OpenAI Codex Agent
-│   │   ├── test_agent_evolver.py        # Tests for Agent Evolver
+│   │   ├── test_core_branch_coverage.py   # Branch coverage tests for core components
+│   │   ├── test_gemini_model_internals.py # Tests for Gemini model internals
+│   │   ├── test_cli_options.py            # Tests for CLI option parsing
+│   │   ├── test_claude_coding_agent.py    # Tests for Claude Coding Agent
+│   │   ├── test_gemini_cli_agent.py       # Tests for Gemini CLI Agent
+│   │   ├── test_openai_codex_agent.py     # Tests for OpenAI Codex Agent
+│   │   ├── test_agent_evolver.py          # Tests for Agent Evolver
+│   │   ├── test_evolver_progress_callback.py # Tests for AgentEvolver progress callbacks
+│   │   ├── test_token_callback.py         # Tests for async token streaming callback
+│   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents
+│   │   ├── test_compact_formatter.py        # Tests for CompactFormatter
 │   │   ├── test_search_web.py
 │   │   └── test_useful_tools.py
+│   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
 │       ├── README.md                    # Trajectory visualizer documentation
 │       └── templates/                   # HTML templates for the visualizer
 │           └── index.html
+├── scripts/             # Repository-level scripts
+│   └── release.sh       # Release script
 ├── pyproject.toml       # Project configuration
 └── README.md
 ```
 
-## Versioning
+## 🏷️ Versioning
 
 The project uses semantic versioning (MAJOR.MINOR.PATCH). The version is defined in a single source of truth:
 
@@ -809,10 +889,10 @@ print(f"KISS version: {__version__}")
 To update the version, simply edit `src/kiss/_version.py`:
 
 ```python
-__version__ = "0.1.0"  # Update to new version
+__version__ = "0.1.9"  # Update to new version
 ```
 
-## Configuration
+## ⚙️ Configuration
 
 Configuration is managed through environment variables and the `DEFAULT_CONFIG` object:
 
@@ -825,12 +905,18 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
   - `use_web`: Automatically add web browsing and search tool if enabled (default: True)
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
+- **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.relentless_coding_agent`:
+  - `orchestrator_model_name`: Model for orchestration (default: "claude-sonnet-4-5")
+  - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-6")
+  - `trials`: Number of retry attempts for failed subtasks (default: 200)
+  - `max_steps`: Maximum steps per agent (default: 200)
+  - `max_budget`: Maximum budget in USD (default: 200.0)
 - **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.kiss_coding_agent`:
   - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-sonnet-4-5")
-  - `subtasker_model_name`: Reserved for future use (default: "claude-opus-4-5")
+  - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-6")
   - `refiner_model_name`: Model for prompt refinement on failures (default: "claude-sonnet-4-5")
-  - `trials`: Number of retry attempts per task/subtask (default: 3)
-  - `max_steps`: Maximum steps per agent (default: 50)
+  - `trials`: Number of retry attempts per task/subtask (default: 200)
+  - `max_steps`: Maximum steps per agent (default: 200)
   - `max_budget`: Maximum budget in USD (default: 100.0)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
@@ -838,8 +924,48 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `population_size`: Number of candidates to maintain in population (default: 8)
   - `pareto_size`: Maximum size of Pareto frontier (default: 4)
   - `mutation_rate`: Probability of mutating a prompt template (default: 0.5)
+- **KISSEvolve Settings**: Modify `DEFAULT_CONFIG.kiss_evolve` in `src/kiss/agents/kiss_evolve/config.py`:
+  - `max_generations`: Maximum number of evolutionary generations (default: 10)
+  - `population_size`: Number of variants to maintain in population (default: 8)
+  - `mutation_rate`: Probability of mutating a variant (default: 0.7)
+  - `elite_size`: Number of best variants to preserve each generation (default: 2)
+  - `num_islands`: Number of islands for island-based evolution, 1 = disabled (default: 2)
+  - `migration_frequency`: Number of generations between migrations (default: 5)
+  - `migration_size`: Number of individuals to migrate between islands (default: 1)
+  - `migration_topology`: Migration topology: 'ring', 'fully_connected', or 'random' (default: "ring")
+  - `enable_novelty_rejection`: Enable code novelty rejection sampling (default: False)
+  - `novelty_threshold`: Cosine similarity threshold for rejecting code (default: 0.95)
+  - `max_rejection_attempts`: Maximum rejection attempts before accepting (default: 5)
+  - `parent_sampling_method`: Parent sampling: 'tournament', 'power_law', or 'performance_novelty' (default: "power_law")
+  - `power_law_alpha`: Power-law sampling parameter for rank-based selection (default: 1.0)
+  - `performance_novelty_lambda`: Selection pressure parameter for sigmoid (default: 1.0)
+- **Agent Creator Settings**: Modify `DEFAULT_CONFIG.create_and_optimize_agent` in `src/kiss/agents/create_and_optimize_agent/config.py`:
+  - **Improver** (`DEFAULT_CONFIG.create_and_optimize_agent.improver`):
+    - `model_name`: LLM model to use for the improver agent (default: "claude-sonnet-4-5")
+    - `max_steps`: Maximum steps for the improver agent (default: 100)
+    - `max_budget`: Maximum budget in USD for the improver agent (default: 20.0)
+  - **Evolver** (`DEFAULT_CONFIG.create_and_optimize_agent.evolver`):
+    - `model_name`: LLM model to use for agent creation and improvement (default: "claude-sonnet-4-5")
+    - `max_generations`: Maximum number of improvement generations (default: 10)
+    - `initial_frontier_size`: Initial size of the Pareto frontier (default: 4)
+    - `max_frontier_size`: Maximum size of the Pareto frontier (default: 6)
+    - `mutation_probability`: Probability of mutation vs crossover, 1.0 = always mutate (default: 0.8)
+    - `initial_agent_max_steps`: Maximum steps for creating the initial agent (default: 50)
+    - `initial_agent_max_budget`: Maximum budget in USD for creating the initial agent (default: 50.0)
+    - `evolve_to_solve_task`: Whether to evolve the agent to solve the task or be general purpose (default: False)
+- **Self-Evolving Multi-Agent Settings**: Modify `DEFAULT_CONFIG.self_evolving_multi_agent` in `src/kiss/agents/self_evolving_multi_agent/config.py`:
+  - `model`: LLM model to use for the main agent (default: "gemini-3-flash-preview")
+  - `sub_agent_model`: Model for sub-agents (default: "gemini-3-flash-preview")
+  - `evolver_model`: Model for evolution (default: "gemini-3-flash-preview")
+  - `max_steps`: Maximum orchestrator steps (default: 100)
+  - `max_budget`: Maximum budget in USD (default: 10.0)
+  - `max_retries`: Maximum retries on error (default: 3)
+  - `sub_agent_max_steps`: Maximum steps for sub-agents (default: 50)
+  - `sub_agent_max_budget`: Maximum budget for sub-agents in USD (default: 2.0)
+  - `docker_image`: Docker image for execution (default: "python:3.12-slim")
+  - `workdir`: Working directory in container (default: "/workspace")
 
-## Available Commands
+## 🛠️ Available Commands
 
 ### Development
 
@@ -854,7 +980,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run pytest src/kiss/tests/ -v` - Run all tests with verbose output
 - `uv run pytest src/kiss/tests/test_kiss_agent_agentic.py -v` - Run agentic agent tests
 - `uv run pytest src/kiss/tests/test_kiss_agent_non_agentic.py -v` - Run non-agentic agent tests
-- `uv run pytest src/kiss/tests/test_models_quick.py -v` - Run quick model tests
 - `uv run pytest src/kiss/tests/test_multiprocess.py -v` - Run multiprocessing tests
 - `uv run python -m unittest src.kiss.tests.test_gepa_squad -v` - Run GEPA Squad tests (unittest)
 - `uv run python -m unittest src.kiss.tests.test_docker_manager -v` - Run docker manager tests (unittest)
@@ -885,73 +1010,52 @@ find . -type d -name __pycache__ -exec rm -r {} + && \
 find . -type f -name "*.pyc" -delete
 ```
 
-## Trajectory Saving and Visualization
-
-Agent trajectories are automatically saved to the artifacts directory (default: `artifacts/`). Each trajectory includes:
-
-- Complete message history with token usage and budget information appended to each message
-- Tool calls and results
-- Configuration used
-- Timestamps
-- Budget and token usage statistics
-
-### Visualizing Trajectories
-
-The framework includes a web-based trajectory visualizer for viewing agent execution histories:
-
-```bash
-# Run the visualizer server
-uv run python -m kiss.viz_trajectory.server artifacts
-
-# Or with custom host/port
-uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 5050
-```
-
-Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
-
-The visualizer provides:
-
-- **Modern UI**: Dark theme with smooth animations
-- **Sidebar Navigation**: List of all trajectories sorted by start time
-- **Markdown Rendering**: Full markdown support for message content
-- **Code Highlighting**: Syntax highlighting for fenced code blocks
-- **Message Display**: Clean, organized view of agent conversations
-- **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
-
-> 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
+## 🤖 Models Supported
 
 **Supported Models**: The framework includes context length, pricing, and capability flags for:
 
 **Generation Models** (text generation with function calling support):
 
-- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5, gpt-5.1, gpt-5.2
-- **Anthropic**: claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
-- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
+- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro, gpt-5.3-codex
+- **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, codex-mini-latest
+- **OpenAI (Reasoning)**: o1, o1-mini, o1-pro, o3, o3-mini, o3-mini-high, o3-pro, o3-deep-research, o4-mini, o4-mini-high, o4-mini-deep-research
+- **OpenAI (Open Source)**: openai/gpt-oss-20b, openai/gpt-oss-120b
+- **Anthropic**: claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
+- **Anthropic (Legacy)**: claude-3-5-sonnet-20241022, claude-3-5-haiku-20241022, claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307
+- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-1.5-pro, gemini-1.5-flash
 - **Gemini (preview, unreliable function calling)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-2.5-flash-lite
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
-- **Together AI (Qwen)**: Qwen2.5-72B-Instruct-Turbo, Qwen3 series (with function calling)
-- **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3.1 (with function calling)
-- **Together AI (Other)**: Kimi-K2-Instruct, GLM-4.5/4.6, Nemotron-Nano-9B
-- **OpenRouter**: Access to 400+ models from multiple providers via unified API:
-  - OpenAI (gpt-4.1, gpt-4o, gpt-5, gpt-5.1, gpt-5.2, o1, o3, o3-pro, o4-mini, codex-mini)
-  - Anthropic (claude-3-haiku, claude-3.5-haiku, claude-3.5-sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5)
-  - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-3-27b)
-  - Meta Llama (llama-3.3-70b, llama-4-maverick/scout)
-  - DeepSeek (deepseek-chat, deepseek-r1, deepseek-v3.1/v3.2)
-  - Qwen (qwen-2.5-72b, qwen-turbo/plus/max, qwen3-8b/14b/32b/235b, qwen3-coder, qwq-32b)
+- **Together AI (Qwen)**: Qwen2.5-72B/7B-Instruct-Turbo, Qwen2.5-Coder-32B, Qwen2.5-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, QwQ-32B (with function calling)
+- **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3-0324, DeepSeek-V3.1 (with function calling)
+- **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Thinking, Kimi-K2.5
+- **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.2/v0.3, Mistral-Small-24B
+- **Together AI (Other)**: GLM-4.5-Air/4.7, Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2, essentialai/rnj-1, marin-community/marin-8b
+- **OpenRouter**: Access to 400+ models from 60+ providers via unified API:
+  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2/5.3 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
+  - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6)
+  - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-2-9b/27b, gemma-3-4b/12b/27b, gemma-3n-e4b)
+  - Meta Llama (llama-3-8b/70b, llama-3.1-8b/70b/405b, llama-3.2-1b/3b/11b-vision, llama-3.3-70b, llama-4-maverick/scout, llama-guard-2/3/4)
+  - DeepSeek (deepseek-chat/v3/v3.1/v3.2/v3.2-speciale, deepseek-r1/r1-0528/r1-turbo, deepseek-r1-distill variants, deepseek-coder-v2, deepseek-prover-v2)
+  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next/coder-flash, qwen3-vl variants, qwq-32b, qwen3-next/max)
   - Amazon Nova (nova-micro/lite/pro, nova-2-lite, nova-premier)
-  - Cohere (command-r, command-r-plus, command-a)
-  - X.AI Grok (grok-3/3-mini, grok-4/4-fast, grok-4.1-fast)
-  - MiniMax (minimax-m1, minimax-m2/m2.1)
-  - ByteDance Seed (seed-1.6, seed-1.6-flash)
-  - MoonshotAI (kimi-k2, kimi-k2-thinking)
-  - Mistral (codestral, devstral, mistral-large/medium/small, mixtral)
-  - And many more (nvidia, z-ai/glm, inception, arcee-ai, etc.)
+  - Cohere (command-r, command-r-plus, command-a, command-r7b)
+  - X.AI Grok (grok-3/3-mini, grok-4/4-fast, grok-4.1-fast, grok-code-fast)
+  - MiniMax (minimax-01, minimax-m1, minimax-m2/m2.1/m2-her)
+  - ByteDance Seed (seed-1.6, seed-1.6-flash, seed-2.0, seed-2.0-thinking)
+  - MoonshotAI (kimi-k2, kimi-k2-thinking, kimi-k2.5, kimi-dev-72b)
+  - Mistral (codestral, devstral/devstral-medium/devstral-small, mistral-large/medium/small, mixtral-8x7b/8x22b, ministral-3b/8b/14b, pixtral, voxtral)
+  - NVIDIA (llama-3.1-nemotron-70b/ultra-253b, llama-3.3-nemotron-super-49b, nemotron-nano-9b/12b-vl, nemotron-3-nano-30b)
+  - Z.AI/GLM (glm-4-32b, glm-4.5/4.5-air/4.5v, glm-4.6/4.6v, glm-4.7/4.7-flash)
+  - AllenAI (olmo-2/3-7b/32b-instruct/think, olmo-3.1-32b-instruct/think, molmo-2-8b)
+  - Perplexity (sonar, sonar-pro, sonar-pro-search, sonar-deep-research, sonar-reasoning-pro)
+  - NousResearch (hermes-2-pro/3/4-llama series, deephermes-3)
+  - Baidu ERNIE (ernie-4.5 series including VL and thinking variants)
+  - And 30+ more providers (ai21, aion-labs, arcee-ai, deepcogito, essentialai, ibm-granite, inception, inflection, liquid, morph, opengvlab, prime-intellect, relace, sao10k, stepfun, tencent, thedrummer, tngtech, upstage, writer, xiaomi, etc.)
 
 **Embedding Models** (for RAG and semantic search):
 
 - **OpenAI**: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
-- **Google**: text-embedding-004
+- **Google**: text-embedding-004, gemini-embedding-001
 - **Together AI**: BAAI/bge-large-en-v1.5, BAAI/bge-base-en-v1.5, m2-bert-80M-32k-retrieval, multilingual-e5-large-instruct, gte-modernbert-base
 
 Each model in `MODEL_INFO` includes capability flags:
@@ -975,13 +1079,13 @@ The framework provides embedding generation capabilities through the `get_embedd
   - Default model: `togethercomputer/m2-bert-80M-32k-retrieval` (can be customized)
   - Usage: `model.get_embedding(text, embedding_model="togethercomputer/m2-bert-80M-32k-retrieval")`
 - **Gemini Models**: Full embedding support via Google's embedding API
-  - Default model: `text-embedding-004` (can be customized)
+  - Default model: `text-embedding-004` (can be customized; `gemini-embedding-001` also available)
   - Usage: `model.get_embedding(text, embedding_model="text-embedding-004")`
 - **Anthropic Models**: Embeddings not supported (raises `NotImplementedError`)
 
 Embeddings are primarily used by the `SimpleRAG` system for document retrieval. When using `SimpleRAG`, ensure you use an OpenAI, Together AI, or Gemini model that supports embeddings.
 
-## Contributing
+## 🤗 Contributing
 
 Contributions are welcome! Please ensure your code:
 
@@ -991,10 +1095,10 @@ Contributions are welcome! Please ensure your code:
 - Passes type checking (`uv run mypy src/`)
 - Passes type checking (`uv run pyright src/`)
 
-## License
+## 📄 License
 
 Apache-2.0
 
-## Authors
+## ✍️ Authors
 
 - Koushik Sen (ksen@berkeley.edu) | [LinkedIn](https://www.linkedin.com/in/koushik-sen-80b99a/) | [X @koushik77](https://x.com/koushik77)

@@ -5,6 +5,7 @@
 
 """Gemini CLI Coding Agent using the Google ADK (Agent Development Kit)."""
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -16,9 +17,10 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from kiss.core import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.useful_tools import UsefulTools
@@ -162,7 +164,8 @@ class GeminiCliAgent(Base):
                 dict: A dict with 'status', 'stdout', 'stderr', and 'exit_code'.
             """
             output = self.useful_tools.Bash(
-                command=command, description=f"Executing: {command[:50]}..."
+                command=command, description=f"Executing: {command[:50]}...",
+                timeout_seconds=float(timeout),
             )
 
             if output.startswith("Error:"):
@@ -199,7 +202,9 @@ class GeminiCliAgent(Base):
 
         return [read_file, write_file, list_dir, run_shell, web_search]
 
-    def _process_events(self, events: list[Any], timestamp: int) -> str | None:
+    def _process_events(
+        self, events: list[Any], timestamp: int
+    ) -> tuple[str | None, list[str]]:
         """Process events from the runner and update state.
 
         Args:
@@ -207,9 +212,11 @@ class GeminiCliAgent(Base):
             timestamp: Unix timestamp for the events.
 
         Returns:
-            str | None: The final text result if available.
+            A tuple of (final_text, streamed_texts) where streamed_texts
+            are text chunks suitable for streaming to token_callback.
         """
         final_text = None
+        streamed_texts: list[str] = []
 
         for event in events:
             self.step_count += 1
@@ -230,6 +237,7 @@ class GeminiCliAgent(Base):
                             final_text = part.text
                             self._formatter.print_label_and_value("FINAL", f"{part.text[:200]}...")
                             self._add_message("model", part.text, timestamp)
+                            streamed_texts.append(part.text)
 
             # Process content parts
             elif event.content and event.content.parts:
@@ -237,6 +245,7 @@ class GeminiCliAgent(Base):
                     if hasattr(part, "text") and part.text:
                         self._formatter.print_label_and_value("MESSAGE", f"{part.text[:200]}...")
                         self._add_message("model", part.text, timestamp)
+                        streamed_texts.append(part.text)
                     elif hasattr(part, "function_call") and part.function_call:
                         name = part.function_call.name
                         args = part.function_call.args
@@ -247,20 +256,22 @@ class GeminiCliAgent(Base):
                         display = str(response)[:200]
                         self._formatter.print_label_and_value("TOOL RESULT", f"{display}...")
                         self._add_message("user", str(response), timestamp)
+                        streamed_texts.append(str(response))
 
-        return final_text
+        return final_text, streamed_texts
 
     def run(
         self,
         model_name: str = DEFAULT_GEMINI_MODEL,
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-        base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "gemini_workdir"),
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
         formatter: Formatter | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str | None:
         """Run the Gemini CLI agent for a given task.
 
@@ -274,26 +285,46 @@ class GeminiCliAgent(Base):
                 paths are resolved if they are not absolute.
             readable_paths: The paths from which the agent is allowed to read from.
             writable_paths: The paths to which the agent is allowed to write to.
+            token_callback: Optional async callback invoked with each streamed text token.
+                Default is None.
 
         Returns:
             The result of the task.
         """
+        cfg = config_module.DEFAULT_CONFIG.agent
+        actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
+        actual_max_budget = max_budget if max_budget is not None else cfg.max_agent_budget
+        actual_base_dir = (
+            base_dir
+            if base_dir is not None
+            else str(Path(cfg.artifact_dir).resolve() / "gemini_workdir")
+        )
         self._reset(
-            model_name, readable_paths, writable_paths, base_dir, max_steps, max_budget, formatter
+            model_name,
+            readable_paths,
+            writable_paths,
+            actual_base_dir,
+            actual_max_steps,
+            actual_max_budget,
+            formatter,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
+        self.token_callback = token_callback
 
         async def _run_async() -> str | None:
-            task = prompt_template.format(**(arguments or {}))
             timestamp = int(time.time())
+            task = prompt_template.format(**(arguments or {}))
             self._add_message("user", task, timestamp)
 
             # Create the ADK agent with tools
             tools = self._create_tools()
+            safe_name = re.sub(r"[^A-Za-z0-9_]", "_", self.name)
+            if safe_name and safe_name[0].isdigit():
+                safe_name = "_" + safe_name
             agent = Agent(
                 model=model_name,
-                name=self.name,
+                name=safe_name,
                 instruction=CODING_INSTRUCTIONS,
                 description="An expert Python programmer that writes clean, simple, robust code.",
                 tools=tools,
@@ -331,7 +362,11 @@ class GeminiCliAgent(Base):
                     timestamp = int(time.time())
 
                 # Process all collected events
-                final_result = self._process_events(events_list, timestamp)
+                final_result, streamed_texts = self._process_events(events_list, timestamp)
+
+                if self.token_callback:
+                    for text in streamed_texts:
+                        await self.token_callback(text)
 
                 self._formatter.print_label_and_value(
                     "GEMINI AGENT", f"Completed with {self.step_count} steps"

@@ -131,13 +131,12 @@ The module includes a carefully designed initial prompt template (`HOTPOTQA_INIT
 
 ```bash
 # Run HotPotQA-specific tests
-python -m pytest src/kiss/tests/test_gepa_hotpotqa.py -v
+uv run pytest src/kiss/tests/test_gepa_hotpotqa.py -v
 
 # Run just the evaluation tests (no API calls)
-python -m pytest src/kiss/tests/test_gepa_hotpotqa.py::TestHotPotQAEvaluation -v
+uv run pytest src/kiss/tests/test_gepa_hotpotqa.py::TestHotPotQAEvaluation -v
 ```
 
 ## Authors
 
 - Koushik Sen (ksen@berkeley.edu)
-- Cursor AI (cursor@cursor.com)

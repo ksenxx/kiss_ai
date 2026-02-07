@@ -174,8 +174,8 @@ Configuration is managed through `SWEBenchVerifiedConfig`. All settings can be o
 |-----------|---------|-------------|
 | `dataset_name` | `"princeton-nlp/SWE-bench_Verified"` | HuggingFace dataset name |
 | `split` | `"test"` | Dataset split to use |
-| `instance_id` | `""` | Single instance ID to run (takes precedence over `instance_ids`) |
-| `instance_ids` | `[]` | Specific instance IDs to run (empty = all) |
+| `instance_id` | `""` | Single instance ID to run via CLI (takes precedence over `instance_ids`) |
+| `instance_ids` | `[]` | List of instance IDs for programmatic use (empty = all) |
 | `max_instances` | `0` | Maximum instances to run (0 = all) |
 
 ### Docker Settings

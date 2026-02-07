@@ -24,11 +24,6 @@ class TestEditToolIntegration(unittest.TestCase):
     """Integration tests for the Edit tool."""
 
     def setUp(self) -> None:
-        """Set up test fixtures.
-
-        Creates a temporary directory structure with writable subdirectory
-        and initializes UsefulTools with appropriate path permissions.
-        """
         self.test_dir = tempfile.mkdtemp()
         self.writable_dir = os.path.join(self.test_dir, "writable")
         os.makedirs(self.writable_dir)
@@ -40,18 +35,10 @@ class TestEditToolIntegration(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        """Clean up test fixtures.
-
-        Removes the temporary directory and all its contents.
-        """
         shutil.rmtree(self.test_dir)
 
     def test_edit_replaces_single_occurrence(self) -> None:
-        """Test that Edit replaces a single occurrence of a string.
-
-        Verifies that the Edit tool correctly replaces a unique string in a file
-        and that the result message indicates success.
-        """
+        """Test that Edit replaces a single occurrence of a string."""
         # Create a test file
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = '''def hello():
@@ -81,11 +68,7 @@ if __name__ == "__main__":
         self.assertNotIn('print("Hello, World!")', new_content)
 
     def test_edit_fails_on_non_unique_string(self) -> None:
-        """Test that Edit fails when the string appears multiple times.
-
-        Verifies that the Edit tool returns an error when the old_string
-        appears more than once in the file, and that the file remains unchanged.
-        """
+        """Test that Edit fails when the string appears multiple times."""
         # Create a test file with duplicate strings
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = '''def foo():
@@ -113,11 +96,7 @@ if __name__ == "__main__":
         self.assertEqual(new_content, original_content)
 
     def test_edit_fails_on_string_not_found(self) -> None:
-        """Test that Edit fails when the string is not found.
-
-        Verifies that the Edit tool returns an error when the old_string
-        does not exist in the file.
-        """
+        """Test that Edit fails when the string is not found."""
         # Create a test file
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = "def hello(): pass"
@@ -135,12 +114,7 @@ if __name__ == "__main__":
         self.assertIn("not found", result.lower())
 
     def test_edit_respects_writable_paths(self) -> None:
-        """Test that Edit denies access to paths outside writable_paths.
-
-        Verifies that the Edit tool refuses to modify files that are not
-        within the configured writable_paths, ensuring security boundaries
-        are enforced.
-        """
+        """Test that Edit denies access to paths outside writable_paths."""
         # Create a test file outside writable_paths
         non_writable_dir = os.path.join(self.test_dir, "non_writable")
         os.makedirs(non_writable_dir)
@@ -164,11 +138,7 @@ if __name__ == "__main__":
         self.assertEqual(content, "content")
 
     def test_edit_with_single_line_unique_string(self) -> None:
-        """Test that Edit handles unique single-line strings correctly.
-
-        Verifies that the Edit tool works correctly with grep's line-based
-        counting by replacing a unique single-line comment string.
-        """
+        """Test that Edit handles unique single-line strings correctly."""
         test_file = os.path.join(self.writable_dir, "test.py")
         # Use a unique single-line string (Edit uses grep -c which is line-based)
         original_content = (
@@ -203,11 +173,6 @@ class TestMultiEditToolIntegration(unittest.TestCase):
     """Integration tests for the MultiEdit tool."""
 
     def setUp(self) -> None:
-        """Set up test fixtures.
-
-        Creates a temporary directory structure with writable subdirectory
-        and initializes UsefulTools with appropriate path permissions.
-        """
         self.test_dir = tempfile.mkdtemp()
         self.writable_dir = os.path.join(self.test_dir, "writable")
         os.makedirs(self.writable_dir)
@@ -219,18 +184,10 @@ class TestMultiEditToolIntegration(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        """Clean up test fixtures.
-
-        Removes the temporary directory and all its contents.
-        """
         shutil.rmtree(self.test_dir)
 
     def test_multiedit_replaces_all_occurrences(self) -> None:
-        """Test that MultiEdit with replace_all=True replaces all occurrences.
-
-        Verifies that the MultiEdit tool replaces every instance of the
-        old_string when replace_all is set to True.
-        """
+        """Test that MultiEdit with replace_all=True replaces all occurrences."""
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = '''def foo():
     x = 1
@@ -259,11 +216,7 @@ class TestMultiEditToolIntegration(unittest.TestCase):
         self.assertEqual(new_content.count("1"), 0)
 
     def test_multiedit_single_occurrence_mode(self) -> None:
-        """Test that MultiEdit with replace_all=False works like Edit.
-
-        Verifies that the MultiEdit tool behaves identically to the Edit tool
-        when replace_all is set to False.
-        """
+        """Test that MultiEdit with replace_all=False works like Edit."""
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = '''def unique_function():
     return "unique"
@@ -286,12 +239,7 @@ class TestMultiEditToolIntegration(unittest.TestCase):
         self.assertIn('"replaced"', new_content)
 
     def test_multiedit_respects_writable_paths(self) -> None:
-        """Test that MultiEdit denies access to paths outside writable_paths.
-
-        Verifies that the MultiEdit tool refuses to modify files that are not
-        within the configured writable_paths, ensuring security boundaries
-        are enforced.
-        """
+        """Test that MultiEdit denies access to paths outside writable_paths."""
         non_writable_dir = os.path.join(self.test_dir, "non_writable")
         os.makedirs(non_writable_dir)
         test_file = os.path.join(non_writable_dir, "test.py")
@@ -308,11 +256,7 @@ class TestMultiEditToolIntegration(unittest.TestCase):
         self.assertIn("Access denied", result)
 
     def test_multiedit_fails_on_string_not_found(self) -> None:
-        """Test that MultiEdit fails when the string is not found.
-
-        Verifies that the MultiEdit tool returns an error when the old_string
-        does not exist in the file.
-        """
+        """Test that MultiEdit fails when the string is not found."""
         test_file = os.path.join(self.writable_dir, "test.py")
         with open(test_file, "w") as f:
             f.write("some content here")
@@ -335,28 +279,15 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        """Set up test fixtures.
-
-        Creates a temporary directory structure with writable subdirectory
-        for use with KISSCodingAgent.
-        """
         self.test_dir = tempfile.mkdtemp()
         self.writable_dir = os.path.join(self.test_dir, "writable")
         os.makedirs(self.writable_dir)
 
     def tearDown(self) -> None:
-        """Clean up test fixtures.
-
-        Removes the temporary directory and all its contents.
-        """
         shutil.rmtree(self.test_dir)
 
     def test_kiss_coding_agent_has_edit_tools_configured(self) -> None:
-        """Test that KISSCodingAgent has Edit and MultiEdit tools available.
-
-        Verifies that when KISSCodingAgent is initialized, its UsefulTools
-        instance includes callable Edit, MultiEdit, and Bash methods.
-        """
+        """Test that KISSCodingAgent has Edit and MultiEdit tools available."""
         try:
             from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
         except ImportError as e:
@@ -388,11 +319,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
         self.assertTrue(callable(agent.useful_tools.Bash))
 
     def test_agent_useful_tools_edit_modifies_file(self) -> None:
-        """Test that agent's Edit tool can modify files.
-
-        Verifies that the Edit tool attached to KISSCodingAgent's UsefulTools
-        can successfully modify file contents within the writable path.
-        """
+        """Test that agent's Edit tool can modify files."""
         try:
             from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
         except ImportError as e:
@@ -433,11 +360,7 @@ class TestEditToolWithKISSCodingAgent(unittest.TestCase):
         self.assertIn('VERSION = "2.0.0"', content)
 
     def test_agent_useful_tools_multiedit_modifies_file(self) -> None:
-        """Test that agent's MultiEdit tool can modify files.
-
-        Verifies that the MultiEdit tool attached to KISSCodingAgent's UsefulTools
-        can successfully replace all occurrences in a file within the writable path.
-        """
+        """Test that agent's MultiEdit tool can modify files."""
         try:
             from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
         except ImportError as e:
@@ -484,11 +407,6 @@ class TestEditToolEdgeCases(unittest.TestCase):
     """Edge case tests for Edit and MultiEdit tools."""
 
     def setUp(self) -> None:
-        """Set up test fixtures.
-
-        Creates a temporary directory structure with writable subdirectory
-        and initializes UsefulTools with appropriate path permissions.
-        """
         self.test_dir = tempfile.mkdtemp()
         self.writable_dir = os.path.join(self.test_dir, "writable")
         os.makedirs(self.writable_dir)
@@ -500,18 +418,10 @@ class TestEditToolEdgeCases(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        """Clean up test fixtures.
-
-        Removes the temporary directory and all its contents.
-        """
         shutil.rmtree(self.test_dir)
 
     def test_edit_with_special_characters(self) -> None:
-        """Test that Edit handles special regex characters correctly.
-
-        Verifies that the Edit tool properly handles strings containing
-        special regex characters (like backslashes) without misinterpreting them.
-        """
+        """Test that Edit handles special regex characters correctly."""
         test_file = os.path.join(self.writable_dir, "test.py")
         # Use the exact string that will be in the file
         original_content = 'pattern = r"\\d+\\.\\d+"'
@@ -533,12 +443,7 @@ class TestEditToolEdgeCases(unittest.TestCase):
         self.assertIn('[0-9]', content)
 
     def test_edit_with_empty_new_string(self) -> None:
-        """Test that Edit can delete content by replacing with empty string.
-
-        Verifies that the Edit tool can effectively delete content by replacing
-        a string with a comment or placeholder (since true deletion would change
-        line structure).
-        """
+        """Test that Edit can delete content by replacing with empty string."""
         test_file = os.path.join(self.writable_dir, "test.py")
         # Use a truly unique single-line string without newline in search
         original_content = (
@@ -565,11 +470,7 @@ class TestEditToolEdgeCases(unittest.TestCase):
         self.assertIn("# line deleted", content)
 
     def test_edit_preserves_file_encoding(self) -> None:
-        """Test that Edit preserves file encoding (UTF-8).
-
-        Verifies that the Edit tool correctly handles files with UTF-8
-        encoding, including Unicode characters and emoji.
-        """
+        """Test that Edit preserves file encoding (UTF-8)."""
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = '''# -*- coding: utf-8 -*-
 message = "Hello, 世界! 🌍"
@@ -591,11 +492,7 @@ message = "Hello, 世界! 🌍"
         self.assertIn("Bonjour, 世界! 🌎", content)
 
     def test_edit_with_tabs_and_spaces(self) -> None:
-        """Test that Edit handles mixed tabs and spaces correctly.
-
-        Verifies that the Edit tool preserves whitespace formatting,
-        including the ability to convert tabs to spaces.
-        """
+        """Test that Edit handles mixed tabs and spaces correctly."""
         test_file = os.path.join(self.writable_dir, "test.py")
         # File with tabs
         original_content = "def foo():\n\treturn 1"
@@ -616,11 +513,7 @@ message = "Hello, 世界! 🌍"
         self.assertIn("    return 2", content)
 
     def test_edit_nonexistent_file(self) -> None:
-        """Test that Edit fails gracefully for nonexistent files.
-
-        Verifies that the Edit tool returns an appropriate error message
-        when attempting to edit a file that does not exist.
-        """
+        """Test that Edit fails gracefully for nonexistent files."""
         test_file = os.path.join(self.writable_dir, "nonexistent.py")
 
         result = self.tools.Edit(
@@ -632,11 +525,7 @@ message = "Hello, 世界! 🌍"
         self.assertIn("not found", result.lower())
 
     def test_edit_same_old_and_new_string(self) -> None:
-        """Test that Edit fails when old_string equals new_string.
-
-        Verifies that the Edit tool returns an error when the old_string
-        and new_string are identical, preventing no-op edits.
-        """
+        """Test that Edit fails when old_string equals new_string."""
         test_file = os.path.join(self.writable_dir, "test.py")
         with open(test_file, "w") as f:
             f.write("content")
@@ -650,11 +539,7 @@ message = "Hello, 世界! 🌍"
         self.assertIn("must be different", result.lower())
 
     def test_multiedit_replaces_overlapping_patterns(self) -> None:
-        """Test MultiEdit with patterns that could overlap.
-
-        Verifies that the MultiEdit tool handles consecutive identical
-        characters correctly, replacing each occurrence independently.
-        """
+        """Test MultiEdit with patterns that could overlap."""
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = "aaa"
         with open(test_file, "w") as f:
@@ -680,11 +565,6 @@ class TestEditToolWithAgentWorkflow(unittest.TestCase):
     """Tests that verify Edit/MultiEdit tools work in realistic agent workflows."""
 
     def setUp(self) -> None:
-        """Set up test fixtures.
-
-        Creates a temporary directory structure with an agent_workspace
-        subdirectory and initializes UsefulTools with appropriate permissions.
-        """
         self.test_dir = tempfile.mkdtemp()
         self.writable_dir = os.path.join(self.test_dir, "agent_workspace")
         os.makedirs(self.writable_dir)
@@ -696,18 +576,10 @@ class TestEditToolWithAgentWorkflow(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        """Clean up test fixtures.
-
-        Removes the temporary directory and all its contents.
-        """
         shutil.rmtree(self.test_dir)
 
     def test_sequential_edits_to_same_file(self) -> None:
-        """Test that multiple sequential edits to the same file work correctly.
-
-        Verifies that the Edit tool can be called multiple times on the same
-        file, with each subsequent edit seeing the results of previous edits.
-        """
+        """Test that multiple sequential edits to the same file work correctly."""
         test_file = os.path.join(self.writable_dir, "agent.py")
         # Use very specific unique strings on single lines to avoid grep issues
         original_content = (
@@ -754,11 +626,7 @@ class TestEditToolWithAgentWorkflow(unittest.TestCase):
         self.assertIn("execution_time", final_content)
 
     def test_edit_creates_valid_python(self) -> None:
-        """Test that Edit produces syntactically valid Python code.
-
-        Verifies that edits (such as adding type hints) result in code
-        that can be parsed and compiled by Python.
-        """
+        """Test that Edit produces syntactically valid Python code."""
         test_file = os.path.join(self.writable_dir, "test.py")
         original_content = '''def calculate(a, b):
     return a + b
@@ -788,11 +656,7 @@ class TestEditToolWithAgentWorkflow(unittest.TestCase):
         self.assertTrue(is_valid, "Edit produced invalid Python syntax")
 
     def test_edit_workflow_for_optimization(self) -> None:
-        """Test a realistic optimization workflow using Edit tools.
-
-        Note: Since the Edit tool uses grep -c (line-based counting),
-        we test single-line edits rather than multi-line function replacements.
-        """
+        """Test a realistic optimization workflow using Edit tools."""
         test_file = os.path.join(self.writable_dir, "optimizer.py")
         # Use unique variable names to ensure no substring matches
         original_content = (

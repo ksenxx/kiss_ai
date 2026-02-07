@@ -1,15 +1,4 @@
-"""
-Hardened version of useful_tools.py with immediate security improvements.
-
-This version adds:
-1. Expanded command lists
-2. Additional redirect operators
-3. Dangerous pattern detection
-4. Comprehensive logging
-
-Note: This is still NOT production-ready. For production use, implement
-proper sandboxing (bubblewrap, Docker, etc.) as described in SECURITY_FIXES.md
-"""
+"""Useful tools for agents: file editing, bash execution, web search, and URL fetching."""
 
 import re
 import shlex
@@ -170,166 +159,38 @@ echo "----------------------------------------"
 exit 0
 """
 
-MULTI_EDIT_SCRIPT = r"""
-#!/usr/bin/env bash
-#
-# Multi Edit Tool - Claude Code Implementation
-# Performs precise string replacements in files with exact matching
-#
-# Usage: edit_tool.sh <file_path> <old_string> <new_string> [replace_all]
-#
-# Parameters:
-#   file_path    - Absolute path to the file to modify (required)
-#   old_string   - Exact text to find and replace (required)
-#   new_string   - Replacement text, must differ from old_string (required)
-#   replace_all  - If "true", replace all occurrences (optional, default: false)
-#
-# Exit codes:
-#   0 - Success
-#   1 - Invalid arguments
-#   2 - File not found
-#   3 - String not found or not unique
-#   4 - Read-before-edit validation failed
 
-set -euo pipefail
 
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+SAFE_SPECIAL_PATHS = {
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/tty",
+}
 
-# Validate arguments
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    echo -e "${RED}Error: Invalid number of arguments${NC}" >&2
-    echo "Usage: $0 <file_path> <old_string> <new_string> [replace_all]" >&2
-    exit 1
-fi
+SAFE_SPECIAL_PREFIXES = (
+    "/dev/fd/",
+    "/proc/self/",
+)
 
-FILE_PATH="$1"
-OLD_STRING="$2"
-NEW_STRING="$3"
-REPLACE_ALL="${4:-false}"
 
-# Validate file path is absolute
-if [[ ! "$FILE_PATH" = /* ]]; then
-    echo -e "${RED}Error: file_path must be absolute, not relative${NC}" >&2
-    exit 1
-fi
-
-# Check if file exists
-if [ ! -f "$FILE_PATH" ]; then
-    echo -e "${RED}Error: File not found: $FILE_PATH${NC}" >&2
-    exit 2
-fi
-
-# Check if old_string and new_string are different
-if [ "$OLD_STRING" = "$NEW_STRING" ]; then
-    echo -e "${RED}Error: new_string must be different from old_string${NC}" >&2
-    exit 1
-fi
-
-# Create a state tracking directory (simulating session state)
-STATE_DIR="${HOME}/.claude-edit-state"
-mkdir -p "$STATE_DIR"
-
-# Check read-before-edit validation
-# In a real implementation, this would check session state
-# For demo purposes, we'll create a marker file when files are "read"
-FILE_HASH=$(echo -n "$FILE_PATH" | md5sum | cut -d' ' -f1)
-READ_MARKER="$STATE_DIR/$FILE_HASH"
-
-if [ ! -f "$READ_MARKER" ]; then
-    echo -e "${YELLOW}Warning: File has not been read in this session${NC}" >&2
-    echo -e "${YELLOW}Creating read marker for demo purposes...${NC}" >&2
-    touch "$READ_MARKER"
-fi
-
-# Count occurrences of old_string
-OCCURRENCE_COUNT=$(grep -F -c "$OLD_STRING" "$FILE_PATH" || true)
-
-echo "File: $FILE_PATH"
-echo "Looking for: '$OLD_STRING'"
-echo "Replacing with: '$NEW_STRING'"
-echo "Occurrences found: $OCCURRENCE_COUNT"
-echo "Replace all: $REPLACE_ALL"
-echo ""
-
-# Handle replacement based on mode
-if [ "$REPLACE_ALL" = "true" ]; then
-    # Replace all occurrences
-    if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
-        echo -e "${RED}Error: String not found in file${NC}" >&2
-        exit 3
-    fi
-
-    # Use python for literal string replacement (handles special chars)
-    # Pass strings via environment variables to handle embedded quotes safely
-    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
-    export EDIT_NEW_STRING="$NEW_STRING"
-    python3 -c "
-import os
-file_path = os.environ['EDIT_FILE_PATH']
-old_string = os.environ['EDIT_OLD_STRING']
-new_string = os.environ['EDIT_NEW_STRING']
-with open(file_path, 'r') as f:
-    content = f.read()
-content = content.replace(old_string, new_string)
-with open(file_path, 'w') as f:
-    f.write(content)
-"
-
-    echo -e "${GREEN}✓ Successfully replaced $OCCURRENCE_COUNT occurrence(s)${NC}"
-
-else
-    # Single replacement mode - requires exactly one occurrence
-    if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
-        echo -e "${RED}Error: String not found in file${NC}" >&2
-        exit 3
-    elif [ "$OCCURRENCE_COUNT" -gt 1 ]; then
-        echo -e "${RED}Error: String appears $OCCURRENCE_COUNT times (not unique)${NC}" >&2
-        echo -e "${YELLOW}Hint: Use replace_all=true to replace all occurrences${NC}" >&2
-        exit 3
-    fi
-
-    # Exactly one occurrence - safe to replace
-    # Pass strings via environment variables to handle embedded quotes safely
-    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
-    export EDIT_NEW_STRING="$NEW_STRING"
-    python3 -c "
-import os
-file_path = os.environ['EDIT_FILE_PATH']
-old_string = os.environ['EDIT_OLD_STRING']
-new_string = os.environ['EDIT_NEW_STRING']
-with open(file_path, 'r') as f:
-    content = f.read()
-content = content.replace(old_string, new_string, 1)
-with open(file_path, 'w') as f:
-    f.write(content)
-"
-
-    echo -e "${GREEN}✓ Successfully replaced 1 occurrence${NC}"
-fi
-
-# Show the changed section (context around the change)
-echo ""
-echo "Changed section:"
-echo "----------------------------------------"
-grep -n -C 2 "$NEW_STRING" "$FILE_PATH" || echo "(No context available)"
-echo "----------------------------------------"
-
-exit 0
-"""
+def _is_safe_special_path(path: str) -> bool:
+    cleaned = path.strip(")'\"`);}]")
+    return cleaned in SAFE_SPECIAL_PATHS or cleaned.startswith(SAFE_SPECIAL_PREFIXES)
 
 
 def _extract_directory(path_str: str) -> str | None:
-    """Extract directory from a file path, resolving relative paths.
+    """Resolve a file path to an absolute canonical path for security validation.
 
     Args:
-        path_str: A file or directory path
+        path_str: A file or directory path (can be relative or absolute)
 
     Returns:
-        The resolved absolute directory path, or None if invalid
+        The resolved absolute path, or None if the path is invalid
     """
     try:
         path = Path(path_str)
@@ -340,30 +201,7 @@ def _extract_directory(path_str: str) -> str | None:
             path = Path.cwd() / path
 
         # Resolve to get canonical path (handles .., ., etc.)
-        path = path.resolve()
-
-        # Check if path exists to determine if it's a file or directory
-        if path.exists():
-            return str(path)
-        else:
-            # Path doesn't exist - use heuristics
-            if path_str.endswith("/"):
-                # Trailing slash indicates directory
-                return str(path)
-            else:
-                # Check if it has a file extension
-                if path.suffix:
-                    # Has extension - likely a file
-                    return str(path)
-                else:
-                    # No extension - could be directory
-                    # Check if parent exists and is a directory
-                    if path.parent.exists() and path.parent.is_dir():
-                        # Parent exists, so this is likely a file or subdir
-                        return str(path)
-                    else:
-                        # Parent doesn't exist either - assume it's a directory path
-                        return str(path)
+        return str(path.resolve())
 
     except Exception:
         return None
@@ -382,25 +220,31 @@ SAFARI_HEADERS = {
 }
 
 
-def fetch_url(url: str, headers: dict[str, str], max_content_length: int = 10000) -> str:
+def fetch_url(
+    url: str,
+    headers: dict[str, str],
+    max_characters: int = 10000,
+    timeout_seconds: float = 10.0,
+) -> str:
     """
     Fetch and extract text content from a URL using BeautifulSoup.
 
     Args:
         url: The URL to fetch.
         headers: HTTP headers to use for the request.
-        max_content_length: Maximum length of content to return.
+        max_characters: Maximum number of characters to return.
+        timeout_seconds: Request timeout in seconds.
 
     Returns:
         Extracted text content from the page.
     """
-    import re
-
     import requests
     from bs4 import BeautifulSoup
 
     try:
-        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        response = requests.get(
+            url, headers=headers, timeout=timeout_seconds, allow_redirects=True
+        )
         response.raise_for_status()
         response.encoding = response.apparent_encoding or "utf-8"
 
@@ -434,8 +278,8 @@ def fetch_url(url: str, headers: dict[str, str], max_content_length: int = 10000
 
         text = re.sub(r"\s+", " ", main_content.get_text(separator=" ", strip=True)).strip()
 
-        if len(text) > max_content_length:
-            text = text[:max_content_length] + "... [truncated]"
+        if len(text) > max_characters:
+            text = text[:max_characters] + "... [truncated]"
 
         return text or "No readable content found."
     except requests.exceptions.Timeout:
@@ -587,6 +431,20 @@ def search_web(query: str, max_results: int = 10) -> str:
     return "No search results found."
 
 
+def _strip_heredocs(command: str) -> str:
+    """Strip heredoc content from a bash command.
+
+    Removes everything between << DELIM and DELIM (or <<- DELIM and DELIM),
+    so that heredoc body text is not parsed as command arguments.
+    """
+    return re.sub(
+        r"<<-?\s*'?\"?(\w+)'?\"?\s*\n.*?\n\s*\1\b",
+        "",
+        command,
+        flags=re.DOTALL,
+    )
+
+
 def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
     """Parse a bash command to extract readable and writable directory paths.
 
@@ -729,6 +587,9 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
     }
 
     try:
+        # Strip heredoc content so body text is not parsed as arguments
+        command = _strip_heredocs(command)
+
         # Handle pipes - split into sub-commands
         pipe_parts = command.split("|")
 
@@ -739,21 +600,21 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
             for redirect in write_redirects:
                 if redirect in part:
                     # Extract path after redirect
-                    redirect_match = re.search(rf"{re.escape(redirect)}\s*([^\s;&|]+)", part)
+                    redirect_match = re.search(rf"{re.escape(redirect)}\s*([^\s;&|()]+)", part)
                     if redirect_match:
                         path = redirect_match.group(1).strip()
                         path = path.strip("'\"")
-                        if path and path != "/dev/null":
+                        if path and not _is_safe_special_path(path):
                             dir_path = _extract_directory(path)
                             if dir_path:
                                 writable_paths.add(dir_path)
 
             # Check for input redirection (reading)
-            input_redirect_match = re.search(r"<\s*([^\s;&|]+)", part)
+            input_redirect_match = re.search(r"<\s*([^\s;&|()]+)", part)
             if input_redirect_match:
                 path = input_redirect_match.group(1).strip()
                 path = path.strip("'\"")
-                if path and path != "/dev/null":
+                if path and not _is_safe_special_path(path):
                     dir_path = _extract_directory(path)
                     if dir_path:
                         readable_paths.add(dir_path)
@@ -792,10 +653,10 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
 
                     # Skip redirect operators and their targets
                     redirect_ops = [
-                        ">", ">>", "<", "&>", "&>>", "1>", "2>",
+                        ">", ">>", "<", "<<", "<<<", "&>", "&>>", "1>", "2>",
                         "2>&1", ">|", ">>|", "&>|", "1>>", "2>>",
                     ]
-                    if token in redirect_ops:
+                    if token in redirect_ops or token.startswith("<<"):
                         i += 1
                         # Skip the redirect target (next token)
                         if i < len(tokens):
@@ -805,7 +666,7 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                     # Check if it looks like a path
                     if "/" in token or not any(c in token for c in ["=", "$", "(", ")"]):
                         token = token.strip("'\"")
-                        if token and token != "/dev/null":
+                        if token and not _is_safe_special_path(token):
                             paths.append(token)
 
                     i += 1
@@ -838,14 +699,16 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                             for token in tokens:
                                 if token.startswith("of="):
                                     output_file = token[3:]
-                                    dir_path = _extract_directory(output_file)
-                                    if dir_path:
-                                        writable_paths.add(dir_path)
+                                    if not _is_safe_special_path(output_file):
+                                        dir_path = _extract_directory(output_file)
+                                        if dir_path:
+                                            writable_paths.add(dir_path)
                                 elif token.startswith("if="):
                                     input_file = token[3:]
-                                    dir_path = _extract_directory(input_file)
-                                    if dir_path:
-                                        readable_paths.add(dir_path)
+                                    if not _is_safe_special_path(input_file):
+                                        dir_path = _extract_directory(input_file)
+                                        if dir_path:
+                                            readable_paths.add(dir_path)
                         else:
                             # Other write commands
                             for path in paths:
@@ -899,6 +762,7 @@ class UsefulTools:
         old_string: str,
         new_string: str,
         replace_all: bool = False,
+        timeout_seconds: float = 30,
     ) -> str:
         """Performs precise string replacements in files with exact matching.
 
@@ -907,6 +771,7 @@ class UsefulTools:
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
+            timeout_seconds: Timeout in seconds for the edit command.
 
         Returns:
             The output of the edit operation.
@@ -944,7 +809,7 @@ class UsefulTools:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout_seconds,
             )
             return result.stdout
         except subprocess.TimeoutExpired:
@@ -968,6 +833,7 @@ class UsefulTools:
         old_string: str,
         new_string: str,
         replace_all: bool = False,
+        timeout_seconds: float = 30,
     ) -> str:
         """Performs precise string replacements in files with exact matching.
 
@@ -976,65 +842,20 @@ class UsefulTools:
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
+            timeout_seconds: Timeout in seconds for the edit command.
 
         Returns:
             The output of the edit operation.
         """
-        # Check if file_path is in writable_paths
-        resolved = Path(file_path).resolve()
-        if not is_subpath(resolved, self.writable_paths):
-            return f"Error: Access denied for writing to {file_path}"
+        return self.Edit(file_path, old_string, new_string, replace_all, timeout_seconds)
 
-        # Create a temporary script file
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-            f.write(MULTI_EDIT_SCRIPT)
-            script_path = f.name
-
-        try:
-            # Make script executable
-            Path(script_path).chmod(0o755)
-
-            # Build command with arguments
-            replace_all_str = "true" if replace_all else "false"
-            command = [
-                "/bin/bash",
-                script_path,
-                str(resolved),
-                old_string,
-                new_string,
-                replace_all_str,
-            ]
-
-            # Execute with timeout for safety
-            result = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            return "Error: Command execution timeout"
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() if e.stderr else str(e)
-            return f"Error: {error_msg}"
-        except Exception as e:
-            return f"Error: {e}"
-        finally:
-            # Clean up temporary script
-            try:
-                Path(script_path).unlink()
-            except Exception:
-                pass
-
-    def Bash(self, command: str, description: str) -> str:  # noqa: N802
+    def Bash(self, command: str, description: str, timeout_seconds: float = 30) -> str:  # noqa: N802
         """Runs a bash command and returns its output.
 
         Args:
             command: The bash command to run.
             description: A brief description of the command.
+            timeout_seconds: Timeout in seconds for the command.
 
         Returns:
             The output of the command.
@@ -1044,11 +865,15 @@ class UsefulTools:
         readable, writable = parse_bash_command_paths(command)
 
         for path_str in readable:
+            if _is_safe_special_path(path_str):
+                continue
             resolved = Path(path_str).resolve()
             if not is_subpath(resolved, self.readable_paths):
                 return f"Error: Access denied for reading {path_str}"
 
         for path_str in writable:
+            if _is_safe_special_path(path_str):
+                continue
             resolved = Path(path_str).resolve()
             if not is_subpath(resolved, self.writable_paths):
                 return f"Error: Access denied for writing to {path_str}"
@@ -1060,6 +885,7 @@ class UsefulTools:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=timeout_seconds,
             )
             return result.stdout
         except subprocess.TimeoutExpired:

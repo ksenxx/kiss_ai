@@ -66,6 +66,10 @@ class AgentConfig(BaseModel):
         default=200.0, description="Maximum budget for the global agent"
     )
     use_web: bool = Field(default=True, description="Use web browsing and search")
+    relentless_coding_agent: "RelentlessCodingAgentConfig" = Field(
+        default_factory=lambda: RelentlessCodingAgentConfig(),
+        description="Configuration for Relentless Coding Agent",
+    )
     kiss_coding_agent: "KISSCodingAgentConfig" = Field(
         default_factory=lambda: KISSCodingAgentConfig(),
         description="Configuration for KISS Coding Agent",
@@ -78,7 +82,7 @@ class RelentlessCodingAgentConfig(BaseModel):
         description="LLM model to use for Relentless Coding Agent",
     )
     subtasker_model_name: str = Field(
-        default="claude-opus-4-5",
+        default="claude-opus-4-6",
         description="LLM model to use for subtask generation and execution",
     )
     max_steps: int = Field(
@@ -101,7 +105,7 @@ class KISSCodingAgentConfig(BaseModel):
         description="LLM model to use for KISS Coding Agent",
     )
     subtasker_model_name: str = Field(
-        default="claude-opus-4-5",
+        default="claude-opus-4-6",
         description="LLM model to use for subtask generation and execution",
     )
     refiner_model_name: str = Field(

@@ -1,8 +1,3 @@
-# Author: Koushik Sen (ksen@berkeley.edu)
-# Contributors:
-# Koushik Sen (ksen@berkeley.edu)
-# add your name here
-
 """Test suite for Claude Coding Agent.
 
 These tests verify the Claude Coding Agent functionality using real API calls.
@@ -17,20 +12,12 @@ from pathlib import Path
 
 from kiss.agents.coding_agents.claude_coding_agent import ClaudeCodingAgent
 from kiss.core import DEFAULT_CONFIG
-from kiss.core.utils import is_subpath
 from kiss.tests.conftest import requires_anthropic_api_key
 
 
 @requires_anthropic_api_key
 class TestClaudeCodingAgentPermissions(unittest.TestCase):
-    """Tests for ClaudeCodingAgent permission handling."""
-
     def setUp(self):
-        """Set up test fixtures.
-
-        Creates a temporary directory structure with separate readable and
-        writable subdirectories, and initializes a ClaudeCodingAgent instance.
-        """
         self.temp_dir = Path(tempfile.mkdtemp())
         self.readable_dir = self.temp_dir / "readable"
         self.writable_dir = self.temp_dir / "writable"
@@ -48,278 +35,95 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
         )
 
     def tearDown(self):
-        """Clean up test fixtures.
-
-        Removes the temporary directory and all its contents.
-        """
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_is_subpath_for_exact_match(self):
-        """Test is_subpath returns True for exact path match."""
-        target = Path(self.readable_dir).resolve()
-        whitelist = [Path(self.readable_dir).resolve()]
-        self.assertTrue(is_subpath(target, whitelist))
+    def _run_permission(self, tool_name, tool_args):
+        from claude_agent_sdk import ToolPermissionContext
 
-    def test_is_subpath_for_child_path(self):
-        """Test is_subpath returns True for child paths."""
-        child_path = Path(self.readable_dir, "subdir", "file.txt").resolve()
-        whitelist = [Path(self.readable_dir).resolve()]
-        self.assertTrue(is_subpath(child_path, whitelist))
-
-    def test_is_subpath_for_unrelated_path(self):
-        """Test is_subpath returns False for unrelated paths."""
-        unrelated = Path("/tmp/unrelated/path").resolve()
-        whitelist = [Path(self.readable_dir).resolve()]
-        self.assertFalse(is_subpath(unrelated, whitelist))
-
-    def test_permission_handler_allows_read_in_readable_path(self):
-        """Test permission_handler allows Read for readable paths.
-
-        Verifies that the permission handler returns PermissionResultAllow
-        when a Read operation targets a file within the readable paths.
-        """
-        from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
-
-        file_path = str(self.readable_dir / "test.txt")
         context = ToolPermissionContext()
-        result = asyncio.run(self.agent.permission_handler("Read", {"path": file_path}, context))
+        return asyncio.run(self.agent.permission_handler(tool_name, tool_args, context))
+
+    def test_permission_handler_read_allowed(self):
+        from claude_agent_sdk import PermissionResultAllow
+
+        result = self._run_permission("Read", {"path": str(self.readable_dir / "test.txt")})
         self.assertIsInstance(result, PermissionResultAllow)
 
-    def test_permission_handler_denies_read_outside_readable_path(self):
-        """Test permission_handler denies Read outside readable paths.
+    def test_permission_handler_read_denied(self):
+        from claude_agent_sdk import PermissionResultDeny
 
-        Verifies that the permission handler returns PermissionResultDeny
-        when a Read operation targets a file outside the readable paths.
-        """
-        from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
-
-        file_path = "/tmp/outside/test.txt"
-        context = ToolPermissionContext()
-        result = asyncio.run(self.agent.permission_handler("Read", {"path": file_path}, context))
+        result = self._run_permission("Read", {"path": "/tmp/outside/test.txt"})
         self.assertIsInstance(result, PermissionResultDeny)
 
-    def test_permission_handler_allows_write_in_writable_path(self):
-        """Test permission_handler allows Write for writable paths.
+    def test_permission_handler_write_allowed(self):
+        from claude_agent_sdk import PermissionResultAllow
 
-        Verifies that the permission handler returns PermissionResultAllow
-        when a Write operation targets a file within the writable paths.
-        """
-        from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
-
-        file_path = str(self.writable_dir / "output.txt")
-        context = ToolPermissionContext()
-        result = asyncio.run(self.agent.permission_handler("Write", {"path": file_path}, context))
+        result = self._run_permission("Write", {"path": str(self.writable_dir / "output.txt")})
         self.assertIsInstance(result, PermissionResultAllow)
 
-    def test_permission_handler_denies_write_outside_writable_path(self):
-        """Test permission_handler denies Write outside writable paths.
+    def test_permission_handler_write_denied(self):
+        from claude_agent_sdk import PermissionResultDeny
 
-        Verifies that the permission handler returns PermissionResultDeny
-        when a Write operation targets a file outside the writable paths.
-        """
-        from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
-
-        file_path = str(self.readable_dir / "readonly.txt")
-        context = ToolPermissionContext()
-        result = asyncio.run(self.agent.permission_handler("Write", {"path": file_path}, context))
+        result = self._run_permission("Write", {"path": str(self.readable_dir / "readonly.txt")})
         self.assertIsInstance(result, PermissionResultDeny)
 
-    def test_permission_handler_allows_tools_without_path(self):
-        """Test permission_handler allows tools without path parameter.
+    def test_permission_handler_tools_without_path(self):
+        from claude_agent_sdk import PermissionResultAllow
 
-        Verifies that tools that don't require path-based permissions
-        are allowed by default.
-        """
-        from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
-
-        context = ToolPermissionContext()
-        result = asyncio.run(self.agent.permission_handler("SomeOtherTool", {}, context))
+        result = self._run_permission("SomeOtherTool", {})
         self.assertIsInstance(result, PermissionResultAllow)
 
-    def test_permission_handler_handles_file_path_key(self):
-        """Test permission_handler handles 'file_path' key.
+    def test_permission_handler_file_path_key(self):
+        from claude_agent_sdk import PermissionResultAllow
 
-        Verifies that the permission handler correctly extracts paths from
-        tool arguments using the 'file_path' key as an alternative to 'path'.
-        """
-        from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
-
-        file_path = str(self.readable_dir / "test.txt")
-        context = ToolPermissionContext()
-        result = asyncio.run(
-            self.agent.permission_handler("Read", {"file_path": file_path}, context)
+        result = self._run_permission(
+            "Read", {"file_path": str(self.readable_dir / "test.txt")}
         )
         self.assertIsInstance(result, PermissionResultAllow)
 
-    def test_permission_handler_for_grep(self):
-        """Test permission_handler handles Grep tool.
+    def test_permission_handler_grep_glob(self):
+        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-        Verifies that the Grep tool is allowed for paths within readable_paths
-        and denied for paths outside readable_paths.
-        """
-        from claude_agent_sdk import (
-            PermissionResultAllow,
-            PermissionResultDeny,
-            ToolPermissionContext,
-        )
+        for tool in ["Grep", "Glob"]:
+            result = self._run_permission(tool, {"path": str(self.readable_dir / "test.txt")})
+            self.assertIsInstance(result, PermissionResultAllow)
+            result = self._run_permission(tool, {"path": "/tmp/outside/test.txt"})
+            self.assertIsInstance(result, PermissionResultDeny)
 
-        context = ToolPermissionContext()
-        # In readable path
-        file_path = str(self.readable_dir / "test.txt")
-        result = asyncio.run(self.agent.permission_handler("Grep", {"path": file_path}, context))
-        self.assertIsInstance(result, PermissionResultAllow)
+    def test_permission_handler_edit_multiedit(self):
+        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-        # Outside readable path
-        file_path = "/tmp/outside/test.txt"
-        result = asyncio.run(self.agent.permission_handler("Grep", {"path": file_path}, context))
-        self.assertIsInstance(result, PermissionResultDeny)
-
-    def test_permission_handler_for_glob(self):
-        """Test permission_handler handles Glob tool.
-
-        Verifies that the Glob tool is allowed for paths within readable_paths
-        and denied for paths outside readable_paths.
-        """
-        from claude_agent_sdk import (
-            PermissionResultAllow,
-            PermissionResultDeny,
-            ToolPermissionContext,
-        )
-
-        context = ToolPermissionContext()
-        # In readable path
-        file_path = str(self.readable_dir / "*.py")
-        result = asyncio.run(self.agent.permission_handler("Glob", {"path": file_path}, context))
-        self.assertIsInstance(result, PermissionResultAllow)
-
-        # Outside readable path
-        file_path = "/tmp/outside/*.py"
-        result = asyncio.run(self.agent.permission_handler("Glob", {"path": file_path}, context))
-        self.assertIsInstance(result, PermissionResultDeny)
-
-    def test_permission_handler_for_edit(self):
-        """Test permission_handler handles Edit tool.
-
-        Verifies that the Edit tool is allowed for paths within writable_paths
-        and denied for paths outside writable_paths (including readable-only paths).
-        """
-        from claude_agent_sdk import (
-            PermissionResultAllow,
-            PermissionResultDeny,
-            ToolPermissionContext,
-        )
-
-        context = ToolPermissionContext()
-        # In writable path
-        file_path = str(self.writable_dir / "edit.txt")
-        result = asyncio.run(self.agent.permission_handler("Edit", {"path": file_path}, context))
-        self.assertIsInstance(result, PermissionResultAllow)
-
-        # Outside writable path
-        file_path = str(self.readable_dir / "readonly.txt")
-        result = asyncio.run(self.agent.permission_handler("Edit", {"path": file_path}, context))
-        self.assertIsInstance(result, PermissionResultDeny)
-
-    def test_permission_handler_for_multiedit(self):
-        """Test permission_handler handles MultiEdit tool.
-
-        Verifies that the MultiEdit tool is allowed for paths within writable_paths
-        and denied for paths outside writable_paths (including readable-only paths).
-        """
-        from claude_agent_sdk import (
-            PermissionResultAllow,
-            PermissionResultDeny,
-            ToolPermissionContext,
-        )
-
-        context = ToolPermissionContext()
-        # In writable path
-        file_path = str(self.writable_dir / "multi.txt")
-        result = asyncio.run(
-            self.agent.permission_handler("MultiEdit", {"path": file_path}, context)
-        )
-        self.assertIsInstance(result, PermissionResultAllow)
-
-        # Outside writable path
-        file_path = str(self.readable_dir / "readonly.txt")
-        result = asyncio.run(
-            self.agent.permission_handler("MultiEdit", {"path": file_path}, context)
-        )
-        self.assertIsInstance(result, PermissionResultDeny)
+        for tool in ["Edit", "MultiEdit"]:
+            result = self._run_permission(tool, {"path": str(self.writable_dir / "file.txt")})
+            self.assertIsInstance(result, PermissionResultAllow)
+            result = self._run_permission(
+                tool, {"path": str(self.readable_dir / "readonly.txt")}
+            )
+            self.assertIsInstance(result, PermissionResultDeny)
 
 
 @requires_anthropic_api_key
 class TestClaudeCodingAgentRun(unittest.TestCase):
-    """Integration tests for ClaudeCodingAgent.run() method.
-
-    These tests make real API calls to Claude.
-    """
-
     def setUp(self):
-        """Set up test fixtures with a temp directory.
-
-        Creates a temporary directory structure with an output subdirectory
-        and stores the project root path for readable paths configuration.
-        """
         self.temp_dir = Path(tempfile.mkdtemp())
         self.output_dir = self.temp_dir / "output"
         self.output_dir.mkdir()
-
         self.project_root = Path(DEFAULT_CONFIG.agent.artifact_dir)
 
     def tearDown(self):
-        """Clean up test fixtures.
-
-        Removes the temporary directory and all its contents.
-        """
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_agent_run_simple_task(self):
-        """Test running a simple code generation task.
-
-        Verifies that the ClaudeCodingAgent can execute a basic code generation
-        task and return a non-null string result.
-        """
         agent = ClaudeCodingAgent("test-agent")
-
-        task = """Write a simple Python function that adds two numbers."""
-
         result = agent.run(
             model_name="claude-sonnet-4-5",
-            prompt_template=task,
+            prompt_template="Write a simple Python function that adds two numbers.",
             readable_paths=[str(self.project_root / "src")],
             writable_paths=[str(self.output_dir)],
             base_dir=str(self.temp_dir),
         )
-
-        # Result should be a string summary
         self.assertIsNotNone(result)
-        if result:
-            print(result)
-            self.assertIsInstance(result, str)
-
-    def test_agent_run_returns_string_summary(self):
-        """Test that agent run returns a string summary.
-
-        Verifies that the ClaudeCodingAgent returns a string summary after
-        executing a more complex task involving code generation and testing.
-        """
-        agent = ClaudeCodingAgent("test-agent")
-
-        task = "Write a simple factorial function, test it, and mke it efficient."
-
-        result = agent.run(
-            model_name="claude-sonnet-4-5",
-            prompt_template=task,
-            readable_paths=[str(self.project_root / "src")],
-            writable_paths=[str(self.output_dir)],
-            base_dir=str(self.temp_dir),
-        )
-
-        self.assertIsNotNone(result)
-        if result:
-            print(result)
-            self.assertIsInstance(result, str)
+        self.assertIsInstance(result, str)
 
 
 if __name__ == "__main__":

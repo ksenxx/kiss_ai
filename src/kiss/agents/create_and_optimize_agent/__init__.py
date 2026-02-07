@@ -14,11 +14,11 @@ Example usage:
     from kiss.agents.create_and_optimize_agent import AgentEvolver, ImproverAgent
 
     # Create and evolve an agent for a task
-    evolver = AgentEvolver(
+    evolver = AgentEvolver()
+    best = evolver.evolve(
         task_description="Build a code analysis assistant",
         max_generations=10,
     )
-    best = evolver.evolve()
 
     # Or improve an existing agent
     improver = ImproverAgent()
@@ -29,7 +29,13 @@ Example usage:
     )
 """
 
-from kiss.agents.create_and_optimize_agent.agent_evolver import AgentEvolver, AgentVariant
+from kiss.agents.create_and_optimize_agent.agent_evolver import (
+    AgentEvolver,
+    AgentVariant,
+    EvolverPhase,
+    EvolverProgress,
+    create_progress_callback,
+)
 from kiss.agents.create_and_optimize_agent.config import (
     AgentCreatorConfig,
     EvolverConfig,
@@ -40,6 +46,9 @@ from kiss.agents.create_and_optimize_agent.improver_agent import ImprovementRepo
 __all__ = [
     "AgentEvolver",
     "AgentVariant",
+    "EvolverPhase",
+    "EvolverProgress",
+    "create_progress_callback",
     "ImproverAgent",
     "ImprovementReport",
     "AgentCreatorConfig",

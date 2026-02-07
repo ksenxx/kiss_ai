@@ -10,10 +10,11 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
+from kiss.core import config as config_module
 from kiss.core.base import Base
-from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.useful_tools import fetch_url, search_web
@@ -73,9 +74,10 @@ class KISSAgent(Base):
         tools: list[Callable[..., Any]] | None = None,
         formatter: Formatter | None = None,
         is_agentic: bool = True,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+        max_steps: int | None = None,
+        max_budget: float | None = None,
         model_config: dict[str, Any] | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -96,12 +98,15 @@ class KISSAgent(Base):
                 Default is DEFAULT_CONFIG.agent.max_agent_budget.
             model_config (dict[str, Any] | None): The model configuration to use for the agent.
                 Default is None.
+            token_callback (TokenCallback | None): Optional async callback invoked with each
+                streamed text token. Default is None.
         Returns:
             str: The result of the agent's task.
         """
         try:
             self._initialize_run(
-                model_name, formatter, is_agentic, max_steps, max_budget, model_config
+                model_name, formatter, is_agentic, max_steps, max_budget, model_config,
+                token_callback
             )
 
             if not self.is_agentic and tools is not None:
@@ -130,9 +135,10 @@ class KISSAgent(Base):
         model_name: str,
         formatter: Formatter | None,
         is_agentic: bool,
-        max_steps: int,
-        max_budget: float,
+        max_steps: int | None,
+        max_budget: float | None,
         model_config: dict[str, Any] | None,
+        token_callback: TokenCallback | None = None,
     ) -> None:
         """Initialize run parameters.
 
@@ -140,15 +146,24 @@ class KISSAgent(Base):
             model_name: The name of the model to use.
             formatter: Optional formatter for output display.
             is_agentic: Whether the agent operates in agentic mode with tools.
-            max_steps: Maximum number of steps allowed in the ReAct loop.
-            max_budget: Maximum budget in dollars for this run.
+            max_steps: Maximum steps allowed in the ReAct loop. If None, uses default.
+            max_budget: Maximum budget in dollars for this run. If None, uses default.
             model_config: Optional model-specific configuration dictionary.
+            token_callback: Optional async callback invoked with each streamed text token.
         """
-        self.model = model(model_name, model_config=model_config)
+        self.model = model(model_name, model_config=model_config, token_callback=token_callback)
         self._formatter = formatter or SimpleFormatter()
         self.is_agentic = is_agentic
-        self.max_steps = max_steps
-        self.max_budget = max_budget
+        self.max_steps = (
+            max_steps
+            if max_steps is not None
+            else config_module.DEFAULT_CONFIG.agent.max_steps
+        )
+        self.max_budget = (
+            max_budget
+            if max_budget is not None
+            else config_module.DEFAULT_CONFIG.agent.max_agent_budget
+        )
 
     def _setup_tools(self, tools: list[Callable[..., Any]] | None) -> None:
         """Setup tools for agentic mode.
@@ -166,7 +181,7 @@ class KISSAgent(Base):
 
         if "finish" not in tool_names:
             tools.append(self.finish)
-        if DEFAULT_CONFIG.agent.use_web and "search_web" not in tool_names:
+        if config_module.DEFAULT_CONFIG.agent.use_web and "search_web" not in tool_names:
             tools.append(fetch_url)
             tools.append(search_web)
 
@@ -178,7 +193,7 @@ class KISSAgent(Base):
         Returns:
             str: The generated response text from the model.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             self._formatter.print_status(f"Asking {self.model.model_name}...\n")
         start_timestamp = int(time.time())
         self.step_count = 1
@@ -210,7 +225,7 @@ class KISSAgent(Base):
             except (KISSError, RuntimeError) as e:
                 content = f"Failed to get response from Model: {e}.\nPlease try again.\n"
                 self.model.add_message_to_conversation("user", content)
-                self._add_message_with_formatter("model", content)
+                self._add_message_with_formatter("user", content)
 
             self._check_limits()
 
@@ -222,7 +237,7 @@ class KISSAgent(Base):
         Returns:
             str | None: The result string if the task is finished, None otherwise.
         """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             self._formatter.print_status(f"Asking {self.model.model_name}...\n")
         start_timestamp = int(time.time())
 
@@ -277,29 +292,22 @@ class KISSAgent(Base):
             str | None: The result string if the finish tool was called, None otherwise.
         """
         function_name = function_call["name"]
-        function_args = function_call.get("arguments", {})
+        raw_args = function_call.get("arguments")
+        function_args = raw_args if isinstance(raw_args, dict) else {}
+
+        args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
+        call_repr = f"```python\n{function_name}({args_str})\n```"
+        tool_call_timestamp = int(time.time())
 
         try:
             if function_name not in self._tool_map:
                 raise KISSError(f"Function {function_name} is not a registered tool")
-
-            args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
-            call_repr = f"```python\n{function_name}({args_str})\n```"
-            tool_call_timestamp = int(time.time())
-            result_raw = self._tool_map[function_name](**function_args)
-            function_response = str(result_raw)
+            function_response = str(self._tool_map[function_name](**function_args))
         except Exception as e:
-            args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
-            call_repr = f"```python\n{function_name}({args_str})\n```"
-            tool_call_timestamp = int(time.time())
             function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
 
-        # max_tokens = get_max_context_length(self.model_name)
-        # if len(function_response)/4 > 0.95*(max_tokens - self.total_tokens_used):
-        #     function_response = (
-        #         "**The tool response is too long. "
-        #         "Please use head or tail commands to shorten the response.**"
-        #     )
+        # Stream tool output through the same token callback.
+        self.model._invoke_token_callback(function_response)
 
         model_content = response_text + "\n" + call_repr + "\n" + usage_info
         self._add_message_with_formatter("model", model_content, start_timestamp)
@@ -321,7 +329,7 @@ class KISSAgent(Base):
         """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if Base.global_budget_used > DEFAULT_CONFIG.agent.global_max_budget:
+        if Base.global_budget_used > config_module.DEFAULT_CONFIG.agent.global_max_budget:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -374,7 +382,7 @@ class KISSAgent(Base):
             budget_info = f"[Agent budget usage: ${self.budget_used:.4f}/${self.max_budget:.2f}]"
             global_budget_info = (
                 f"[Global budget usage: ${Base.global_budget_used:.4f}/"
-                f"${DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
+                f"${config_module.DEFAULT_CONFIG.agent.global_max_budget:.2f}]"
             )
             return (
                 "#### Usage Information\n"
@@ -384,7 +392,7 @@ class KISSAgent(Base):
                 f"  - {step_info}\n"
             )
         except Exception:
-            if DEFAULT_CONFIG.agent.verbose:
+            if config_module.DEFAULT_CONFIG.agent.verbose:
                 self._formatter.print_error(f"Error getting usage info: {traceback.format_exc()}")
             return f"#### Usage Information\n  - {step_info}\n"
 

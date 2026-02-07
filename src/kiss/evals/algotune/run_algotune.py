@@ -17,7 +17,7 @@ import kiss.agents.kiss_evolve.config  # noqa: F401
 import kiss.evals.algotune.config  # noqa: F401
 from kiss.agents.kiss import get_run_simple_coding_agent
 from kiss.agents.kiss_evolve.kiss_evolve import KISSEvolve
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 
 # Required dependencies for AlgoTune tasks
 ALGOTUNE_DEPENDENCIES = ["orjson", "scipy", "scikit-learn"]
@@ -429,12 +429,14 @@ def create_correctness_test_fn(task_instance, test_problems: list):
 
 def run_algotune(
     max_retries: int = 3,
+    task: str | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Run KISSEvolve on an AlgoTune task.
 
     Args:
         max_retries: Maximum number of retries for network errors.
+        task: Task name to run. If None, uses config default.
         **kwargs: Override config parameters.
 
     Returns:
@@ -443,25 +445,27 @@ def run_algotune(
 
     _check_and_install_dependencies()
 
-    algotune_path = Path(DEFAULT_CONFIG.algotune.algotune_path)  # type: ignore[attr-defined]
-    _ensure_algotune_installed(algotune_path, DEFAULT_CONFIG.algotune.algotune_repo_url)  # type: ignore[attr-defined]
+    algotune_cfg = config_module.DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
+    algotune_path = Path(algotune_cfg.algotune_path)
+    _ensure_algotune_installed(algotune_path, algotune_cfg.algotune_repo_url)
+
+    task_name = task if task is not None else algotune_cfg.task
 
     print("=" * 80)
-    print(f"AlgoTune Optimization: {DEFAULT_CONFIG.algotune.task}")  # type: ignore[attr-defined]
+    print(f"AlgoTune Optimization: {task_name}")
     print("=" * 80)
 
     # Load task
-    print(f"\nLoading task: {DEFAULT_CONFIG.algotune.task}...")  # type: ignore[attr-defined]
-    task_class = get_task_class(DEFAULT_CONFIG.algotune.task)  # type: ignore[attr-defined]
+    print(f"\nLoading task: {task_name}...")
+    task_class = get_task_class(task_name)
     task_instance = task_class()
 
     # Load description
-    desc_path = algotune_path / "AlgoTuneTasks" / DEFAULT_CONFIG.algotune.task / "description.txt"  # type: ignore[attr-defined]
-    description = desc_path.read_text() if desc_path.exists() else DEFAULT_CONFIG.algotune.task  # type: ignore[attr-defined]
+    desc_path = algotune_path / "AlgoTuneTasks" / task_name / "description.txt"
+    description = desc_path.read_text() if desc_path.exists() else task_name
     description = description.replace("{", "{{").replace("}", "}}")
 
     # Generate test problems
-    algotune_cfg = DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
     num_problems = algotune_cfg.num_test_problems
     problem_size = algotune_cfg.problem_size
     random_seed = algotune_cfg.random_seed
@@ -474,7 +478,6 @@ def run_algotune(
     # Create initial code
     print("Creating initial solver from reference implementation...")
     solve_source = inspect.getsource(task_instance.solve)
-    task_name = algotune_cfg.task
     task_file = algotune_path / "AlgoTuneTasks" / task_name / f"{task_name}.py"
     initial_code = _create_initial_code(task_name, description, solve_source, task_file)
 
@@ -512,7 +515,7 @@ def run_algotune(
 {description[:1500]}
 """
 
-    evolve_config = DEFAULT_CONFIG.kiss_evolve  # type: ignore[attr-defined]
+    evolve_config = config_module.DEFAULT_CONFIG.kiss_evolve  # type: ignore[attr-defined]
     pop_size = evolve_config.population_size
     max_gen = evolve_config.max_generations
     print(f"\nStarting KISSEvolve (pop={pop_size}, gen={max_gen})...")
@@ -548,11 +551,12 @@ def run_algotune(
 
     # Results
     if best.metrics:
-        evolved_time = best.metrics.get("total_time_seconds", initial_time)
+        evolved_time = best.metrics.get("total_time_seconds")
     else:
+        evolved_time = None
+    if evolved_time is None:
         evolved_time = initial_time
-    # Ensure evolved_time is a float for calculations
-    evolved_time = float(evolved_time or initial_time)
+    evolved_time = float(evolved_time)
     speedup = initial_time / evolved_time if evolved_time > 0 else 1.0
 
     print("\n" + "=" * 80)
@@ -569,7 +573,7 @@ def run_algotune(
     print("-" * 80)
 
     return {
-        "task_name": DEFAULT_CONFIG.algotune.task,  # type: ignore[attr-defined]
+        "task_name": task_name,
         "initial_fitness": initial_result["fitness"],
         "best_fitness": best.fitness,
         "initial_time": initial_time,
@@ -592,8 +596,9 @@ def run_all_tasks(max_retries: int = 3) -> list[dict[str, Any]]:
     # Check and install required dependencies before starting
     _check_and_install_dependencies()
 
-    algotune_path = Path(DEFAULT_CONFIG.algotune.algotune_path)  # type: ignore[attr-defined]
-    _ensure_algotune_installed(algotune_path, DEFAULT_CONFIG.algotune.algotune_repo_url)  # type: ignore[attr-defined]
+    algotune_cfg = config_module.DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
+    algotune_path = Path(algotune_cfg.algotune_path)
+    _ensure_algotune_installed(algotune_path, algotune_cfg.algotune_repo_url)
 
     task_names = get_all_task_names(algotune_path)
     if not task_names:
@@ -663,7 +668,7 @@ def main():
     Reads configuration from DEFAULT_CONFIG.algotune and runs either
     all tasks (if all_tasks is True) or a single task optimization.
     """
-    config = DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
+    config = config_module.DEFAULT_CONFIG.algotune  # type: ignore[attr-defined]
 
     if config.all_tasks:
         results = run_all_tasks()

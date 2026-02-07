@@ -19,7 +19,7 @@ import yaml
 from datasets import load_dataset
 
 import kiss.core.utils as utils
-from kiss.agents.gepa import GEPA
+from kiss.agents.gepa import GEPA, create_progress_callback
 from kiss.core.kiss_agent import KISSAgent
 
 
@@ -362,6 +362,7 @@ class HotPotQABenchmark:
             pareto_size=pareto_size,
             mutation_rate=mutation_rate,
             dev_val_split=dev_val_split,
+            progress_callback=create_progress_callback(verbose=True),
         )
 
         dev_count = int(len(train_examples) * dev_val_split)
@@ -424,3 +425,67 @@ class HotPotQABenchmark:
 
         print(f"\nAverage scores: {avg_scores}")
         return avg_scores
+
+
+def main() -> None:
+    """Main entry point for running HotPotQA benchmark with GEPA optimization.
+
+    Runs GEPA optimization on HotPotQA examples and prints results.
+    Configuration is hardcoded for simplicity - modify parameters directly
+    in this function as needed.
+    """
+    print("=" * 70)
+    print("HotPotQA Benchmark - GEPA Prompt Optimization")
+    print("=" * 70)
+
+    # Configuration - modify these as needed
+    # Based on GEPA paper (arXiv:2507.19457) experimental settings:
+    # - Paper uses 400-1200 rollouts for HotPotQA, with dev/val split
+    # - pareto_size controls validation set size (D_pareto)
+    # - minibatch_size is typically 8 for feedback per iteration
+    num_examples = 100  # Total examples (split into dev/val sets)
+    max_generations = 10  # GEPA iterations (paper uses 5-10)
+    population_size = 5  # Candidates maintained per generation
+    pareto_size = 5  # Max Pareto frontier size
+    mutation_rate = 0.5  # Probability of mutation
+    dev_val_split = 0.5  # 50% dev, 50% val (paper uses similar splits)
+    model_name = "gpt-4o-mini"  # Model for QA agent
+
+    # Initialize benchmark
+    benchmark = HotPotQABenchmark(
+        split="validation",
+        num_examples=num_examples,
+        config_name="distractor",
+    )
+
+    # Run GEPA optimization
+    gepa, val_scores = benchmark.run_gepa_optimization(
+        model_name=model_name,
+        max_generations=max_generations,
+        population_size=population_size,
+        pareto_size=pareto_size,
+        mutation_rate=mutation_rate,
+        dev_val_split=dev_val_split,
+    )
+
+    # Print results
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+
+    best_prompt = gepa.get_best_prompt()
+    print(f"\nBest prompt (first 500 chars):\n{'-' * 40}")
+    print(best_prompt[:500])
+    print(f"{'-' * 40}")
+
+    print(f"\nFinal validation scores: {val_scores}")
+    print(f"Pareto frontier size: {len(gepa.get_pareto_frontier())}")
+
+    # Show Pareto frontier candidates
+    print("\nPareto frontier candidates:")
+    for i, candidate in enumerate(gepa.get_pareto_frontier()):
+        print(f"  [{i}] val_scores={candidate.val_scores}")
+
+
+if __name__ == "__main__":
+    main()

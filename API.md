@@ -22,6 +22,7 @@ For a high-level overview and quick start guide, see [README.md](README.md).
 - [AgentEvolver](#agentevolver) - Evolutionary agent optimization
 - [GEPA](#gepa) - Genetic-Pareto prompt optimizer
 - [KISSEvolve](#kissevolve) - Evolutionary algorithm discovery
+- [UsefulTools](#usefultools) - Bash execution with path-based access control
 - [Utility Functions](#utility-functions) - Helper functions
 - [SimpleFormatter](#simpleformatter) - Rich terminal output formatting
 - [CompactFormatter](#compactformatter) - Compact single-line output formatting
@@ -57,9 +58,10 @@ def run(
     tools: list[Callable[..., Any]] | None = None,
     formatter: Formatter | None = None,
     is_agentic: bool = True,
-    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
+    max_steps: int | None = None,
+    max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str
 ```
 
@@ -73,9 +75,10 @@ Runs the agent's main ReAct loop to solve the task.
 - `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web` is enabled in config, `search_web` and `fetch_url` is also automatically added. Default is None.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
 - `is_agentic` (bool): If True, runs in agentic mode with tools. If False, returns raw LLM response. Default is True.
-- `max_steps` (int): Maximum number of ReAct loop iterations. Default is 100.
-- `max_budget` (float): Maximum budget in USD for this agent run. Default is 10.0.
+- `max_steps` (int | None): Maximum number of ReAct loop iterations. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
+- `max_budget` (float | None): Maximum budget in USD for this agent run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`, which is 10.0).
 - `model_config` (dict[str, Any] | None): Optional model configuration to pass to the model. Default is None.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. When set, model responses are streamed and each text delta is passed to this callback. Tool execution output is also streamed through this callback. The callback signature is `async def callback(token: str) -> None`. Default is None.
 
 **Returns:**
 
@@ -198,17 +201,18 @@ def run(
     self,
     prompt_template: str,
     arguments: dict[str, str] | None = None,
-    orchestrator_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name,
-    subtasker_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
-    trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
-    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    work_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
-    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
+    orchestrator_model_name: str | None = None,
+    subtasker_model_name: str | None = None,
+    trials: int | None = None,
+    max_steps: int | None = None,
+    max_budget: float | None = None,
+    work_dir: str | None = None,
+    base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     docker_image: str | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str
 ```
 
@@ -218,17 +222,18 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `orchestrator_model_name` (str): Model for the main orchestrator agent. Default is from config (claude-sonnet-4-5).
-- `subtasker_model_name` (str): Model for executor agents handling sub-tasks. Default is from config (claude-opus-4-5).
-- `trials` (int): Number of retry attempts for each task/subtask. Default is 200.
-- `max_steps` (int): Maximum number of steps per agent. Default is from config.
-- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
-- `work_dir` (str): The working directory for the agent's operations.
-- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access.
+- `orchestrator_model_name` (str | None): Model for the main orchestrator agent. Default is None (uses config default: "claude-sonnet-4-5").
+- `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-6").
+- `trials` (int | None): Number of continuation attempts for each task/subtask. Default is None (uses config default: 200).
+- `max_steps` (int | None): Maximum number of steps per agent. Default is None (uses config default: 200).
+- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses config default: 200.0).
+- `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
+- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
 - `formatter` (Formatter | None): Custom formatter for output. Default is `CompactFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. The callback is passed through to the underlying KISSAgent instances for both orchestrator and executor sub-agents. Default is None.
 
 **Returns:**
 
@@ -290,15 +295,19 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 - `writable_paths` (list[Path]): List of paths the agent can write to.
 - `max_steps` (int): Maximum number of steps per agent.
 - `max_budget` (float): Maximum total budget allowed for this run.
-- `trials` (int): Number of continuations attempts for each task/subtask.
+- `trials` (int): Number of continuation attempts for each task/subtask.
 - `max_tokens` (int): Maximum context length across all models used.
 - `docker_image` (str | None): The Docker image name if Docker execution is enabled.
 - `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
+- `useful_tools` (UsefulTools): The UsefulTools instance used for bash/edit operations.
+- `token_callback` (TokenCallback | None): The token callback passed to `run()`.
 
 ### Key Features
 
 - **Multi-Agent Architecture**: Orchestrator (using `orchestrator_model_name`) delegates to executor agents (using `subtasker_model_name`)
-- **Relentless Retries**: Continues attempting tasks through multiple coninuation attempts until success
+- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, providing a structured summary with "Work Done" and "Work to Do Next" sections for seamless task handoff
+- **Cost-Saving Guidance**: Orchestrator is instructed to avoid unnecessary `perform_subtask()` calls when it can handle work directly, reducing cost
+- **Relentless Retries**: Continues attempting tasks through multiple continuation attempts until success
 - **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
 - **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
@@ -402,18 +411,19 @@ def run(
     self,
     prompt_template: str,
     arguments: dict[str, str] | None = None,
-    orchestrator_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name,
-    subtasker_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name,
-    refiner_model_name: str = DEFAULT_CONFIG.agent.kiss_coding_agent.refiner_model_name,
-    trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
-    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    work_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
-    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
+    orchestrator_model_name: str | None = None,
+    subtasker_model_name: str | None = None,
+    refiner_model_name: str | None = None,
+    trials: int | None = None,
+    max_steps: int | None = None,
+    max_budget: float | None = None,
+    work_dir: str | None = None,
+    base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     docker_image: str | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str
 ```
 
@@ -423,18 +433,19 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `orchestrator_model_name` (str): Model for the main orchestrator agent. Default is from config (claude-sonnet-4-5).
-- `subtasker_model_name` (str): Model for executor agents handling sub-tasks. Default is from config (claude-opus-4-5).
-- `refiner_model_name` (str): Model for dynamic prompt refinement when tasks fail. Default is from config (claude-sonnet-4-5).
-- `trials` (int): Number of retry attempts for each task/subtask. Default is 3.
-- `max_steps` (int): Maximum number of steps per agent. Default is from config.
-- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
-- `work_dir` (str): The working directory for the agent's operations.
-- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access.
+- `orchestrator_model_name` (str | None): Model for the main orchestrator agent. Default is None (uses config default: "claude-sonnet-4-5").
+- `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-6").
+- `refiner_model_name` (str | None): Model for dynamic prompt refinement when tasks fail. Default is None (uses config default: "claude-sonnet-4-5").
+- `trials` (int | None): Number of retry attempts for each task/subtask. Default is None (uses config default: 200).
+- `max_steps` (int | None): Maximum number of steps per agent. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
+- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`, which is 10.0).
+- `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
+- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
+- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
+- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
-- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
+- `formatter` (Formatter | None): Custom formatter for output. Default is `CompactFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. The callback is passed through to the underlying KISSAgent instances for both orchestrator and executor sub-agents. Default is None.
 
 **Returns:**
 
@@ -474,7 +485,7 @@ def perform_subtask(
 ) -> str
 ```
 
-Execute a sub-task using a dedicated executor agent (using `subtasker_model_name`). Can be called by the orchestrator .
+Execute a sub-task using a dedicated executor agent (using `subtasker_model_name`). Can be called by the orchestrator.
 
 **Parameters:**
 
@@ -495,7 +506,6 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 - `task_description` (str): The formatted task description.
 - `total_tokens_used` (int): Total tokens used across all agents in this run.
 - `budget_used` (float): Total budget used across all agents in this run.
-- `run_start_timestamp` (int): Unix timestamp when the run started.
 - `work_dir` (str): The working directory for the agent's operations.
 - `base_dir` (str): The base directory for the agent's working files.
 - `readable_paths` (list[Path]): List of paths the agent can read from.
@@ -506,6 +516,8 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 - `max_tokens` (int): Maximum context length across all models used.
 - `docker_image` (str | None): The Docker image name if Docker execution is enabled.
 - `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
+- `useful_tools` (UsefulTools): The UsefulTools instance used for bash/edit operations.
+- `token_callback` (TokenCallback | None): The token callback passed to `run()`.
 
 ### Key Features
 
@@ -576,6 +588,8 @@ ______________________________________________________________________
 
 ## ClaudeCodingAgent
 
+> **Requires:** `claude-agent-sdk` and `anthropic` packages. Install with `uv sync --group claude-coding-agent`. This class is `None` if the SDK is not installed.
+
 A coding agent that uses the Claude Agent SDK to generate tested Python programs with file system access controls.
 
 ### Constructor
@@ -598,11 +612,12 @@ def run(
     model_name: str,
     prompt_template: str,
     arguments: dict[str, str] | None = None,
-    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "claude_workdir"),
+    max_steps: int | None = None,
+    max_budget: float | None = None,
+    base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str | None
 ```
 
@@ -613,11 +628,12 @@ Run the Claude coding agent for a given task.
 - `model_name` (str): The name of the model to use (e.g., "claude-sonnet-4-5").
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int): Maximum number of steps. Default is from config.
-- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
-- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
+- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
+- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/claude_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for Read/Grep/Glob.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for Write/Edit/MultiEdit.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with assistant text, tool result text, and the final result. Default is None.
 
 **Returns:**
 
@@ -684,6 +700,8 @@ ______________________________________________________________________
 
 ## GeminiCliAgent
 
+> **Requires:** `google-adk` and `google-genai` packages. Install with `uv sync --group gemini`. This class is `None` if the SDK is not installed.
+
 A coding agent that uses the Google ADK (Agent Development Kit) to generate tested Python programs with file system access controls.
 
 ### Constructor
@@ -706,12 +724,13 @@ def run(
     model_name: str = DEFAULT_GEMINI_MODEL,
     prompt_template: str = "",
     arguments: dict[str, str] | None = None,
-    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "gemini_workdir"),
+    max_steps: int | None = None,
+    max_budget: float | None = None,
+    base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str | None
 ```
 
@@ -722,12 +741,13 @@ Run the Gemini CLI agent for a given task.
 - `model_name` (str): The name of the model to use. Default is "gemini-2.5-flash".
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int): Maximum number of steps. Default is from config.
-- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
-- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
+- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
+- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/gemini_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with text content and tool response text from ADK events. Default is None.
 
 **Returns:**
 
@@ -790,6 +810,8 @@ ______________________________________________________________________
 
 ## OpenAICodexAgent
 
+> **Requires:** `openai-agents` package. Install with `uv sync --group openai`. This class is `None` if the SDK is not installed.
+
 A coding agent that uses the OpenAI Agents SDK to generate tested Python programs with file system access controls.
 
 ### Constructor
@@ -812,12 +834,13 @@ def run(
     model_name: str = DEFAULT_CODEX_MODEL,
     prompt_template: str = "",
     arguments: dict[str, str] | None = None,
-    max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-    max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-    base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "codex_workdir"),
+    max_steps: int | None = None,
+    max_budget: float | None = None,
+    base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     formatter: Formatter | None = None,
+    token_callback: TokenCallback | None = None,
 ) -> str | None
 ```
 
@@ -825,15 +848,16 @@ Run the OpenAI Codex agent for a given task.
 
 **Parameters:**
 
-- `model_name` (str): The name of the model to use. Default is "gpt-5.2-codex".
+- `model_name` (str): The name of the model to use. Default is "gpt-5.3-codex".
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int): Maximum number of steps. Default is from config.
-- `max_budget` (float): Maximum budget in USD for this run. Default is from config.
-- `base_dir` (str): The base directory relative to which readable and writable paths are resolved if they are not absolute.
+- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
+- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
+- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/codex_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
 - `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
+- `token_callback` (TokenCallback | None): Optional async callback invoked with message text and tool output text from the Agents SDK result. Default is None.
 
 **Returns:**
 
@@ -885,7 +909,7 @@ from kiss.agents.coding_agents import OpenAICodexAgent
 
 agent = OpenAICodexAgent("My Agent")
 result = agent.run(
-    model_name="gpt-5.2-codex",
+    model_name="gpt-5.3-codex",
     prompt_template="Write a fibonacci function with tests"
 )
 if result:
@@ -1245,7 +1269,7 @@ AgentEvolver()
 
 AgentEvolver is instantiated without parameters. All configuration is passed to the `evolve()` method.
 
-**Note:** AgentEvolver uses KISSCodingAgent internally for agent improvement. Evaluation is done internally by loading and running the generated `agent.py` which must implement `agent_run(task: str) -> dict[str, Any]`.
+**Note:** AgentEvolver uses RelentlessCodingAgent internally for agent improvement. Evaluation is done internally by loading and running the generated `agent.py` which must implement `agent_run(task: str) -> dict[str, Any]`.
 
 ### Methods
 
@@ -1259,6 +1283,7 @@ def evolve(
     initial_frontier_size: int | None = None,
     max_frontier_size: int | None = None,
     mutation_probability: float | None = None,
+    progress_callback: Callable[[EvolverProgress], None] | None = None,
 ) -> AgentVariant
 ```
 
@@ -1271,6 +1296,7 @@ Run the evolutionary optimization process.
 - `initial_frontier_size` (int | None): Number of initial agents to create. Uses config default if None.
 - `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
 - `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
+- `progress_callback` (Callable\[[EvolverProgress], None\] | None): Optional callback function called with `EvolverProgress` during optimization. Use this to track progress, display progress bars, or log intermediate results.
 
 **Returns:**
 
@@ -1362,24 +1388,98 @@ class ImprovementReport:
 - `generation` (int): Generation number.
 - `summary` (str): Summary of the improvement.
 
+### EvolverPhase
+
+```python
+class EvolverPhase(Enum):
+    INITIALIZING = "initializing"    # Creating initial agent variants
+    EVALUATING = "evaluating"        # Evaluating a variant
+    MUTATION = "mutation"            # Mutating a variant
+    CROSSOVER = "crossover"          # Crossing over two variants
+    PARETO_UPDATE = "pareto_update"  # Updating the Pareto frontier
+    COMPLETE = "complete"            # Evolution complete
+```
+
+Enum representing the current phase of AgentEvolver optimization, similar to `GEPAPhase` for GEPA.
+
+### EvolverProgress
+
+```python
+@dataclass
+class EvolverProgress:
+    generation: int                           # Current generation (0 = init, 1+ = evolution)
+    max_generations: int                      # Total generations to run
+    phase: EvolverPhase                       # Current optimization phase
+    variant_id: int | None = None             # ID of current variant (if applicable)
+    parent_ids: list[int] = field(default_factory=list)  # Parent variant IDs
+    frontier_size: int = 0                    # Current Pareto frontier size
+    best_score: float | None = None           # Best combined score (lower is better)
+    current_metrics: dict[str, float] = field(default_factory=dict)  # Current variant metrics
+    added_to_frontier: bool | None = None     # Whether variant was added to frontier
+    message: str = ""                         # Descriptive activity message
+```
+
+Progress information passed to the callback during optimization.
+
+**Attributes:**
+
+- `generation` (int): Current generation number (0 during initialization, 1-indexed during evolution).
+- `max_generations` (int): Total number of generations to run.
+- `phase` (EvolverPhase): Current phase of the optimization.
+- `variant_id` (int | None): ID of the variant currently being processed.
+- `parent_ids` (list[int]): Parent variant IDs for the current operation.
+- `frontier_size` (int): Current size of the Pareto frontier.
+- `best_score` (float | None): Best combined score seen so far (lower is better).
+- `current_metrics` (dict[str, float]): Metrics of the current variant.
+- `added_to_frontier` (bool | None): Whether the current variant was added to the Pareto frontier.
+- `message` (str): Descriptive message about the current activity.
+
+### create_progress_callback()
+
+```python
+def create_progress_callback(verbose: bool = False) -> Callable[[EvolverProgress], None]
+```
+
+Create a standard progress callback for console output.
+
+**Parameters:**
+
+- `verbose` (bool): If True, prints all phases. If False (default), only prints evaluation completions, Pareto updates, and completion messages.
+
+**Returns:**
+
+- `Callable[[EvolverProgress], None]`: A callback function for use with `evolve()`.
+
 ### Example
 
 ```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver
+from kiss.agents.create_and_optimize_agent import AgentEvolver, EvolverProgress, create_progress_callback
 
 evolver = AgentEvolver()
 
+# Using the built-in progress callback
 best = evolver.evolve(
     task_description="Build a code analysis assistant that reviews Python files",
     max_generations=5,
     initial_frontier_size=2,
     max_frontier_size=4,
     mutation_probability=0.8,
+    progress_callback=create_progress_callback(verbose=True),
 )
 
 print(f"Best variant: {best.folder_path}")
 print(f"Metrics: {best.metrics}")
 print(f"Generation: {best.generation}")
+
+# Or use a custom callback
+def my_callback(progress: EvolverProgress) -> None:
+    if progress.phase.value == "complete":
+        print(f"Done! Best score: {progress.best_score}")
+
+best = evolver.evolve(
+    task_description="Build a code analysis assistant",
+    progress_callback=my_callback,
+)
 
 # Save state for later analysis
 evolver.save_state("evolver_state.json")
@@ -1408,6 +1508,7 @@ GEPA(
     use_merge: bool = True,
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 2,
+    progress_callback: Callable[[GEPAProgress], None] | None = None,
 )
 ```
 
@@ -1416,16 +1517,69 @@ GEPA(
 - `agent_wrapper` (Callable): Function `(prompt_template, arguments) -> (result, trajectory)` that runs the agent.
 - `initial_prompt_template` (str): The initial prompt template to optimize.
 - `evaluation_fn` (Callable | None): Function to evaluate result -> `{metric: score}`. Default checks for "success" in result.
-- `max_generations` (int | None): Maximum evolutionary generations. Uses config default if None.
-- `population_size` (int | None): Number of candidates per generation. Uses config default if None.
-- `pareto_size` (int | None): Maximum Pareto frontier size. Uses config default if None.
-- `mutation_rate` (float | None): Probability of mutation. Uses config default if None.
-- `reflection_model` (str | None): Model for reflection. Uses config default if None.
+- `max_generations` (int | None): Maximum evolutionary generations. Uses config default (10) if None.
+- `population_size` (int | None): Number of candidates per generation. Uses config default (8) if None.
+- `pareto_size` (int | None): Maximum Pareto frontier size. Uses config default (4) if None.
+- `mutation_rate` (float | None): Probability of mutation. Uses config default (0.5) if None.
+- `reflection_model` (str | None): Model for reflection. Uses config default ("gemini-3-flash-preview") if None.
 - `dev_val_split` (float | None): Fraction for dev set. Default is 0.5.
 - `perfect_score` (float): Score threshold to skip mutation. Default is 1.0.
 - `use_merge` (bool): Whether to use structural merge. Default is True.
 - `max_merge_invocations` (int): Maximum merge attempts. Default is 5.
 - `merge_val_overlap_floor` (int): Minimum validation overlap for merge. Default is 2.
+- `progress_callback` (Callable | None): Optional callback function called with `GEPAProgress` during optimization.
+
+### GEPAPhase
+
+Enum representing the current phase of GEPA optimization:
+
+```python
+class GEPAPhase(Enum):
+    DEV_EVALUATION = "dev_evaluation"    # Evaluating on dev set
+    VAL_EVALUATION = "val_evaluation"    # Evaluating on validation set
+    REFLECTION = "reflection"            # LLM reflecting to generate mutations
+    MUTATION_GATING = "mutation_gating"  # Testing if mutation should be accepted
+    MERGE = "merge"                      # Structural merge from Pareto frontier
+    PARETO_UPDATE = "pareto_update"      # New candidate added to Pareto frontier
+```
+
+### GEPAProgress
+
+Progress information passed to the callback during optimization:
+
+```python
+@dataclass
+class GEPAProgress:
+    generation: int              # Current generation number (0-indexed)
+    max_generations: int         # Total number of generations
+    phase: GEPAPhase             # Current optimization phase
+    candidate_id: int | None     # ID of current candidate (if applicable)
+    candidate_index: int | None  # Index in population (if applicable)
+    population_size: int         # Current population size
+    best_val_accuracy: float | None     # Best validation accuracy so far
+    current_val_accuracy: float | None  # Current candidate's validation accuracy
+    pareto_frontier_size: int    # Size of Pareto frontier
+    num_candidates_evaluated: int  # Candidates evaluated this generation
+    message: str                 # Description of current activity
+```
+
+### create_progress_callback
+
+```python
+def create_progress_callback(verbose: bool = False) -> Callable[[GEPAProgress], None]
+```
+
+Create a standard progress callback for GEPA optimization.
+
+**Parameters:**
+
+- `verbose` (bool): If True, prints all phases. If False, only prints val evaluation completion messages and Pareto frontier updates.
+
+**Returns:**
+
+- A callback function that prints progress updates during optimization.
+
+**Note:** The `pareto_update` phase is always printed (even when `verbose=False`) to show when new candidates join the Pareto frontier, including the full prompt template.
 
 ### Methods
 
@@ -1630,7 +1784,7 @@ UsefulTools(
 #### `Bash()`
 
 ```python
-def Bash(self, command: str, description: str) -> str
+def Bash(self, command: str, description: str, timeout_seconds: float = 30) -> str
 ```
 
 Execute a bash command with automatic path permission checks and security validation.
@@ -1639,6 +1793,7 @@ Execute a bash command with automatic path permission checks and security valida
 
 - `command` (str): The bash command to execute.
 - `description` (str): A brief description of what the command does.
+- `timeout_seconds` (float): Timeout in seconds for the command. Default is 30.
 
 **Returns:**
 
@@ -1659,6 +1814,7 @@ def Edit(
     old_string: str,
     new_string: str,
     replace_all: bool = False,
+    timeout_seconds: float = 30,
 ) -> str
 ```
 
@@ -1670,6 +1826,7 @@ Performs precise string replacements in files with exact matching.
 - `old_string` (str): Exact text to find and replace.
 - `new_string` (str): Replacement text, must differ from old_string.
 - `replace_all` (bool): If True, replace all occurrences. Default is False.
+- `timeout_seconds` (float): Timeout in seconds for the edit command. Default is 30.
 
 **Returns:**
 
@@ -1684,6 +1841,7 @@ def MultiEdit(
     old_string: str,
     new_string: str,
     replace_all: bool = False,
+    timeout_seconds: float = 30,
 ) -> str
 ```
 
@@ -1695,6 +1853,7 @@ Performs precise string replacements in files with exact matching. Has the same 
 - `old_string` (str): Exact text to find and replace.
 - `new_string` (str): Replacement text, must differ from old_string.
 - `replace_all` (bool): If True, replace all occurrences. Default is False.
+- `timeout_seconds` (float): Timeout in seconds for the edit command. Default is 30.
 
 **Returns:**
 
@@ -1726,7 +1885,12 @@ The `kiss.core.useful_tools` module also provides these standalone functions:
 #### `fetch_url()`
 
 ```python
-def fetch_url(url: str, headers: dict[str, str], max_content_length: int = 10000) -> str
+def fetch_url(
+    url: str,
+    headers: dict[str, str],
+    max_characters: int = 10000,
+    timeout_seconds: float = 10.0,
+) -> str
 ```
 
 Fetch and extract text content from a URL using BeautifulSoup.
@@ -1735,7 +1899,8 @@ Fetch and extract text content from a URL using BeautifulSoup.
 
 - `url` (str): The URL to fetch.
 - `headers` (dict[str, str]): HTTP headers to use for the request.
-- `max_content_length` (int): Maximum length of content to return. Default is 10000.
+- `max_characters` (int): Maximum number of characters to return. Default is 10000.
+- `timeout_seconds` (float): Request timeout in seconds. Default is 10.0.
 
 **Returns:**
 
@@ -1773,9 +1938,12 @@ This function analyzes bash commands to intelligently determine which directorie
 - Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
 - Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
 - Output redirection: >, >>, &>, 2>, etc.
+- Input redirection: \<, \<<, \<<\<
+- Heredoc stripping: heredoc body text (between `<< DELIM` and `DELIM`) is stripped before parsing so that heredoc content is not misinterpreted as command arguments
 - Pipe chains with multiple commands
 - Flags and arguments parsing
 - Special commands like tee (reads stdin and writes to file)
+- Path cleaning: trailing punctuation characters (e.g., `)`, `'`, `"`, `;`, `}`, `]`) are stripped from paths before safety checks
 
 **Parameters:**
 
@@ -1987,15 +2155,15 @@ A utility function from `kiss.core.utils` that can be used as a finish tool for 
 
 **Note:** KISSAgent has its own built-in `finish(result: str) -> str` method that takes only a result parameter and returns it directly. The utility function version is optional and provides more structured output.
 
-### `finish()` (for KISSCodingAgent)
+### `finish()` (for KISSCodingAgent / RelentlessCodingAgent)
 
 ```python
 def finish(success: bool, summary: str) -> str
 ```
 
-Used by KISSCodingAgent and its sub-agents to complete task execution. This is defined in `kiss.agents.coding_agents.kiss_coding_agent` and has a different signature than the utility version.
+Used by KISSCodingAgent, RelentlessCodingAgent, and their sub-agents to complete task execution. This is defined separately in each coding agent module and has a different signature than the utility version.
 
-**Location:** `kiss.agents.coding_agents.kiss_coding_agent`
+**Location:** `kiss.agents.coding_agents.kiss_coding_agent` and `kiss.agents.coding_agents.relentless_coding_agent`
 
 **Parameters:**
 
@@ -2017,6 +2185,24 @@ Read a file from the project root. Compatible with installations packaged as .wh
 **Parameters:**
 
 - `file_path_relative_to_project_root` (str): Path relative to the project root.
+
+**Returns:**
+
+- `str`: The file's contents.
+
+### `read_project_file_from_package()`
+
+```python
+def read_project_file_from_package(file_name_as_python_package: str) -> str
+```
+
+Read a file from the project root using Python package conventions.
+
+**Location:** `kiss.core.utils`
+
+**Parameters:**
+
+- `file_name_as_python_package` (str): File name as a Python package.
 
 **Returns:**
 
@@ -2145,7 +2331,14 @@ ______________________________________________________________________
 
 ## CompactFormatter
 
-Compact formatter implementation that shows truncated, single-line messages for more concise output. This formatter is used by default in `KISSCodingAgent` for cleaner logs during multi-agent orchestration. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting.
+Compact formatter that parses model message content into structured parts (thought, tool action, usage info) and renders them concisely. This formatter is used by default in `RelentlessCodingAgent` and `KISSCodingAgent` for cleaner logs during multi-agent orchestration. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting.
+
+**Key internal features:**
+
+- **Markdown stripping**: Thought text is converted from markdown to plain text using `markdown-it-py`, collapsing multiple spaces into one via `_strip_markdown()`.
+- **AST-based tool call parsing**: Tool calls in ```` ```python ```` fenced code blocks are parsed with Python's `ast` module via `_parse_tool_desc()`. If the call has a `description` keyword argument, that string is used as the action label; otherwise a compact `func(key=value, ...)` summary is generated with values truncated to `LINE_LENGTH` (160 characters).
+- **Content splitting**: `_extract_parts()` splits message content into three parts: the thought (text before the tool call code block), the tool action description, and usage information (text matching `#### Usage Information`).
+- **Consolidated `_print()` helper**: Status, error, and warning printing are unified through a single `_print(message, style, stderr)` method that dispatches to the appropriate Rich console or plain stdout/stderr.
 
 ### Constructor
 
@@ -2161,7 +2354,7 @@ CompactFormatter()
 def format_message(self, message: dict[str, Any]) -> str
 ```
 
-Format a single message as a truncated single-line string. Returns empty string if verbose mode is disabled.
+Parse and format a single message. The content is split into three parts: the thought (text before the tool call code block, with markdown stripped), the tool action description (from the `description` parameter of the tool call, or a generated summary), and usage information. Returns empty string if verbose mode is disabled.
 
 **Parameters:**
 
@@ -2169,7 +2362,7 @@ Format a single message as a truncated single-line string. Returns empty string 
 
 **Returns:**
 
-- `str`: Truncated message in format `[role]: content...` (max 100 chars), or empty string if verbose is False.
+- `str`: Multi-line formatted output with `[role]: thought...`, `[action]:description`, and usage info. Returns `[role]: (empty)` if content is empty, or empty string if verbose is False.
 
 #### `format_messages()`
 
@@ -2177,7 +2370,7 @@ Format a single message as a truncated single-line string. Returns empty string 
 def format_messages(self, messages: list[dict[str, Any]]) -> str
 ```
 
-Format a list of messages as truncated single-line strings. Returns empty string if verbose mode is disabled.
+Format a list of messages by applying `format_message()` to each. Returns empty string if verbose mode is disabled.
 
 **Parameters:**
 
@@ -2185,7 +2378,7 @@ Format a list of messages as truncated single-line strings. Returns empty string
 
 **Returns:**
 
-- `str`: Formatted messages string with each message on its own line, or empty string if verbose is False.
+- `str`: Formatted messages string with each message's output joined by newlines, or empty string if verbose is False.
 
 #### `print_message()`
 
@@ -2193,7 +2386,7 @@ Format a list of messages as truncated single-line strings. Returns empty string
 def print_message(self, message: dict[str, Any]) -> None
 ```
 
-Print a single message as a truncated single line. No output if verbose mode is disabled.
+Print a single formatted message. No output if verbose mode is disabled.
 
 **Parameters:**
 
@@ -2205,7 +2398,7 @@ Print a single message as a truncated single line. No output if verbose mode is 
 def print_messages(self, messages: list[dict[str, Any]]) -> None
 ```
 
-Print a list of messages as truncated single lines. No output if verbose mode is disabled.
+Print a list of formatted messages. No output if verbose mode is disabled.
 
 **Parameters:**
 
@@ -2262,11 +2455,75 @@ Print a label and value pair with distinct colors. No output if verbose mode is 
 
 ______________________________________________________________________
 
+## Token Streaming Callback
+
+The KISS framework supports real-time token streaming through an async callback mechanism. When a `token_callback` is provided, model responses are streamed token-by-token instead of waiting for the full response. Tool execution output is also streamed through the same callback.
+
+### TokenCallback Type
+
+```python
+from kiss.core.models.model import TokenCallback
+
+# Type alias:
+TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
+```
+
+A `TokenCallback` is an async function that receives a single string token and returns nothing. It is invoked synchronously from the model layer using an internal event loop bridge.
+
+### Streaming Behavior by Provider
+
+- **Anthropic (Claude)**: Uses `messages.stream()` with `text_stream` for both `generate()` and `generate_and_process_with_tools()`.
+- **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
+- **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`.
+
+When `token_callback` is `None`, all providers fall back to their original non-streaming code paths with no behavioral change.
+
+### KISSAgent Integration
+
+When passed to `KISSAgent.run()`, the callback receives:
+
+1. **Model response tokens** as they are generated.
+1. **Tool execution output** after each tool call completes (including error messages from failed tool calls).
+
+### Coding Agent Integration
+
+All coding agents support `token_callback` in their `run()` methods:
+
+- **KISSCodingAgent / RelentlessCodingAgent**: The callback is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents. Streamed content includes model response tokens and tool output from all sub-agents.
+- **ClaudeCodingAgent**: The callback receives assistant thought text, tool result text, and the final result message as they are processed from the Claude Agent SDK message stream.
+- **GeminiCliAgent**: The callback receives text content and tool response text from ADK events after all events are collected and processed.
+- **OpenAICodexAgent**: The callback receives message text and tool output text from the Agents SDK run result after processing.
+
+### Example
+
+```python
+import asyncio
+from kiss.core.kiss_agent import KISSAgent
+
+# Collect tokens into a list
+tokens: list[str] = []
+
+async def my_callback(token: str) -> None:
+    tokens.append(token)
+    print(token, end="", flush=True)  # Print tokens as they arrive
+
+agent = KISSAgent("streaming-agent")
+result = agent.run(
+    model_name="gpt-4o",
+    prompt_template="Write a haiku about programming.",
+    is_agentic=False,
+    token_callback=my_callback,
+)
+
+# tokens now contains each streamed text delta
+print(f"\nTotal tokens received: {len(tokens)}")
+```
+
 ______________________________________________________________________
 
 ## Configuration System
 
-The KISS framework uses a Pydantic-based configuration system accessible through `DEFAULT_CONFIG`.
+The KISS framework uses a Pydantic-based configuration system accessible through `DEFAULT_CONFIG`. Configuration is extensible via `add_config()` for sub-systems like GEPA, KISSEvolve, etc.
 
 ### Config Structure
 
@@ -2302,22 +2559,53 @@ DEFAULT_CONFIG.agent.use_web = True
 - `debug` (bool): Enable debug mode (default: False)
 - `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
 
+#### `agent.relentless_coding_agent`
+
+- `orchestrator_model_name` (str): Model for orchestration (default: "claude-sonnet-4-5")
+- `subtasker_model_name` (str): Model for subtask execution (default: "claude-opus-4-6")
+- `max_steps` (int): Maximum steps for the Relentless Coding Agent (default: 200)
+- `max_budget` (float): Maximum budget in USD for the Relentless Coding Agent (default: 200.0)
+- `trials` (int): Continuation attempts per task/subtask (default: 200)
+
 #### `agent.kiss_coding_agent`
 
-- `orchestrator_model_name` (str): Model for main orchestration and executor agents (default: "claude-sonnet-4-5")
-- `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-5")
+- `orchestrator_model_name` (str): Model for main orchestration (default: "claude-sonnet-4-5")
+- `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-6")
 - `refiner_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
-- `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 50)
+- `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 200)
 - `max_budget` (float): Maximum budget in USD for the KISS Coding Agent (default: 100.0)
-- `trials` (int): Retry attempts per task/subtask (default: 3)
+- `trials` (int): Retry attempts per task/subtask (default: 200)
 
 #### `docker`
 
 - `client_shared_path` (str): Path inside Docker container for shared volume (default: "/testbed")
 
-#### `gepa`, `kiss_evolve`, `create_and_optimize_agent`
+#### `gepa`
+
+- `reflection_model` (str): Model to use for reflection (default: "gemini-3-flash-preview")
+- `max_generations` (int): Maximum number of evolutionary generations (default: 10)
+- `population_size` (int): Number of candidates to maintain in population (default: 8)
+- `pareto_size` (int): Maximum size of Pareto frontier (default: 4)
+- `mutation_rate` (float): Probability of mutating a prompt template in each generation (default: 0.5)
+
+#### `kiss_evolve`, `create_and_optimize_agent`
 
 Configuration sections for evolutionary optimization systems. See respective classes for details.
+
+### `add_config()`
+
+```python
+def add_config(name: str, config_class: type[BaseModel]) -> None
+```
+
+Extend the KISS configuration with a new config section. Each call adds a new config field while preserving existing fields from previous calls. Also parses command-line arguments matching the config fields.
+
+**Location:** `kiss.core.config_builder`
+
+**Parameters:**
+
+- `name` (str): Name of the new config section (e.g., "gepa", "kiss_evolve").
+- `config_class` (type[BaseModel]): A Pydantic BaseModel class defining the config fields.
 
 ______________________________________________________________________
 

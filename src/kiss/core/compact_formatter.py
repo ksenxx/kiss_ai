@@ -5,115 +5,149 @@
 
 """Compact formatter implementation using terminal output."""
 
+import ast
+import re
 import sys
 from typing import Any
 
+import markdown_it
 from rich.console import Console
 from rich.markdown import Markdown
 
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.formatter import Formatter
 
-LINE_LENGTH = 100
+LINE_LENGTH = 160
+
+_TOOL_CALL_RE = re.compile(r"```python\s*\n(.+?)\n```", re.DOTALL)
+_USAGE_RE = re.compile(r"(####?\s*Usage Information.*)", re.DOTALL)
+_MD_PARSER = markdown_it.MarkdownIt().enable("strikethrough")
+_MULTI_SPACE = re.compile(r" {2,}")
+
+
+def _strip_markdown(text: str) -> str:
+    parts: list[str] = []
+    for token in _MD_PARSER.parse(text):
+        for child in token.children or []:
+            if child.content:
+                parts.append(child.content)
+        if not token.children and token.content:
+            parts.append(token.content)
+    return _MULTI_SPACE.sub(" ", " ".join(parts)).strip()
+
+
+def _parse_tool_desc(call_body: str) -> str:
+    try:
+        tree = ast.parse(call_body, mode="eval")
+        if not isinstance(tree.body, ast.Call):
+            return call_body
+    except SyntaxError:
+        return call_body
+
+    call = tree.body
+    func_name = (
+        call.func.id  # type: ignore[union-attr]
+        if isinstance(call.func, ast.Name)
+        else ast.dump(call.func)
+    )
+
+    parts = []
+    for kw in call.keywords:
+        if kw.arg == "description" and isinstance(kw.value, ast.Constant):
+            if isinstance(kw.value.value, str):
+                return kw.value.value
+            continue
+        val = (
+            str(kw.value.value)
+            if isinstance(kw.value, ast.Constant)
+            else ast.unparse(kw.value)
+        )
+        if len(val) > LINE_LENGTH:
+            val = val[:LINE_LENGTH] + "..."
+        parts.append(f"{kw.arg}={val}")
+    return f"{func_name}({', '.join(parts)})" if parts else func_name
+
+
+def _extract_parts(content: str) -> tuple[str, str, str]:
+    tool_match = _TOOL_CALL_RE.search(content)
+    usage_match = _USAGE_RE.search(content)
+
+    boundary = (
+        tool_match.start()
+        if tool_match
+        else usage_match.start()
+        if usage_match
+        else len(content)
+    )
+    thought = _strip_markdown(content[:boundary])
+
+    tool_desc = (
+        _parse_tool_desc(tool_match.group(1).strip())
+        if tool_match
+        else ""
+    )
+    usage = usage_match.group(1).strip() if usage_match else ""
+    usage = usage.replace("#### Usage Information", "[usage]:").strip()
+    return thought, tool_desc, usage
+
 
 class CompactFormatter(Formatter):
     """Compact formatter that displays truncated single-line messages."""
 
     def __init__(self) -> None:
-        """Initialize the CompactFormatter with Rich console instances."""
         self.color = sys.stdout.isatty()
         self._console = Console() if self.color else None
         self._stderr_console = Console(stderr=True) if self.color else None
 
     def format_message(self, message: dict[str, Any]) -> str:
-        """Format a single message as a truncated single line.
+        if not config_module.DEFAULT_CONFIG.agent.verbose:
+            return ""
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+        thought, tool_desc, usage = _extract_parts(content)
 
-        Args:
-            message: A dictionary containing message data with 'role' and 'content' keys.
-
-        Returns:
-            str: The formatted truncated message string, or empty string if not verbose.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
-            content = message.get("content", "").replace(chr(10), chr(92) + "n")
-            return f'[{message.get("role", "unknown")}]: {content}'[:LINE_LENGTH] + " ..."
-        return ""
+        lines: list[str] = []
+        if thought:
+            lines.append(f"[{role}]: {thought}"[:LINE_LENGTH] + "...")
+        if tool_desc:
+            lines.append(f"[action]:{tool_desc}")
+        if usage:
+            lines.append(usage)
+        return "\n".join(lines) if lines else f"[{role}]: (empty)"
 
     def format_messages(self, messages: list[dict[str, Any]]) -> str:
-        """Format a list of messages as truncated single lines.
-
-        Args:
-            messages: A list of message dictionaries.
-
-        Returns:
-            str: The formatted messages joined by newlines, or empty string if not verbose.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             return "\n".join(self.format_message(m) for m in messages)
         return ""
 
     def print_message(self, message: dict[str, Any]) -> None:
-        """Print a single message in compact format.
-
-        Args:
-            message: A dictionary containing message data with 'role' and 'content' keys.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             print(self.format_message(message))
 
     def print_messages(self, messages: list[dict[str, Any]]) -> None:
-        """Print a list of messages in compact format.
-
-        Args:
-            messages: A list of message dictionaries.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             print(self.format_messages(messages))
 
-    def print_status(self, message: str) -> None:
-        """Print a status message in green.
+    def _print(self, message: str, style: str, stderr: bool = False) -> None:
+        if not config_module.DEFAULT_CONFIG.agent.verbose:
+            return
+        console = self._stderr_console if stderr else self._console
+        if console:
+            console.print(message, style=style)
+        else:
+            print(message, file=sys.stderr if stderr else sys.stdout)
 
-        Args:
-            message: The status message to print.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
-            if self._console:
-                self._console.print(message, style="green")
-            else:
-                print(message)
+    def print_status(self, message: str) -> None:
+        self._print(message, "green")
 
     def print_error(self, message: str) -> None:
-        """Print an error message in red to stderr.
-
-        Args:
-            message: The error message to print.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
-            if self._stderr_console:
-                self._stderr_console.print(message, style="red")
-            else:
-                print(message, file=sys.stderr)
+        self._print(message, "red", stderr=True)
 
     def print_warning(self, message: str) -> None:
-        """Print a warning message in yellow.
-
-        Args:
-            message: The warning message to print.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
-            if self._console:
-                self._console.print(message, style="yellow")
-            else:
-                print(message)
+        self._print(message, "yellow")
 
     def print_label_and_value(self, label: str, value: str) -> None:
-        """Print a label and value pair with Rich formatting.
-
-        Args:
-            label: The label text.
-            value: The value text.
-        """
-        if DEFAULT_CONFIG.agent.verbose:
+        if config_module.DEFAULT_CONFIG.agent.verbose:
             md = Markdown(f"__**{label}**__: {value}")
             if self._console:
                 self._console.print(md)

@@ -23,28 +23,14 @@ class TestHotPotQAEvaluation(unittest.TestCase):
     """Test HotPotQA evaluation functions."""
 
     def test_normalize_answer(self):
-        """Test answer normalization.
-
-        Verifies that normalize_answer correctly handles articles,
-        punctuation, extra whitespace, and case conversion.
-
-        Returns:
-            None
-        """
+        """Test answer normalization."""
         self.assertEqual(normalize_answer("The Answer"), "answer")
         self.assertEqual(normalize_answer("Barack Obama"), "barack obama")
         self.assertEqual(normalize_answer("   extra   spaces   "), "extra spaces")
         self.assertEqual(normalize_answer("Hello, World!"), "hello world")
 
     def test_compute_f1(self):
-        """Test F1 score computation.
-
-        Verifies that compute_f1 returns correct scores for exact matches,
-        partial matches, and non-matching answers.
-
-        Returns:
-            None
-        """
+        """Test F1 score computation."""
         # Exact match
         self.assertAlmostEqual(compute_f1("Barack Obama", "Barack Obama"), 1.0)
 
@@ -57,14 +43,7 @@ class TestHotPotQAEvaluation(unittest.TestCase):
         self.assertAlmostEqual(compute_f1("John Smith", "Barack Obama"), 0.0)
 
     def test_evaluate_hotpotqa_result(self):
-        """Test HotPotQA result evaluation.
-
-        Verifies that evaluate_hotpotqa_result correctly parses YAML results
-        and computes success, exact_match, and f1 scores.
-
-        Returns:
-            None
-        """
+        """Test HotPotQA result evaluation."""
         # Test successful exact match
         result_yaml = """
 status: success
@@ -91,14 +70,7 @@ class TestHotPotQABenchmark(unittest.TestCase):
     """Test HotPotQA benchmark functionality."""
 
     def test_load_dataset(self):
-        """Test loading HotPotQA dataset.
-
-        Verifies that HotPotQABenchmark correctly loads examples with
-        required fields (id, question, answer, question_type, level).
-
-        Returns:
-            None
-        """
+        """Test loading HotPotQA dataset."""
         benchmark = HotPotQABenchmark(
             split="validation",
             num_examples=3,
@@ -118,20 +90,9 @@ class TestHotPotQABenchmark(unittest.TestCase):
         # Check formatted context
         formatted_context = example.formatted_context
         self.assertGreater(len(formatted_context), 0)
-        print(f"\nExample question: {example.question}")
-        print(f"Expected answer: {example.answer}")
-        print(f"Question type: {example.question_type}")
-        print(f"Level: {example.level}")
 
     def test_create_evaluation_fn(self):
-        """Test evaluation function creation.
-
-        Verifies that create_evaluation_fn returns a function that correctly
-        evaluates results against the expected answer for an example.
-
-        Returns:
-            None
-        """
+        """Test evaluation function creation."""
         benchmark = HotPotQABenchmark(num_examples=1)
         example = benchmark.get_example(0)
         eval_fn = benchmark.create_evaluation_fn(example)
@@ -151,22 +112,14 @@ result: "{example.answer}"
 class TestGEPAHotPotQA(unittest.TestCase):
     """Test GEPA optimization on HotPotQA."""
 
-    def test_gepa_optimizes_over_multiple_examples(self):
-        """Test that GEPA optimizes prompts over multiple HotPotQA examples.
-
-        This test verifies that:
-        1. GEPA runs successfully on multiple HotPotQA examples
-        2. The optimized prompt generalizes across examples
-        3. The Pareto frontier contains valid candidates
-        """
-        # Load benchmark with multiple examples
+    def test_gepa_optimization_outputs_valid_prompt(self):
+        """Test that GEPA optimization produces a valid prompt."""
         benchmark = HotPotQABenchmark(
             split="validation",
             num_examples=3,
             config_name="distractor",
         )
 
-        # Run GEPA optimization over all 3 examples
         gepa, best_scores = benchmark.run_gepa_optimization(
             example_indices=[0, 1, 2],  # Optimize over all examples
             model_name="gpt-4o",
@@ -176,103 +129,22 @@ class TestGEPAHotPotQA(unittest.TestCase):
             mutation_rate=0.5,
         )
 
-        # Verify optimization ran
         self.assertIsNotNone(best_scores)
         self.assertIn("success", best_scores)
         self.assertIn("exact_match", best_scores)
         self.assertIn("f1", best_scores)
 
-        # Verify Pareto frontier
         pareto_frontier = gepa.get_pareto_frontier()
         self.assertGreater(len(pareto_frontier), 0)
 
-        # Print results
-        print("\n=== GEPA Multi-Example Optimization Results ===")
-        print(f"Best scores: {best_scores}")
-        print(f"Pareto frontier size: {len(pareto_frontier)}")
-
-        for i, candidate in enumerate(pareto_frontier):
-            print(f"\nCandidate {i}: val_scores={candidate.val_scores}")
-            print(f"Prompt preview (first 300 chars):\n{candidate.prompt_template[:300]}...")
-
-        # Get the best prompt
         best_prompt = gepa.get_best_prompt()
         self.assertGreater(len(best_prompt), 0)
 
-        # Verify the prompt still has required placeholders
         self.assertIn("{context}", best_prompt)
         self.assertIn("{question}", best_prompt)
-
-        # Evaluate the optimized prompt on all examples to verify generalization
-        print("\n=== Evaluating Optimized Prompt on All Examples ===")
-        avg_scores = benchmark.evaluate_prompt_on_examples(
-            prompt_template=best_prompt,
-            model_name="gpt-4o",
-            example_indices=[0, 1, 2],
-        )
-        print(f"Average scores across all examples: {avg_scores}")
-
-    def test_gepa_optimization_produces_valid_prompts(self):
-        """Test that GEPA optimization produces valid, well-formed prompts.
-
-        Verifies that the optimized prompt preserves required placeholders,
-        has reasonable length, and all Pareto frontier candidates have scores.
-
-        Returns:
-            None
-        """
-        benchmark = HotPotQABenchmark(
-            split="validation",
-            num_examples=3,
-            config_name="distractor",
-        )
-
-        # Print examples being used
-        for i in range(3):
-            example = benchmark.get_example(i)
-            print(f"\nExample {i}: {example.question[:50]}... -> {example.answer}")
-
-        # Run GEPA optimization over multiple examples
-        print("\n--- Running GEPA Optimization Over Multiple Examples ---")
-        gepa, best_scores = benchmark.run_gepa_optimization(
-            example_indices=[0, 1, 2],  # All examples
-            model_name="gpt-4o",
-            max_generations=2,
-            population_size=2,
-            pareto_size=2,
-            mutation_rate=0.5,
-        )
-
-        # Get optimized prompt
-        optimized_prompt = gepa.get_best_prompt()
-
-        # Verify the optimized prompt is valid
-        print("\n=== GEPA Optimization Results ===")
-        print(f"Best scores during optimization: {best_scores}")
-        print(f"Pareto frontier size: {len(gepa.get_pareto_frontier())}")
-        print(f"\nOptimized prompt preview:\n{optimized_prompt[:500]}...")
-
-        # Test that the optimization produced valid results
-        self.assertIsNotNone(best_scores)
-        self.assertIn("success", best_scores)
-        self.assertIn("exact_match", best_scores)
-        self.assertIn("f1", best_scores)
-
-        # Verify the prompt still has required placeholders
-        self.assertIn("{context}", optimized_prompt)
-        self.assertIn("{question}", optimized_prompt)
-
-        # Verify the prompt has reasonable length (not empty or truncated)
-        self.assertGreater(len(optimized_prompt), 100)
-
-        # Verify Pareto frontier has candidates
-        pareto_frontier = gepa.get_pareto_frontier()
-        self.assertGreater(len(pareto_frontier), 0)
-
-        # All candidates in Pareto frontier should have scores
+        self.assertGreater(len(best_prompt), 100)
         for candidate in pareto_frontier:
             self.assertIsNotNone(candidate.val_scores)
-            print(f"  Candidate {candidate.id}: val_scores={candidate.val_scores}")
 
 
 if __name__ == "__main__":

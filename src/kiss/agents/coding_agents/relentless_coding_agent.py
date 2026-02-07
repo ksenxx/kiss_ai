@@ -6,58 +6,77 @@
 """Multi-agent coding system with orchestration, and sub-agents using KISSAgent."""
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
 import yaml
 
+from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.compact_formatter import CompactFormatter
-from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.formatter import Formatter
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
 from kiss.docker.docker_manager import DockerManager
+
+IMPORTANT_INSTRUCTIONS = """
+ - If you have used 50% of your max_tokens, call 'finish' with 'success'
+   set to False and 'summary' set to a summary of the work you have done
+   so far and the work you need to do next.
+ - Be specific about what you have done and what you need to do next.
+ - The summary should have two sections: starting with the headers "Work Done"
+   and "Work to Do Next".
+ - The summary should be compact, but should be detailed enough so that next
+   agent does not repeat the work you have already done.
+ - The summary should have the same format as the user's original
+   prompt.  The summary should have information about testing, checking, and debugging
+   the code you have written so that next agent don't have to repeat testing,
+   checking, and debugging the code.
+ - The user's original prompt and the summary will be given to a new agent
+   to continue the task.
+ - DO NOT REPEAT any work (such as testing, checking, debuggings, verifications, etc.)
+   that your predecessor agent has already done.
+"""
 
 ORCHESTRATOR_PROMPT = """
 ## Task
 
 {task_description}
 
-Call perform_subtask() to perform a sub-task.
-perform_subtask() will return a yaml encoded dictionary containing the keys
-'success' (boolean) and 'summary' (string).
 
-# **Important**: If you have used 50% of your max_tokens,
-call 'finish' with 'success' set to False and 'summary' set to a summary of
-the work have done so far and the work you need to do next.
+{coding_instructions}
+
+ - perform_subtask() will return a yaml encoded dictionary containing the keys
+   'success' (boolean) and 'summary' (string).
+ - Call perform_subtask() to perform a sub-task.
+ - DO NOT call perform_subtask() if you can do the sub-task yourself while
+   keeping the cost down.
+ - You MUST save time and cost of performing a task.
+
+# Important Instructions
+{important_instructions}
 """
 
 TASKING_PROMPT = """
-# Role
+# Main Task
 
-You are a software engineer who is expert with
-bash commands and coding.
+{task_description}
 
 # Sub-task
+
+You need to perform the following sub-task:
 
 Name: {subtask_name}
 Description: {description}
 
-# Context
-This is part of a larger task:
-
-{task_description}
-
 {coding_instructions}
 
-# **Important**: If you have used 50% of your max_tokens,
-call 'finish' with 'success' set to False and 'summary' set to a summary of
-the work have done so far and the work you need to do next.
+# Important Instructions
+{important_instructions}
 """
 
 
@@ -100,23 +119,7 @@ class SubTask:
         SubTask.task_counter += 1
 
     def __repr__(self) -> str:
-        """Return a detailed string representation of the SubTask.
-
-        Returns:
-            str: A string showing the SubTask's id, name, and description.
-        """
-        return (
-            f"SubTask(id={self.id}, name={self.name}, "
-            f"description={self.description})"
-        )
-
-    def __str__(self) -> str:
-        """Return string representation of the SubTask.
-
-        Returns:
-            str: Same as __repr__.
-        """
-        return self.__repr__()
+        return f"SubTask(id={self.id}, name={self.name}, description={self.description})"
 
 
 class RelentlessCodingAgent(Base):
@@ -138,13 +141,13 @@ class RelentlessCodingAgent(Base):
 
     def _reset(
         self,
-        orchestrator_model_name: str,
-        subtasker_model_name: str,
-        trials: int,
-        max_steps: int,
-        max_budget: float,
-        work_dir: str,
-        base_dir: str,
+        orchestrator_model_name: str | None,
+        subtasker_model_name: str | None,
+        trials: int | None,
+        max_steps: int | None,
+        max_budget: float | None,
+        work_dir: str | None,
+        base_dir: str | None,
         readable_paths: list[str] | None,
         writable_paths: list[str] | None,
         docker_image: str | None,
@@ -163,26 +166,40 @@ class RelentlessCodingAgent(Base):
             writable_paths: Paths allowed for writing.
             docker_image: Optional Docker image for sandboxed execution.
         """
-        Path(base_dir).mkdir(parents=True, exist_ok=True)
-        Path(work_dir).mkdir(parents=True, exist_ok=True)
-        self.base_dir = str(Path(base_dir).resolve())
-        self.work_dir = str(Path(work_dir).resolve())
+        # Apply config defaults for None values
+        global_cfg = config_module.DEFAULT_CONFIG
+        cfg = global_cfg.agent.relentless_coding_agent
+        default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
+
+        actual_base_dir = base_dir if base_dir is not None else default_work_dir
+        actual_work_dir = work_dir if work_dir is not None else default_work_dir
+
+        Path(actual_base_dir).mkdir(parents=True, exist_ok=True)
+        Path(actual_work_dir).mkdir(parents=True, exist_ok=True)
+        self.base_dir = str(Path(actual_base_dir).resolve())
+        self.work_dir = str(Path(actual_work_dir).resolve())
         self.readable_paths = [resolve_path(p, self.base_dir) for p in readable_paths or []]
         self.writable_paths = [resolve_path(p, self.base_dir) for p in writable_paths or []]
         self.readable_paths.append(Path(self.work_dir))
         self.writable_paths.append(Path(self.work_dir))
         self.is_agentic = True
 
-        self.trials = trials or DEFAULT_CONFIG.agent.relentless_coding_agent.trials
-        self.max_steps = max_steps or DEFAULT_CONFIG.agent.relentless_coding_agent.max_steps
-        self.max_budget = max_budget or DEFAULT_CONFIG.agent.relentless_coding_agent.max_budget
-        default_orch = DEFAULT_CONFIG.agent.relentless_coding_agent.orchestrator_model_name
-        self.orchestrator_model_name = orchestrator_model_name or default_orch
-        default_sub = DEFAULT_CONFIG.agent.relentless_coding_agent.subtasker_model_name
-        self.subtasker_model_name = subtasker_model_name or default_sub
+        self.trials = trials if trials is not None else cfg.trials
+        self.max_steps = max_steps if max_steps is not None else cfg.max_steps
+        self.max_budget = max_budget if max_budget is not None else cfg.max_budget
+        self.orchestrator_model_name = (
+            orchestrator_model_name
+            if orchestrator_model_name is not None
+            else cfg.orchestrator_model_name
+        )
+        self.subtasker_model_name = (
+            subtasker_model_name
+            if subtasker_model_name is not None
+            else cfg.subtasker_model_name
+        )
         self.max_tokens = max(
-            get_max_context_length(orchestrator_model_name),
-            get_max_context_length(subtasker_model_name),
+            get_max_context_length(self.orchestrator_model_name),
+            get_max_context_length(self.subtasker_model_name),
         )
 
         self.budget_used: float = 0.0
@@ -238,19 +255,23 @@ class RelentlessCodingAgent(Base):
                 prompt_template=task_prompt_template,
                 arguments={
                     "task_description": self.task_description,
+                    "coding_instructions": CODING_INSTRUCTIONS,
+                    "important_instructions": IMPORTANT_INSTRUCTIONS,
                 },
                 tools=[finish, self.perform_subtask],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
                 formatter=self.formatter,
+                token_callback=self.token_callback,
             )
             self.budget_used += executor.budget_used  # type: ignore
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
 
             ret = yaml.safe_load(result)
-            success = ret.get("success", False)
+            payload = ret if isinstance(ret, dict) else {}
+            success = payload.get("success", False)
             if not success:
-                task_prompt_template = ORCHESTRATOR_PROMPT + "\n\n" + result
+                task_prompt_template = ORCHESTRATOR_PROMPT + "\n\n" + payload.get("summary", "")
                 continue
             return result
         raise KISSError(f"Task {self.task_description} failed after {self.trials} trials")
@@ -286,11 +307,11 @@ class RelentlessCodingAgent(Base):
                 model_name=self.subtasker_model_name,
                 prompt_template=task_prompt_template,
                 arguments={
+                    "task_description": self.task_description,
                     "subtask_name": subtask.name,
                     "description": subtask.description,
-                    "task_description": self.task_description,
-                    "max_steps": str(self.max_steps),
                     "coding_instructions": CODING_INSTRUCTIONS,
+                    "important_instructions": IMPORTANT_INSTRUCTIONS,
                 },
                 tools=[
                     finish,
@@ -301,14 +322,16 @@ class RelentlessCodingAgent(Base):
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
                 formatter=self.formatter,
+                token_callback=self.token_callback,
             )
             self.budget_used += executor.budget_used  # type: ignore
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
 
             ret = yaml.safe_load(result)
-            success = ret.get("success", False)
+            payload = ret if isinstance(ret, dict) else {}
+            success = payload.get("success", False)
             if not success:
-                task_prompt_template = TASKING_PROMPT + "\n\n" + result
+                task_prompt_template = TASKING_PROMPT + "\n\n" + payload.get("summary", "")
                 continue
             return result
         raise KISSError(f"Subtask {subtask.name} failed after {self.trials} trials")
@@ -317,19 +340,18 @@ class RelentlessCodingAgent(Base):
         self,
         prompt_template: str,
         arguments: dict[str, str] | None = None,
-        orchestrator_model_name: str = (
-            DEFAULT_CONFIG.agent.kiss_coding_agent.orchestrator_model_name
-        ),
-        subtasker_model_name: str = (DEFAULT_CONFIG.agent.kiss_coding_agent.subtasker_model_name),
-        trials: int = DEFAULT_CONFIG.agent.kiss_coding_agent.trials,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-        work_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
-        base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "kiss_workdir"),
+        orchestrator_model_name: str | None = None,
+        subtasker_model_name: str | None = None,
+        trials: int | None = None,
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        work_dir: str | None = None,
+        base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
         docker_image: str | None = None,
         formatter: Formatter | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str:
         """Run the multi-agent coding system.
 
@@ -352,6 +374,8 @@ class RelentlessCodingAgent(Base):
                 If provided, bash commands will be executed inside the Docker container.
                 Example: "ubuntu:latest", "python:3.11-slim".
             formatter: The formatter to use for the agent. If None, the default formatter is used.
+            token_callback: Optional async callback invoked with each streamed text token.
+                Default is None.
         Returns:
             The result of the task.
         """
@@ -371,6 +395,7 @@ class RelentlessCodingAgent(Base):
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
         self.formatter = formatter or CompactFormatter()
+        self.token_callback = token_callback
 
         # Run with Docker container if docker_image is provided
         if self.docker_image:
@@ -381,13 +406,7 @@ class RelentlessCodingAgent(Base):
                 finally:
                     self.docker_manager = None
         else:
-            old_cwd = os.getcwd()
-            try:
-                if self.work_dir:
-                    os.chdir(self.work_dir)
-                return self.perform_task()
-            finally:
-                os.chdir(old_cwd)
+            return self.perform_task()
 
 
 def main() -> None:
@@ -398,29 +417,44 @@ def main() -> None:
 
     agent = RelentlessCodingAgent("Example Multi-Agent")
     task_description = """
-    Create, test, and document a Python script that:
-    1. Reads a CSV file with two columns (name, age)
-    2. Filters rows where age > 18
-    3. Writes the filtered results to a new CSV file
-    4. Includes error handling for missing files
-    Return a summary of your work.
+ **Task:** Create a robust database engine using only Bash scripts.
+
+ **Requirements:**
+ 1.  Create a script named `db.sh` that interacts with a local data folder.
+ 2.  **Basic Operations:** Implement `db.sh set <key> <value>`,
+     `db.sh get <key>`, and `db.sh delete <key>`.
+ 3.  **Atomicity:** Implement transaction support.
+     *   `db.sh begin` starts a session where writes are cached but not visible to others.
+     *   `db.sh commit` atomically applies all cached changes.
+     *   `db.sh rollback` discards pending changes.
+ 4.  **Concurrency:** Ensure that if two different terminal windows run `db.sh`
+     simultaneously, the data is never corrupted (use `mkdir`-based mutex locking).
+ 5.  **Validation:** Write a test script `test_stress.sh` that launches 10
+     concurrent processes to spam the database, verifying no data is lost.
+
+ **Constraints:**
+ *   No external database tools (no sqlite3, no python).
+ *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
+ *   Safe: Operate entirely within a `./my_db` directory.
     """
 
     work_dir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
     try:
+        os.chdir(work_dir)
         result = agent.run(
             prompt_template=task_description,
             work_dir=work_dir,
             formatter=CompactFormatter()
         )
     finally:
-        shutil.rmtree(work_dir)
-
+        os.chdir(old_cwd)
 
     agent.formatter.print_status("FINAL RESULT:")
     result = yaml.safe_load(result)
     agent.formatter.print_status("Completed successfully: " + str(result["success"]))
     agent.formatter.print_status(result["summary"])
+    agent.formatter.print_status("Work directory was: " + work_dir)
 
 
 if __name__ == "__main__":

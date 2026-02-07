@@ -11,21 +11,13 @@ import yaml
 from datasets import load_dataset
 
 import kiss.core.utils as utils
-from kiss.agents.gepa import GEPA
+from kiss.agents.gepa import GEPA, create_progress_callback
 from kiss.core.kiss_agent import KISSAgent
 from kiss.tests.conftest import requires_openai_api_key
 
 
 def evaluate_qa_result(result: str, expected_answer: str) -> dict[str, float]:
-    """Evaluate a QA result against expected answer.
-
-    Args:
-        result: Result string (YAML) from agent.run() with keys: status, analysis, result
-        expected_answer: The expected answer string
-
-    Returns:
-        Dict of metric scores (higher is better)
-    """
+    """Evaluate a QA result against expected answer."""
     # Parse YAML result string
     try:
         result_dict = yaml.safe_load(result) or {}
@@ -65,21 +57,8 @@ class TestGEPAHuggingFace(unittest.TestCase):
     """Test GEPA algorithm on HuggingFace datasets."""
 
     def test_gepa_on_squad_dataset(self):
-        """Test GEPA on a small sample from SQuAD dataset.
-
-        This test uses the new GEPA API with proper dev/val split:
-        - Training examples are split into dev (feedback) and val (selection) sets
-        - Candidates are evaluated on dev minibatches for trajectory feedback
-        - Selection is based on val set scores
-
-        Verifies that optimization runs successfully and produces valid
-        candidates with scores and preserved placeholders.
-
-        Returns:
-            None
-        """
+        """Test GEPA on a small sample from SQuAD dataset."""
         # Load a small sample from SQuAD dataset
-        print("Loading SQuAD dataset...")
         dataset = load_dataset("squad", split="validation[:6]")  # 6 examples for dev/val split
 
         # Initial prompt template for question answering
@@ -113,23 +92,11 @@ as the 'result' argument.
                 }
             )
 
-        print(f"\nLoaded {len(train_examples)} examples for optimization")
-        for i, ex in enumerate(train_examples[:3]):
-            print(f"  [{i}] Q: {ex['question'][:50]}... -> A: {ex['_expected_answer']}")
-
         # Agent counter for unique names
         agent_counter = [0]
 
         def agent_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:
-            """Agent wrapper that handles expected answer embedding.
-
-            Args:
-                prompt_template: The prompt template to use for the agent.
-                arguments: Dict with context, question, and _expected_answer keys.
-
-            Returns:
-                Tuple of (result string with expected/actual, empty trajectory list).
-            """
+            """Agent wrapper that handles expected answer embedding."""
             expected_answer = arguments.get("_expected_answer", "")
             agent_args = {
                 "context": arguments["context"],
@@ -149,14 +116,7 @@ as the 'result' argument.
             return result_with_expected, []
 
         def evaluation_fn(result: str) -> dict[str, float]:
-            """Evaluation function that extracts expected answer from result.
-
-            Args:
-                result: Result string in format 'EXPECTED:...\nRESULT:...'
-
-            Returns:
-                Dict with 'success' and 'answer_match' scores.
-            """
+            """Evaluation function that extracts expected answer from result."""
             try:
                 if result.startswith("EXPECTED:"):
                     parts = result.split("\nRESULT:", 1)
@@ -177,20 +137,16 @@ as the 'result' argument.
             pareto_size=2,
             mutation_rate=0.5,
             dev_val_split=0.5,  # 50% dev, 50% val
+            progress_callback=create_progress_callback(),
         )
 
         # Run optimization with dev/val split
-        print("\nRunning GEPA optimization with dev/val split...")
         best_candidate = gepa.optimize(
             train_examples=train_examples,
             dev_minibatch_size=2,  # Use 2 dev examples per evaluation
         )
 
         # Check results
-        print(f"\nBest prompt val_scores: {best_candidate.val_scores}")
-        print(f"Best prompt dev_scores: {best_candidate.dev_scores}")
-        print(f"\nBest prompt (first 500 chars):\n{best_candidate.prompt_template[:500]}...")
-
         # Verify that optimization ran
         self.assertIsNotNone(best_candidate)
         self.assertIsNotNone(best_candidate.val_scores)
@@ -199,10 +155,6 @@ as the 'result' argument.
         # Check Pareto frontier
         pareto_frontier = gepa.get_pareto_frontier()
         self.assertGreater(len(pareto_frontier), 0)
-
-        print(f"\nPareto frontier size: {len(pareto_frontier)}")
-        for i, candidate in enumerate(pareto_frontier):
-            print(f"  Candidate {i}: val_scores={candidate.val_scores}")
 
 
 if __name__ == "__main__":

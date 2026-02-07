@@ -5,25 +5,114 @@
 
 This script runs test_a_model.py on each model in model_info.py,
 testing non-agentic, agentic, and embedding modes as appropriate.
+
+Usage:
+    # Test all models (WARNING: This takes a very long time!)
+    python src/kiss/tests/run_all_models_test.py
+
+    # Test only Together AI models
+    python src/kiss/tests/run_all_models_test.py --provider together
+
+    # Test only OpenRouter models
+    python src/kiss/tests/run_all_models_test.py --provider openrouter
+
+    # Test only OpenAI models
+    python src/kiss/tests/run_all_models_test.py --provider openai
+
+    # Test only Anthropic models
+    python src/kiss/tests/run_all_models_test.py --provider anthropic
+
+    # Test only Gemini models
+    python src/kiss/tests/run_all_models_test.py --provider gemini
+
+    # Test a specific model
+    python src/kiss/tests/run_all_models_test.py --model "openrouter/z-ai/glm-4.7-flash"
+
+    # Skip slow reasoning models
+    python src/kiss/tests/run_all_models_test.py --skip-slow
 """
 
+import argparse
 import subprocess
 import sys
 from dataclasses import dataclass
 
 from kiss.core.models.model_info import MODEL_INFO
 
+# Models known to be slow (reasoning models, thinking models)
+SLOW_MODELS = {
+    # OpenAI reasoning models
+    "o1",
+    "o1-mini",
+    "o1-pro",
+    "o3-pro",
+    # Together AI slow models
+    "Qwen/QwQ-32B",
+    "Qwen/Qwen3-235B-A22B-Thinking-2507",
+    "Qwen/Qwen3-Next-80B-A3B-Thinking",
+    "moonshotai/Kimi-K2-Thinking",
+    "deepseek-ai/DeepSeek-R1",
+    # OpenRouter slow models - DeepSeek
+    "openrouter/deepseek/deepseek-r1",
+    "openrouter/deepseek/deepseek-r1-0528",
+    # OpenRouter slow models - OpenAI
+    "openrouter/openai/o1",
+    "openrouter/openai/o1-pro",
+    "openrouter/openai/o3-pro",
+    # OpenRouter slow models - Qwen thinking models
+    "openrouter/qwen/qwq-32b",
+    "openrouter/qwen/qwen-plus-2025-07-28:thinking",
+    "openrouter/qwen/qwen3-235b-a22b-thinking-2507",
+    "openrouter/qwen/qwen3-30b-a3b-thinking-2507",
+    "openrouter/qwen/qwen3-next-80b-a3b-thinking",
+    "openrouter/qwen/qwen3-vl-235b-a22b-thinking",
+    "openrouter/qwen/qwen3-vl-30b-a3b-thinking",
+    "openrouter/qwen/qwen3-vl-8b-thinking",
+    # OpenRouter slow models - MoonshotAI
+    "openrouter/moonshotai/kimi-k2-thinking",
+    # OpenRouter slow models - ByteDance
+    "openrouter/bytedance-seed/seed-2.0-thinking",
+    # OpenRouter slow models - AllenAI
+    "openrouter/allenai/olmo-3-32b-think",
+    "openrouter/allenai/olmo-3-7b-think",
+    "openrouter/allenai/olmo-3.1-32b-think",
+    # OpenRouter slow models - Anthropic thinking
+    "openrouter/anthropic/claude-3.7-sonnet:thinking",
+    # OpenRouter slow models - Baidu thinking
+    "openrouter/baidu/ernie-4.5-21b-a3b-thinking",
+}
+
+# Models known to have issues (503 errors, empty responses, etc.)
+SKIP_MODELS = {
+    # Models that return empty or have gen=False
+    "openrouter/cohere/command-r-plus-08-2024",  # gen=False
+    "openrouter/deepseek/deepseek-chat-v3.1",  # gen=False
+    "openrouter/deepseek/deepseek-v3.1-terminus",  # gen=False
+    "openrouter/inception/mercury",  # Returns empty
+    "openrouter/inception/mercury-coder",  # Returns empty
+    "openrouter/mistralai/devstral-medium",  # gen=False
+    "openrouter/mistralai/devstral-small",  # gen=False
+    "openrouter/nousresearch/deephermes-3-mistral-24b-preview",  # gen=False
+    "openrouter/meta-llama/llama-3.1-405b-instruct",  # gen=False
+    "openrouter/meta-llama/llama-3.3-70b-instruct",  # gen=False
+    "openrouter/qwen/qwen3-235b-a22b",  # Returns empty
+    # Image generation models (gen=False - can't do text generation)
+    "openrouter/google/gemini-2.5-flash-image",  # Image generation
+    "openrouter/google/gemini-3-pro-image-preview",  # Image generation
+    "openrouter/openai/gpt-5-image",  # Image generation
+    "openrouter/openai/gpt-5-image-mini",  # Image generation
+    # Audio models (not suitable for text-only testing)
+    "openrouter/openai/gpt-audio",  # Audio model
+    "openrouter/openai/gpt-audio-mini",  # Audio model
+    "openrouter/openai/gpt-4o-audio-preview",  # Audio model
+    # Router/meta models
+    "openrouter/switchpoint/router",  # Router model
+}
+
 
 @dataclass
 class TestResult:
-    """Result of a test run.
-
-    Attributes:
-        model_name: The name of the model being tested.
-        test_type: The type of test ("non_agentic", "agentic", or "embedding").
-        passed: Whether the test passed.
-        error_message: Error message if the test failed, empty string otherwise.
-    """
+    """Result of a test run."""
 
     model_name: str
     test_type: str  # "non_agentic", "agentic", "embedding"
@@ -33,14 +122,7 @@ class TestResult:
 
 @dataclass
 class ModelTestResults:
-    """Results for all tests on a model.
-
-    Attributes:
-        model_name: The name of the model being tested.
-        non_agentic: Result of non-agentic test, or None if not run.
-        agentic: Result of agentic test, or None if not run.
-        embedding: Result of embedding test, or None if not run.
-    """
+    """Results for all tests on a model."""
 
     model_name: str
     non_agentic: TestResult | None = None
@@ -49,19 +131,7 @@ class ModelTestResults:
 
 
 def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
-    """Run a specific test for a model.
-
-    Executes a pytest test for the given model and test type using subprocess.
-
-    Args:
-        model_name: The name of the model to test.
-        test_name: The name of the test to run (e.g., "test_non_agentic").
-        timeout: Maximum time in seconds to wait for the test to complete.
-
-    Returns:
-        A TestResult containing the model name, test type, pass/fail status,
-        and any error message.
-    """
+    """Run a specific test for a model."""
     cmd = [
         sys.executable,
         "-m",
@@ -69,8 +139,7 @@ def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
         "src/kiss/tests/test_a_model.py",
         f"--model={model_name}",
         f"-k={test_name}",
-        "-v",
-        f"--timeout={timeout}",
+        "-q",  # Quiet mode for faster output
     ]
 
     try:
@@ -78,7 +147,7 @@ def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
             cmd,
             capture_output=True,
             text=True,
-            timeout=timeout + 30,  # Extra buffer for pytest overhead
+            timeout=timeout,
         )
         passed = result.returncode == 0
         error_message = ""
@@ -120,17 +189,7 @@ def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
 
 
 def test_model(model_name: str) -> ModelTestResults:
-    """Run all applicable tests for a model.
-
-    Runs non-agentic, agentic, and embedding tests based on the model's
-    capabilities as defined in MODEL_INFO.
-
-    Args:
-        model_name: The name of the model to test.
-
-    Returns:
-        A ModelTestResults containing results for all applicable tests.
-    """
+    """Run all applicable tests for a model."""
     info = MODEL_INFO.get(model_name)
     if info is None:
         print(f"  WARNING: {model_name} not found in MODEL_INFO")
@@ -162,16 +221,104 @@ def test_model(model_name: str) -> ModelTestResults:
     return results
 
 
+def get_provider_prefix(provider: str) -> list[str]:
+    """Get the model name prefixes for a provider."""
+    provider_prefixes = {
+        "openai": ["gpt-", "o1", "o3", "text-embedding-"],
+        "anthropic": ["claude-"],
+        "gemini": ["gemini-", "models/"],
+        "together": [
+            "meta-llama/",
+            "Qwen/",
+            "mistralai/",
+            "deepseek-ai/",
+            "google/",
+            "moonshotai/",
+            "nvidia/",
+            "arcee-ai/",
+            "refuel-ai/",
+            "marin-community/",
+            "essentialai/",
+            "zai-org/",
+            "deepcogito/",
+            "Alibaba-NLP/",
+            "BAAI/",
+            "togethercomputer/",
+            "intfloat/",
+        ],
+        "openrouter": ["openrouter/"],
+    }
+    return provider_prefixes.get(provider.lower(), [])
+
+
+def filter_models_by_provider(models: list[str], provider: str) -> list[str]:
+    """Filter models to only include those from a specific provider."""
+    prefixes = get_provider_prefix(provider)
+    if not prefixes:
+        print(f"Unknown provider: {provider}")
+        print("Valid providers: openai, anthropic, gemini, together, openrouter")
+        return []
+
+    return [m for m in models if any(m.startswith(p) for p in prefixes)]
+
+
 def main() -> int:
-    """Main entry point.
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="Test all models from model_info.py")
+    parser.add_argument(
+        "--provider",
+        type=str,
+        help="Filter by provider (openai, anthropic, gemini, together, openrouter)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        help="Test a specific model by name",
+    )
+    parser.add_argument(
+        "--skip-slow",
+        action="store_true",
+        help="Skip slow reasoning/thinking models",
+    )
+    parser.add_argument(
+        "--skip-known-issues",
+        action="store_true",
+        help="Skip models with known issues (503 errors, empty responses)",
+    )
+    args = parser.parse_args()
 
-    Iterates through all models in MODEL_INFO, runs applicable tests,
-    and prints a summary report of results.
-
-    Returns:
-        Exit code: 0 if all tests passed, 1 if any tests failed.
-    """
     all_models = list(MODEL_INFO.keys())
+
+    # Filter by specific model
+    if args.model:
+        if args.model in MODEL_INFO:
+            all_models = [args.model]
+        else:
+            print(f"Model '{args.model}' not found in MODEL_INFO")
+            return 1
+
+    # Filter by provider
+    if args.provider:
+        all_models = filter_models_by_provider(all_models, args.provider)
+        if not all_models:
+            return 1
+
+    # Skip slow models
+    if args.skip_slow:
+        original_count = len(all_models)
+        all_models = [m for m in all_models if m not in SLOW_MODELS]
+        skipped = original_count - len(all_models)
+        if skipped > 0:
+            print(f"Skipping {skipped} slow models")
+
+    # Skip models with known issues
+    if args.skip_known_issues:
+        original_count = len(all_models)
+        all_models = [m for m in all_models if m not in SKIP_MODELS]
+        skipped = original_count - len(all_models)
+        if skipped > 0:
+            print(f"Skipping {skipped} models with known issues")
+
     print(f"Testing {len(all_models)} models from model_info.py\n")
     print("=" * 80)
 
@@ -229,7 +376,7 @@ def main() -> int:
                             print(f"  - {failure_type}: {test_result.error_message[:200]}")
                         break
     else:
-        print("\nAll tests passed! 🎉")
+        print("\nAll tests passed!")
 
     # Return exit code
     return 1 if failed_models else 0

@@ -13,7 +13,7 @@ from typing import Any
 
 import kiss.agents.kiss_evolve.config  # noqa: F401
 from kiss.agents.kiss_evolve.novelty_prompts import INNOVATION_INSTRUCTIONS
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.models.model import Model
 from kiss.core.utils import get_config_value
 from kiss.rag.simple_rag import SimpleRAG
@@ -183,7 +183,7 @@ class KISSEvolve:
         self.model_names = self._validate_and_normalize_models(model_names)
 
         # Get config with fallback defaults
-        cfg = getattr(DEFAULT_CONFIG, "kiss_evolve", None)
+        cfg = getattr(config_module.DEFAULT_CONFIG, "kiss_evolve", None)
 
         self.population_size = get_config_value(population_size, cfg, "population_size")
         self.max_generations = get_config_value(max_generations, cfg, "max_generations")

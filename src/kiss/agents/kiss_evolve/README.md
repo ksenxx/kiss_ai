@@ -224,8 +224,8 @@ optimizer = KISSEvolve(
 
 KISSEvolve supports three parent sampling methods:
 
-1. **Tournament Selection** (default): Randomly selects parents from top performers
-1. **Power-Law Sampling**: Uses rank-based power-law distribution (α parameter controls exploration vs exploitation)
+1. **Tournament Selection**: Randomly selects parents from top performers
+1. **Power-Law Sampling** (default): Uses rank-based power-law distribution (α parameter controls exploration vs exploitation)
 1. **Performance-Novelty Sampling**: Balances performance and novelty using a sigmoid function (λ parameter controls selection pressure)
 
 ```python

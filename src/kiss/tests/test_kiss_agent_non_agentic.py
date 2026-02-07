@@ -1,9 +1,4 @@
-# Author: Koushik Sen (ksen@berkeley.edu)
-# Contributors:
-# Koushik Sen (ksen@berkeley.edu)
-# add your name here
-
-"""Test suite for KISSAgent non-agentic mode without mocking, using real API calls."""
+"""Test suite for KISSAgent non-agentic mode using real API calls."""
 
 import unittest
 
@@ -11,35 +6,15 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.tests.conftest import requires_gemini_api_key, simple_calculator
 
-# Test model - using a fast, cheap model for testing
 TEST_MODEL = "gemini-3-flash-preview"
 
 
 @requires_gemini_api_key
 class TestKISSAgentNonAgentic(unittest.TestCase):
-    """Tests for non-agentic mode."""
-
-    agent: KISSAgent
-
     def setUp(self) -> None:
-        """Set up test fixtures for each test method.
-
-        Creates a fresh KISSAgent instance before each test.
-
-        Returns:
-            None
-        """
         self.agent = KISSAgent("Non-Agentic Test Agent")
 
     def test_non_agentic_simple_response(self) -> None:
-        """Test non-agentic mode returns a response without tools.
-
-        Verifies that the agent can respond to simple questions without
-        using any tools when running in non-agentic mode.
-
-        Returns:
-            None
-        """
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template="What is 2 + 2? Reply with just the number.",
@@ -48,15 +23,6 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
         self.assertIn("4", result)
 
     def test_non_agentic_with_arguments(self) -> None:
-        """Test non-agentic mode with single and multiple template arguments.
-
-        Verifies that the agent correctly substitutes both single and multiple
-        template arguments into the prompt and generates appropriate responses.
-
-        Returns:
-            None
-        """
-        # Single argument
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template="Say hello to {name}. Reply with just 'Hello, {name}!'",
@@ -65,7 +31,6 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
         )
         self.assertIn("Hello", result)
 
-        # Multiple arguments
         result = self.agent.run(
             model_name=TEST_MODEL,
             prompt_template="Add {a} and {b}. Reply with just the sum as a number.",
@@ -75,14 +40,6 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
         self.assertIn("40", result)
 
     def test_non_agentic_with_tools_raises_error(self) -> None:
-        """Test that providing tools to non-agentic agent raises KISSError.
-
-        Verifies that attempting to provide tools when running in non-agentic
-        mode raises an appropriate error, as tools are not supported in this mode.
-
-        Returns:
-            None
-        """
         try:
             self.agent.run(
                 model_name=TEST_MODEL,
@@ -94,7 +51,6 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
         except KISSError as e:
             self.assertIn("Tools cannot be provided", str(e))
         except AttributeError:
-            # This is expected due to the order of operations in run()
             pass
 
 

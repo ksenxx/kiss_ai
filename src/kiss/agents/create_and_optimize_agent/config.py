@@ -58,6 +58,13 @@ class EvolverConfig(BaseModel):
         default=50.0,
         description="Maximum budget in USD for creating the initial agent",
     )
+    evolve_to_solve_task: bool = Field(
+        default=False,
+        description=(
+            "Whether to evolve the agent to solve the task or evolve the agent "
+            "to be a general purpose agent that can be used for any task"
+        ),
+    )
 
 
 class AgentCreatorConfig(BaseModel):

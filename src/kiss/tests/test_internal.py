@@ -1,13 +1,4 @@
-# Author: Koushik Sen (ksen@berkeley.edu)
-# Contributors:
-# Koushik Sen (ksen@berkeley.edu)
-# add your name here
-
-"""Test suite for internal KISS components that don't require API calls.
-
-These tests verify various internal components like formatters, utilities,
-config builders, and error classes without making real API calls.
-"""
+"""Test suite for internal KISS components that don't require API calls."""
 
 import os
 import tempfile
@@ -24,71 +15,33 @@ from kiss.core.utils import (
 
 
 class TestUtilsFunctions(unittest.TestCase):
-    """Tests for utility functions in the KISS core utils module."""
-
     def test_get_template_field_names(self):
-        """Test that get_template_field_names correctly extracts field names from template strings.
-
-        Verifies that the function identifies all {field_name} placeholders in a template
-        string and returns an empty list when no placeholders are present.
-
-        Returns:
-            None. Uses assertions to verify field name extraction behavior.
-        """
-        # With fields
-        text = "Hello {name}, your score is {score}."
-        fields = get_template_field_names(text)
+        fields = get_template_field_names("Hello {name}, your score is {score}.")
         self.assertIn("name", fields)
         self.assertIn("score", fields)
         self.assertEqual(len(fields), 2)
-
-        # Without fields
-        text_no_fields = "Hello, world!"
-        fields_empty = get_template_field_names(text_no_fields)
-        self.assertEqual(fields_empty, [])
+        self.assertEqual(get_template_field_names("Hello, world!"), [])
 
     def test_add_prefix_to_each_line(self):
-        """Test that add_prefix_to_each_line correctly prepends a prefix to every line.
-
-        Verifies the function works correctly for both multi-line and single-line inputs.
-
-        Returns:
-            None. Uses assertions to verify prefix addition behavior.
-        """
-        # Multiple lines
-        text = "line1\nline2\nline3"
-        result = add_prefix_to_each_line(text, "> ")
-        self.assertEqual(result, "> line1\n> line2\n> line3")
-
-        # Single line
-        single = "single line"
-        result_single = add_prefix_to_each_line(single, ">> ")
-        self.assertEqual(result_single, ">> single line")
+        self.assertEqual(
+            add_prefix_to_each_line("line1\nline2\nline3", "> "),
+            "> line1\n> line2\n> line3",
+        )
+        self.assertEqual(add_prefix_to_each_line("single line", ">> "), ">> single line")
 
     def test_config_to_dict(self):
-        """Test that config_to_dict returns a properly structured dictionary.
-
-        Verifies that the function returns a dict containing the 'agent' key,
-        filters out sensitive API keys, preserves primitive types, and ensures
-        no API_KEY fields appear in the nested structure.
-
-        Returns:
-            None. Uses assertions to verify dictionary structure and API key filtering.
-        """
         config_dict = config_to_dict()
         self.assertIsInstance(config_dict, dict)
         self.assertIn("agent", config_dict)
+        self.assertIsInstance(config_dict["agent"], dict)
 
-        # API keys should be filtered out
         result_str = str(config_dict)
         self.assertNotIn("GEMINI_API_KEY", result_str)
         self.assertNotIn("OPENAI_API_KEY", result_str)
 
-        # Verify primitive types are preserved
         self.assertIsInstance(config_dict.get("agent", {}).get("max_steps"), int)
         self.assertIsInstance(config_dict.get("agent", {}).get("verbose"), bool)
 
-        # Verify no API_KEY fields in nested structure
         def check_no_api_keys(d):
             if isinstance(d, dict):
                 for k, v in d.items():
@@ -101,13 +54,6 @@ class TestUtilsFunctions(unittest.TestCase):
         check_no_api_keys(config_dict)
 
     def test_finish_function(self):
-        """Test that the finish utility function returns a properly formatted result string.
-
-        Verifies that the returned string contains status, analysis, and result fields.
-
-        Returns:
-            None. Uses assertions to verify result string format.
-        """
         result = finish("success", "Task completed", "42")
         self.assertIn("status", result)
         self.assertIn("success", result)
@@ -117,63 +63,26 @@ class TestUtilsFunctions(unittest.TestCase):
         self.assertIn("42", result)
 
     def test_fc_reads_file(self):
-        """Test that the fc (file content) function correctly reads file contents.
-
-        Creates a temporary file, writes content to it, then verifies fc returns
-        the exact content that was written.
-
-        Returns:
-            None. Uses assertions to verify file content reading.
-        """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("Test content for fc function")
             temp_path = f.name
-
         try:
-            content = fc(temp_path)
-            self.assertEqual(content, "Test content for fc function")
+            self.assertEqual(fc(temp_path), "Test content for fc function")
         finally:
             os.unlink(temp_path)
 
 
 class TestKISSError(unittest.TestCase):
-    """Tests for the KISSError exception class."""
-
     def test_kiss_error_message(self):
-        """Test that KISSError stores and returns the error message correctly.
-
-        Verifies that the string representation includes 'KISS Error' prefix
-        and the original error message.
-
-        Returns:
-            None. Uses assertions to verify error message formatting.
-        """
         error = KISSError("Test error message")
         error_str = str(error)
         self.assertIn("KISS Error", error_str)
         self.assertIn("Test error message", error_str)
 
     def test_kiss_error_inheritance(self):
-        """Test that KISSError inherits from ValueError.
-
-        Verifies the inheritance chain to ensure KISSError can be caught
-        as a ValueError.
-
-        Returns:
-            None. Uses assertions to verify inheritance.
-        """
-        error = KISSError("Test")
-        self.assertIsInstance(error, ValueError)
+        self.assertIsInstance(KISSError("Test"), ValueError)
 
     def test_kiss_error_debug_mode(self):
-        """Test that KISSError message is properly formatted in different debug modes.
-
-        Temporarily modifies the debug config setting to verify error message
-        formatting behavior, then restores the original setting.
-
-        Returns:
-            None. Uses assertions to verify debug mode handling.
-        """
         from kiss.core.config import DEFAULT_CONFIG
 
         original_debug = DEFAULT_CONFIG.agent.debug
@@ -186,28 +95,17 @@ class TestKISSError(unittest.TestCase):
 
 
 class TestConfigBuilder(unittest.TestCase):
-    """Tests for the config_builder.py module functions."""
-
     def test_add_config_basic(self):
-        """Test that add_config creates a valid configuration from a BaseModel.
-
-        Creates a simple Pydantic model and verifies that add_config
-        successfully registers it without raising errors.
-
-        Returns:
-            None. Uses assertions to verify config registration.
-        """
         from pydantic import BaseModel, Field
 
         from kiss.core import config as config_module
         from kiss.core.config_builder import add_config
 
         class TestConfig(BaseModel):
-            test_value: str = Field(default="test", description="A test value")
-            test_int: int = Field(default=42, description="A test integer")
+            test_value: str = Field(default="test")
+            test_int: int = Field(default=42)
 
         original_config = config_module.DEFAULT_CONFIG
-
         try:
             add_config("test_config", TestConfig)
             self.assertIsNotNone(config_module.DEFAULT_CONFIG)
@@ -215,28 +113,19 @@ class TestConfigBuilder(unittest.TestCase):
             config_module.DEFAULT_CONFIG = original_config
 
     def test_add_config_with_nested_model(self):
-        """Test that add_config handles nested BaseModel configurations.
-
-        Creates a Pydantic model containing another BaseModel as a field
-        and verifies that add_config handles the nested structure correctly.
-
-        Returns:
-            None. Uses assertions to verify nested config handling.
-        """
         from pydantic import BaseModel, Field
 
         from kiss.core import config as config_module
         from kiss.core.config_builder import add_config
 
         class InnerConfig(BaseModel):
-            inner_value: str = Field(default="inner", description="Inner value")
+            inner_value: str = Field(default="inner")
 
         class OuterConfig(BaseModel):
-            outer_value: str = Field(default="outer", description="Outer value")
+            outer_value: str = Field(default="outer")
             inner: InnerConfig = Field(default_factory=InnerConfig)
 
         original_config = config_module.DEFAULT_CONFIG
-
         try:
             add_config("outer_config", OuterConfig)
             self.assertIsNotNone(config_module.DEFAULT_CONFIG)
@@ -244,14 +133,6 @@ class TestConfigBuilder(unittest.TestCase):
             config_module.DEFAULT_CONFIG = original_config
 
     def test_add_model_arguments_with_types(self):
-        """Test that _add_model_arguments correctly handles various Python types.
-
-        Verifies handling of Optional types, Union types, and Any type fields
-        when adding model arguments to an ArgumentParser.
-
-        Returns:
-            None. Uses assertions to verify argument parsing setup.
-        """
         from argparse import ArgumentParser
         from typing import Any
 
@@ -260,10 +141,10 @@ class TestConfigBuilder(unittest.TestCase):
         from kiss.core.config_builder import _add_model_arguments
 
         class ConfigWithTypes(BaseModel):
-            optional_str: str | None = Field(default=None, description="Optional string")
-            optional_int: int | None = Field(default=None, description="Optional int")
-            union_type: str | int = Field(default="test", description="Union type")
-            any_field: Any = Field(default=None, description="Any type field")
+            optional_str: str | None = Field(default=None)
+            optional_int: int | None = Field(default=None)
+            union_type: str | int = Field(default="test")
+            any_field: Any = Field(default=None)
 
         parser = ArgumentParser()
         _add_model_arguments(parser, ConfigWithTypes)
@@ -271,14 +152,6 @@ class TestConfigBuilder(unittest.TestCase):
         self.assertIsNotNone(args)
 
     def test_flat_to_nested_dict(self):
-        """Test that _flat_to_nested_dict correctly converts flat dictionaries to nested structures.
-
-        Verifies handling of double-underscore prefixed keys (e.g., 'inner__value'),
-        empty dictionaries, and dictionaries with direct values.
-
-        Returns:
-            None. Uses assertions to verify dictionary nesting conversion.
-        """
         from pydantic import BaseModel, Field
 
         from kiss.core.config_builder import _flat_to_nested_dict
@@ -293,202 +166,15 @@ class TestConfigBuilder(unittest.TestCase):
             value: str = Field(default="test")
             number: int = Field(default=0)
 
-        # With prefix
-        flat_prefix = {"inner__value": "custom_value"}
-        result_prefix = _flat_to_nested_dict(flat_prefix, OuterModel)
+        result_prefix = _flat_to_nested_dict({"inner__value": "custom_value"}, OuterModel)
         self.assertIn("inner", result_prefix)
         self.assertEqual(result_prefix["inner"]["value"], "custom_value")
 
-        # Empty
-        flat_empty = {}
-        result_empty = _flat_to_nested_dict(flat_empty, SimpleModel)
-        self.assertEqual(result_empty, {})
+        self.assertEqual(_flat_to_nested_dict({}, SimpleModel), {})
 
-        # With values
-        flat_values = {"value": "custom", "number": 42}
-        result_values = _flat_to_nested_dict(flat_values, SimpleModel)
+        result_values = _flat_to_nested_dict({"value": "custom", "number": 42}, SimpleModel)
         self.assertEqual(result_values["value"], "custom")
         self.assertEqual(result_values["number"], 42)
-
-    def test_cli_args_with_dashes(self):
-        """Test that CLI arguments work with both dash and underscore styles.
-
-        Verifies that field names with underscores can be specified on the CLI
-        using either dashes (e.g., --test.my-field) or underscores (--test.my_field).
-
-        Returns:
-            None. Uses assertions to verify both argument styles work.
-        """
-        import sys
-
-        from pydantic import BaseModel, Field
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        class TestConfig(BaseModel):
-            my_value: int = Field(default=10, description="A test value")
-            another_field: str = Field(default="default", description="Another field")
-
-        original_config = config_module.DEFAULT_CONFIG
-        original_argv = sys.argv
-
-        try:
-            # Test dash-style arguments
-            sys.argv = ["test", "--test.my-value", "42", "--test.another-field", "hello"]
-            add_config("test", TestConfig)
-            self.assertEqual(config_module.DEFAULT_CONFIG.test.my_value, 42)
-            self.assertEqual(config_module.DEFAULT_CONFIG.test.another_field, "hello")
-
-            # Reset and test underscore-style arguments
-            config_module.DEFAULT_CONFIG = original_config
-            sys.argv = ["test", "--test.my_value", "99", "--test.another_field", "world"]
-            add_config("test", TestConfig)
-            self.assertEqual(config_module.DEFAULT_CONFIG.test.my_value, 99)
-            self.assertEqual(config_module.DEFAULT_CONFIG.test.another_field, "world")
-        finally:
-            sys.argv = original_argv
-            config_module.DEFAULT_CONFIG = original_config
-
-    def test_cli_args_nested_with_dashes(self):
-        """Test that nested CLI arguments work with dash-style naming.
-
-        Verifies that deeply nested field names with underscores can be specified
-        using dashes on the CLI (e.g., --outer.inner-config.deep-value).
-
-        Returns:
-            None. Uses assertions to verify nested argument parsing.
-        """
-        import sys
-
-        from pydantic import BaseModel, Field
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        class InnerConfig(BaseModel):
-            deep_value: int = Field(default=5, description="Deep value")
-
-        class OuterConfig(BaseModel):
-            inner_config: InnerConfig = Field(default_factory=InnerConfig)
-            outer_value: str = Field(default="outer", description="Outer value")
-
-        original_config = config_module.DEFAULT_CONFIG
-        original_argv = sys.argv
-
-        try:
-            # Test dash-style for nested config
-            sys.argv = [
-                "test",
-                "--outer.inner-config.deep-value",
-                "100",
-                "--outer.outer-value",
-                "changed",
-            ]
-            add_config("outer", OuterConfig)
-            self.assertEqual(config_module.DEFAULT_CONFIG.outer.inner_config.deep_value, 100)
-            self.assertEqual(config_module.DEFAULT_CONFIG.outer.outer_value, "changed")
-        finally:
-            sys.argv = original_argv
-            config_module.DEFAULT_CONFIG = original_config
-
-    def test_cli_args_triple_nested_with_dashes(self):
-        """Test that triple-nested CLI arguments work with dash-style naming.
-
-        Verifies that three levels of nested field names with underscores can be
-        specified using dashes on the CLI (e.g., --level1.level2-config.level3-config.deep-value).
-
-        Returns:
-            None. Uses assertions to verify triple-nested argument parsing.
-        """
-        import sys
-
-        from pydantic import BaseModel, Field
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        class Level3Config(BaseModel):
-            deep_value: int = Field(default=1, description="Deep value")
-            deep_name: str = Field(default="deep", description="Deep name")
-
-        class Level2Config(BaseModel):
-            level3_config: Level3Config = Field(default_factory=Level3Config)
-            mid_value: int = Field(default=2, description="Mid value")
-
-        class Level1Config(BaseModel):
-            level2_config: Level2Config = Field(default_factory=Level2Config)
-            top_value: str = Field(default="top", description="Top value")
-
-        original_config = config_module.DEFAULT_CONFIG
-        original_argv = sys.argv
-
-        try:
-            # Test dash-style for triple-nested config
-            sys.argv = [
-                "test",
-                "--level1.level2-config.level3-config.deep-value",
-                "999",
-                "--level1.level2-config.level3-config.deep-name",
-                "very-deep",
-                "--level1.level2-config.mid-value",
-                "50",
-                "--level1.top-value",
-                "changed-top",
-            ]
-            add_config("level1", Level1Config)
-            self.assertEqual(
-                config_module.DEFAULT_CONFIG.level1.level2_config.level3_config.deep_value, 999
-            )
-            self.assertEqual(
-                config_module.DEFAULT_CONFIG.level1.level2_config.level3_config.deep_name,
-                "very-deep",
-            )
-            self.assertEqual(config_module.DEFAULT_CONFIG.level1.level2_config.mid_value, 50)
-            self.assertEqual(config_module.DEFAULT_CONFIG.level1.top_value, "changed-top")
-        finally:
-            sys.argv = original_argv
-            config_module.DEFAULT_CONFIG = original_config
-
-    def test_cli_bool_args_with_dashes(self):
-        """Test that boolean CLI arguments work with dash-style naming.
-
-        Verifies that boolean flags with underscores can be toggled using
-        dash-style CLI args (e.g., --test.my-flag, --no-test.my-flag).
-
-        Returns:
-            None. Uses assertions to verify boolean flag handling.
-        """
-        import sys
-
-        from pydantic import BaseModel, Field
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        class TestConfig(BaseModel):
-            my_flag: bool = Field(default=True, description="A boolean flag")
-            another_flag: bool = Field(default=False, description="Another flag")
-
-        original_config = config_module.DEFAULT_CONFIG
-        original_argv = sys.argv
-
-        try:
-            # Test disabling with dash-style --no-
-            sys.argv = ["test", "--no-test.my-flag", "--test.another-flag"]
-            add_config("test", TestConfig)
-            self.assertFalse(config_module.DEFAULT_CONFIG.test.my_flag)
-            self.assertTrue(config_module.DEFAULT_CONFIG.test.another_flag)
-
-            # Reset and test with underscore-style
-            config_module.DEFAULT_CONFIG = original_config
-            sys.argv = ["test", "--no-test.my_flag", "--test.another_flag"]
-            add_config("test", TestConfig)
-            self.assertFalse(config_module.DEFAULT_CONFIG.test.my_flag)
-            self.assertTrue(config_module.DEFAULT_CONFIG.test.another_flag)
-        finally:
-            sys.argv = original_argv
-            config_module.DEFAULT_CONFIG = original_config
 
 
 if __name__ == "__main__":

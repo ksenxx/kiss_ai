@@ -44,7 +44,7 @@ Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
 
 ## Trajectory Format
 
-Trajectories are automatically saved by KISSAgent instances to the artifacts directory. Each trajectory file contains:
+Trajectories are automatically saved by KISSAgent instances as YAML files in the artifacts directory. Each trajectory file contains:
 
 - Complete message history with token usage and budget information
 - Tool calls and results
@@ -52,7 +52,7 @@ Trajectories are automatically saved by KISSAgent instances to the artifacts dir
 - Timestamps
 - Budget and token usage statistics
 
-The visualizer reads these YAML trajectory files and displays them in an interactive web interface.
+The visualizer reads these YAML trajectory files and displays them in an interactive web interface. Note: the `get_trajectory()` method on agent instances returns the trajectory as a JSON string (for programmatic use), while the saved files on disk are in YAML format.
 
 ## Authors
 

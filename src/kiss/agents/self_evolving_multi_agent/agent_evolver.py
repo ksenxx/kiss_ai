@@ -23,7 +23,7 @@ from typing import Any
 import kiss.agents.kiss_evolve.config  # noqa: F401
 import kiss.agents.self_evolving_multi_agent.config  # noqa: F401
 from kiss.agents.kiss_evolve.kiss_evolve import CodeVariant, KISSEvolve
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.utils import get_config_value
 from kiss.docker.docker_manager import DockerManager
@@ -871,8 +871,8 @@ class AgentEvolver:
             focus_on_efficiency: If True, optimize for fewer LLM calls;
                 otherwise optimize for accuracy.
         """
-        cfg = DEFAULT_CONFIG.self_evolving_multi_agent  # type: ignore[attr-defined]
-        evolve_cfg = DEFAULT_CONFIG.kiss_evolve  # type: ignore[attr-defined]
+        cfg = config_module.DEFAULT_CONFIG.self_evolving_multi_agent  # type: ignore[attr-defined]
+        evolve_cfg = config_module.DEFAULT_CONFIG.kiss_evolve  # type: ignore[attr-defined]
 
         self.model_name = get_config_value(model_name, cfg, "evolver_model")
         self.population_size = evolve_cfg.population_size
@@ -960,7 +960,8 @@ Focus on: task understanding, error recovery, code verification, long-horizon ta
             None.
         """
         if path is None:
-            output_dir = Path(DEFAULT_CONFIG.agent.artifact_dir) / "self_evolving_multi_agent"
+            artifact_dir = config_module.DEFAULT_CONFIG.agent.artifact_dir
+            output_dir = Path(artifact_dir) / "self_evolving_multi_agent"
             output_dir.mkdir(parents=True, exist_ok=True)
             path = str(output_dir / self.agent_file_path)
         Path(path).write_text(variant.code)
@@ -989,7 +990,7 @@ def main() -> None:
     Returns:
         None.
     """
-    config = DEFAULT_CONFIG.self_evolving_multi_agent  # type: ignore[attr-defined]
+    config = config_module.DEFAULT_CONFIG.self_evolving_multi_agent  # type: ignore[attr-defined]
 
     evolver = AgentEvolver(
         package_name="kiss.agents.self_evolving_multi_agent",

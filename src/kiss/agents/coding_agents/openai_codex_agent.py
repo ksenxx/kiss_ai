@@ -13,15 +13,16 @@ import anyio
 from agents import Agent, Runner, function_tool
 from agents.tool import WebSearchTool
 
-from kiss.core import DEFAULT_CONFIG
+from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.formatter import Formatter
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import is_subpath, resolve_path
 
-DEFAULT_CODEX_MODEL = "gpt-5.2-codex"
+DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 
 SANDBOX_READ_ONLY = "read-only"
 SANDBOX_WORKSPACE_WRITE = "workspace-write"
@@ -130,7 +131,8 @@ class OpenAICodexAgent(Base):
         def run_shell(command: str, timeout: int = 60) -> str:
             """Execute shell command. Args: command - shell command, timeout - seconds."""
             output = self.useful_tools.Bash(
-                command=command, description=f"Executing: {command[:50]}..."
+                command=command, description=f"Executing: {command[:50]}...",
+                timeout_seconds=float(timeout),
             )
             return output
 
@@ -148,45 +150,57 @@ class OpenAICodexAgent(Base):
                     self.total_tokens_used += getattr(response.usage, "input_tokens", 0)
                     self.total_tokens_used += getattr(response.usage, "output_tokens", 0)
 
-    def _process_run_result(self, result: Any, timestamp: int) -> None:
+    def _process_run_result(self, result: Any, timestamp: int) -> list[str]:
         """Process run result and update state.
 
         Args:
             result: The run result from the agent.
             timestamp: Unix timestamp for the result.
+
+        Returns:
+            list[str]: Text chunks suitable for streaming to token_callback.
         """
+        streamed_texts: list[str] = []
         for item in result.new_items:
             self.step_count += 1
             item_type = type(item).__name__
 
             if item_type == "MessageOutputItem":
-                content = str(item.raw_item.content[0].text if item.raw_item.content else "")
-                self._formatter.print_label_and_value("MESSAGE", f"{content[:200]}...")
-                self._add_message("model", content, timestamp)
+                raw = getattr(item, "raw_item", None)
+                raw_content = getattr(raw, "content", None)
+                text = str(getattr(raw_content[0], "text", "")) if raw_content else ""
+                self._formatter.print_label_and_value("MESSAGE", f"{text[:200]}...")
+                self._add_message("model", text, timestamp)
+                if text:
+                    streamed_texts.append(text)
             elif item_type == "ToolCallItem":
                 name = getattr(item.raw_item, "name", "unknown")
                 self._formatter.print_label_and_value("TOOL", name)
                 self._add_message("model", f"Tool: {name}", timestamp)
             elif item_type == "ToolCallOutputItem":
-                self._formatter.print_label_and_value("TOOL RESULT", f"{str(item.output)[:200]}...")
-                self._add_message("user", str(item.output), timestamp)
+                output = str(item.output)
+                self._formatter.print_label_and_value("TOOL RESULT", f"{output[:200]}...")
+                self._add_message("user", output, timestamp)
+                streamed_texts.append(output)
             elif item_type == "ReasoningItem":
                 self._formatter.print_label_and_value("REASONING", "...")
                 self._add_message("model", "Reasoning", timestamp)
 
         self._update_token_usage(result)
+        return streamed_texts
 
     def run(
         self,
         model_name: str = DEFAULT_CODEX_MODEL,
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
-        max_steps: int = DEFAULT_CONFIG.agent.max_steps,
-        max_budget: float = DEFAULT_CONFIG.agent.max_agent_budget,
-        base_dir: str = str(Path(DEFAULT_CONFIG.agent.artifact_dir).resolve() / "codex_workdir"),
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
         formatter: Formatter | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> str | None:
         """Run the OpenAI Codex agent for a given task.
 
@@ -200,15 +214,32 @@ class OpenAICodexAgent(Base):
                 paths are resolved if they are not absolute.
             readable_paths: The paths from which the agent is allowed to read from.
             writable_paths: The paths to which the agent is allowed to write to.
+            token_callback: Optional async callback invoked with each streamed text token.
+                Default is None.
 
         Returns:
             The result of the task.
         """
+        cfg = config_module.DEFAULT_CONFIG.agent
+        actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
+        actual_max_budget = max_budget if max_budget is not None else cfg.max_agent_budget
+        actual_base_dir = (
+            base_dir
+            if base_dir is not None
+            else str(Path(cfg.artifact_dir).resolve() / "codex_workdir")
+        )
         self._reset(
-            model_name, readable_paths, writable_paths, base_dir, max_steps, max_budget, formatter
+            model_name,
+            readable_paths,
+            writable_paths,
+            actual_base_dir,
+            actual_max_steps,
+            actual_max_budget,
+            formatter,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
+        self.token_callback = token_callback
 
         async def _run_async() -> str | None:
             task = prompt_template.format(**(arguments or {}))
@@ -224,13 +255,17 @@ class OpenAICodexAgent(Base):
 
             self._formatter.print_label_and_value("CODEX AGENT", f"Starting in {self.base_dir}")
             self._formatter.print_label_and_value(
-                "CODEX AGENT", f"Model: {model_name}, Max turns: {max_steps}"
+                "CODEX AGENT", f"Model: {model_name}, Max turns: {actual_max_steps}"
             )
 
             try:
-                result = await Runner.run(agent, input=task, max_turns=max_steps)
+                result = await Runner.run(agent, input=task, max_turns=actual_max_steps)
                 timestamp = int(time.time())
-                self._process_run_result(result, timestamp)
+                streamed_texts = self._process_run_result(result, timestamp)
+
+                if self.token_callback:
+                    for text in streamed_texts:
+                        await self.token_callback(text)
 
                 final_result = str(result.final_output) if result.final_output else None
                 self._formatter.print_label_and_value(
@@ -254,7 +289,7 @@ def main() -> None:
     task_description = """
     can you write, test, and optimize a fibonacci function in Python that is efficient and correct?
     """
-    result = agent.run(model_name="gpt-5.2-codex", prompt_template=task_description)
+    result = agent.run(model_name="gpt-5.3-codex", prompt_template=task_description)
 
     if result:
         print("\n--- FINAL AGENT REPORT ---")
