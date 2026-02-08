@@ -387,7 +387,7 @@ uv sync --group claude --group dev
 | `claude` | Core + Anthropic | core + anthropic |
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
-| `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk |
+| `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk, uvicorn, starlette |
 | `docker` | Docker integration | docker, types-docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
@@ -535,6 +535,37 @@ result = agent.run(
 if result:
     print(f"Result: {result}")
 ```
+
+**Browser Streaming Output:**
+
+The Claude Coding Agent supports real-time browser streaming. When `use_browser=True` is set, a local server is started and a browser window opens automatically to display live output with a modern dark-themed UI:
+
+```python
+from kiss.agents.coding_agents import ClaudeCodingAgent
+
+agent = ClaudeCodingAgent(name="My Agent", use_browser=True)
+result = agent.run(
+    model_name="claude-sonnet-4-5",
+    prompt_template="Write a fibonacci function with tests"
+)
+```
+
+When running `claude_coding_agent.py` directly, browser output is enabled by default:
+
+```bash
+uv run python -m kiss.agents.coding_agents.claude_coding_agent
+```
+
+The browser interface features scrollable panels for thinking blocks, text output, tool calls with syntax highlighting, tool results, and a final result summary with cost/token stats.
+
+**Key Features:**
+
+- **Real-time Streaming**: Uses `include_partial_messages` for live streaming of assistant text, thinking, and tool calls as they happen
+- **Extended Thinking**: Supports Claude's extended thinking with configurable `max_thinking_tokens` for improved reasoning
+- **Rich Console Output**: Uses a dedicated `ConsolePrinter` for formatted terminal output with syntax-highlighted tool calls, thinking blocks, and result panels
+- **Browser Streaming Output**: Uses `BrowserPrinter` with uvicorn/starlette SSE server for real-time browser display with modern UI, scrollable panels, and syntax highlighting
+- **Path Access Control**: Enforces read/write permissions on file system paths
+- **Budget & Token Tracking**: Automatic cost and token usage monitoring
 
 **Built-in Tools Available:**
 
@@ -782,6 +813,8 @@ kiss/
 │   │   │   ├── kiss_coding_agent.py       # Multi-agent coding system with orchestration
 │   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
 │   │   │   ├── claude_coding_agent.py     # Claude Coding Agent using Claude Agent SDK
+│   │   │   ├── print_to_console.py        # Console output formatting for Claude Coding Agent
+│   │   │   ├── print_to_browser.py        # Browser SSE streaming for Claude Coding Agent
 │   │   │   ├── gemini_cli_agent.py        # Gemini CLI Agent using Google ADK
 │   │   │   └── openai_codex_agent.py      # OpenAI Codex Agent using OpenAI Agents SDK
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
@@ -858,6 +891,8 @@ kiss/
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents
 │   │   ├── test_compact_formatter.py        # Tests for CompactFormatter
+│   │   ├── test_print_to_console.py         # Tests for ConsolePrinter (Claude Coding Agent output)
+│   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter (Claude Coding Agent browser output)
 │   │   ├── test_search_web.py
 │   │   └── test_useful_tools.py
 │   ├── py.typed          # PEP 561 marker for type checking

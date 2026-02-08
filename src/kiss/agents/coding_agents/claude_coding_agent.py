@@ -17,14 +17,18 @@ from claude_agent_sdk import (
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
+    SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
     query,
 )
+from claude_agent_sdk.types import StreamEvent
 
+from kiss.agents.coding_agents.print_to_console import ConsolePrinter
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.models.model import TokenCallback
@@ -50,13 +54,15 @@ WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 class ClaudeCodingAgent(Base):
     """Claude Coding Agent using the Claude Agent SDK."""
 
-    def __init__(self, name: str) -> None:
-        """Initialize a ClaudeCodingAgent instance.
-
-        Args:
-            name: The name identifier for the agent.
-        """
+    def __init__(self, name: str, use_browser: bool = False) -> None:
         super().__init__(name)
+        self._use_browser = use_browser
+        if use_browser:
+            from kiss.agents.coding_agents.print_to_browser import BrowserPrinter
+
+            self._printer: Any = BrowserPrinter()
+        else:
+            self._printer = ConsolePrinter()
 
     def _reset(
         self,
@@ -67,16 +73,6 @@ class ClaudeCodingAgent(Base):
         max_steps: int,
         max_budget: float,
     ) -> None:
-        """Reset the agent's state for a new run.
-
-        Args:
-            model_name: The model name to use.
-            readable_paths: Paths allowed for reading.
-            writable_paths: Paths allowed for writing.
-            base_dir: Base directory for path resolution.
-            max_steps: Maximum steps allowed.
-            max_budget: Maximum budget in USD.
-        """
         self._init_run_state(model_name, BUILTIN_TOOLS)
         Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = str(Path(base_dir).resolve())
@@ -92,15 +88,6 @@ class ClaudeCodingAgent(Base):
     def _check_path_permission(
         self, path_str: str, allowed_paths: list[Path]
     ) -> PermissionResultAllow | PermissionResultDeny:
-        """Check if path is allowed, return appropriate permission result.
-
-        Args:
-            path_str: The path to check.
-            allowed_paths: List of allowed path prefixes.
-
-        Returns:
-            PermissionResultAllow if path is allowed, PermissionResultDeny otherwise.
-        """
         if is_subpath(Path(path_str).resolve(), allowed_paths):
             return PermissionResultAllow(behavior="allow")
         return PermissionResultDeny(
@@ -113,16 +100,6 @@ class ClaudeCodingAgent(Base):
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        """Handle permission requests for tool calls.
-
-        Args:
-            tool_name: The name of the tool being called.
-            tool_input: The input arguments for the tool.
-            context: The permission context from the SDK.
-
-        Returns:
-            PermissionResultAllow or PermissionResultDeny based on path access.
-        """
         path_str = tool_input.get("file_path") or tool_input.get("path")
         if not path_str:
             return PermissionResultAllow(behavior="allow")
@@ -134,73 +111,38 @@ class ClaudeCodingAgent(Base):
         return PermissionResultAllow(behavior="allow")
 
     def _update_token_usage(self, message: Any) -> None:
-        """Update token counts from message usage.
-
-        Args:
-            message: A message object with optional usage attribute.
-        """
         if hasattr(message, "usage") and message.usage:
             self.total_tokens_used += getattr(message.usage, "input_tokens", 0)
             self.total_tokens_used += getattr(message.usage, "output_tokens", 0)
 
-    def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> str:
-        """Process assistant message and update state.
-
-        Args:
-            message: The assistant message from the Claude SDK.
-            timestamp: Unix timestamp for the message.
-
-        Returns:
-            str: The extracted thought text (for streaming to token_callback).
-        """
+    def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> None:
         self.step_count += 1
         self._update_token_usage(message)
 
         thought, tool_call = "", ""
         for block in message.content:
             if isinstance(block, ToolUseBlock):
-                args_str = ", ".join(f"{k}={repr(v)[:50]}" for k, v in block.input.items())
+                args_str = ", ".join(f"{k}={repr(v)}" for k, v in block.input.items())
                 tool_call += f"```python\n{block.name}({args_str})\n```\n"
-                print(f"[TOOL] {block.name}({args_str})")
             elif isinstance(block, TextBlock):
                 thought += block.text
-                print(f"[THOUGHT] {block.text}")
+            elif isinstance(block, ThinkingBlock):
+                thought += block.thinking
 
         self._add_message("model", thought + tool_call, timestamp)
-        return thought
 
     def _process_user_message(self, message: UserMessage, timestamp: int) -> str:
-        """Process user message (tool results) and update state.
-
-        Args:
-            message: The user message containing tool results.
-            timestamp: Unix timestamp for the message.
-
-        Returns:
-            str: The concatenated tool result text (for streaming to token_callback).
-        """
         result = ""
         for block in message.content:
             if isinstance(block, ToolResultBlock):
                 content = block.content if isinstance(block.content, str) else str(block.content)
-                display = f"{content[:100]}...{content[-100:]}" if len(content) > 200 else content
                 status = "Tool Call Failed" if block.is_error else "Tool Call Succeeded"
-                print(f"[TOOL RESULT] {status}: {display.replace(chr(10), chr(92) + 'n')}")
                 result += f"{status}\n{content}\n"
 
         self._add_message("user", result, timestamp)
         return result
 
     def _process_result_message(self, message: ResultMessage, timestamp: int) -> str | None:
-        """Process final result message and return the result.
-
-        Args:
-            message: The final result message from the Claude SDK.
-            timestamp: Unix timestamp for the message.
-
-        Returns:
-            str | None: The final result string.
-        """
         self._update_token_usage(message)
         if hasattr(message, "total_cost_usd") and message.total_cost_usd:
             cost = message.total_cost_usd
@@ -236,7 +178,6 @@ class ClaudeCodingAgent(Base):
             readable_paths: The paths from which the agent is allowed to read from.
             writable_paths: The paths to which the agent is allowed to write to.
             token_callback: Optional async callback invoked with each streamed text token.
-                Default is None.
 
         Returns:
             The result of the task.
@@ -262,6 +203,9 @@ class ClaudeCodingAgent(Base):
         self.token_callback = token_callback
 
         async def _run_async() -> str | None:
+            if self._use_browser:
+                self._printer.start()
+            self._printer.reset()
             options = ClaudeAgentOptions(
                 model=model_name,
                 system_prompt=CODING_INSTRUCTIONS,
@@ -269,6 +213,8 @@ class ClaudeCodingAgent(Base):
                 permission_mode="default",
                 allowed_tools=BUILTIN_TOOLS,
                 cwd=str(self.base_dir),
+                include_partial_messages=True,
+                max_thinking_tokens=10000,
             )
 
             async def prompt_stream() -> AsyncGenerator[dict[str, Any]]:
@@ -279,27 +225,44 @@ class ClaudeCodingAgent(Base):
             final_result: str | None = None
 
             async for message in query(prompt=prompt_stream(), options=options):
-                text = ""
-                if isinstance(message, AssistantMessage):
-                    text = self._process_assistant_message(message, timestamp)
+                if isinstance(message, StreamEvent):
+                    text = self._printer.print_stream_event(message)
+                    if self.token_callback and text:
+                        await self.token_callback(text)
+                elif isinstance(message, SystemMessage):
+                    self._printer.print_message(message)
+                elif isinstance(message, AssistantMessage):
+                    self._process_assistant_message(message, timestamp)
+                    timestamp = int(time.time())
                 elif isinstance(message, UserMessage):
+                    self._printer.print_message(message)
                     text = self._process_user_message(message, timestamp)
+                    if self.token_callback and text:
+                        await self.token_callback(text)
+                    timestamp = int(time.time())
                 elif isinstance(message, ResultMessage):
                     final_result = self._process_result_message(message, timestamp)
-                    text = final_result or ""
-                if self.token_callback and text:
-                    await self.token_callback(text)
-                timestamp = int(time.time())
+                    self._printer.print_message(
+                        message,
+                        step_count=self.step_count,
+                        budget_used=self.budget_used,
+                        total_tokens_used=self.total_tokens_used,
+                    )
+                    if self.token_callback and final_result:
+                        await self.token_callback(final_result)
+                    timestamp = int(time.time())
 
             self._save()
+            if self._use_browser:
+                self._printer.stop()
             return final_result
 
         return anyio.run(_run_async)
 
 
 def main() -> None:
-    """Example usage of the ClaudeCodingAgent."""
-    agent = ClaudeCodingAgent("Example agent")
+    """Example usage of the ClaudeCodingAgent with browser output."""
+    agent = ClaudeCodingAgent("Example agent", use_browser=True)
     task_description = """
     can you write, test, and optimize a fibonacci function in Python that is efficient and correct?
     """

@@ -46,6 +46,8 @@ dependencies = [
     "claude-agent-sdk>=0.1.19",
     "openai-agents>=0.0.3",
     "google-adk>=0.1.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.38.0",
 ]
 
 [build-system]
@@ -107,10 +109,12 @@ gemini = [
     "google-genai>=0.30.0",
 ]
 
-# Claude Coding Agent (uses claude-agent-sdk)
+# Claude Coding Agent (uses claude-agent-sdk + browser streaming)
 claude-coding-agent = [
     {include-group = "claude"},
     "claude-agent-sdk>=0.1.19",
+    "uvicorn>=0.30.0",
+    "starlette>=0.38.0",
 ]
 
 docker = [
