@@ -241,6 +241,43 @@ class TestParseBashCommandPaths:
         _, writable = parse_bash_command_paths(cmd)
         assert str(temp_test_dir / "out.sh") in writable
 
+    def test_and_separator(self, temp_test_dir):
+        dir_path = temp_test_dir / "newdir"
+        readable, writable = parse_bash_command_paths(f"mkdir -p {dir_path} && ls {dir_path}")
+        assert str(dir_path) in writable
+        assert str(dir_path) in readable
+        # && itself should NOT appear as a path
+        for p in writable + readable:
+            assert "&&" not in p
+
+    def test_or_separator(self, temp_test_dir):
+        file1 = temp_test_dir / "a.txt"
+        file2 = temp_test_dir / "b.txt"
+        readable, writable = parse_bash_command_paths(f"cat {file1} || cat {file2}")
+        assert str(file1) in readable
+        assert str(file2) in readable
+        for p in readable:
+            assert "||" not in p
+
+    def test_semicolon_separator(self, temp_test_dir):
+        dir_path = temp_test_dir / "mydir"
+        file_path = temp_test_dir / "out.txt"
+        readable, writable = parse_bash_command_paths(
+            f"mkdir {dir_path}; echo hello > {file_path}"
+        )
+        assert str(dir_path) in writable
+        assert str(file_path) in writable
+
+    def test_chained_and_operators(self, temp_test_dir):
+        d = temp_test_dir / "target"
+        readable, writable = parse_bash_command_paths(
+            f"mkdir -p {d} && touch {d}/file.txt && ls {d}"
+        )
+        assert str(d) in writable
+        assert str(d) in readable
+        for p in writable + readable:
+            assert "&&" not in p
+
 
 class TestStripHeredocs:
     def test_strips_single_quoted_heredoc(self):
@@ -427,6 +464,58 @@ class TestUsefulTools:
         tools.MultiEdit(file_path=str(test_file), old_string="Alpha Beta", new_string="Alpha Omega")
         assert "Alpha Omega" in test_file.read_text()
         assert "Alpha Beta" not in test_file.read_text()
+
+
+class TestRead:
+    def test_read_allowed_file(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        test_file = readable_dir / "test.txt"
+        test_file.write_text("line1\nline2\nline3\n")
+        result = tools.Read(str(test_file))
+        assert result == "line1\nline2\nline3\n"
+
+    def test_read_access_denied(self, tools_sandbox):
+        tools, _, _, test_dir = tools_sandbox
+        outside_file = test_dir / "outside.txt"
+        outside_file.write_text("secret")
+        result = tools.Read(str(outside_file))
+        assert "Error: Access denied" in result
+
+    def test_read_nonexistent_file(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        result = tools.Read(str(readable_dir / "missing.txt"))
+        assert "Error:" in result
+
+    def test_read_max_lines_truncation(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        test_file = readable_dir / "big.txt"
+        test_file.write_text("\n".join(f"line{i}" for i in range(100)))
+        result = tools.Read(str(test_file), max_lines=10)
+        assert "[truncated: 90 more lines]" in result
+        assert "line9" in result
+        assert "line10" not in result
+
+    def test_read_empty_file(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        test_file = readable_dir / "empty.txt"
+        test_file.write_text("")
+        result = tools.Read(str(test_file))
+        assert result == ""
+
+    def test_read_writable_dir_denied(self, tools_sandbox):
+        tools, _, writable_dir, _ = tools_sandbox
+        test_file = writable_dir / "file.txt"
+        test_file.write_text("content")
+        result = tools.Read(str(test_file))
+        assert "Error: Access denied" in result
+
+    def test_read_within_max_lines(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        test_file = readable_dir / "small.txt"
+        test_file.write_text("a\nb\nc\n")
+        result = tools.Read(str(test_file), max_lines=100)
+        assert result == "a\nb\nc\n"
+        assert "[truncated" not in result
 
 
 class TestFetchUrl:

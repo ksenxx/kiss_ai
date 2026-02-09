@@ -106,7 +106,7 @@ from kiss.agents.create_and_optimize_agent.improver_agent import (
 from kiss.core import config as config_module
 from kiss.core.utils import get_config_value
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
 
 
 class EvolverPhase(Enum):
@@ -509,7 +509,8 @@ class AgentEvolver:
         """
         print(f"Evaluating variant {variant.id}...")
 
-        temp_dir = Path(tempfile.mkdtemp(prefix=f"eval_variant_{variant.id}_"))
+        temp_dir = self.work_dir / f"eval_variant_{variant.id}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
         old_cwd = os.getcwd()
         os.chdir(temp_dir)
         module_name: str | None = None
@@ -540,7 +541,6 @@ class AgentEvolver:
                     sys.modules.pop(module_name, None)
         finally:
             os.chdir(old_cwd)
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _update_pareto_frontier(self, new_variant: AgentVariant) -> bool:
         """Update the Pareto frontier with a new variant.
@@ -678,8 +678,6 @@ class AgentEvolver:
         )
 
         if not success or new_report is None:
-            if Path(work_dir).exists():
-                shutil.rmtree(work_dir)
             return None
 
         new_report.save(report_path)
@@ -721,8 +719,6 @@ class AgentEvolver:
         )
 
         if not success or new_report is None:
-            if Path(work_dir).exists():
-                shutil.rmtree(work_dir)
             return None
 
         new_report.save(report_path)
@@ -788,6 +784,7 @@ class AgentEvolver:
             The best AgentVariant from the final Pareto frontier (lowest score).
         """
         print(f"Starting AgentEvolver with {self.max_generations} generations")
+        print(f"Work directory: {self.work_dir}")
         print(f"Max frontier size: {self.max_frontier_size}, Task: {self.task_description}")
         while len(self.pareto_frontier) < self.initial_frontier_size:
             variant_id = self._next_variant_id()
@@ -1018,25 +1015,25 @@ class AgentEvolver:
 
 # Very long task description for testing
 LONG_RUNNING_TASK = """
-> **Task:** Create a robust database engine using only Bash scripts.
->
-> **Requirements:**
-> 1.  Create a script named `db.sh` that interacts with a local data folder.
-> 2.  **Basic Operations:** Implement `db.sh set <key> <value>`,
->     `db.sh get <key>`, and `db.sh delete <key>`.
-> 3.  **Atomicity:** Implement transaction support.
->     *   `db.sh begin` starts a session where writes are cached but not visible to others.
->     *   `db.sh commit` atomically applies all cached changes.
->     *   `db.sh rollback` discards pending changes.
-> 4.  **Concurrency:** Ensure that if two different terminal windows run `db.sh`
->     simultaneously, the data is never corrupted (use `mkdir`-based mutex locking).
-> 5.  **Validation:** Write a test script `test_stress.sh` that launches 10
->     concurrent processes to spam the database, verifying no data is lost.
->
-> **Constraints:**
-> *   No external database tools (no sqlite3, no python).
-> *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
-> *   Safe: Operate entirely within a `./my_db` directory.
+ **Task:** Create a robust database engine using only Bash scripts.
+
+ **Requirements:**
+ 1.  Create a script named `db.sh` that interacts with a local data folder.
+ 2.  **Basic Operations:** Implement `db.sh set <key> <value>`,
+     `db.sh get <key>`, and `db.sh delete <key>`.
+ 3.  **Atomicity:** Implement transaction support.
+     *   `db.sh begin` starts a session where writes are cached but not visible to others.
+     *   `db.sh commit` atomically applies all cached changes.
+     *   `db.sh rollback` discards pending changes.
+ 4.  **Concurrency:** Ensure that if two different terminal windows run `db.sh`
+     simultaneously, the data is never corrupted (use `mkdir`-based mutex locking).
+ 5.  **Validation:** Write a test script `test_stress.sh` that launches 10
+     concurrent processes to spam the database, verifying no data is lost.
+
+ **Constraints:**
+ *   No external database tools (no sqlite3, no python).
+ *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
+ *   Safe: Operate entirely within a `./my_db` directory.
 """
 
 

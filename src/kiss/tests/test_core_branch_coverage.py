@@ -314,7 +314,7 @@ class TestConfigClasses:
         assert docker.client_shared_path == "/testbed"
 
         relentless = RelentlessCodingAgentConfig()
-        assert relentless.orchestrator_model_name == "claude-sonnet-4-5"
+        assert relentless.subtasker_model_name == "claude-opus-4-6"
         assert relentless.max_steps == 200
 
         kiss = KISSCodingAgentConfig()

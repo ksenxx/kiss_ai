@@ -82,13 +82,13 @@ class TestCoreConfigCLI(CLITestBase):
 
     def test_nested_relentless_coding_agent_config(self):
         args = [
-            "--agent.relentless-coding-agent.orchestrator-model-name", "gpt-4",
+            "--agent.relentless-coding-agent.subtasker-model-name", "gpt-4",
             "--agent.relentless-coding-agent.max-steps", "300",
             "--agent.relentless-coding-agent.max-budget", "50.0",
             "--agent.relentless-coding-agent.trials", "100",
         ]
         expected = {
-            "agent.relentless_coding_agent.orchestrator_model_name": "gpt-4",
+            "agent.relentless_coding_agent.subtasker_model_name": "gpt-4",
             "agent.relentless_coding_agent.max_steps": 300,
             "agent.relentless_coding_agent.max_budget": 50.0,
             "agent.relentless_coding_agent.trials": 100,

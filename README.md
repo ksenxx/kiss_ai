@@ -1,6 +1,6 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.10
+**Version:** 0.1.11
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Evolutionary Framework
 
@@ -163,7 +163,7 @@ print(f"Metrics: {best_variant.metrics}")
 - **Multi-Objective Optimization**: Optimizes for flexible metrics (e.g., success, token usage, execution time, cost)
 - **Pareto Frontier Maintenance**: Keeps track of all non-dominated solutions
 - **Evolutionary Operations**: Supports mutation (improving one variant) and crossover (combining ideas from two variants)
-- **Uses RelentlessCodingAgent**: Leverages the relentless multi-agent coding system for agent improvement
+- **Uses RelentlessCodingAgent**: Leverages the relentless single-agent coding system with auto-continuation for agent improvement
 - **Automatic Pruning**: Removes dominated variants to manage memory and storage
 - **Lineage Tracking**: Records parent relationships and improvement history
 - **Progress Callbacks**: Optional `progress_callback` for tracking optimization progress, building UIs, or logging
@@ -173,7 +173,7 @@ For usage examples, API reference, and configuration options, please see the [Ag
 
 ## 💪 Using Relentless Coding Agent
 
-For very very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task:
+For very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task using a single-agent architecture with smart continuation:
 
 ```python
 from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
@@ -185,8 +185,7 @@ result = agent.run(
         Create a Python script that reads a CSV file,
         filters rows where age > 18, and writes to a new file.
     """,
-    orchestrator_model_name="gpt-4o",
-    subtasker_model_name="gpt-4o-mini",
+    subtasker_model_name="claude-sonnet-4-5",
     work_dir="./workspace",
     max_steps=200,
     trials=200
@@ -201,7 +200,7 @@ You can optionally run bash commands inside a Docker container for isolation:
 ```python
 from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 
-agent = RelentlessCodingAgent(name="Dockered Relenetless Coding Agent")
+agent = RelentlessCodingAgent(name="Dockered Relentless Coding Agent")
 
 result = agent.run(
     prompt_template="""
@@ -217,15 +216,17 @@ print(f"Result: {result}")
 
 **Key Features:**
 
-- **Multi-Agent Architecture**: Orchestrator delegates tasks to executor sub-agents for parallel task handling
-- **Token-Aware Continuation**: Agents signal when 50% of tokens are used, providing structured summaries with "Work Done" and "Work to Do Next" sections for seamless handoff (💡 new idea)
-- **Cost-Saving Guidance**: Orchestrator avoids unnecessary sub-agent delegation when it can handle work directly
-- **Retry with Context**: Failed tasks automatically retry with previous summary appended to the prompt
+- **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple trials, automatically continuing where it left off via structured JSON progress tracking (💡 new idea)
+- **Structured Progress Tracking**: Each trial reports completed and remaining tasks in JSON format (done/next items), which is deduplicated and passed to subsequent trials along with a scan of existing files in the work directory
+- **Adaptive Step Thresholds**: Step limits per trial scale based on trial number and progress, with conservative early trials and more steps for trials showing good progress
+- **Efficiency Rules**: Built-in prompt instructions enforce step minimization, batching, and immediate completion when tests pass
+- **Output Truncation**: Long tool outputs are automatically truncated to keep context manageable
+- **Retry with Context**: Failed trials automatically pass structured progress summaries and file listings to the next trial
 - **Configurable Trials**: Set high trial counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
 - **Path Access Control**: Enforces read/write permissions on file system paths
-- **Built-in Tools**: Bash, Edit, and MultiEdit tools for file operations
-- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-agents
+- **Built-in Tools**: Bash, Read, and Edit tools for file operations
+- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all trials
 
 ## 🎨 Output Formatting
 
@@ -305,7 +306,7 @@ The visualizer provides:
 KISS is a lightweight, yet powerful, multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
 
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
-- **Multi-Agent Coding System**: Relentless Coding Agent with orchestration, sub-agent management, and automatic task hand-off (💡 new idea)
+- **Relentless Coding Agent**: Single-agent coding system with smart auto-continuation for infinite tasks (💡 new idea)
 - **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier (💡 new idea)
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
@@ -386,7 +387,7 @@ uv sync --group claude --group dev
 | `claude` | Core + Anthropic | core + anthropic |
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
-| `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk |
+| `claude-coding-agent` | Claude Coding Agent | claude + claude-agent-sdk, uvicorn, starlette |
 | `docker` | Docker integration | docker, types-docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
@@ -534,6 +535,37 @@ result = agent.run(
 if result:
     print(f"Result: {result}")
 ```
+
+**Browser Streaming Output:**
+
+The Claude Coding Agent supports real-time browser streaming. When `use_browser=True` is set, a local server is started and a browser window opens automatically to display live output with a modern dark-themed UI:
+
+```python
+from kiss.agents.coding_agents import ClaudeCodingAgent
+
+agent = ClaudeCodingAgent(name="My Agent", use_browser=True)
+result = agent.run(
+    model_name="claude-sonnet-4-5",
+    prompt_template="Write a fibonacci function with tests"
+)
+```
+
+When running `claude_coding_agent.py` directly, browser output is enabled by default:
+
+```bash
+uv run python -m kiss.agents.coding_agents.claude_coding_agent
+```
+
+The browser interface features scrollable panels for thinking blocks, text output, tool calls with syntax highlighting, tool results, and a final result summary with cost/token stats.
+
+**Key Features:**
+
+- **Real-time Streaming**: Uses `include_partial_messages` for live streaming of assistant text, thinking, and tool calls as they happen
+- **Extended Thinking**: Supports Claude's extended thinking with configurable `max_thinking_tokens` for improved reasoning
+- **Rich Console Output**: Uses a dedicated `ConsolePrinter` for formatted terminal output with syntax-highlighted tool calls, thinking blocks, and result panels
+- **Browser Streaming Output**: Uses `BrowserPrinter` with uvicorn/starlette SSE server for real-time browser display with modern UI, scrollable panels, and syntax highlighting
+- **Path Access Control**: Enforces read/write permissions on file system paths
+- **Budget & Token Tracking**: Automatic cost and token usage monitoring
 
 **Built-in Tools Available:**
 
@@ -779,8 +811,11 @@ kiss/
 │   │   │   └── README.md           # KISSEvolve documentation
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── kiss_coding_agent.py       # Multi-agent coding system with orchestration
-│   │   │   ├── relentless_coding_agent.py # Simplified multi-agent system without prompt refinement
+│   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
 │   │   │   ├── claude_coding_agent.py     # Claude Coding Agent using Claude Agent SDK
+│   │   │   ├── optimize_agent.py          # Pareto frontier agent optimizer
+│   │   │   ├── print_to_console.py        # Console output formatting for Claude Coding Agent
+│   │   │   ├── print_to_browser.py        # Browser SSE streaming for Claude Coding Agent
 │   │   │   ├── gemini_cli_agent.py        # Gemini CLI Agent using Google ADK
 │   │   │   └── openai_codex_agent.py      # OpenAI Codex Agent using OpenAI Agents SDK
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
@@ -799,7 +834,7 @@ kiss/
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
-│   │   ├── useful_tools.py    # UsefulTools class with path-restricted bash execution, search_web, fetch_url
+│   │   ├── useful_tools.py    # UsefulTools class with path-restricted Read, Write, Bash, Edit, search_web, fetch_url
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface with TokenCallback streaming support
 │   │       ├── gemini_model.py    # Gemini model implementation
@@ -857,6 +892,8 @@ kiss/
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents
 │   │   ├── test_compact_formatter.py        # Tests for CompactFormatter
+│   │   ├── test_print_to_console.py         # Tests for ConsolePrinter (Claude Coding Agent output)
+│   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter (Claude Coding Agent browser output)
 │   │   ├── test_search_web.py
 │   │   └── test_useful_tools.py
 │   ├── py.typed          # PEP 561 marker for type checking
@@ -906,10 +943,9 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `use_web`: Automatically add web browsing and search tool if enabled (default: True)
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.relentless_coding_agent`:
-  - `orchestrator_model_name`: Model for orchestration (default: "claude-sonnet-4-5")
-  - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-6")
-  - `trials`: Number of retry attempts for failed subtasks (default: 200)
-  - `max_steps`: Maximum steps per agent (default: 200)
+  - `subtasker_model_name`: Model for task execution (default: "claude-opus-4-6")
+  - `trials`: Number of continuation attempts (default: 200)
+  - `max_steps`: Maximum steps per trial (default: 200)
   - `max_budget`: Maximum budget in USD (default: 200.0)
 - **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.kiss_coding_agent`:
   - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-sonnet-4-5")

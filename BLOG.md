@@ -207,7 +207,14 @@ gepa = GEPA(
     population_size=8
 )
 
-best_prompt = gepa.optimize(arguments={"task": "solve problems"})
+best = gepa.optimize(
+    train_examples=[
+        {"task": "Write a poem"},
+        {"task": "Explain physics"},
+        {"task": "Create a recipe"},
+        {"task": "Describe ML"},
+    ]
+)
 # Your prompt just evolved beyond human-crafted limits
 ```
 
@@ -232,6 +239,7 @@ KISSEvolve does the rest:
 
 ```python
 from kiss.agents.kiss_evolve.kiss_evolve import KISSEvolve
+from kiss.core.kiss_agent import KISSAgent
 
 # Start with O(n²) bubble sort
 initial_code = """
@@ -244,10 +252,15 @@ def sort_array(arr):
     return arr
 """
 
+def code_agent_wrapper(model_name: str, prompt_template: str, arguments: dict) -> str:
+    agent = KISSAgent(name="Code Optimizer")
+    return agent.run(model_name=model_name, prompt_template=prompt_template, arguments=arguments)
+
 optimizer = KISSEvolve(
+    code_agent_wrapper=code_agent_wrapper,
     initial_code=initial_code,
     evaluation_fn=measure_performance,
-    model_names=[("gemni-3-flash-preview", 0.5),("gemni-3-pro-preview", 0.5)],
+    model_names=[("gemini-3-flash-preview", 0.5), ("gemini-3-pro-preview", 0.5)],
     population_size=8,
     max_generations=10
 )

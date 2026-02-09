@@ -104,13 +104,22 @@ class CompactFormatter(Formatter):
             return ""
         role = message.get("role", "unknown")
         content = message.get("content", "")
-        thought, tool_desc, usage = _extract_parts(content)
 
+        if role == "user":
+            flat = " ".join(content.split()) if content else ""
+            prefix = f"[{role}]: {flat}" if flat else f"[{role}]: (empty)"
+            return prefix[:LINE_LENGTH] + "..." if len(prefix) > LINE_LENGTH else prefix
+
+        thought, tool_desc, usage = _extract_parts(content)
         lines: list[str] = []
         if thought:
-            lines.append(f"[{role}]: {thought}"[:LINE_LENGTH] + "...")
+            prefix = f"[{role}]: {thought}"
+            if len(prefix) > LINE_LENGTH:
+                lines.append(prefix[:LINE_LENGTH] + "...")
+            else:
+                lines.append(prefix)
         if tool_desc:
-            lines.append(f"[action]:{tool_desc}")
+            lines.append(f"[action]: {tool_desc}")
         if usage:
             lines.append(usage)
         return "\n".join(lines) if lines else f"[{role}]: (empty)"

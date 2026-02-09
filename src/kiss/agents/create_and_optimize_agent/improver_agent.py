@@ -19,7 +19,7 @@ from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAg
 from kiss.core import config as config_module
 from kiss.core.compact_formatter import CompactFormatter
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
 
 AGENT_EVOLVER_PROMPT_PART1 = """
 You have to optimize an AI agent for long-running complex tasks.
@@ -32,9 +32,8 @@ You have to optimize an AI agent for long-running complex tasks.
     then look at code under the src folder as required.
     {kiss_folder}/src/kiss/core/models/model_info.py contains information
     about different LLM models and their context lengths, costs, etc.
-    {kiss_folder}/src/kiss/agents/coding_agents/relentless_coding_agent.py  and
-    {kiss_folder}/src/kiss/agents/self_evolving_multi_agent/multi_agent.py
-    have examples of long-running complex task agents.
+    Use {kiss_folder}/src/kiss/agents/coding_agents/relentless_coding_agent.py
+    as the initial agent implementation.
   - The agent **MUST** be tested for success on the given task description.
 """
 

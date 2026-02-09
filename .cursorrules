@@ -3,6 +3,11 @@ description:
 alwaysApply: true
 ---
 
+---
+description: 
+alwaysApply: true
+---
+
 ## Code Style Guidelines
 - Write simple, readable code with minimal indirection
 - Avoid unnecessary object attributes and local variables
@@ -10,6 +15,7 @@ alwaysApply: true
 - Each function should do one thing well
 - Use clear, descriptive names
 - NO need to write documentations or comments unless absolutely necessary
+- NO bloat or overengineering of the system
 
 ## Testing Requirements
 - Run lint and typecheckers and fix any lint and typecheck errors
@@ -37,7 +43,7 @@ alwaysApply: true
 - Find examples of similar implementations
 - Understand existing code in the project
 
-## After you have implemented the task, aggresively and carefully simplify and clean up the code
+## After you have implemented a task, aggresively and carefully simplify and clean up the code
  - Remove unnessary object/struct attributes, variables, config variables
  - Avoid object/struct attribute redirections
  - Remove unnessary conditional checks

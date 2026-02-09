@@ -146,7 +146,8 @@ class TestFormatMessage(unittest.TestCase):
     def test_full_message(self) -> None:
         result = self.formatter.format_message(_msg(FULL_CONTENT))
         assert "[model]: I need to list the files." in result
-        assert "[action]:list project files" in result
+        assert "..." not in result.split("\n")[0]
+        assert "[action]: list project files" in result
         assert "[usage]:" in result
 
     def test_empty_and_missing(self) -> None:
@@ -161,11 +162,26 @@ class TestFormatMessage(unittest.TestCase):
 
     def test_user_message(self) -> None:
         result = self.formatter.format_message(_msg("Tool output.", "user"))
-        assert result == "[user]: Tool output...."
+        assert result == "[user]: Tool output."
+
+    def test_user_message_truncated(self) -> None:
+        long = "x" * 200
+        result = self.formatter.format_message(_msg(long, "user"))
+        assert result.endswith("...") and len(result) <= LINE_LENGTH + len("...")
+
+    def test_user_message_no_extract_parts(self) -> None:
+        content = "result.\n```python\nBash(description='sneaky')\n```\n"
+        result = self.formatter.format_message(_msg(content, "user"))
+        assert "[action]:" not in result
+        assert result.startswith("[user]: ")
+
+    def test_user_message_empty(self) -> None:
+        assert self.formatter.format_message(_msg("", "user")) == "[user]: (empty)"
 
     def test_format_messages(self) -> None:
         result = self.formatter.format_messages([_msg("Hello"), _msg("World", "user")])
-        assert "[model]: Hello..." in result and "[user]: World..." in result
+        assert "[model]: Hello" in result and "[user]: World" in result
+        assert "..." not in result
 
     def test_format_messages_not_verbose(self) -> None:
         config_module.DEFAULT_CONFIG.agent.verbose = False

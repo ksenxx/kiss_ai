@@ -406,12 +406,16 @@ class TestGEPAProgressCallbackWithMutation(unittest.TestCase):
     """
 
     def test_callback_receives_reflection_and_mutation_gating(self):
-        """Test that callback receives reflection and mutation gating phases."""
-        agent_wrapper, _ = create_agent_wrapper_with_expected()
+        """Test that callback receives reflection and mutation gating phases.
 
-        initial_prompt = "Problem: {p}\nCall finish with result."
+        Uses a deterministic agent wrapper for dev/val evaluations to avoid
+        flaky LLM calls. Only the reflection step (reflection_model) uses a
+        real LLM call, which is the behavior being tested.
+        """
+        agent_wrapper, _ = create_deterministic_agent_wrapper()
 
-        # Minimal examples to reduce LLM calls
+        initial_prompt = "Problem: {p}"
+
         train_examples = [
             {"p": "1+1", "_expected": "2"},
             {"p": "2+2", "_expected": "4"},

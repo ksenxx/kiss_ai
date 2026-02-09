@@ -77,10 +77,6 @@ class AgentConfig(BaseModel):
 
 
 class RelentlessCodingAgentConfig(BaseModel):
-    orchestrator_model_name: str = Field(
-        default="claude-sonnet-4-5",
-        description="LLM model to use for Relentless Coding Agent",
-    )
     subtasker_model_name: str = Field(
         default="claude-opus-4-6",
         description="LLM model to use for subtask generation and execution",

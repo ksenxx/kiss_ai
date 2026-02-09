@@ -3,8 +3,9 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Multi-agent coding system with orchestration, and sub-agents using KISSAgent."""
+"""Single-agent coding system with smart continuation for long tasks."""
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -23,125 +24,58 @@ from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
 from kiss.docker.docker_manager import DockerManager
 
-IMPORTANT_INSTRUCTIONS = """
- - If you have used 50% of your max_tokens, call 'finish' with 'success'
-   set to False and 'summary' set to a summary of the work you have done
-   so far and the work you need to do next.
- - Be specific about what you have done and what you need to do next.
- - The summary should have two sections: starting with the headers "Work Done"
-   and "Work to Do Next".
- - The summary should be compact, but should be detailed enough so that next
-   agent does not repeat the work you have already done.
- - The summary should have the same format as the user's original
-   prompt.  The summary should have information about testing, checking, and debugging
-   the code you have written so that next agent don't have to repeat testing,
-   checking, and debugging the code.
- - The user's original prompt and the summary will be given to a new agent
-   to continue the task.
- - DO NOT REPEAT any work (such as testing, checking, debuggings, verifications, etc.)
-   that your predecessor agent has already done.
-"""
-
-ORCHESTRATOR_PROMPT = """
-## Task
-
+TASK_PROMPT = """# Task
 {task_description}
-
 
 {coding_instructions}
 
- - perform_subtask() will return a yaml encoded dictionary containing the keys
-   'success' (boolean) and 'summary' (string).
- - Call perform_subtask() to perform a sub-task.
- - DO NOT call perform_subtask() if you can do the sub-task yourself while
-   keeping the cost down.
- - You MUST save time and cost of performing a task.
+# Working Directory
+All files MUST be created in: {work_dir}
+Use relative paths from this directory. Do NOT use /tmp, ~, or any other location.
 
-# Important Instructions
-{important_instructions}
-"""
+# Rules
+- BATCH: Combine related commands in ONE Bash() call
+- SUCCESS: Call finish(success=True, summary="done") when complete
+- At step {step_threshold}: finish(success=False,
+  summary={{"done":["task A", "task B"], "next":["task C"]}})
+  IMPORTANT: Use specific, actionable items in "done" and "next"
+  (e.g., "created db.sh with set/get/delete", not "started work")
+{previous_progress}"""
 
-TASKING_PROMPT = """
-# Main Task
+CONTINUATION_PROMPT = """# CONTINUATION - Pick up where the previous trial left off
+DO NOT recreate files that already exist. Build on existing work efficiently.
 
-{task_description}
+{existing_files}
 
-# Sub-task
+{progress_text}
 
-You need to perform the following sub-task:
+# Continuation Strategy:
+1. FIRST: Quickly verify existing state (ls key files, check if tests pass)
+2. Identify what still needs to be done from "Remaining Tasks"
+3. Continue implementation or fix any issues found
+4. Report progress in structured format at checkpoint
 
-Name: {subtask_name}
-Description: {description}
-
-{coding_instructions}
-
-# Important Instructions
-{important_instructions}
-"""
+EFFICIENCY: Don't redo completed work. Focus on remaining tasks."""
 
 
 def finish(success: bool, summary: str) -> str:
-    """Finishes the current agent execution with success or failure, and summary.
+    """Finish execution with status and summary.
 
     Args:
-        success: True if the task was successful, False otherwise.
-        summary: Summary message to return.
-
-    Returns:
-        str: A YAML encoded dictionary containing 'success' and 'summary' keys.
+        success: True if successful, False otherwise.
+        summary: Summary of work done and remaining work (JSON for continuation).
     """
-    result_str = yaml.dump(
-        {
-            "success": success,
-            "summary": summary,
-        },
-        indent=2,
-        sort_keys=False,
-    )
-    return result_str
-
-
-class SubTask:
-    """Represents a sub-task in the multi-agent coding system."""
-
-    task_counter: int = 0
-
-    def __init__(self, name: str, description: str) -> None:
-        """Initialize a SubTask instance.
-
-        Args:
-            name: The name of the sub-task.
-            description: A description of what the sub-task should accomplish.
-        """
-        self.id = SubTask.task_counter
-        self.name = name
-        self.description = description
-        SubTask.task_counter += 1
-
-    def __repr__(self) -> str:
-        return f"SubTask(id={self.id}, name={self.name}, description={self.description})"
+    return yaml.dump({"success": success, "summary": summary}, indent=2, sort_keys=False)
 
 
 class RelentlessCodingAgent(Base):
-    """Relentless coding agent that uses a multi-agent architecture to solve tasks.
-
-    This agent implements a multi-agent architecture:
-    1. Orchestrator: Manages execution and keeps steps below 30
-    2. Executor sub-agents: Handle specific sub-tasks efficiently
-    3. Token optimization: Uses smaller models for simple tasks
-    """
+    """Single-agent coding system with auto-continuation for infinite tasks."""
 
     def __init__(self, name: str) -> None:
-        """Initialize a RelentlessCodingAgent instance.
-
-        Args:
-            name: The name identifier for the agent.
-        """
         super().__init__(name)
 
     def _reset(
         self,
-        orchestrator_model_name: str | None,
         subtasker_model_name: str | None,
         trials: int | None,
         max_steps: int | None,
@@ -152,21 +86,6 @@ class RelentlessCodingAgent(Base):
         writable_paths: list[str] | None,
         docker_image: str | None,
     ) -> None:
-        """Reset the agent's state for a new run.
-
-        Args:
-            orchestrator_model_name: The model name for the orchestrator agent.
-            subtasker_model_name: The model name for subtask execution.
-            trials: Number of continuation attempts for incomplete tasks.
-            max_steps: Maximum steps per agent execution.
-            max_budget: Maximum budget in USD.
-            work_dir: Working directory for the agent.
-            base_dir: Base directory for path resolution.
-            readable_paths: Paths allowed for reading.
-            writable_paths: Paths allowed for writing.
-            docker_image: Optional Docker image for sandboxed execution.
-        """
-        # Apply config defaults for None values
         global_cfg = config_module.DEFAULT_CONFIG
         cfg = global_cfg.agent.relentless_coding_agent
         default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
@@ -187,160 +106,186 @@ class RelentlessCodingAgent(Base):
         self.trials = trials if trials is not None else cfg.trials
         self.max_steps = max_steps if max_steps is not None else cfg.max_steps
         self.max_budget = max_budget if max_budget is not None else cfg.max_budget
-        self.orchestrator_model_name = (
-            orchestrator_model_name
-            if orchestrator_model_name is not None
-            else cfg.orchestrator_model_name
-        )
         self.subtasker_model_name = (
             subtasker_model_name
             if subtasker_model_name is not None
             else cfg.subtasker_model_name
         )
-        self.max_tokens = max(
-            get_max_context_length(self.orchestrator_model_name),
-            get_max_context_length(self.subtasker_model_name),
-        )
+        self.max_tokens = get_max_context_length(self.subtasker_model_name)
 
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
 
-        # Initialize Docker manager if docker_image is provided
         self.docker_image = docker_image
         self.docker_manager: DockerManager | None = None
 
-        # Initialize UsefulTools instance
         self.useful_tools = UsefulTools(
             base_dir=self.base_dir,
             readable_paths=[str(p) for p in self.readable_paths],
             writable_paths=[str(p) for p in self.writable_paths],
         )
 
-
     def _docker_bash(self, command: str, description: str) -> str:
-        """Execute a bash command in the Docker container.
-
-        Args:
-            command: The bash command to run.
-            description: A brief description of the command.
-
-        Returns:
-            str: The output of the command.
-
-        Raises:
-            KISSError: If Docker manager is not initialized.
-        """
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
         return self.docker_manager.run_bash_command(command, description)
 
-    def perform_task(
-        self,
+    def _parse_progress(self, summary: str) -> tuple[list[str], list[str]]:
+        """Parse structured progress from summary string with validation."""
+        try:
+            progress = json.loads(summary)
+            done = progress.get("done", [])
+            next_items = progress.get("next", [])
+            # Validate and clean items
+            if isinstance(done, list) and isinstance(next_items, list):
+                # Deduplicate while preserving order
+                done = list(dict.fromkeys(str(d)[:200] for d in done if d))
+                next_items = list(dict.fromkeys(str(n)[:200] for n in next_items if n))
+                return done, next_items
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+        return [], []
+
+    def _scan_work_dir(self) -> str:
+        try:
+            files = []
+            for p in sorted(Path(self.work_dir).rglob("*")):
+                if p.is_file():
+                    rel = p.relative_to(self.work_dir)
+                    size = p.stat().st_size
+                    files.append(f"  {rel} ({size}B)")
+            if files:
+                return "## Existing Files\n" + "\n".join(files[:50])
+        except Exception:
+            pass
+        return ""
+
+    def _format_progress(self, done_items: list[str], next_items: list[str]) -> str:
+        if not done_items:
+            return ""
+        progress = "## Completed Work\n"
+        for item in done_items[-10:]:
+            progress += f"- {item}\n"
+        if next_items:
+            progress += "\n## Remaining Tasks\n"
+            for item in next_items[:5]:
+                progress += f"- {item}\n"
+        return progress
+
+    def _calculate_step_threshold(self, trial: int, done_count: int) -> int:
+        """Calculate adaptive step threshold based on progress and trial number."""
+        base = self.max_steps - 3
+
+        # For 10K+ steps: use exponential scaling with progress tracking
+        if trial == 0:
+            # First trial: conservative to establish baseline
+            return max(6, base // 2)
+        elif trial < 3:
+            # Early trials: moderate step count, focus on establishing workflow
+            return max(8, int(base * 0.65))
+        elif done_count > trial * 2:
+            # Good progress: allow more steps per trial
+            return max(10, int(base * 0.85))
+        elif done_count > trial:
+            # Steady progress: moderate steps
+            return max(9, int(base * 0.75))
+        else:
+            # Slow progress: reduce steps to force more frequent checkpoints
+            return max(7, int(base * 0.55))
+
+    def _build_continuation_section(
+        self, done_items: list[str], next_items: list[str]
     ) -> str:
-        """Perform the main task by orchestrating sub-tasks.
+        existing_files = self._scan_work_dir()
+        progress_text = self._format_progress(done_items, next_items)
+        return "\n\n" + CONTINUATION_PROMPT.format(
+            existing_files=existing_files,
+            progress_text=progress_text,
+        )
 
-        Returns:
-            str: A YAML encoded dictionary containing 'success' (boolean)
-                and 'summary' (string) keys.
-
-        Raises:
-            KISSError: If the task fails after all continuation trials.
-        """
+    def perform_task(self) -> str:
         self.formatter.print_status(f"Executing task: {self.task_description}")
-        executor = KISSAgent(f"{self.name} Main")
-        task_prompt_template = ORCHESTRATOR_PROMPT
-        for _ in range(self.trials):
-            result = executor.run(
-                model_name=self.orchestrator_model_name,
-                prompt_template=task_prompt_template,
-                arguments={
-                    "task_description": self.task_description,
-                    "coding_instructions": CODING_INSTRUCTIONS,
-                    "important_instructions": IMPORTANT_INSTRUCTIONS,
-                },
-                tools=[finish, self.perform_subtask],
-                max_steps=self.max_steps,
-                max_budget=self.max_budget,
-                formatter=self.formatter,
-                token_callback=self.token_callback,
-            )
-            self.budget_used += executor.budget_used  # type: ignore
-            self.total_tokens_used += executor.total_tokens_used  # type: ignore
-
-            ret = yaml.safe_load(result)
-            payload = ret if isinstance(ret, dict) else {}
-            success = payload.get("success", False)
-            if not success:
-                task_prompt_template = ORCHESTRATOR_PROMPT + "\n\n" + payload.get("summary", "")
-                continue
-            return result
-        raise KISSError(f"Task {self.task_description} failed after {self.trials} trials")
-
-    def perform_subtask(
-        self,
-        subtask_name: str,
-        description: str,
-    ) -> str:
-        """Perform a sub-task.
-
-        Args:
-            subtask_name: Name of the sub-task.
-            description: Description of the sub-task.
-
-        Returns:
-            str: A YAML encoded dictionary containing 'success' (boolean)
-                and 'summary' (string) keys.
-
-        Raises:
-            KISSError: If the subtask fails after all retry trials.
-        """
-        subtask = SubTask(subtask_name, description)
-        self.formatter.print_status(f"Executing subtask: {subtask.name}")
-        executor = KISSAgent(f"{self.name} Executor {subtask.name}")
-        task_prompt_template = TASKING_PROMPT
-
-        # Use Docker bash if Docker is enabled, otherwise use local bash
         bash_tool = self._docker_bash if self.docker_manager else self.useful_tools.Bash
 
-        for _ in range(self.trials):
-            result = executor.run(
-                model_name=self.subtasker_model_name,
-                prompt_template=task_prompt_template,
-                arguments={
-                    "task_description": self.task_description,
-                    "subtask_name": subtask.name,
-                    "description": subtask.description,
-                    "coding_instructions": CODING_INSTRUCTIONS,
-                    "important_instructions": IMPORTANT_INSTRUCTIONS,
-                },
-                tools=[
-                    finish,
-                    bash_tool,
-                    self.useful_tools.Edit,
-                    self.useful_tools.MultiEdit,
-                ],
-                max_steps=self.max_steps,
-                max_budget=self.max_budget,
-                formatter=self.formatter,
-                token_callback=self.token_callback,
-            )
+        done_items: list[str] = []
+        next_items: list[str] = []
+
+        for trial in range(self.trials):
+            step_threshold = self._calculate_step_threshold(trial, len(done_items))
+
+            if trial == 0:
+                progress_section = ""
+            else:
+                progress_section = self._build_continuation_section(
+                    done_items, next_items
+                )
+
+            executor = KISSAgent(f"{self.name} Trial-{trial}")
+            try:
+                result = executor.run(
+                    model_name=self.subtasker_model_name,
+                    prompt_template=TASK_PROMPT,
+                    arguments={
+                        "task_description": self.task_description,
+                        "coding_instructions": CODING_INSTRUCTIONS,
+                        "previous_progress": progress_section,
+                        "step_threshold": str(step_threshold),
+                        "work_dir": self.work_dir,
+                    },
+                    tools=[
+                        finish,
+                        bash_tool,
+                        self.useful_tools.Read,
+                        self.useful_tools.Edit,
+                    ],
+                    max_steps=self.max_steps,
+                    max_budget=self.max_budget,
+                    formatter=self.formatter,
+                    token_callback=self.token_callback,
+                )
+            except KISSError:
+                last_msgs = executor.messages[-2:] if hasattr(executor, "messages") else []
+                context = " ".join(
+                    str(m.get("content", ""))[:100]
+                    for m in last_msgs
+                    if isinstance(m, dict)
+                )[:200]
+                result = yaml.dump(
+                    {
+                        "success": False,
+                        "summary": json.dumps(
+                            {"done": done_items, "next": [f"Continue: {context}"]}
+                        ),
+                    },
+                    sort_keys=False,
+                )
+
             self.budget_used += executor.budget_used  # type: ignore
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
 
             ret = yaml.safe_load(result)
             payload = ret if isinstance(ret, dict) else {}
-            success = payload.get("success", False)
-            if not success:
-                task_prompt_template = TASKING_PROMPT + "\n\n" + payload.get("summary", "")
-                continue
-            return result
-        raise KISSError(f"Subtask {subtask.name} failed after {self.trials} trials")
+
+            if payload.get("success", False):
+                return result
+
+            summary = payload.get("summary", "")
+            trial_done, trial_next = self._parse_progress(summary)
+
+            if trial_done:
+                for item in trial_done:
+                    if item not in done_items:
+                        done_items.append(item)
+                next_items = trial_next
+            elif summary and summary not in done_items:
+                done_items.append(summary[:100])
+
+        raise KISSError(f"Task failed after {self.trials} trials")
 
     def run(
         self,
         prompt_template: str,
         arguments: dict[str, str] | None = None,
-        orchestrator_model_name: str | None = None,
         subtasker_model_name: str | None = None,
         trials: int | None = None,
         max_steps: int | None = None,
@@ -353,34 +298,26 @@ class RelentlessCodingAgent(Base):
         formatter: Formatter | None = None,
         token_callback: TokenCallback | None = None,
     ) -> str:
-        """Run the multi-agent coding system.
+        """Run the coding agent.
 
         Args:
-            orchestrator_model_name: The name of the orchestrator model to use.
-            subtasker_model_name: The name of the subtasker model to use.
-            trials: The number of trials to attempt for each subtask.
             prompt_template: The prompt template for the task.
             arguments: The arguments for the task.
-            tools: Optional tools to provide to executor agents.
-            max_steps: The maximum number of total steps per agent.
+            subtasker_model_name: The name of the model to use.
+            trials: The number of continuation trials for long tasks.
+            max_steps: The maximum number of steps per trial.
             max_budget: The maximum budget in USD to spend.
             work_dir: The working directory for the agent.
             base_dir: The base directory for expressing readable and writable paths.
             readable_paths: The paths from which the agent is allowed to read.
-                relative paths in readable_paths is resolved against base_dir.
-            writable_paths: The paths to which the agent is allowed to write
-                relative paths in writable_paths is resolved against base_dir.
+            writable_paths: The paths to which the agent is allowed to write.
             docker_image: Optional Docker image name to run bash commands in a container.
-                If provided, bash commands will be executed inside the Docker container.
-                Example: "ubuntu:latest", "python:3.11-slim".
-            formatter: The formatter to use for the agent. If None, the default formatter is used.
+            formatter: The formatter to use for the agent.
             token_callback: Optional async callback invoked with each streamed text token.
-                Default is None.
         Returns:
             The result of the task.
         """
         self._reset(
-            orchestrator_model_name,
             subtasker_model_name,
             trials,
             max_steps,
@@ -397,7 +334,6 @@ class RelentlessCodingAgent(Base):
         self.formatter = formatter or CompactFormatter()
         self.token_callback = token_callback
 
-        # Run with Docker container if docker_image is provided
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
                 self.docker_manager = docker_mgr
@@ -410,10 +346,7 @@ class RelentlessCodingAgent(Base):
 
 
 def main() -> None:
-    """Example usage of the RelentlessCodingAgent.
-
-    Creates a multi-agent system and runs a sample CSV processing task.
-    """
+    import time as time_mod
 
     agent = RelentlessCodingAgent("Example Multi-Agent")
     task_description = """
@@ -436,25 +369,33 @@ def main() -> None:
  *   No external database tools (no sqlite3, no python).
  *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
  *   Safe: Operate entirely within a `./my_db` directory.
+ *   No README or docs.
     """
 
     work_dir = tempfile.mkdtemp()
     old_cwd = os.getcwd()
+    start_time = time_mod.time()
     try:
         os.chdir(work_dir)
         result = agent.run(
             prompt_template=task_description,
+            subtasker_model_name="claude-sonnet-4-5",
+            max_steps=25,
             work_dir=work_dir,
             formatter=CompactFormatter()
         )
     finally:
         os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
 
     agent.formatter.print_status("FINAL RESULT:")
-    result = yaml.safe_load(result)
-    agent.formatter.print_status("Completed successfully: " + str(result["success"]))
-    agent.formatter.print_status(result["summary"])
+    result_data = yaml.safe_load(result)
+    agent.formatter.print_status("Completed successfully: " + str(result_data["success"]))
+    agent.formatter.print_status(result_data["summary"])
     agent.formatter.print_status("Work directory was: " + work_dir)
+    agent.formatter.print_status(f"Time: {elapsed:.1f}s")
+    agent.formatter.print_status(f"Cost: ${agent.budget_used:.4f}")
+    agent.formatter.print_status(f"Total tokens: {agent.total_tokens_used}")
 
 
 if __name__ == "__main__":

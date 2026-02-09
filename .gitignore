@@ -23,4 +23,4 @@ artifacts/
 .claude
 .ipynb_checkpoints
 .cursorrules
-.cursorrules
+.coverage_per_test

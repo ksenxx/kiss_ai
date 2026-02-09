@@ -590,8 +590,11 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
         # Strip heredoc content so body text is not parsed as arguments
         command = _strip_heredocs(command)
 
-        # Handle pipes - split into sub-commands
-        pipe_parts = command.split("|")
+        # Split by command separators (&&, ||, ;) first, then by pipes
+        segments = re.split(r"&&|\|\||;", command)
+        pipe_parts: list[str] = []
+        for seg in segments:
+            pipe_parts.extend(seg.split("|"))
 
         for part in pipe_parts:
             part = part.strip()
@@ -649,6 +652,11 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                             and not tokens[i].startswith("/")
                         ):
                             i += 1
+                        continue
+
+                    # Skip shell operators (safety net for any unsplit separators)
+                    if token in ("&&", "||", ";", "&"):
+                        i += 1
                         continue
 
                     # Skip redirect operators and their targets
@@ -755,6 +763,53 @@ class UsefulTools:
         self.base_dir = str(Path(base_dir).resolve())
         self.readable_paths = [Path(p).resolve() for p in readable_paths or []]
         self.writable_paths = [Path(p).resolve() for p in writable_paths or []]
+
+    def Read(  # noqa: N802
+        self,
+        file_path: str,
+        max_lines: int = 2000,
+    ) -> str:
+        """Read file contents.
+
+        Args:
+            file_path: Absolute path to file.
+            max_lines: Maximum number of lines to return.
+        """
+        resolved = Path(file_path).resolve()
+        if not is_subpath(resolved, self.readable_paths):
+            return f"Error: Access denied for reading {file_path}"
+        try:
+            text = resolved.read_text()
+            lines = text.splitlines(keepends=True)
+            if len(lines) > max_lines:
+                return (
+                    "".join(lines[:max_lines])
+                    + f"\n[truncated: {len(lines) - max_lines} more lines]"
+                )
+            return text
+        except Exception as e:
+            return f"Error: {e}"
+
+    def Write(  # noqa: N802
+        self,
+        file_path: str,
+        content: str,
+    ) -> str:
+        """Write content to a file, creating it if it doesn't exist or overwriting if it does.
+
+        Args:
+            file_path: Path to the file to write.
+            content: The full content to write to the file.
+        """
+        resolved = Path(file_path).resolve()
+        if not is_subpath(resolved, self.writable_paths):
+            return f"Error: Access denied for writing to {file_path}"
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(content)
+            return f"Successfully wrote {len(content)} bytes to {file_path}"
+        except Exception as e:
+            return f"Error: {e}"
 
     def Edit(  # noqa: N802
         self,

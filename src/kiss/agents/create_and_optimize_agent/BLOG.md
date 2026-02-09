@@ -84,7 +84,7 @@ Under the hood, Agent Evolver is elegantly simple:
                                                       │
                                                       ▼
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│            Initial Agent Creation (KISS Coding Agent) + Web Search for Best Practices                    │
+│         Initial Agent Creation (Relentless Coding Agent) + Web Search for Best Practices                 │
 └─────────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
                                                       │
                                                       ▼
