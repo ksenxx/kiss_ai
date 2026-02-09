@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console, Group
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
@@ -269,6 +270,18 @@ class ConsolePrinter:
                 border_style="bold green",
                 padding=(1, 2),
             )
+        )
+
+    def print_usage_info(self, usage_info: str) -> None:
+        self._flush_newline()
+        md = Markdown(usage_info.strip())
+        self._console.print(
+            Panel(
+                md,
+                border_style="dim",
+                padding=(0, 1),
+            ),
+            style="dim",
         )
 
     def _print_tool_results(self, message: Any) -> None:

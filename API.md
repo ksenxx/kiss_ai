@@ -562,9 +562,8 @@ ClaudeCodingAgent(name: str, use_browser: bool = False)
 ```python
 def run(
     self,
-    prompt_template: str = "",
     model_name: str | None = None,
-    subtasker_model_name: str | None = None,
+    prompt_template: str = "",
     arguments: dict[str, str] | None = None,
     max_steps: int | None = None,
     max_budget: float | None = None,
@@ -572,9 +571,7 @@ def run(
     work_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    token_callback: TokenCallback | None = None,
-    formatter: Any = None,
-    trials: int | None = None,
+    use_browser: bool = True,
     max_thinking_tokens: int = 1024,
 ) -> str
 ```
@@ -583,19 +580,16 @@ Run the Claude coding agent for a given task.
 
 **Parameters:**
 
+- `model_name` (str | None): The name of the model to use (e.g., "claude-sonnet-4-5"). Default is None (uses "claude-sonnet-4-5").
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution. Default is "".
-- `model_name` (str | None): The name of the model to use (e.g., "claude-sonnet-4-5"). Default is None (falls back to `subtasker_model_name`, then "claude-sonnet-4-5").
-- `subtasker_model_name` (str | None): Alternative parameter name for the model. Used as fallback if `model_name` is None. Default is None.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
 - `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `work_dir` if provided, otherwise `{artifact_dir}/claude_workdir`).
-- `work_dir` (str | None): Alternative parameter name for the working directory. Takes precedence over `base_dir`. Default is None.
+- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None.
+- `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/claude_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for Read/Grep/Glob.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for Write/Edit/MultiEdit.
-- `token_callback` (TokenCallback | None): Optional async callback invoked with streaming text deltas (from `StreamEvent` messages), tool result text, and the final result. When set, the agent streams assistant text and thinking content in real-time as they are generated. Default is None.
-- `formatter` (Any): Unused parameter for interface compatibility with other coding agents. Default is None.
-- `trials` (int | None): Unused parameter for interface compatibility with other coding agents. Default is None.
+- `use_browser` (bool): If True, starts a local uvicorn server and opens a browser window for real-time streaming output. If False, uses `ConsolePrinter` for terminal output. Default is True.
 - `max_thinking_tokens` (int): Maximum tokens for Claude's extended thinking. Default is 1024.
 
 **Returns:**
@@ -638,10 +632,10 @@ Returns the agent's conversation trajectory as a JSON string.
 - **Rich Console Output**: Uses a dedicated `ConsolePrinter` class (`print_to_console.py`) for formatted terminal output with Rich panels for tool calls (syntax-highlighted file content, diffs, commands), thinking block delimiters, streaming text deltas, and result summaries with cost/token stats.
 - **Browser Streaming Output**: When `use_browser=True`, uses `BrowserPrinter` class (`print_to_browser.py`) which starts a local uvicorn/starlette SSE server and opens a browser window for real-time streaming with a modern dark-themed UI featuring scrollable panels for thinking, text, tool calls with syntax highlighting, tool results, and a final result card with stats.
 - **Message Processing**: Handles five message types from the Claude Agent SDK query stream:
-  - `StreamEvent`: Partial streaming deltas (text, thinking, tool input JSON) — printed in real-time and forwarded to `token_callback`
+  - `StreamEvent`: Partial streaming deltas (text, thinking, tool input JSON) — printed in real-time
   - `SystemMessage`: System-level messages (e.g., tool output) — printed to console
   - `AssistantMessage`: Complete assistant turns with `TextBlock`, `ThinkingBlock`, and `ToolUseBlock` content — recorded in trajectory
-  - `UserMessage`: Tool result blocks — printed and forwarded to `token_callback`
+  - `UserMessage`: Tool result blocks — printed to console
   - `ResultMessage`: Final result with cost tracking — printed with stats panel
 
 ### Available Built-in Tools
@@ -2603,13 +2597,14 @@ When passed to `KISSAgent.run()`, the callback receives:
 
 ### Coding Agent Integration
 
-All coding agents support `token_callback` in their `run()` methods:
+The following coding agents support `token_callback` in their `run()` methods:
 
 - **KISSCodingAgent**: The callback is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents. Streamed content includes model response tokens and tool output from all sub-agents.
 - **RelentlessCodingAgent**: The callback is passed through to the underlying `KISSAgent.run()` calls for each trial. Streamed content includes model response tokens and tool output from all trials.
-- **ClaudeCodingAgent**: The callback receives real-time streaming text deltas from `StreamEvent` messages (assistant text, thinking content) as they are generated, tool result text from `UserMessage` processing, and the final result string. Streaming is enabled via `include_partial_messages=True` in the Claude Agent SDK options.
 - **GeminiCliAgent**: The callback receives text content and tool response text from ADK events after all events are collected and processed.
 - **OpenAICodexAgent**: The callback receives message text and tool output text from the Agents SDK run result after processing.
+
+**Note:** `ClaudeCodingAgent` does not support `token_callback`. It uses its own streaming output via `ConsolePrinter` (terminal) or `BrowserPrinter` (browser UI).
 
 ### Example
 

@@ -153,6 +153,12 @@ main{flex:1;overflow-y:auto;padding:20px 28px;scroll-behavior:smooth}
   font-size:13px;color:var(--dim);font-family:'SF Mono','Fira Code',monospace;
   white-space:pre-wrap;word-break:break-word;padding:2px 0;
 }
+.usage{
+  border:1px solid var(--border);border-radius:6px;margin:8px 0;
+  padding:6px 12px;background:var(--surface);
+  font-size:9px;color:var(--dim);line-height:1.5;opacity:0.7;
+  white-space:pre-wrap;word-break:break-word;
+}
 footer{
   background:var(--surface);border-top:1px solid var(--border);
   padding:8px 28px;font-size:12px;color:var(--dim);flex-shrink:0;
@@ -264,6 +270,9 @@ src.onmessage=function(e){
         +'Cost: <b>'+(ev.cost||'N/A')+'</b>'
         +'</div></div><div class="rc-body">'+esc(ev.text||'(no result)')+'</div>';
       O.appendChild(c);break}
+    case'usage_info':{
+      const u=document.createElement('div');u.className='ev usage';
+      u.textContent=ev.text||'';O.appendChild(u);break}
     case'done':
       D.classList.add('done');ST.textContent='Completed';src.close();break;
   }
@@ -502,6 +511,9 @@ class BrowserPrinter:
                 "cost": cost_str,
             }
         )
+
+    def print_usage_info(self, usage_info: str) -> None:
+        self._broadcast({"type": "usage_info", "text": usage_info.strip()})
 
     def _print_tool_results(self, message: Any) -> None:
         for block in message.content:

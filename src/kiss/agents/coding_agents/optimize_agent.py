@@ -380,7 +380,7 @@ def improve_variant(
         f"### Task {i + 1}\n{t.strip()}" for i, t in enumerate(tasks)
     )
 
-    agent = ClaudeCodingAgent("Improver", use_browser=False)
+    agent = ClaudeCodingAgent("Improver")
     try:
         agent.run(
             prompt_template=IMPROVE_PROMPT,
@@ -398,6 +398,7 @@ def improve_variant(
             work_dir=resolved_target,
             readable_paths=[resolved_target, str(PROJECT_ROOT), resolved_original],
             writable_paths=[resolved_target],
+            use_browser=False,
         )
         return True
     except Exception as e:

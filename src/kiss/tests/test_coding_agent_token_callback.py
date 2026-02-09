@@ -11,7 +11,6 @@ import pytest
 
 from kiss.core.models.model import TokenCallback
 from kiss.tests.conftest import (
-    requires_anthropic_api_key,
     requires_gemini_api_key,
     requires_openai_api_key,
 )
@@ -62,23 +61,6 @@ def _run_relentless_coding_agent(tmp_path: Path, token_callback: TokenCallback |
     )
 
 
-def _run_claude_coding_agent(tmp_path: Path, token_callback: TokenCallback | None):
-    from kiss.agents.coding_agents.claude_coding_agent import ClaudeCodingAgent
-
-    base_dir = tmp_path / "claude_work"
-    base_dir.mkdir()
-    output_dir = base_dir / "output"
-    output_dir.mkdir()
-    agent = ClaudeCodingAgent("test-claude-callback")
-    return agent.run(
-        model_name="claude-sonnet-4-5",
-        prompt_template="What is 2 + 2? Reply with just the number.",
-        base_dir=str(base_dir),
-        writable_paths=[str(output_dir)],
-        token_callback=token_callback,
-    )
-
-
 def _run_gemini_cli_agent(tmp_path: Path, token_callback: TokenCallback | None):
     from kiss.agents.coding_agents.gemini_cli_agent import GeminiCliAgent
 
@@ -118,7 +100,6 @@ CODING_AGENT_CASES = [
     pytest.param(
         _run_relentless_coding_agent, marks=requires_openai_api_key, id="relentless"
     ),
-    pytest.param(_run_claude_coding_agent, marks=requires_anthropic_api_key, id="claude"),
     pytest.param(_run_gemini_cli_agent, marks=requires_gemini_api_key, id="gemini"),
     pytest.param(
         _run_openai_codex_agent, marks=requires_openai_api_key, id="openai-codex"
