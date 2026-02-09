@@ -155,9 +155,11 @@ main{flex:1;overflow-y:auto;padding:20px 28px;scroll-behavior:smooth}
 }
 .usage{
   border:1px solid var(--border);border-radius:6px;margin:8px 0;
-  padding:6px 12px;background:var(--surface);
-  font-size:9px;color:var(--dim);line-height:1.5;opacity:0.7;
-  white-space:pre-wrap;word-break:break-word;
+  padding:8px 12px;background:var(--surface);
+  font-size:11px;color:var(--dim);line-height:1.6;
+}
+.usage strong{color:var(--accent);font-size:10px;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:4px;
 }
 footer{
   background:var(--surface);border-top:1px solid var(--border);
@@ -272,7 +274,13 @@ src.onmessage=function(e){
       O.appendChild(c);break}
     case'usage_info':{
       const u=document.createElement('div');u.className='ev usage';
-      u.textContent=ev.text||'';O.appendChild(u);break}
+      if(ev.items&&ev.items.length>0){
+        u.innerHTML='<strong>Usage Information</strong><br>'+
+          ev.items.map(i=>'• '+esc(i)).join('<br>');
+      }else{
+        u.textContent=ev.text||'';
+      }
+      O.appendChild(u);break}
     case'done':
       D.classList.add('done');ST.textContent='Completed';src.close();break;
   }
@@ -513,7 +521,9 @@ class BrowserPrinter:
         )
 
     def print_usage_info(self, usage_info: str) -> None:
-        self._broadcast({"type": "usage_info", "text": usage_info.strip()})
+        lines = [line.strip() for line in usage_info.strip().split('\n') if line.strip()]
+        items = [line.lstrip('- ') for line in lines if line.startswith('- ')]
+        self._broadcast({"type": "usage_info", "items": items})
 
     def _print_tool_results(self, message: Any) -> None:
         for block in message.content:

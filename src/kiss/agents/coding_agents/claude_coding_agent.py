@@ -158,6 +158,25 @@ class ClaudeCodingAgent(Base):
             f"- Step: {self.step_count}/{self.max_steps}\n"
         )
 
+    def _check_limits(self) -> None:
+        """Check if any resource limits have been exceeded and raise KISSError if so."""
+        if self.total_tokens_used > self.max_tokens:
+            raise KISSError(
+                f"Token limit exceeded: {self.total_tokens_used}/{self.max_tokens} tokens used."
+            )
+
+        if self.budget_used > self.max_budget:
+            raise KISSError(
+                f"Agent budget limit exceeded: ${self.budget_used:.4f}/${self.max_budget:.2f} used."
+            )
+
+        global_max_budget = config_module.DEFAULT_CONFIG.agent.global_max_budget
+        if Base.global_budget_used > global_max_budget:
+            raise KISSError(
+                f"Global budget limit exceeded: "
+                f"${Base.global_budget_used:.4f}/${global_max_budget:.2f} used."
+            )
+
     def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> bool:
         from kiss.core.models.model_info import calculate_cost
 
@@ -220,7 +239,8 @@ class ClaudeCodingAgent(Base):
             Base.global_budget_used += cost_difference
 
         final_result = message.result
-        message_content = final_result + "\n\n" + self._get_usage_info_string()
+        result_text = final_result or ""
+        message_content = result_text + "\n\n" + self._get_usage_info_string()
         self._add_message("model", message_content, timestamp)
         return final_result
 
@@ -315,6 +335,11 @@ class ClaudeCodingAgent(Base):
                                 f"Maximum steps ({self.max_steps}) exceeded. "
                                 f"Agent stopped at step {self.step_count}."
                             )
+                        try:
+                            self._check_limits()
+                        except KISSError:
+                            self._save()
+                            raise
                 elif isinstance(message, UserMessage):
                     if not max_steps_reached:
                         self._printer.print_message(message)
@@ -329,6 +354,11 @@ class ClaudeCodingAgent(Base):
                         total_tokens_used=self.total_tokens_used,
                     )
                     timestamp = int(time.time())
+                    try:
+                        self._check_limits()
+                    except KISSError:
+                        self._save()
+                        raise
 
             self._save()
             if self._use_browser:
@@ -377,7 +407,7 @@ def main() -> None:
             model_name="claude-sonnet-4-5",
             work_dir=work_dir,
             max_steps=50,
-            use_browser=False,
+            use_browser=True,
         )
     finally:
         os.chdir(old_cwd)
