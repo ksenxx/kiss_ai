@@ -76,7 +76,7 @@ class RelentlessCodingAgent(Base):
 
     def _reset(
         self,
-        subtasker_model_name: str | None,
+        model_name: str | None,
         trials: int | None,
         max_steps: int | None,
         max_budget: float | None,
@@ -106,12 +106,12 @@ class RelentlessCodingAgent(Base):
         self.trials = trials if trials is not None else cfg.trials
         self.max_steps = max_steps if max_steps is not None else cfg.max_steps
         self.max_budget = max_budget if max_budget is not None else cfg.max_budget
-        self.subtasker_model_name = (
-            subtasker_model_name
-            if subtasker_model_name is not None
-            else cfg.subtasker_model_name
+        self.model_name = (
+            model_name
+            if model_name is not None
+            else cfg.model_name
         )
-        self.max_tokens = get_max_context_length(self.subtasker_model_name)
+        self.max_tokens = get_max_context_length(self.model_name)
 
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
@@ -223,7 +223,7 @@ class RelentlessCodingAgent(Base):
             executor = KISSAgent(f"{self.name} Trial-{trial}")
             try:
                 result = executor.run(
-                    model_name=self.subtasker_model_name,
+                    model_name=self.model_name,
                     prompt_template=TASK_PROMPT,
                     arguments={
                         "task_description": self.task_description,
@@ -284,16 +284,16 @@ class RelentlessCodingAgent(Base):
 
     def run(
         self,
-        prompt_template: str,
+        model_name: str | None = None,
+        prompt_template: str = "",
         arguments: dict[str, str] | None = None,
-        subtasker_model_name: str | None = None,
-        trials: int | None = None,
         max_steps: int | None = None,
         max_budget: float | None = None,
         work_dir: str | None = None,
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
+        trials: int | None = None,
         docker_image: str | None = None,
         formatter: Formatter | None = None,
         token_callback: TokenCallback | None = None,
@@ -301,16 +301,16 @@ class RelentlessCodingAgent(Base):
         """Run the coding agent.
 
         Args:
+            model_name: The name of the model to use.
             prompt_template: The prompt template for the task.
             arguments: The arguments for the task.
-            subtasker_model_name: The name of the model to use.
-            trials: The number of continuation trials for long tasks.
             max_steps: The maximum number of steps per trial.
             max_budget: The maximum budget in USD to spend.
             work_dir: The working directory for the agent.
             base_dir: The base directory for expressing readable and writable paths.
             readable_paths: The paths from which the agent is allowed to read.
             writable_paths: The paths to which the agent is allowed to write.
+            trials: The number of continuation trials for long tasks.
             docker_image: Optional Docker image name to run bash commands in a container.
             formatter: The formatter to use for the agent.
             token_callback: Optional async callback invoked with each streamed text token.
@@ -318,7 +318,7 @@ class RelentlessCodingAgent(Base):
             The result of the task.
         """
         self._reset(
-            subtasker_model_name,
+            model_name,
             trials,
             max_steps,
             max_budget,
@@ -379,7 +379,7 @@ def main() -> None:
         os.chdir(work_dir)
         result = agent.run(
             prompt_template=task_description,
-            subtasker_model_name="claude-sonnet-4-5",
+            model_name="claude-sonnet-4-5",
             max_steps=25,
             work_dir=work_dir,
             formatter=CompactFormatter()

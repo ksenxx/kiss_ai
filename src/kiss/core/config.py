@@ -77,9 +77,9 @@ class AgentConfig(BaseModel):
 
 
 class RelentlessCodingAgentConfig(BaseModel):
-    subtasker_model_name: str = Field(
+    model_name: str = Field(
         default="claude-opus-4-6",
-        description="LLM model to use for subtask generation and execution",
+        description="LLM model to use",
     )
     max_steps: int = Field(
         default=200,
