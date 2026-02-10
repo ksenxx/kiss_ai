@@ -5,20 +5,23 @@
 
 """Single-agent coding system with smart continuation for long tasks."""
 
+from __future__ import annotations
+
 import json
 import os
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
+if TYPE_CHECKING:
+    from kiss.core.printer import Printer
+
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
-from kiss.core.compact_formatter import CompactFormatter
-from kiss.core.formatter import Formatter
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
@@ -87,7 +90,7 @@ class RelentlessCodingAgent(Base):
         docker_image: str | None,
     ) -> None:
         global_cfg = config_module.DEFAULT_CONFIG
-        cfg = global_cfg.agent.relentless_coding_agent
+        cfg = global_cfg.coding_agent.relentless_coding_agent
         default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
 
         actual_base_dir = base_dir if base_dir is not None else default_work_dir
@@ -204,7 +207,7 @@ class RelentlessCodingAgent(Base):
         )
 
     def perform_task(self) -> str:
-        self.formatter.print_status(f"Executing task: {self.task_description}")
+        print(f"Executing task: {self.task_description}")
         bash_tool = self._docker_bash if self.docker_manager else self.useful_tools.Bash
 
         done_items: list[str] = []
@@ -240,8 +243,8 @@ class RelentlessCodingAgent(Base):
                     ],
                     max_steps=self.max_steps,
                     max_budget=self.max_budget,
-                    formatter=self.formatter,
-                    token_callback=self.token_callback,
+
+                    printer=self.printer,
                 )
             except KISSError:
                 last_msgs = executor.messages[-2:] if hasattr(executor, "messages") else []
@@ -295,28 +298,9 @@ class RelentlessCodingAgent(Base):
         writable_paths: list[str] | None = None,
         trials: int | None = None,
         docker_image: str | None = None,
-        formatter: Formatter | None = None,
-        token_callback: TokenCallback | None = None,
+        printer: Printer | None = None,
     ) -> str:
-        """Run the coding agent.
-
-        Args:
-            model_name: The name of the model to use.
-            prompt_template: The prompt template for the task.
-            arguments: The arguments for the task.
-            max_steps: The maximum number of steps per trial.
-            max_budget: The maximum budget in USD to spend.
-            work_dir: The working directory for the agent.
-            base_dir: The base directory for expressing readable and writable paths.
-            readable_paths: The paths from which the agent is allowed to read.
-            writable_paths: The paths to which the agent is allowed to write.
-            trials: The number of continuation trials for long tasks.
-            docker_image: Optional Docker image name to run bash commands in a container.
-            formatter: The formatter to use for the agent.
-            token_callback: Optional async callback invoked with each streamed text token.
-        Returns:
-            The result of the task.
-        """
+        """Run the coding agent."""
         self._reset(
             model_name,
             trials,
@@ -331,8 +315,7 @@ class RelentlessCodingAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.formatter = formatter or CompactFormatter()
-        self.token_callback = token_callback
+        self.printer = printer
 
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
@@ -382,20 +365,19 @@ def main() -> None:
             model_name="claude-sonnet-4-5",
             max_steps=25,
             work_dir=work_dir,
-            formatter=CompactFormatter()
         )
     finally:
         os.chdir(old_cwd)
     elapsed = time_mod.time() - start_time
 
-    agent.formatter.print_status("FINAL RESULT:")
+    print("FINAL RESULT:")
     result_data = yaml.safe_load(result)
-    agent.formatter.print_status("Completed successfully: " + str(result_data["success"]))
-    agent.formatter.print_status(result_data["summary"])
-    agent.formatter.print_status("Work directory was: " + work_dir)
-    agent.formatter.print_status(f"Time: {elapsed:.1f}s")
-    agent.formatter.print_status(f"Cost: ${agent.budget_used:.4f}")
-    agent.formatter.print_status(f"Total tokens: {agent.total_tokens_used}")
+    print("Completed successfully: " + str(result_data["success"]))
+    print(result_data["summary"])
+    print("Work directory was: " + work_dir)
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Cost: ${agent.budget_used:.4f}")
+    print(f"Total tokens: {agent.total_tokens_used}")
 
 
 if __name__ == "__main__":

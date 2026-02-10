@@ -1,4 +1,4 @@
-"""Browser output streaming for Claude Coding Agent via SSE."""
+"""Browser output streaming for KISS agents via SSE."""
 
 import asyncio
 import json
@@ -10,7 +10,8 @@ import webbrowser
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from kiss.agents.coding_agents.printer_common import (
+from kiss.core.printer import (
+    Printer,
     extract_extras,
     extract_path_and_lang,
     truncate_result,
@@ -268,7 +269,7 @@ src.onerror=function(){D.classList.add('done');ST.textContent='Disconnected'};
 </html>"""
 
 
-class BrowserPrinter:
+class BrowserPrinter(Printer):
     def __init__(self) -> None:
         self._clients: list[queue.Queue[dict[str, Any]]] = []
         self._clients_lock = threading.Lock()
@@ -346,6 +347,51 @@ class BrowserPrinter:
             for cq in self._clients:
                 cq.put(event)
 
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+        if type == "text":
+            from io import StringIO
+
+            from rich.console import Console
+
+            buf = StringIO()
+            Console(
+                file=buf, highlight=False, width=120, no_color=True,
+            ).print(content)
+            text = buf.getvalue()
+            if text.strip():
+                self._broadcast({"type": "text_delta", "text": text})
+            return ""
+        if type == "stream_event":
+            return self._handle_stream_event(content)
+        if type == "message":
+            self._handle_message(content, **kwargs)
+            return ""
+        if type == "usage_info":
+            self._broadcast({"type": "usage_info", "text": str(content).strip()})
+            return ""
+        if type == "tool_call":
+            self._broadcast({"type": "text_end"})
+            self._format_tool_call(str(content), kwargs.get("tool_input", {}))
+            return ""
+        if type == "tool_result":
+            self._print_tool_result(str(content), kwargs.get("is_error", False))
+            return ""
+        if type == "result":
+            self._broadcast({"type": "text_end"})
+            self._broadcast({
+                "type": "result",
+                "text": str(content) or "(no result)",
+                "step_count": kwargs.get("step_count", 0),
+                "total_tokens": kwargs.get("total_tokens", 0),
+                "cost": kwargs.get("cost", "N/A"),
+            })
+            return ""
+        return ""
+
+    async def token_callback(self, token: str) -> None:
+        if token:
+            self._broadcast({"type": "text_delta", "text": token})
+
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
         event: dict[str, Any] = {"type": "tool_call", "name": name}
@@ -376,7 +422,7 @@ class BrowserPrinter:
             "is_error": is_error,
         })
 
-    def print_stream_event(self, event: Any) -> str:
+    def _handle_stream_event(self, event: Any) -> str:
         evt = event.event
         evt_type = evt.get("type", "")
         text = ""
@@ -421,42 +467,27 @@ class BrowserPrinter:
 
         return text
 
-    def print_message(
-        self,
-        message: Any,
-        step_count: int = 0,
-        budget_used: float = 0.0,
-        total_tokens_used: int = 0,
-    ) -> None:
+    def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
-            self._print_system(message)
+            if message.subtype == "tool_output":
+                text = message.data.get("content", "")
+                if text:
+                    self._broadcast({"type": "system_output", "text": text})
         elif hasattr(message, "result"):
-            self._print_result(message, step_count, budget_used, total_tokens_used)
+            step_count = kwargs.get("step_count", 0)
+            budget_used = kwargs.get("budget_used", 0.0)
+            total_tokens_used = kwargs.get("total_tokens_used", 0)
+            self._broadcast({
+                "type": "result",
+                "text": message.result or "(no result)",
+                "step_count": step_count,
+                "total_tokens": total_tokens_used,
+                "cost": f"${budget_used:.4f}" if budget_used else "N/A",
+            })
         elif hasattr(message, "content"):
-            self._print_tool_results(message)
-
-    def _print_system(self, message: Any) -> None:
-        if message.subtype == "tool_output":
-            text = message.data.get("content", "")
-            if text:
-                self._broadcast({"type": "system_output", "text": text})
-
-    def _print_result(
-        self, message: Any, step_count: int, budget_used: float, total_tokens_used: int,
-    ) -> None:
-        self._broadcast({
-            "type": "result",
-            "text": message.result or "(no result)",
-            "step_count": step_count,
-            "total_tokens": total_tokens_used,
-            "cost": f"${budget_used:.4f}" if budget_used else "N/A",
-        })
-
-    def print_usage_info(self, usage_info: str) -> None:
-        self._broadcast({"type": "usage_info", "text": usage_info.strip()})
-
-    def _print_tool_results(self, message: Any) -> None:
-        for block in message.content:
-            if hasattr(block, "is_error") and hasattr(block, "content"):
-                content = block.content if isinstance(block.content, str) else str(block.content)
-                self._print_tool_result(content, bool(block.is_error))
+            for block in message.content:
+                if hasattr(block, "is_error") and hasattr(block, "content"):
+                    content = (
+                        block.content if isinstance(block.content, str) else str(block.content)
+                    )
+                    self._print_tool_result(content, bool(block.is_error))

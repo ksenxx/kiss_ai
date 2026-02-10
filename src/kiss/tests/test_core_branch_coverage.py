@@ -4,22 +4,16 @@ These tests target specific branches and edge cases in:
 - base.py: Base class for agents
 - utils.py: Utility functions
 - model_info.py: Model information and lookup
-- simple_formatter.py and compact_formatter.py: Formatter implementations
 """
 
 import pytest
 
-from kiss.core import config as config_module
 from kiss.core.base import Base
-from kiss.core.compact_formatter import CompactFormatter
-from kiss.core.simple_formatter import SimpleFormatter, _left_aligned_heading
 from kiss.core.utils import (
     get_config_value,
     read_project_file,
     read_project_file_from_package,
 )
-
-FORMATTER_CLASSES = [SimpleFormatter, CompactFormatter]
 
 
 class TestBaseClass:
@@ -32,8 +26,16 @@ class TestBaseClass:
         Base.global_budget_used = original_budget
 
     def test_build_state_dict_unknown_model(self):
+        import time
+
         agent = Base("test")
-        agent._init_run_state("unknown-model-xyz", [])
+        agent.model_name = "unknown-model-xyz"
+        agent.function_map: list[str] = []
+        agent.messages: list[dict] = []
+        agent.step_count = 0
+        agent.total_tokens_used = 0
+        agent.budget_used = 0.0
+        agent.run_start_timestamp = int(time.time())
         state = agent._build_state_dict()
         assert state["max_tokens"] is None
 
@@ -64,62 +66,6 @@ class TestUtils:
 
         with pytest.raises(KISSError, match="Could not find"):
             read_project_file_from_package("nonexistent_file.txt")
-
-
-class TestFormatters:
-    def test_format_methods_false_simple_formatter(self, verbose_config):
-        config_module.DEFAULT_CONFIG.agent.verbose = False
-        formatter = SimpleFormatter()
-
-        result = formatter.format_message({"role": "user", "content": "Hello"})
-        assert result == ""
-
-        messages = [{"role": "user", "content": "Hello"}, {"role": "model", "content": "Hi"}]
-        result = formatter.format_messages(messages)
-        assert result == ""
-
-    @pytest.mark.parametrize("formatter_class", FORMATTER_CLASSES)
-    @pytest.mark.parametrize("verbose", [True, False])
-    def test_all_print_methods(self, verbose_config, formatter_class, verbose):
-        config_module.DEFAULT_CONFIG.agent.verbose = verbose
-        formatter = formatter_class()
-        formatter.print_message({"role": "user", "content": "Test"})
-        formatter.print_messages([{"role": "user", "content": "Test"}])
-        formatter.print_status("Status")
-        formatter.print_error("Error")
-        formatter.print_warning("Warning")
-        formatter.print_label_and_value("Label", "Value")
-
-    @pytest.mark.parametrize("formatter_class", FORMATTER_CLASSES)
-    def test_print_methods_with_console(self, verbose_config, formatter_class):
-        from io import StringIO
-
-        from rich.console import Console
-
-        config_module.DEFAULT_CONFIG.agent.verbose = True
-        formatter = formatter_class()
-        output = StringIO()
-        err_output = StringIO()
-        formatter._console = Console(file=output, force_terminal=True)
-        formatter._stderr_console = Console(file=err_output, force_terminal=True)
-        formatter.print_status("Status")
-        formatter.print_error("Error")
-        formatter.print_warning("Warning")
-        formatter.print_label_and_value("Label", "Value")
-
-
-class TestLeftAlignedHeading:
-    @pytest.mark.parametrize("tag,expected_count", [("h1", 1), ("h2", 2), ("h3", 1)])
-    def test_heading_tags(self, tag, expected_count):
-        from rich.text import Text
-
-        class MockHeading:
-            def __init__(self, t):
-                self.tag = t
-                self.text = Text("Heading")
-
-        results = list(_left_aligned_heading(MockHeading(tag), None, None))
-        assert len(results) == expected_count
 
 
 class TestModelHelpers:

@@ -9,7 +9,7 @@ import io
 import unittest
 from types import SimpleNamespace
 
-from kiss.agents.coding_agents.print_to_console import ConsolePrinter
+from kiss.core.print_to_console import ConsolePrinter
 
 
 class TestConsolePrinterInit(unittest.TestCase):
@@ -75,52 +75,57 @@ class TestPrintStreamEvent(unittest.TestCase):
     def test_content_block_delta_json(self):
         p, _ = self._make_printer()
         p._tool_json_buffer = ""
-        text = p.print_stream_event(
+        text = p.print(
             self._event({
                 "type": "content_block_delta",
                 "delta": {"type": "input_json_delta", "partial_json": '{"path":'},
-            })
+            }),
+            type="stream_event",
         )
         assert text == ""
         assert p._tool_json_buffer == '{"path":'
 
     def test_content_block_delta_thinking(self):
         p, _ = self._make_printer()
-        text = p.print_stream_event(
+        text = p.print(
             self._event({
                 "type": "content_block_delta",
                 "delta": {"type": "thinking_delta", "thinking": "Let me think..."},
-            })
+            }),
+            type="stream_event",
         )
         assert text == "Let me think..."
 
     def test_content_block_delta_unknown_delta_type(self):
         p, _ = self._make_printer()
-        text = p.print_stream_event(
+        text = p.print(
             self._event({
                 "type": "content_block_delta",
                 "delta": {"type": "unknown_type"},
-            })
+            }),
+            type="stream_event",
         )
         assert text == ""
 
     def test_content_block_start_text(self):
         p, _ = self._make_printer()
-        p.print_stream_event(
+        p.print(
             self._event({
                 "type": "content_block_start",
                 "content_block": {"type": "text"},
-            })
+            }),
+            type="stream_event",
         )
         assert p._current_block_type == "text"
 
     def test_content_block_start_thinking(self):
         p, buf = self._make_printer()
-        text = p.print_stream_event(
+        text = p.print(
             self._event({
                 "type": "content_block_start",
                 "content_block": {"type": "thinking"},
-            })
+            }),
+            type="stream_event",
         )
         assert text == ""
         assert p._current_block_type == "thinking"
@@ -129,7 +134,7 @@ class TestPrintStreamEvent(unittest.TestCase):
     def test_content_block_stop_thinking(self):
         p, buf = self._make_printer()
         p._current_block_type = "thinking"
-        p.print_stream_event(self._event({"type": "content_block_stop"}))
+        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
         assert p._current_block_type == ""
 
     def test_content_block_stop_tool_use_invalid_json(self):
@@ -137,14 +142,14 @@ class TestPrintStreamEvent(unittest.TestCase):
         p._current_block_type = "tool_use"
         p._tool_name = "Bash"
         p._tool_json_buffer = "invalid json{"
-        p.print_stream_event(self._event({"type": "content_block_stop"}))
+        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
         assert p._current_block_type == ""
         out = buf.getvalue()
         assert "Bash" in out
 
     def test_empty_event_dict(self):
         p, _ = self._make_printer()
-        text = p.print_stream_event(self._event({}))
+        text = p.print(self._event({}), type="stream_event")
         assert text == ""
 
 
@@ -156,19 +161,19 @@ class TestPrintMessageSystem(unittest.TestCase):
     def test_other_subtype_ignored(self):
         p, buf = self._make_printer()
         msg = SimpleNamespace(subtype="other", data={"content": "should not appear"})
-        p.print_message(msg)
+        p.print(msg, type="message")
         assert buf.getvalue() == ""
 
     def test_tool_output(self):
         p, buf = self._make_printer()
         msg = SimpleNamespace(subtype="tool_output", data={"content": "hello output"})
-        p.print_message(msg)
+        p.print(msg, type="message")
         assert "hello output" in buf.getvalue()
 
     def test_tool_output_empty_content(self):
         p, buf = self._make_printer()
         msg = SimpleNamespace(subtype="tool_output", data={"content": ""})
-        p.print_message(msg)
+        p.print(msg, type="message")
         assert buf.getvalue() == ""
 
 
@@ -181,7 +186,7 @@ class TestPrintMessageUser(unittest.TestCase):
         p, buf = self._make_printer()
         block = SimpleNamespace(text="just text")
         msg = SimpleNamespace(content=[block])
-        p.print_message(msg)
+        p.print(msg, type="message")
         out = buf.getvalue()
         assert "OK" not in out
         assert "FAILED" not in out
@@ -195,8 +200,52 @@ class TestPrintMessageDispatch(unittest.TestCase):
     def test_unknown_message_type_no_crash(self):
         p, buf = self._make_printer()
         msg = SimpleNamespace(unknown_attr="value")
-        p.print_message(msg)
+        p.print(msg, type="message")
         assert buf.getvalue() == ""
+
+
+class TestPrint(unittest.TestCase):
+    def _make_printer(self):
+        buf = io.StringIO()
+        return ConsolePrinter(file=buf), buf
+
+    def test_print_string(self):
+        p, buf = self._make_printer()
+        p.print("hello world")
+        assert "hello world" in buf.getvalue()
+
+    def test_print_flushes_mid_line(self):
+        p, buf = self._make_printer()
+        p._mid_line = True
+        p.print("after flush")
+        out = buf.getvalue()
+        assert "\n" in out
+        assert "after flush" in out
+
+
+class TestTokenCallback(unittest.TestCase):
+    def _make_printer(self):
+        buf = io.StringIO()
+        return ConsolePrinter(file=buf), buf
+
+    def test_token_callback_streams_text(self):
+        import asyncio
+        p, buf = self._make_printer()
+        asyncio.run(p.token_callback("hello"))
+        assert "hello" in buf.getvalue()
+        assert p._mid_line is True
+
+    def test_token_callback_empty_string(self):
+        import asyncio
+        p, buf = self._make_printer()
+        asyncio.run(p.token_callback(""))
+        assert p._mid_line is False
+
+    def test_token_callback_ending_newline(self):
+        import asyncio
+        p, buf = self._make_printer()
+        asyncio.run(p.token_callback("line\n"))
+        assert p._mid_line is False
 
 
 if __name__ == "__main__":

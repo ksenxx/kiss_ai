@@ -10,8 +10,8 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from kiss.agents.coding_agents.print_to_browser import BrowserPrinter
-from kiss.agents.coding_agents.printer_common import MAX_RESULT_LEN as _MAX_RESULT_LEN
+from kiss.core.print_to_browser import BrowserPrinter
+from kiss.core.printer import MAX_RESULT_LEN as _MAX_RESULT_LEN
 
 
 def _subscribe(printer: BrowserPrinter) -> queue.Queue:
@@ -38,13 +38,14 @@ class TestPrintStreamEvent(unittest.TestCase):
     def test_text_delta_empty(self):
         p = BrowserPrinter()
         q = _subscribe(p)
-        text = p.print_stream_event(
+        text = p.print(
             self._event(
                 {
                     "type": "content_block_delta",
                     "delta": {"type": "text_delta", "text": ""},
                 }
-            )
+            ),
+            type="stream_event",
         )
         assert text == ""
         assert _drain(q) == []
@@ -55,7 +56,7 @@ class TestPrintStreamEvent(unittest.TestCase):
         p._current_block_type = "tool_use"
         p._tool_name = "Bash"
         p._tool_json_buffer = "invalid{"
-        p.print_stream_event(self._event({"type": "content_block_stop"}))
+        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
         assert p._current_block_type == ""
         events = _drain(q)
         assert len(events) == 1
@@ -97,7 +98,7 @@ class TestPrintMessageSystem(unittest.TestCase):
         p = BrowserPrinter()
         q = _subscribe(p)
         msg = SimpleNamespace(subtype="tool_output", data={"content": ""})
-        p.print_message(msg)
+        p.print(msg, type="message")
         assert _drain(q) == []
 
 
@@ -107,7 +108,7 @@ class TestPrintMessageUser(unittest.TestCase):
         q = _subscribe(p)
         block = SimpleNamespace(text="just text")
         msg = SimpleNamespace(content=[block])
-        p.print_message(msg)
+        p.print(msg, type="message")
         assert _drain(q) == []
 
 
@@ -116,7 +117,7 @@ class TestPrintMessageDispatch(unittest.TestCase):
         p = BrowserPrinter()
         q = _subscribe(p)
         msg = SimpleNamespace(unknown_attr="value")
-        p.print_message(msg)
+        p.print(msg, type="message")
         assert _drain(q) == []
 
 
@@ -143,6 +144,41 @@ class TestServerLifecycle(unittest.TestCase):
         p.stop()
         events = _drain(q)
         assert any(e["type"] == "done" for e in events)
+
+
+class TestPrint(unittest.TestCase):
+    def test_print_broadcasts_text_delta(self):
+        p = BrowserPrinter()
+        q = _subscribe(p)
+        p.print("hello world")
+        events = _drain(q)
+        assert len(events) == 1
+        assert events[0]["type"] == "text_delta"
+        assert "hello world" in events[0]["text"]
+
+    def test_print_empty_no_broadcast(self):
+        p = BrowserPrinter()
+        q = _subscribe(p)
+        p.print("")
+        assert _drain(q) == []
+
+
+class TestTokenCallback(unittest.TestCase):
+    def test_token_callback_broadcasts_text_delta(self):
+        import asyncio
+        p = BrowserPrinter()
+        q = _subscribe(p)
+        asyncio.run(p.token_callback("hello"))
+        events = _drain(q)
+        assert len(events) == 1
+        assert events[0] == {"type": "text_delta", "text": "hello"}
+
+    def test_token_callback_empty_string_no_broadcast(self):
+        import asyncio
+        p = BrowserPrinter()
+        q = _subscribe(p)
+        asyncio.run(p.token_callback(""))
+        assert _drain(q) == []
 
 
 if __name__ == "__main__":

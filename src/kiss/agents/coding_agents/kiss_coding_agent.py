@@ -5,20 +5,23 @@
 
 """Multi-agent coding system with orchestration, and sub-agents using KISSAgent."""
 
+from __future__ import annotations
+
 import shutil
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
+
+if TYPE_CHECKING:
+    from kiss.core.printer import Printer
 
 from kiss.agents.kiss import prompt_refiner_agent
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
-from kiss.core.compact_formatter import CompactFormatter
-from kiss.core.formatter import Formatter
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
@@ -142,9 +145,8 @@ class KISSCodingAgent(Base):
             writable_paths: Paths allowed for writing.
             docker_image: Optional Docker image for sandboxed execution.
         """
-        # Apply config defaults for None values
         cfg = config_module.DEFAULT_CONFIG
-        kiss_cfg = cfg.agent.kiss_coding_agent
+        kiss_cfg = cfg.coding_agent.kiss_coding_agent
         default_work_dir = str(Path(cfg.agent.artifact_dir).resolve() / "kiss_workdir")
 
         actual_base_dir = base_dir if base_dir is not None else default_work_dir
@@ -228,7 +230,7 @@ class KISSCodingAgent(Base):
         Raises:
             KISSError: If the task fails after all retry trials.
         """
-        self.formatter.print_status(f"Executing task: {self.task_description}")
+        print(f"Executing task: {self.task_description}")
         executor = KISSAgent(f"{self.name} Main")
         task_prompt_template = ORCHESTRATOR_PROMPT
         for _ in range(self.trials):
@@ -241,8 +243,8 @@ class KISSCodingAgent(Base):
                 tools=[finish, self.perform_subtask],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
-                formatter=self.formatter,
-                token_callback=self.token_callback,
+
+                printer=self.printer,
             )
             self.budget_used += executor.budget_used  # type: ignore
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
@@ -251,7 +253,7 @@ class KISSCodingAgent(Base):
             payload = ret if isinstance(ret, dict) else {}
             success = payload.get("success", False)
             if not success:
-                self.formatter.print_error("Task failed, refining prompt and retrying...")
+                print("Task failed, refining prompt and retrying...")
                 task_prompt_template = prompt_refiner_agent(
                     original_prompt_template=ORCHESTRATOR_PROMPT,
                     previous_prompt_template=task_prompt_template,
@@ -281,7 +283,7 @@ class KISSCodingAgent(Base):
             KISSError: If the subtask fails after all retry trials.
         """
         subtask = SubTask(subtask_name, description)
-        self.formatter.print_status(f"Executing subtask: {subtask.name}")
+        print(f"Executing subtask: {subtask.name}")
         executor = KISSAgent(f"{self.name} Executor {subtask.name}")
         task_prompt_template = TASKING_PROMPT
 
@@ -307,8 +309,8 @@ class KISSCodingAgent(Base):
                 ],
                 max_steps=self.max_steps,
                 max_budget=self.max_budget,
-                formatter=self.formatter,
-                token_callback=self.token_callback,
+
+                printer=self.printer,
             )
             self.budget_used += executor.budget_used  # type: ignore
             self.total_tokens_used += executor.total_tokens_used  # type: ignore
@@ -317,7 +319,7 @@ class KISSCodingAgent(Base):
             payload = ret if isinstance(ret, dict) else {}
             success = payload.get("success", False)
             if not success:
-                self.formatter.print_error(
+                print(
                     f"Subtask {subtask.name} failed, refining prompt and retrying..."
                 )
                 task_prompt_template = prompt_refiner_agent(
@@ -345,36 +347,9 @@ class KISSCodingAgent(Base):
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
         docker_image: str | None = None,
-        formatter: Formatter | None = None,
-        token_callback: TokenCallback | None = None,
+        printer: Printer | None = None,
     ) -> str:
-        """Run the multi-agent coding system.
-
-        Args:
-            orchestrator_model_name: The name of the orchestrator model to use.
-            subtasker_model_name: The name of the subtasker model to use.
-            refiner_model_name: The name of the dynamic_gepa model to use.
-            trials: The number of trials to attempt for each subtask.
-            prompt_template: The prompt template for the task.
-            arguments: The arguments for the task.
-            tools: Optional tools to provide to executor agents.
-            max_steps: The maximum number of total steps per agent.
-            max_budget: The maximum budget in USD to spend.
-            work_dir: The working directory for the agent.
-            base_dir: The base directory for expressing readable and writable paths.
-            readable_paths: The paths from which the agent is allowed to read.
-                relative paths in readable_paths is resolved against base_dir.
-            writable_paths: The paths to which the agent is allowed to write
-                relative paths in writable_paths is resolved against base_dir.
-            docker_image: Optional Docker image name to run bash commands in a container.
-                If provided, bash commands will be executed inside the Docker container.
-                Example: "ubuntu:latest", "python:3.11-slim".
-            formatter: The formatter to use for the agent. If None, the default formatter is used.
-            token_callback: Optional async callback invoked with each streamed text token.
-                Default is None.
-        Returns:
-            The result of the task.
-        """
+        """Run the multi-agent coding system."""
         self._reset(
             orchestrator_model_name,
             subtasker_model_name,
@@ -391,8 +366,7 @@ class KISSCodingAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.formatter = formatter or CompactFormatter()
-        self.token_callback = token_callback
+        self.printer = printer
 
         # Run with Docker container if docker_image is provided
         if self.docker_image:
@@ -427,10 +401,9 @@ def main() -> None:
         result = agent.run(
             prompt_template=task_description,
             work_dir=work_dir,
-            formatter=CompactFormatter()
         )
-        agent.formatter.print_status("FINAL RESULT:")
-        agent.formatter.print_status(result)
+        print("FINAL RESULT:")
+        print(result)
     finally:
         shutil.rmtree(work_dir)
 

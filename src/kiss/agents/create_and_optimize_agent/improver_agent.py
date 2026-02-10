@@ -17,7 +17,6 @@ from pathlib import Path
 
 from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 from kiss.core import config as config_module
-from kiss.core.compact_formatter import CompactFormatter
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
 
@@ -372,7 +371,6 @@ class ImproverAgent:
                 },
                 readable_paths=[work_dir, str(PROJECT_ROOT)],
                 writable_paths=[work_dir],
-                formatter=CompactFormatter()
             )
         except Exception as e:
             print(f"Error during improvement: {e}")

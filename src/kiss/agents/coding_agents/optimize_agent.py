@@ -19,7 +19,6 @@ from typing import Any
 
 from kiss.agents.coding_agents.claude_coding_agent import ClaudeCodingAgent
 from kiss.core.base import Base
-from kiss.core.compact_formatter import CompactFormatter
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
 
@@ -252,7 +251,7 @@ def _evaluate_on_task(
     variant_folder: str,
     program_path: str,
     task: str,
-    fmt: CompactFormatter,
+
 ) -> tuple[dict[str, float], str]:
     fail_metrics = {"success": 1, "tokens_used": 0, "execution_time": 0.0, "cost": 0.0}
     agent_file = str(Path(variant_folder) / program_path)
@@ -261,12 +260,12 @@ def _evaluate_on_task(
 
     module, mod_name = _load_module(agent_file)
     if module is None:
-        fmt.print_error(f"Failed to load {agent_file}")
+        print(f"Failed to load {agent_file}")
         return fail_metrics, "Failed to load module"
 
     agent_cls = _find_agent_class(module)
     if agent_cls is None:
-        fmt.print_error(f"No agent class in {agent_file}")
+        print(f"No agent class in {agent_file}")
         sys.modules.pop(mod_name, None)
         return fail_metrics, "No agent class extending Base found"
 
@@ -294,7 +293,7 @@ def _evaluate_on_task(
         success = 0
     except Exception as e:
         error_msg = str(e)[:200]
-        fmt.print_error(f"Eval error: {e}")
+        print(f"Eval error: {e}")
         success = 1
     finally:
         os.chdir(old_cwd)
@@ -303,7 +302,7 @@ def _evaluate_on_task(
 
     elapsed = time.time() - start
     if elapsed > EVAL_TIMEOUT:
-        fmt.print_warning(f"Task took {elapsed:.0f}s (limit {EVAL_TIMEOUT}s)")
+        print(f"Task took {elapsed:.0f}s (limit {EVAL_TIMEOUT}s)")
     return {
         "success": success,
         "tokens_used": getattr(agent, "total_tokens_used", 0) if agent else 0,
@@ -325,7 +324,6 @@ def evaluate_variant(
     tasks: list[str],
     eval_sample_size: int,
     eval_runs: int,
-    fmt: CompactFormatter,
 ) -> tuple[dict[str, float], str]:
     sample = random.sample(tasks, min(eval_sample_size, len(tasks)))
     all_failures: list[float] = []
@@ -337,9 +335,9 @@ def evaluate_variant(
     for i, task in enumerate(sample):
         for run in range(eval_runs):
             label = f"  Task {i + 1}/{len(sample)} run {run + 1}/{eval_runs}"
-            fmt.print_status(f"{label}: {task.strip()[:60]}...")
+            print(f"{label}: {task.strip()[:60]}...")
             metrics, error = _evaluate_on_task(
-                variant_folder, program_path, task, fmt
+                variant_folder, program_path, task
             )
             all_failures.append(metrics["success"])
             all_tokens.append(max(metrics["tokens_used"], 1))
@@ -347,7 +345,7 @@ def evaluate_variant(
             all_costs.append(max(metrics["cost"], 0.0001))
             if error:
                 errors.append(f"Task {i + 1} run {run + 1}: {error}")
-            fmt.print_status(f"    {_format_metrics(metrics)}")
+            print(f"    {_format_metrics(metrics)}")
 
     n = len(all_failures)
     return {
@@ -366,7 +364,6 @@ def improve_variant(
     metrics_description: str,
     current_metrics: str,
     improvement_history: str,
-    fmt: CompactFormatter,
 ) -> bool:
     shutil.copytree(source_folder, target_folder, dirs_exist_ok=True)
 
@@ -398,7 +395,7 @@ def improve_variant(
         )
         return True
     except Exception as e:
-        fmt.print_error(f"Improvement failed: {e}")
+        print(f"Improvement failed: {e}")
         return False
 
 
@@ -448,16 +445,16 @@ def optimize(
     eval_runs: int = 2,
     mutation_probability: float = 0.8,
 ) -> AgentVariant:
-    fmt = CompactFormatter()
+
     work_dir = Path(tempfile.mkdtemp())
     variant_counter = 0
     frontier: list[AgentVariant] = []
     folder = str(Path(folder).resolve())
 
-    fmt.print_status("=== Optimize Agent (Pareto Frontier) ===")
-    fmt.print_status(f"Folder: {folder}, Program: {program_path}")
-    fmt.print_status(f"Tasks: {len(tasks)}, Metrics: {metrics_description}")
-    fmt.print_status(
+    print("=== Optimize Agent (Pareto Frontier) ===")
+    print(f"Folder: {folder}, Program: {program_path}")
+    print(f"Tasks: {len(tasks)}, Metrics: {metrics_description}")
+    print(
         f"Generations: {max_generations}, Frontier: {initial_frontier_size}-"
         f"{max_frontier_size}, Eval sample: {eval_sample_size}, "
         f"Eval runs: {eval_runs}"
@@ -474,7 +471,7 @@ def optimize(
 
         if vid == 1:
             shutil.copytree(folder, vdir)
-            fmt.print_status(f"Variant {vid}: baseline")
+            print(f"Variant {vid}: baseline")
         else:
             baseline_metrics = frontier[0].metrics if frontier else {}
             failure_notes = "\n".join(
@@ -482,7 +479,7 @@ def optimize(
                 for v in frontier
                 if v.improvement_history.startswith("FAILED")
             )
-            fmt.print_status(f"Variant {vid}: improving from baseline...")
+            print(f"Variant {vid}: improving from baseline...")
             improve_variant(
                 str(work_dir / "variant_1"),
                 vdir,
@@ -491,16 +488,15 @@ def optimize(
                 metrics_description,
                 _format_metrics(baseline_metrics) if baseline_metrics else "",
                 failure_notes or "",
-                fmt,
             )
 
-        fmt.print_status(f"Evaluating variant {vid}...")
+        print(f"Evaluating variant {vid}...")
         metrics, eval_error = evaluate_variant(
-            vdir, program_path, tasks, eval_sample_size, eval_runs, fmt
+            vdir, program_path, tasks, eval_sample_size, eval_runs
         )
         history = f"FAILED: {eval_error}" if eval_error else ""
         if eval_error:
-            fmt.print_warning(f"Variant {vid} issues: {eval_error}")
+            print(f"Variant {vid} issues: {eval_error}")
         variant = AgentVariant(
             folder_path=vdir,
             metrics=metrics,
@@ -510,7 +506,7 @@ def optimize(
             improvement_history=history,
         )
         frontier, added = update_pareto_frontier(frontier, variant, max_frontier_size)
-        fmt.print_status(
+        print(
             f"Variant {vid}: {_format_metrics(metrics)}, "
             f"{'added' if added else 'rejected'} (frontier: {len(frontier)})"
         )
@@ -520,7 +516,7 @@ def optimize(
 
     # Phase 2: Evolution
     for gen in range(1, max_generations + 1):
-        fmt.print_status(f"\n=== Generation {gen}/{max_generations} ===")
+        print(f"\n=== Generation {gen}/{max_generations} ===")
         failure_notes = "\n".join(
             f"- Variant {v.id}: {v.improvement_history}"
             for v in frontier
@@ -529,7 +525,7 @@ def optimize(
 
         if random.random() < mutation_probability or len(frontier) < 2:
             parent = random.choice(frontier)
-            fmt.print_status(f"Mutation from variant {parent.id}")
+            print(f"Mutation from variant {parent.id}")
             variant_counter += 1
             vid = variant_counter
             vdir = str(work_dir / f"variant_{vid}")
@@ -544,7 +540,6 @@ def optimize(
                 metrics_description,
                 _format_metrics(parent.metrics),
                 history,
-                fmt,
             )
             if not ok:
                 continue
@@ -554,7 +549,7 @@ def optimize(
             primary, secondary = (
                 (v1, v2) if v1.score() <= v2.score() else (v2, v1)
             )
-            fmt.print_status(
+            print(
                 f"Crossover: variant {primary.id} x {secondary.id}"
             )
             variant_counter += 1
@@ -574,15 +569,14 @@ def optimize(
                 metrics_description,
                 _format_metrics(primary.metrics),
                 history,
-                fmt,
             )
             if not ok:
                 continue
             parent_ids = [primary.id, secondary.id]
 
-        fmt.print_status(f"Evaluating variant {vid}...")
+        print(f"Evaluating variant {vid}...")
         metrics, eval_error = evaluate_variant(
-            vdir, program_path, tasks, eval_sample_size, eval_runs, fmt
+            vdir, program_path, tasks, eval_sample_size, eval_runs
         )
         variant = AgentVariant(
             folder_path=vdir,
@@ -594,19 +588,19 @@ def optimize(
         )
         frontier, added = update_pareto_frontier(frontier, variant, max_frontier_size)
         best = min(frontier, key=lambda v: v.score())
-        fmt.print_status(
+        print(
             f"Variant {vid}: {_format_metrics(metrics)} "
             f"{'added' if added else 'rejected'} | Best: {best.id}"
         )
 
     best = min(frontier, key=lambda v: v.score())
-    fmt.print_status("\n=== Optimization Complete ===")
+    print("\n=== Optimization Complete ===")
     for v in frontier:
-        fmt.print_status(f"  variant {v.id}: {_format_metrics(v.metrics)}")
-    fmt.print_status(f"Best: variant {best.id}, score={best.score():.2f}")
+        print(f"  variant {v.id}: {_format_metrics(v.metrics)}")
+    print(f"Best: variant {best.id}, score={best.score():.2f}")
 
     shutil.copytree(best.folder_path, folder, dirs_exist_ok=True)
-    fmt.print_status(f"Best variant copied back to: {folder}")
+    print(f"Best variant copied back to: {folder}")
 
     shutil.rmtree(work_dir, ignore_errors=True)
     return best

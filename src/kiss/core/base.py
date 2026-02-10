@@ -91,21 +91,6 @@ class Base:
         Base.agent_counter += 1
         self.base_dir = ""
 
-    def _init_run_state(self, model_name: str, function_map: list[str]) -> None:
-        """Initialize common run state variables.
-
-        Args:
-            model_name: The name of the model being used.
-            function_map: List of function names available to the agent.
-        """
-        self.model_name = model_name
-        self.function_map = function_map
-        self.messages: list[dict[str, Any]] = []
-        self.step_count = 0
-        self.total_tokens_used = 0
-        self.budget_used = 0.0
-        self.run_start_timestamp = int(time.time())
-
     def _build_state_dict(self) -> dict[str, Any]:
         """Build state dictionary for saving.
 
@@ -121,7 +106,7 @@ class Base:
             "name": self.name,
             "id": self.id,
             "messages": self.messages,
-            "function_map": self.function_map,
+            "function_map": list(self.function_map),
             "run_start_timestamp": self.run_start_timestamp,
             "run_end_timestamp": int(time.time()),
             "config": config_to_dict(),

@@ -23,11 +23,11 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent
 
-from kiss.agents.coding_agents.print_to_console import ConsolePrinter
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length
+from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.utils import is_subpath, resolve_path
 
 BUILTIN_TOOLS = [
@@ -53,7 +53,12 @@ class ClaudeCodingAgent(Base):
         max_budget: float | None,
     ) -> None:
         self.model_name = model_name or config_module.DEFAULT_CONFIG.agent.model_name
-        self._init_run_state(self.model_name, BUILTIN_TOOLS)
+        self.function_map = list(BUILTIN_TOOLS)
+        self.messages: list[dict[str, Any]] = []
+        self.step_count = 0
+        self.total_tokens_used: int = 0
+        self.budget_used: float = 0.0
+        self.run_start_timestamp = int(time.time())
         self.base_dir = str(Path(base_dir).resolve())
         self.readable_paths = [resolve_path(p, base_dir) for p in readable_paths or []]
         self.writable_paths = [resolve_path(p, base_dir) for p in writable_paths or []]
@@ -61,8 +66,6 @@ class ClaudeCodingAgent(Base):
         self.is_agentic = True
         self.max_steps = max_steps or config_module.DEFAULT_CONFIG.agent.max_steps
         self.max_budget = max_budget or config_module.DEFAULT_CONFIG.agent.max_agent_budget
-        self.budget_used: float = 0.0
-        self.total_tokens_used: int = 0
         self.input_tokens_used: int = 0
         self.output_tokens_used: int = 0
         self.last_step_input_tokens: int = 0
@@ -202,7 +205,7 @@ class ClaudeCodingAgent(Base):
         max_thinking_tokens: int = 1024,
     ) -> str:
         if use_browser:
-            from kiss.agents.coding_agents.print_to_browser import BrowserPrinter
+            from kiss.core.print_to_browser import BrowserPrinter
             printer: Any = BrowserPrinter()
         else:
             printer = ConsolePrinter()
@@ -251,25 +254,29 @@ class ClaudeCodingAgent(Base):
                 async for message in query(prompt=prompt_stream(), options=options):
                     if isinstance(message, StreamEvent):
                         self._update_token_usage_from_stream(message)
-                        printer.print_stream_event(message)
+                        printer.print(message, type="stream_event")
                     elif isinstance(message, SystemMessage):
-                        printer.print_message(message)
+                        printer.print(message, type="message")
                     elif isinstance(message, AssistantMessage):
                         self._process_assistant_message(message, timestamp)
                         usage_printed = False
                         timestamp = int(time.time())
                     elif isinstance(message, UserMessage):
                         if not usage_printed:
-                            printer.print_usage_info(self._get_usage_info_string())
+                            printer.print(
+                                self._get_usage_info_string(), type="usage_info",
+                            )
                             usage_printed = True
-                        printer.print_message(message)
+                        printer.print(message, type="message")
                         self._process_user_message(message, timestamp)
                         timestamp = int(time.time())
                     elif isinstance(message, ResultMessage):
                         final_result = self._process_result_message(message, timestamp)
-                        printer.print_usage_info(self._get_usage_info_string())
-                        printer.print_message(
-                            message,
+                        printer.print(
+                            self._get_usage_info_string(), type="usage_info",
+                        )
+                        printer.print(
+                            message, type="message",
                             step_count=self.step_count,
                             budget_used=self.budget_used,
                             total_tokens_used=self.total_tokens_used,
@@ -319,10 +326,10 @@ def main() -> None:
         os.chdir(work_dir)
         result = agent.run(
             prompt_template=task_description,
-            model_name="claude-opus-4-6",
+            model_name="claude-sonnet-4-5",
             work_dir=work_dir,
             max_steps=100,
-            use_browser=False,
+            use_browser=True,
         )
     finally:
         os.chdir(old_cwd)

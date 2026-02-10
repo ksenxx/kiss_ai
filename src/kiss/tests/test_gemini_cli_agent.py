@@ -29,7 +29,6 @@ class TestGeminiCliAgentTools(unittest.TestCase):
             base_dir=str(self.temp_dir),
             max_steps=10,
             max_budget=1.0,
-            formatter=None,
         )
         self.tools = self.agent._create_tools()
         self.tools_by_name = {t.__name__: t for t in self.tools}

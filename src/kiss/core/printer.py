@@ -1,6 +1,8 @@
-"""Shared constants and utilities for printer modules."""
+"""Abstract base class and shared utilities for KISS agent printers."""
 
+from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 
 LANG_MAP = {
     "py": "python", "js": "javascript", "ts": "typescript",
@@ -44,3 +46,36 @@ def extract_extras(tool_input: dict) -> dict[str, str]:
                 val = val[:200] + "..."
             extras[k] = val
     return extras
+
+
+class Printer(ABC):
+    @abstractmethod
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+        pass
+
+    @abstractmethod
+    async def token_callback(self, token: str) -> None:
+        pass
+
+    @abstractmethod
+    def reset(self) -> None:
+        pass
+
+
+class MultiPrinter(Printer):
+    def __init__(self, printers: list[Printer]) -> None:
+        self.printers = printers
+
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+        result = ""
+        for p in self.printers:
+            result = p.print(content, type=type, **kwargs)
+        return result
+
+    async def token_callback(self, token: str) -> None:
+        for p in self.printers:
+            await p.token_callback(token)
+
+    def reset(self) -> None:
+        for p in self.printers:
+            p.reset()

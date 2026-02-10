@@ -1,4 +1,4 @@
-"""Console output formatting for Claude Coding Agent."""
+"""Console output formatting for KISS agents."""
 
 import json
 import sys
@@ -10,14 +10,15 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
-from kiss.agents.coding_agents.printer_common import (
+from kiss.core.printer import (
+    Printer,
     extract_extras,
     extract_path_and_lang,
     truncate_result,
 )
 
 
-class ConsolePrinter:
+class ConsolePrinter(Printer):
     def __init__(self, file: Any = None) -> None:
         self._console = Console(highlight=False, file=file)
         self._file = file or sys.stdout
@@ -42,6 +43,50 @@ class ConsolePrinter:
         self._console.print(text, end="", highlight=False, **kwargs)
         if text:
             self._mid_line = not text.endswith("\n")
+
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+        if type == "text":
+            self._flush_newline()
+            self._console.print(content, **kwargs)
+            return ""
+        if type == "stream_event":
+            return self._handle_stream_event(content)
+        if type == "message":
+            self._handle_message(content, **kwargs)
+            return ""
+        if type == "usage_info":
+            self._flush_newline()
+            self._console.print(
+                Panel(Markdown(str(content).strip()), border_style="dim", padding=(0, 1))
+            )
+            return ""
+        if type == "tool_call":
+            self._flush_newline()
+            self._format_tool_call(str(content), kwargs.get("tool_input", {}))
+            return ""
+        if type == "tool_result":
+            self._flush_newline()
+            self._print_tool_result(str(content), kwargs.get("is_error", False))
+            return ""
+        if type == "result":
+            self._flush_newline()
+            cost = kwargs.get("cost", "N/A")
+            step_count = kwargs.get("step_count", 0)
+            total_tokens = kwargs.get("total_tokens", 0)
+            self._console.print(
+                Panel(
+                    str(content) or "(no result)",
+                    title="Result",
+                    subtitle=f"steps={step_count}  tokens={total_tokens}  cost={cost}",
+                    border_style="bold green",
+                    padding=(1, 2),
+                )
+            )
+            return ""
+        return ""
+
+    async def token_callback(self, token: str) -> None:
+        self._stream_delta(token)
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -88,7 +133,7 @@ class ConsolePrinter:
             self._file.flush()
         self._console.rule(style=style)
 
-    def print_stream_event(self, event: Any) -> str:
+    def _handle_stream_event(self, event: Any) -> str:
         evt = event.event
         evt_type = evt.get("type", "")
         text = ""
@@ -141,52 +186,36 @@ class ConsolePrinter:
 
         return text
 
-    def print_message(
-        self,
-        message: Any,
-        step_count: int = 0,
-        budget_used: float = 0.0,
-        total_tokens_used: int = 0,
-    ) -> None:
+    def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
-            self._print_system(message)
+            if message.subtype == "tool_output":
+                text = message.data.get("content", "")
+                if text:
+                    self._file.write(text)
+                    self._file.flush()
+                    self._mid_line = not text.endswith("\n")
         elif hasattr(message, "result"):
-            self._print_result(message, step_count, budget_used, total_tokens_used)
-        elif hasattr(message, "content"):
-            self._print_tool_results(message)
-
-    def _print_system(self, message: Any) -> None:
-        if message.subtype == "tool_output":
-            text = message.data.get("content", "")
-            if text:
-                self._file.write(text)
-                self._file.flush()
-                self._mid_line = not text.endswith("\n")
-
-    def _print_result(
-        self, message: Any, step_count: int, budget_used: float, total_tokens_used: int,
-    ) -> None:
-        cost_str = f"${budget_used:.4f}" if budget_used else "N/A"
-        self._flush_newline()
-        self._console.print(
-            Panel(
-                message.result or "(no result)",
-                title="Result",
-                subtitle=f"steps={step_count}  tokens={total_tokens_used}  cost={cost_str}",
-                border_style="bold green",
-                padding=(1, 2),
+            step_count = kwargs.get("step_count", 0)
+            budget_used = kwargs.get("budget_used", 0.0)
+            total_tokens_used = kwargs.get("total_tokens_used", 0)
+            cost_str = f"${budget_used:.4f}" if budget_used else "N/A"
+            self._flush_newline()
+            self._console.print(
+                Panel(
+                    message.result or "(no result)",
+                    title="Result",
+                    subtitle=(
+                        f"steps={step_count}  tokens={total_tokens_used}  cost={cost_str}"
+                    ),
+                    border_style="bold green",
+                    padding=(1, 2),
+                )
             )
-        )
-
-    def print_usage_info(self, usage_info: str) -> None:
-        self._flush_newline()
-        self._console.print(
-            Panel(Markdown(usage_info.strip()), border_style="dim", padding=(0, 1))
-        )
-
-    def _print_tool_results(self, message: Any) -> None:
-        for block in message.content:
-            if hasattr(block, "is_error") and hasattr(block, "content"):
-                content = block.content if isinstance(block.content, str) else str(block.content)
-                self._flush_newline()
-                self._print_tool_result(content, bool(block.is_error))
+        elif hasattr(message, "content"):
+            for block in message.content:
+                if hasattr(block, "is_error") and hasattr(block, "content"):
+                    content = (
+                        block.content if isinstance(block.content, str) else str(block.content)
+                    )
+                    self._flush_newline()
+                    self._print_tool_result(content, bool(block.is_error))
