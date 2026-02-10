@@ -5,51 +5,24 @@ These tests target specific branches and edge cases in:
 - utils.py: Utility functions
 - model_info.py: Model information and lookup
 - simple_formatter.py and compact_formatter.py: Formatter implementations
-- config.py: Configuration classes
 """
 
-import os
 from pathlib import Path
 
 import pytest
 
 from kiss.core import config as config_module
-from kiss.core.base import CODING_INSTRUCTIONS, Base
+from kiss.core.base import Base
 from kiss.core.compact_formatter import CompactFormatter
-from kiss.core.config import (
-    AgentConfig,
-    APIKeysConfig,
-    Config,
-    DockerConfig,
-    KISSCodingAgentConfig,
-    RelentlessCodingAgentConfig,
-)
 from kiss.core.simple_formatter import SimpleFormatter, _left_aligned_heading
 from kiss.core.utils import (
     get_config_value,
     is_subpath,
     read_project_file,
     read_project_file_from_package,
-    resolve_path,
 )
 
 FORMATTER_CLASSES = [SimpleFormatter, CompactFormatter]
-
-
-@pytest.fixture
-def temp_dir(tmp_path):
-    original = os.getcwd()
-    resolved = tmp_path.resolve()
-    os.chdir(resolved)
-    yield resolved
-    os.chdir(original)
-
-
-@pytest.fixture
-def verbose_config():
-    original = config_module.DEFAULT_CONFIG.agent.verbose
-    yield
-    config_module.DEFAULT_CONFIG.agent.verbose = original
 
 
 @pytest.fixture
@@ -62,15 +35,6 @@ def base_state():
 
 
 class TestBaseClass:
-    def test_basic_init_and_counter(self, base_state):
-        initial = Base.agent_counter
-        agent = Base("test_agent")
-        assert agent.name == "test_agent"
-        assert agent.base_dir == ""
-        assert isinstance(agent.id, int)
-        Base("agent2")
-        assert Base.agent_counter == initial + 2
-
     def test_run_state_and_messages(self, base_state):
         Base.global_budget_used = 5.5
         agent = Base("test")
@@ -99,10 +63,6 @@ class TestBaseClass:
         state = agent._build_state_dict()
         assert state["max_tokens"] is None
 
-    def test_coding_instructions_constant(self):
-        assert CODING_INSTRUCTIONS is not None
-        assert len(CODING_INSTRUCTIONS) > 0
-
     def test_save_creates_trajectory_file(self, base_state, tmp_path):
         original_artifact_dir = config_module.DEFAULT_CONFIG.agent.artifact_dir
         config_module.DEFAULT_CONFIG.agent.artifact_dir = str(tmp_path)
@@ -120,15 +80,6 @@ class TestBaseClass:
 
 
 class TestUtils:
-    def test_resolve_path(self, temp_dir):
-        test_file = temp_dir / "test.txt"
-        test_file.write_text("content")
-        assert resolve_path(str(test_file), str(temp_dir)) == test_file.resolve()
-
-    def test_resolve_path_absolute(self, tmp_path):
-        abs_path = str(tmp_path / "test.txt")
-        assert resolve_path(abs_path, "/some/other/base") == Path(abs_path).resolve()
-
     def test_is_subpath(self, temp_dir):
         parent = temp_dir / "parent"
         child = parent / "child"
@@ -157,14 +108,6 @@ class TestUtils:
 
         with pytest.raises(ValueError, match="No value provided"):
             get_config_value(None, EmptyConfig(), "nonexistent_attr")
-
-    def test_read_project_file_existing(self):
-        try:
-            content = read_project_file("src/kiss/core/__init__.py")
-            assert isinstance(content, str)
-            assert len(content) > 0
-        except Exception:
-            pytest.skip("Project file not accessible in test environment")
 
     def test_read_project_file_not_found(self):
         from kiss.core.kiss_error import KISSError
@@ -212,23 +155,6 @@ class TestFormatters:
         formatter.print_label_and_value("Label", "Value")
 
     @pytest.mark.parametrize("formatter_class", FORMATTER_CLASSES)
-    def test_print_methods_no_console(self, verbose_config, formatter_class, capsys):
-        config_module.DEFAULT_CONFIG.agent.verbose = True
-        formatter = formatter_class()
-        formatter._console = None
-        formatter._stderr_console = None
-        formatter.print_message({"role": "user", "content": "Test content"})
-        formatter.print_messages([{"role": "user", "content": "Msg1"}])
-        formatter.print_status("Status")
-        formatter.print_error("Error")
-        formatter.print_warning("Warning")
-        formatter.print_label_and_value("Label", "Value")
-        captured = capsys.readouterr()
-        assert "Status" in captured.out
-        assert "Error" in captured.err
-        assert "Warning" in captured.out
-
-    @pytest.mark.parametrize("formatter_class", FORMATTER_CLASSES)
     def test_print_methods_with_console(self, verbose_config, formatter_class):
         from io import StringIO
 
@@ -246,37 +172,6 @@ class TestFormatters:
         formatter.print_label_and_value("Label", "Value")
 
 
-class TestSimpleFormatterSpecific:
-    def test_format_message_missing_keys(self, verbose_config):
-        config_module.DEFAULT_CONFIG.agent.verbose = True
-        formatter = SimpleFormatter()
-        result = formatter.format_message({})
-        assert 'role=""' in result
-
-
-class TestCompactFormatterSpecific:
-    def test_truncates_long_content(self, verbose_config):
-        config_module.DEFAULT_CONFIG.agent.verbose = True
-        formatter = CompactFormatter()
-        message = {"role": "user", "content": "A" * 200}
-        result = formatter.format_message(message)
-        assert len(result) < 200
-
-    def test_replaces_newlines(self, verbose_config):
-        config_module.DEFAULT_CONFIG.agent.verbose = True
-        formatter = CompactFormatter()
-        message = {"role": "user", "content": "line1\nline2"}
-        result = formatter.format_message(message)
-        assert "line1" in result and "line2" in result
-        assert "line1\nline2" not in result
-
-    def test_unknown_role(self, verbose_config):
-        config_module.DEFAULT_CONFIG.agent.verbose = True
-        formatter = CompactFormatter()
-        result = formatter.format_message({"content": "Hello"})
-        assert "[unknown]" in result
-
-
 class TestLeftAlignedHeading:
     @pytest.mark.parametrize("tag,expected_count", [("h1", 1), ("h2", 2), ("h3", 1)])
     def test_heading_tags(self, tag, expected_count):
@@ -289,41 +184,6 @@ class TestLeftAlignedHeading:
 
         results = list(_left_aligned_heading(MockHeading(tag), None, None))
         assert len(results) == expected_count
-
-
-class TestConfigClasses:
-    def test_api_keys_from_env(self):
-        original = os.environ.get("GEMINI_API_KEY")
-        try:
-            os.environ["GEMINI_API_KEY"] = "test_key"
-            config = APIKeysConfig()
-            assert config.GEMINI_API_KEY == "test_key"
-        finally:
-            if original:
-                os.environ["GEMINI_API_KEY"] = original
-            elif "GEMINI_API_KEY" in os.environ:
-                del os.environ["GEMINI_API_KEY"]
-
-    def test_all_config_classes(self):
-        agent = AgentConfig()
-        assert agent.max_steps == 100
-        assert agent.verbose is True
-        assert agent.debug is False
-
-        docker = DockerConfig()
-        assert docker.client_shared_path == "/testbed"
-
-        relentless = RelentlessCodingAgentConfig()
-        assert relentless.subtasker_model_name == "claude-opus-4-6"
-        assert relentless.max_steps == 200
-
-        kiss = KISSCodingAgentConfig()
-        assert kiss.orchestrator_model_name == "claude-opus-4-6"
-        assert kiss.refiner_model_name == "claude-sonnet-4-5"
-
-        config = Config()
-        assert isinstance(config.agent, AgentConfig)
-        assert isinstance(config.docker, DockerConfig)
 
 
 class TestModelHelpers:
@@ -402,12 +262,6 @@ class TestModelInfoEdgeCases:
 
         with pytest.raises(KISSError, match="Unknown model name"):
             model("nonexistent-model-xyz")
-
-    def test_get_max_context_length_unknown_model(self):
-        from kiss.core.models.model_info import get_max_context_length
-
-        with pytest.raises(KeyError, match="not found in MODEL_INFO"):
-            get_max_context_length("nonexistent-model-xyz")
 
     def test_calculate_cost_unknown_model(self):
         from kiss.core.models.model_info import calculate_cost

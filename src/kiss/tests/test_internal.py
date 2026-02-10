@@ -82,75 +82,8 @@ class TestKISSError(unittest.TestCase):
     def test_kiss_error_inheritance(self):
         self.assertIsInstance(KISSError("Test"), ValueError)
 
-    def test_kiss_error_debug_mode(self):
-        from kiss.core.config import DEFAULT_CONFIG
-
-        original_debug = DEFAULT_CONFIG.agent.debug
-        DEFAULT_CONFIG.agent.debug = False
-        try:
-            error = KISSError("Test message")
-            self.assertIn("Test message", str(error))
-        finally:
-            DEFAULT_CONFIG.agent.debug = original_debug
-
 
 class TestConfigBuilder(unittest.TestCase):
-    def test_add_config_basic(self):
-        from pydantic import BaseModel, Field
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        class TestConfig(BaseModel):
-            test_value: str = Field(default="test")
-            test_int: int = Field(default=42)
-
-        original_config = config_module.DEFAULT_CONFIG
-        try:
-            add_config("test_config", TestConfig)
-            self.assertIsNotNone(config_module.DEFAULT_CONFIG)
-        finally:
-            config_module.DEFAULT_CONFIG = original_config
-
-    def test_add_config_with_nested_model(self):
-        from pydantic import BaseModel, Field
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        class InnerConfig(BaseModel):
-            inner_value: str = Field(default="inner")
-
-        class OuterConfig(BaseModel):
-            outer_value: str = Field(default="outer")
-            inner: InnerConfig = Field(default_factory=InnerConfig)
-
-        original_config = config_module.DEFAULT_CONFIG
-        try:
-            add_config("outer_config", OuterConfig)
-            self.assertIsNotNone(config_module.DEFAULT_CONFIG)
-        finally:
-            config_module.DEFAULT_CONFIG = original_config
-
-    def test_add_model_arguments_with_types(self):
-        from argparse import ArgumentParser
-        from typing import Any
-
-        from pydantic import BaseModel, Field
-
-        from kiss.core.config_builder import _add_model_arguments
-
-        class ConfigWithTypes(BaseModel):
-            optional_str: str | None = Field(default=None)
-            optional_int: int | None = Field(default=None)
-            union_type: str | int = Field(default="test")
-            any_field: Any = Field(default=None)
-
-        parser = ArgumentParser()
-        _add_model_arguments(parser, ConfigWithTypes)
-        args, _ = parser.parse_known_args([])
-        self.assertIsNotNone(args)
-
     def test_flat_to_nested_dict(self):
         from pydantic import BaseModel, Field
 

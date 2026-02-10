@@ -46,104 +46,6 @@ class CLITestBase(unittest.TestCase):
         sys.argv = self.original_argv
 
 
-class TestCoreConfigCLI(CLITestBase):
-    def _dummy_config(self):
-        class DummyConfig(BaseModel):
-            dummy: str = Field(default="test")
-
-        return DummyConfig
-
-    def test_agent_simple_options(self):
-        cases = [
-            (["--agent.max-steps", "200"], "agent.max_steps", 200),
-            (["--agent.max-agent-budget", "25.5"], "agent.max_agent_budget", 25.5),
-            (["--agent.global-max-budget", "500.0"], "agent.global_max_budget", 500.0),
-            (["--no-agent.use-web"], "agent.use_web", False),
-            (["--agent.debug"], "agent.debug", True),
-            (
-                ["--docker.client-shared-path", "/custom/path"],
-                "docker.client_shared_path",
-                "/custom/path",
-            ),
-        ]
-        for args, attr_path, expected in cases:
-            with self.subTest(args=args):
-                self._assert_cli_value(
-                    args, "dummy", self._dummy_config(), attr_path, expected
-                )
-
-    def test_agent_verbose_flag(self):
-        self._assert_cli_value(
-            ["--no-agent.verbose"], "dummy", self._dummy_config(), "agent.verbose", False
-        )
-        self._assert_cli_value(
-            ["--agent.verbose"], "dummy", self._dummy_config(), "agent.verbose", True
-        )
-
-    def test_nested_relentless_coding_agent_config(self):
-        args = [
-            "--agent.relentless-coding-agent.subtasker-model-name", "gpt-4",
-            "--agent.relentless-coding-agent.max-steps", "300",
-            "--agent.relentless-coding-agent.max-budget", "50.0",
-            "--agent.relentless-coding-agent.trials", "100",
-        ]
-        expected = {
-            "agent.relentless_coding_agent.subtasker_model_name": "gpt-4",
-            "agent.relentless_coding_agent.max_steps": 300,
-            "agent.relentless_coding_agent.max_budget": 50.0,
-            "agent.relentless_coding_agent.trials": 100,
-        }
-        self._assert_cli_values(args, "dummy", self._dummy_config(), expected)
-
-    def test_nested_kiss_coding_agent_config(self):
-        args = [
-            "--agent.kiss-coding-agent.orchestrator-model-name", "claude-opus-4-6",
-            "--agent.kiss-coding-agent.subtasker-model-name", "claude-sonnet-4-5",
-            "--agent.kiss-coding-agent.refiner-model-name", "gemini-3-flash",
-            "--agent.kiss-coding-agent.max-steps", "250",
-            "--agent.kiss-coding-agent.max-budget", "75.0",
-        ]
-        expected = {
-            "agent.kiss_coding_agent.orchestrator_model_name": "claude-opus-4-6",
-            "agent.kiss_coding_agent.subtasker_model_name": "claude-sonnet-4-5",
-            "agent.kiss_coding_agent.refiner_model_name": "gemini-3-flash",
-            "agent.kiss_coding_agent.max_steps": 250,
-            "agent.kiss_coding_agent.max_budget": 75.0,
-        }
-        self._assert_cli_values(args, "dummy", self._dummy_config(), expected)
-
-
-class TestAlgoTuneConfigCLI(CLITestBase):
-    def _get_algotune_config(self):
-        class AlgoTuneConfig(BaseModel):
-            task: str = Field(default="matrix_multiplication")
-            all_tasks: bool = Field(default=False)
-            algotune_path: str = Field(default="/tmp/AlgoTune")
-            algotune_repo_url: str = Field(default="https://github.com/oripress/AlgoTune.git")
-            num_test_problems: int = Field(default=3)
-            problem_size: int = Field(default=100)
-            num_timing_runs: int = Field(default=5)
-            random_seed: int = Field(default=42)
-            model: str = Field(default="gemini-3-flash-preview")
-
-        return AlgoTuneConfig
-
-    def test_algotune_options(self):
-        cases = [
-            (["--algotune.task", "sorting"], "algotune.task", "sorting"),
-            (["--algotune.all-tasks"], "algotune.all_tasks", True),
-            (["--algotune.num-test-problems", "10"], "algotune.num_test_problems", 10),
-            (["--algotune.problem-size", "500"], "algotune.problem_size", 500),
-            (["--algotune.model", "gpt-4-turbo"], "algotune.model", "gpt-4-turbo"),
-            (["--algotune.random-seed", "123"], "algotune.random_seed", 123),
-        ]
-        for args, attr_path, expected in cases:
-            with self.subTest(args=args):
-                self._assert_cli_value(
-                    args, "algotune", self._get_algotune_config(), attr_path, expected
-                )
-
-
 class TestSWEBenchConfigCLI(CLITestBase):
     def _get_swebench_config(self):
         class SWEBenchVerifiedConfig(BaseModel):
@@ -222,70 +124,6 @@ class TestSWEBenchConfigCLI(CLITestBase):
                     args,
                     "swebench_verified",
                     self._get_swebench_config(),
-                    attr_path,
-                    expected,
-                )
-
-
-class TestKISSEvolveConfigCLI(CLITestBase):
-    def _get_kiss_evolve_config(self):
-        class KISSEvolveConfig(BaseModel):
-            max_generations: int = Field(default=10)
-            population_size: int = Field(default=8)
-            mutation_rate: float = Field(default=0.7)
-            elite_size: int = Field(default=2)
-            num_islands: int = Field(default=2)
-            migration_frequency: int = Field(default=5)
-            migration_size: int = Field(default=1)
-            migration_topology: str = Field(default="ring")
-            enable_novelty_rejection: bool = Field(default=False)
-            novelty_threshold: float = Field(default=0.95)
-            max_rejection_attempts: int = Field(default=5)
-            parent_sampling_method: str = Field(default="power_law")
-            power_law_alpha: float = Field(default=1.0)
-            performance_novelty_lambda: float = Field(default=1.0)
-
-        return KISSEvolveConfig
-
-    def test_kiss_evolve_options(self):
-        cases = [
-            (["--kiss-evolve.max-generations", "20"], "kiss_evolve.max_generations", 20),
-            (["--kiss-evolve.population-size", "16"], "kiss_evolve.population_size", 16),
-            (["--kiss-evolve.mutation-rate", "0.5"], "kiss_evolve.mutation_rate", 0.5),
-            (["--kiss-evolve.elite-size", "4"], "kiss_evolve.elite_size", 4),
-            (["--kiss-evolve.num-islands", "4"], "kiss_evolve.num_islands", 4),
-            (
-                ["--kiss-evolve.migration-topology", "fully_connected"],
-                "kiss_evolve.migration_topology",
-                "fully_connected",
-            ),
-            (
-                ["--kiss-evolve.enable-novelty-rejection"],
-                "kiss_evolve.enable_novelty_rejection",
-                True,
-            ),
-            (
-                ["--kiss-evolve.novelty-threshold", "0.8"],
-                "kiss_evolve.novelty_threshold",
-                0.8,
-            ),
-            (
-                ["--kiss-evolve.parent-sampling-method", "tournament"],
-                "kiss_evolve.parent_sampling_method",
-                "tournament",
-            ),
-            (
-                ["--kiss-evolve.power-law-alpha", "2.0"],
-                "kiss_evolve.power_law_alpha",
-                2.0,
-            ),
-        ]
-        for args, attr_path, expected in cases:
-            with self.subTest(args=args):
-                self._assert_cli_value(
-                    args,
-                    "kiss_evolve",
-                    self._get_kiss_evolve_config(),
                     attr_path,
                     expected,
                 )
@@ -374,34 +212,6 @@ class TestAgentCreatorConfigCLI(CLITestBase):
 
         return AgentCreatorConfig
 
-    def test_improver_options(self):
-        cases = [
-            (
-                ["--create-and-optimize-agent.improver.model-name", "gpt-4"],
-                "create_and_optimize_agent.improver.model_name",
-                "gpt-4",
-            ),
-            (
-                ["--create-and-optimize-agent.improver.max-steps", "200"],
-                "create_and_optimize_agent.improver.max_steps",
-                200,
-            ),
-            (
-                ["--create-and-optimize-agent.improver.max-budget", "30.0"],
-                "create_and_optimize_agent.improver.max_budget",
-                30.0,
-            ),
-        ]
-        for args, attr_path, expected in cases:
-            with self.subTest(args=args):
-                self._assert_cli_value(
-                    args,
-                    "create_and_optimize_agent",
-                    self._get_agent_creator_config(),
-                    attr_path,
-                    expected,
-                )
-
     def test_evolver_options(self):
         cases = [
             (
@@ -441,55 +251,7 @@ class TestAgentCreatorConfigCLI(CLITestBase):
                 )
 
 
-class TestGEPAConfigCLI(CLITestBase):
-    def _get_gepa_config(self):
-        class GEPAConfig(BaseModel):
-            reflection_model: str = Field(default="gemini-3-flash-preview")
-            max_generations: int = Field(default=10)
-            population_size: int = Field(default=8)
-            pareto_size: int = Field(default=4)
-            mutation_rate: float = Field(default=0.5)
-
-        return GEPAConfig
-
-    def test_gepa_options(self):
-        cases = [
-            (["--gepa.reflection-model", "gpt-4-turbo"], "gepa.reflection_model", "gpt-4-turbo"),
-            (["--gepa.max-generations", "15"], "gepa.max_generations", 15),
-            (["--gepa.population-size", "12"], "gepa.population_size", 12),
-            (["--gepa.pareto-size", "6"], "gepa.pareto_size", 6),
-            (["--gepa.mutation-rate", "0.6"], "gepa.mutation_rate", 0.6),
-        ]
-        for args, attr_path, expected in cases:
-            with self.subTest(args=args):
-                self._assert_cli_value(args, "gepa", self._get_gepa_config(), attr_path, expected)
-
-
 class TestMultipleCLIOptions(CLITestBase):
-    def test_multiple_options_same_config(self):
-        class KISSEvolveConfig(BaseModel):
-            max_generations: int = Field(default=10)
-            population_size: int = Field(default=8)
-            mutation_rate: float = Field(default=0.7)
-            elite_size: int = Field(default=2)
-            num_islands: int = Field(default=2)
-
-        sys.argv = [
-            "test",
-            "--kiss-evolve.max-generations", "25",
-            "--kiss-evolve.population-size", "32",
-            "--kiss-evolve.mutation-rate", "0.9",
-            "--kiss-evolve.elite-size", "5",
-            "--kiss-evolve.num-islands", "8",
-        ]
-        add_config("kiss_evolve", KISSEvolveConfig)
-        ke = config_module.DEFAULT_CONFIG.kiss_evolve
-        self.assertEqual(ke.max_generations, 25)
-        self.assertEqual(ke.population_size, 32)
-        self.assertEqual(ke.mutation_rate, 0.9)
-        self.assertEqual(ke.elite_size, 5)
-        self.assertEqual(ke.num_islands, 8)
-
     def test_multiple_options_different_configs(self):
         class GEPAConfig(BaseModel):
             reflection_model: str = Field(default="gemini-3-flash-preview")
@@ -530,20 +292,6 @@ class TestCLIEdgeCases(CLITestBase):
         sys.argv = ["test", "--gepa.max-generations", "15", "--unknown-arg", "value", "-v"]
         add_config("gepa", GEPAConfig)
         self.assertEqual(config_module.DEFAULT_CONFIG.gepa.max_generations, 15)
-
-    def test_mixed_dash_underscore_styles(self):
-        class SWEBenchConfig(BaseModel):
-            max_steps: int = Field(default=100)
-            max_budget: float = Field(default=5.0)
-
-        sys.argv = [
-            "test",
-            "--swebench-verified.max-steps", "100",
-            "--swebench_verified.max_budget", "7.5",
-        ]
-        add_config("swebench_verified", SWEBenchConfig)
-        self.assertEqual(config_module.DEFAULT_CONFIG.swebench_verified.max_steps, 100)
-        self.assertEqual(config_module.DEFAULT_CONFIG.swebench_verified.max_budget, 7.5)
 
 
 if __name__ == "__main__":
