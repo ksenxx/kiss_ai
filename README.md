@@ -817,6 +817,7 @@ kiss/
 │   │   │   ├── optimize_agent.py          # Pareto frontier agent optimizer
 │   │   │   ├── print_to_console.py        # Console output formatting for Claude Coding Agent
 │   │   │   ├── print_to_browser.py        # Browser SSE streaming for Claude Coding Agent
+│   │   │   ├── printer_common.py          # Shared utilities for console and browser printers
 │   │   │   ├── gemini_cli_agent.py        # Gemini CLI Agent using Google ADK
 │   │   │   └── openai_codex_agent.py      # OpenAI Codex Agent using OpenAI Agents SDK
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
@@ -865,7 +866,8 @@ kiss/
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
-│   │   └── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
+│   │   ├── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
+│   │   └── release.sh                  # Release automation script
 │   ├── tests/           # Test suite
 │   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py

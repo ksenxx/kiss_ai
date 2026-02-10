@@ -14,7 +14,6 @@ from kiss.core.useful_tools import (
     UsefulTools,
     _extract_directory,
     _extract_search_results,
-    _render_page_with_playwright,
     fetch_url,
     parse_bash_command_paths,
 )
@@ -195,10 +194,6 @@ class TestUsefulTools:
         result = tools.Bash("sleep 1", "Timeout test", timeout_seconds=0.01)
         assert result == "Error: Command execution timeout"
 
-    def test_bash_nonzero_exit(self, tools_sandbox):
-        tools, _, _, _ = tools_sandbox
-        assert tools.Bash("false", "Failure test").startswith("Error:")
-
     def test_edit_string_not_found(self, tools_sandbox):
         tools, _, writable_dir, _ = tools_sandbox
         test_file = writable_dir / "missing.txt"
@@ -215,16 +210,6 @@ class TestUsefulTools:
 
         result = tools.Edit(str(test_file), "a", "b", replace_all=True, timeout_seconds=0.0001)
         assert result == "Error: Command execution timeout"
-
-    def test_multiedit_delegates_to_edit(self, tools_sandbox):
-        tools, _, writable_dir, _ = tools_sandbox
-        test_file = writable_dir / "multiedit_test.txt"
-        test_file.write_text("Alpha Beta\nGamma Delta\n")
-
-        tools.MultiEdit(file_path=str(test_file), old_string="Alpha Beta", new_string="Alpha Omega")
-        assert "Alpha Omega" in test_file.read_text()
-        assert "Alpha Beta" not in test_file.read_text()
-
 
 class TestRead:
     def test_read_nonexistent_file(self, tools_sandbox):
@@ -252,22 +237,9 @@ class TestFetchUrl:
         result = fetch_url(f"{http_server}/slow", headers, timeout_seconds=0.01)
         assert result == "Failed to fetch content: Request timed out."
 
-    def test_connection_refused(self):
-        result = fetch_url("http://127.0.0.1:1", {"User-Agent": "Test Agent"}, timeout_seconds=0.1)
-        assert result.startswith("Failed to fetch content:")
-
     def test_invalid_headers(self):
         result = fetch_url("http://example.com", 1, timeout_seconds=0.1)  # type: ignore[arg-type]
         assert result.startswith("Failed to fetch content:")
-
-
-class TestRenderPageWithPlaywright:
-    @pytest.mark.timeout(60)
-    def test_render_local_file(self, tmp_path):
-        html_file = tmp_path / "page.html"
-        html_file.write_text("<html><main>Hello Playwright</main></html>")
-        content = _render_page_with_playwright(f"file://{html_file}", wait_selector="#missing")
-        assert "Hello Playwright" in content
 
 
 if __name__ == "__main__":

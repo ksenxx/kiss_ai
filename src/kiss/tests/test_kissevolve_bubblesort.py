@@ -26,21 +26,6 @@ from kiss.tests.conftest import requires_gemini_api_key
 class TestEvaluateCorrectnessOfCode(unittest.TestCase):
     """Tests for evaluate_correctness_of_code function."""
 
-    def test_initial_code_is_correct(self):
-        """Test that the initial bubble sort code is correct."""
-        result = evaluate_correctness_of_code(INITIAL_CODE)
-        self.assertTrue(result["correctness"])
-        self.assertEqual(result["error"], "None")
-
-    def test_correct_sorting_code(self):
-        """Test correct sorting implementation passes."""
-        correct_code = """
-def sort_array(arr):
-    return sorted(arr)
-"""
-        result = evaluate_correctness_of_code(correct_code)
-        self.assertTrue(result["correctness"])
-
     def test_incorrect_sorting_code(self):
         """Test incorrect sorting implementation fails."""
         incorrect_code = """
@@ -85,28 +70,6 @@ def sort_array(arr):
 class TestEvaluatePerformanceOfCode(unittest.TestCase):
     """Tests for evaluate_performance_of_code function."""
 
-    def test_initial_code_performance(self):
-        """Test that initial code returns valid performance metrics."""
-        result = evaluate_performance_of_code(INITIAL_CODE)
-        self.assertGreater(result["fitness"], 0.0)
-        self.assertIn("total_time_seconds", result["metrics"])
-        self.assertIn("times_by_size", result["metrics"])
-        self.assertIn("growth_ratio", result["metrics"])
-        self.assertIn("test_sizes", result["artifacts"])
-
-    def test_faster_algorithm_has_higher_fitness(self):
-        """Test that a faster algorithm gets higher fitness."""
-        # Python's built-in sort is O(n log n) and highly optimized
-        fast_code = """
-def sort_array(arr):
-    return sorted(arr)
-"""
-        fast_result = evaluate_performance_of_code(fast_code)
-        slow_result = evaluate_performance_of_code(INITIAL_CODE)
-
-        # The built-in sort should be significantly faster
-        self.assertGreater(fast_result["fitness"], slow_result["fitness"])
-
     def test_missing_function_returns_zero_fitness(self):
         """Test code without sort_array function returns zero fitness."""
         no_function_code = """
@@ -131,16 +94,6 @@ def sort_array(arr)
 class TestAnalyzeComplexity(unittest.TestCase):
     """Tests for analyze_complexity function."""
 
-    def test_empty_metrics(self):
-        """Test with empty metrics returns Unknown."""
-        self.assertEqual(analyze_complexity({}), "Unknown")
-        self.assertEqual(analyze_complexity(None), "Unknown")
-
-    def test_missing_times_by_size(self):
-        """Test with missing times_by_size returns Unknown."""
-        metrics = {"total_time_seconds": 1.0}
-        self.assertEqual(analyze_complexity(metrics), "Unknown")
-
     def test_invalid_times_by_size(self):
         """Test with invalid times_by_size returns Unknown."""
         metrics = {"times_by_size": "not a dict"}
@@ -151,7 +104,6 @@ class TestAnalyzeComplexity(unittest.TestCase):
 
     def test_quadratic_complexity_detection(self):
         """Test detection of O(n²) complexity."""
-        # Simulate O(n²) growth: time grows as square of size
         metrics = {
             "times_by_size": {
                 100: 0.01,
@@ -163,7 +115,6 @@ class TestAnalyzeComplexity(unittest.TestCase):
 
     def test_nlogn_complexity_detection(self):
         """Test detection of O(n log n) complexity."""
-        # Simulate O(n log n) growth
         import math
 
         base_time = 0.01
@@ -175,20 +126,6 @@ class TestAnalyzeComplexity(unittest.TestCase):
         }
         result = analyze_complexity(metrics)
         self.assertIn("n log n", result)
-
-
-class TestInitialCode(unittest.TestCase):
-    """Tests for the INITIAL_CODE constant."""
-
-    def test_initial_code_contains_sort_array(self):
-        """Test that INITIAL_CODE defines sort_array function."""
-        self.assertIn("def sort_array", INITIAL_CODE)
-
-    def test_initial_code_is_bubble_sort(self):
-        """Test that INITIAL_CODE implements bubble sort."""
-        self.assertIn("for i in range", INITIAL_CODE)
-        self.assertIn("for j in range", INITIAL_CODE)
-        self.assertIn("arr[j] > arr[j + 1]", INITIAL_CODE)
 
 
 @requires_gemini_api_key

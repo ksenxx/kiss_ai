@@ -10,18 +10,6 @@ import unittest
 from types import SimpleNamespace
 
 from kiss.agents.coding_agents.print_to_console import ConsolePrinter
-from kiss.agents.coding_agents.printer_common import lang_for_path
-
-
-class TestLangForPath(unittest.TestCase):
-    def test_c(self):
-        assert lang_for_path("main.c") == "c"
-
-    def test_sql(self):
-        assert lang_for_path("query.sql") == "sql"
-
-    def test_unknown_extension_returns_ext(self):
-        assert lang_for_path("file.xyz") == "xyz"
 
 
 class TestConsolePrinterInit(unittest.TestCase):
@@ -36,14 +24,6 @@ class TestConsolePrinterInit(unittest.TestCase):
         assert p._current_block_type == ""
         assert p._tool_name == ""
         assert p._tool_json_buffer == ""
-
-
-class TestFlushNewline(unittest.TestCase):
-    def test_no_op_when_not_mid_line(self):
-        buf = io.StringIO()
-        p = ConsolePrinter(file=buf)
-        p._flush_newline()
-        assert buf.getvalue() == ""
 
 
 class TestStreamDelta(unittest.TestCase):

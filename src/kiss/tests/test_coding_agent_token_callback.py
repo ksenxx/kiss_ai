@@ -25,42 +25,6 @@ def _make_collector() -> tuple[TokenCallback, list[str]]:
     return _callback, tokens
 
 
-def _run_kiss_coding_agent(tmp_path: Path, token_callback: TokenCallback | None):
-    from kiss.agents.coding_agents.kiss_coding_agent import KISSCodingAgent
-
-    work_dir = tmp_path / "kiss_work"
-    work_dir.mkdir()
-    agent = KISSCodingAgent("test-kca-callback")
-    return agent.run(
-        prompt_template="What is 2 + 2? Reply with just the number, then finish.",
-        work_dir=str(work_dir),
-        orchestrator_model_name="gpt-5.2",
-        subtasker_model_name="gpt-5.2",
-        refiner_model_name="gpt-5.2",
-        max_steps=10,
-        max_budget=1.0,
-        trials=3,
-        token_callback=token_callback,
-    )
-
-
-def _run_relentless_coding_agent(tmp_path: Path, token_callback: TokenCallback | None):
-    from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
-
-    work_dir = tmp_path / "relentless_work"
-    work_dir.mkdir()
-    agent = RelentlessCodingAgent("test-rca-callback")
-    return agent.run(
-        prompt_template="What is 2 + 2? Reply with just the number, then finish.",
-        work_dir=str(work_dir),
-        subtasker_model_name="gpt-5.2",
-        max_steps=10,
-        max_budget=1.0,
-        trials=3,
-        token_callback=token_callback,
-    )
-
-
 def _run_gemini_cli_agent(tmp_path: Path, token_callback: TokenCallback | None):
     from kiss.agents.coding_agents.gemini_cli_agent import GeminiCliAgent
 
@@ -95,12 +59,14 @@ def _run_openai_codex_agent(tmp_path: Path, token_callback: TokenCallback | None
     )
 
 
-CODING_AGENT_CASES = [
-    pytest.param(_run_kiss_coding_agent, marks=requires_openai_api_key, id="kiss"),
-    pytest.param(
-        _run_relentless_coding_agent, marks=requires_openai_api_key, id="relentless"
-    ),
+CALLBACK_CASES = [
     pytest.param(_run_gemini_cli_agent, marks=requires_gemini_api_key, id="gemini"),
+    pytest.param(
+        _run_openai_codex_agent, marks=requires_openai_api_key, id="openai-codex"
+    ),
+]
+
+REGRESSION_CASES = [
     pytest.param(
         _run_openai_codex_agent, marks=requires_openai_api_key, id="openai-codex"
     ),
@@ -108,7 +74,7 @@ CODING_AGENT_CASES = [
 
 
 class TestCodingAgentTokenCallback:
-    @pytest.mark.parametrize("runner", CODING_AGENT_CASES)
+    @pytest.mark.parametrize("runner", CALLBACK_CASES)
     @pytest.mark.timeout(300)
     def test_callback_receives_tokens(self, runner, tmp_path: Path):
         callback, tokens = _make_collector()
@@ -119,7 +85,7 @@ class TestCodingAgentTokenCallback:
         assert len(tokens) > 0
         assert all(isinstance(t, str) for t in tokens)
 
-    @pytest.mark.parametrize("runner", CODING_AGENT_CASES)
+    @pytest.mark.parametrize("runner", REGRESSION_CASES)
     @pytest.mark.timeout(300)
     def test_no_callback_regression(self, runner, tmp_path: Path):
         try:

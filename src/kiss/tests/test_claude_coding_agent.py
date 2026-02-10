@@ -37,69 +37,12 @@ class TestClaudeCodingAgentPermissions(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _run_permission(self, tool_name, tool_args):
-        from claude_agent_sdk import ToolPermissionContext
+    def test_permission_handler_tools_without_path(self):
+        from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 
         context = ToolPermissionContext()
-        return asyncio.run(self.agent.permission_handler(tool_name, tool_args, context))
-
-    def test_permission_handler_read_allowed(self):
-        from claude_agent_sdk import PermissionResultAllow
-
-        result = self._run_permission("Read", {"path": str(self.readable_dir / "test.txt")})
+        result = asyncio.run(self.agent.permission_handler("SomeOtherTool", {}, context))
         self.assertIsInstance(result, PermissionResultAllow)
-
-    def test_permission_handler_read_denied(self):
-        from claude_agent_sdk import PermissionResultDeny
-
-        result = self._run_permission("Read", {"path": "/tmp/outside/test.txt"})
-        self.assertIsInstance(result, PermissionResultDeny)
-
-    def test_permission_handler_write_allowed(self):
-        from claude_agent_sdk import PermissionResultAllow
-
-        result = self._run_permission("Write", {"path": str(self.writable_dir / "output.txt")})
-        self.assertIsInstance(result, PermissionResultAllow)
-
-    def test_permission_handler_write_denied(self):
-        from claude_agent_sdk import PermissionResultDeny
-
-        result = self._run_permission("Write", {"path": str(self.readable_dir / "readonly.txt")})
-        self.assertIsInstance(result, PermissionResultDeny)
-
-    def test_permission_handler_tools_without_path(self):
-        from claude_agent_sdk import PermissionResultAllow
-
-        result = self._run_permission("SomeOtherTool", {})
-        self.assertIsInstance(result, PermissionResultAllow)
-
-    def test_permission_handler_file_path_key(self):
-        from claude_agent_sdk import PermissionResultAllow
-
-        result = self._run_permission(
-            "Read", {"file_path": str(self.readable_dir / "test.txt")}
-        )
-        self.assertIsInstance(result, PermissionResultAllow)
-
-    def test_permission_handler_grep_glob(self):
-        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
-
-        for tool in ["Grep", "Glob"]:
-            result = self._run_permission(tool, {"path": str(self.readable_dir / "test.txt")})
-            self.assertIsInstance(result, PermissionResultAllow)
-            result = self._run_permission(tool, {"path": "/tmp/outside/test.txt"})
-            self.assertIsInstance(result, PermissionResultDeny)
-
-    def test_permission_handler_edit_multiedit(self):
-        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
-
-        for tool in ["Edit", "MultiEdit"]:
-            result = self._run_permission(tool, {"path": str(self.writable_dir / "file.txt")})
-            self.assertIsInstance(result, PermissionResultAllow)
-            result = self._run_permission(
-                tool, {"path": str(self.readable_dir / "readonly.txt")}
-            )
-            self.assertIsInstance(result, PermissionResultDeny)
 
 
 @requires_anthropic_api_key

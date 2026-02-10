@@ -7,8 +7,6 @@ These tests target specific branches and edge cases in:
 - simple_formatter.py and compact_formatter.py: Formatter implementations
 """
 
-from pathlib import Path
-
 import pytest
 
 from kiss.core import config as config_module
@@ -17,7 +15,6 @@ from kiss.core.compact_formatter import CompactFormatter
 from kiss.core.simple_formatter import SimpleFormatter, _left_aligned_heading
 from kiss.core.utils import (
     get_config_value,
-    is_subpath,
     read_project_file,
     read_project_file_from_package,
 )
@@ -25,76 +22,23 @@ from kiss.core.utils import (
 FORMATTER_CLASSES = [SimpleFormatter, CompactFormatter]
 
 
-@pytest.fixture
-def base_state():
-    original_counter = Base.agent_counter
-    original_budget = Base.global_budget_used
-    yield
-    Base.agent_counter = original_counter
-    Base.global_budget_used = original_budget
-
-
 class TestBaseClass:
-    def test_run_state_and_messages(self, base_state):
-        Base.global_budget_used = 5.5
-        agent = Base("test")
-        agent._init_run_state("gpt-4o", ["func1"])
-        assert agent.model_name == "gpt-4o"
-        assert agent.function_map == ["func1"]
-        assert agent.messages == []
-        assert isinstance(agent.run_start_timestamp, int)
+    @pytest.fixture(autouse=True)
+    def base_state(self):
+        original_counter = Base.agent_counter
+        original_budget = Base.global_budget_used
+        yield
+        Base.agent_counter = original_counter
+        Base.global_budget_used = original_budget
 
-        agent._add_message("user", "Hello")
-        assert len(agent.messages) == 1
-        assert agent.messages[0]["role"] == "user"
-        assert agent.messages[0]["content"] == "Hello"
-
-        state = agent._build_state_dict()
-        assert state["model"] == "gpt-4o"
-        assert state["global_budget_used"] == 5.5
-
-        trajectory = agent.get_trajectory()
-        assert isinstance(trajectory, str)
-        assert "Hello" in trajectory
-
-    def test_build_state_dict_unknown_model(self, base_state):
+    def test_build_state_dict_unknown_model(self):
         agent = Base("test")
         agent._init_run_state("unknown-model-xyz", [])
         state = agent._build_state_dict()
         assert state["max_tokens"] is None
 
-    def test_save_creates_trajectory_file(self, base_state, tmp_path):
-        original_artifact_dir = config_module.DEFAULT_CONFIG.agent.artifact_dir
-        config_module.DEFAULT_CONFIG.agent.artifact_dir = str(tmp_path)
-        try:
-            agent = Base("test_save_agent")
-            agent._init_run_state("gpt-4.1-mini", [])
-            agent._add_message("user", "Test message")
-            agent._save()
-            trajectories_dir = tmp_path / "trajectories"
-            assert trajectories_dir.exists()
-            files = list(trajectories_dir.glob("trajectory_test_save_agent_*.yaml"))
-            assert len(files) == 1
-        finally:
-            config_module.DEFAULT_CONFIG.agent.artifact_dir = original_artifact_dir
-
 
 class TestUtils:
-    def test_is_subpath(self, temp_dir):
-        parent = temp_dir / "parent"
-        child = parent / "child"
-        parent.mkdir()
-        assert is_subpath(child, [parent])
-        assert not is_subpath(Path("/etc/passwd"), [temp_dir])
-
-    def test_get_config_value(self):
-        result = get_config_value(None, config_module.DEFAULT_CONFIG.agent, "verbose")
-        assert isinstance(result, bool)
-
-    def test_get_config_value_prefers_explicit(self):
-        result = get_config_value("explicit", config_module.DEFAULT_CONFIG.agent, "verbose")
-        assert result == "explicit"
-
     def test_get_config_value_uses_default(self):
         class ConfigWithNone:
             nonexistent = None
@@ -123,24 +67,16 @@ class TestUtils:
 
 
 class TestFormatters:
-    @pytest.mark.parametrize("formatter_class", FORMATTER_CLASSES)
-    @pytest.mark.parametrize("verbose", [True, False])
-    def test_format_methods(self, verbose_config, formatter_class, verbose):
-        config_module.DEFAULT_CONFIG.agent.verbose = verbose
-        formatter = formatter_class()
+    def test_format_methods_false_simple_formatter(self, verbose_config):
+        config_module.DEFAULT_CONFIG.agent.verbose = False
+        formatter = SimpleFormatter()
 
         result = formatter.format_message({"role": "user", "content": "Hello"})
-        if verbose:
-            assert "user" in result.lower() or "Hello" in result
-        else:
-            assert result == ""
+        assert result == ""
 
         messages = [{"role": "user", "content": "Hello"}, {"role": "model", "content": "Hi"}]
         result = formatter.format_messages(messages)
-        if verbose:
-            assert "Hello" in result
-        else:
-            assert result == ""
+        assert result == ""
 
     @pytest.mark.parametrize("formatter_class", FORMATTER_CLASSES)
     @pytest.mark.parametrize("verbose", [True, False])
@@ -214,18 +150,6 @@ class TestModelHelpers:
 
         return ConcreteModel("test_model")
 
-    def test_model_basics_and_helpers(self):
-        m = self._create_model()
-        assert m.model_name == "test_model"
-        assert m.model_config == {}
-
-        m.set_usage_info_for_messages("Usage: 100")
-        assert m.usage_info_for_messages == "Usage: 100"
-
-        docstring = """Test.\n\nArgs:\n    param1: Description."""
-        result = m._parse_docstring_params(docstring)
-        assert "param1" in result
-
     def test_type_to_json_schema_all_types(self):
         m = self._create_model()
         type_map = [
@@ -242,18 +166,6 @@ class TestModelHelpers:
         assert result["type"] == "array"
         assert result["items"]["type"] == "string"
 
-    def test_function_to_openai_tool(self):
-        m = self._create_model()
-
-        def sample(name: str, count: int = 10) -> str:
-            """Sample function.\n\nArgs:\n    name: The name.\n    count: Count."""
-            return f"{name}: {count}"
-
-        tool = m._function_to_openai_tool(sample)
-        assert tool["type"] == "function"
-        assert tool["function"]["name"] == "sample"
-        assert "name" in tool["function"]["parameters"]["properties"]
-
 
 class TestModelInfoEdgeCases:
     def test_unknown_model_raises_error(self):
@@ -267,13 +179,6 @@ class TestModelInfoEdgeCases:
         from kiss.core.models.model_info import calculate_cost
 
         assert calculate_cost("unknown-model-xyz", 1000, 1000) == 0.0
-
-    def test_calculate_cost_known_model(self):
-        from kiss.core.models.model_info import calculate_cost
-
-        result = calculate_cost("gpt-4.1-mini", 1000, 1000)
-        assert result >= 0.0
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

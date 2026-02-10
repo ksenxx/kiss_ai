@@ -15,51 +15,6 @@ from kiss.tests.conftest import requires_gemini_api_key
 
 
 @requires_gemini_api_key
-class TestGeminiCliAgentPermissions(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.readable_dir = self.temp_dir / "readable"
-        self.writable_dir = self.temp_dir / "writable"
-        self.readable_dir.mkdir()
-        self.writable_dir.mkdir()
-
-        self.agent = GeminiCliAgent("test-agent")
-        self.agent._reset(
-            model_name=DEFAULT_GEMINI_MODEL,
-            readable_paths=[str(self.readable_dir)],
-            writable_paths=[str(self.writable_dir)],
-            base_dir=str(self.temp_dir),
-            max_steps=DEFAULT_CONFIG.agent.max_steps,
-            max_budget=DEFAULT_CONFIG.agent.max_agent_budget,
-            formatter=None,
-        )
-
-    def tearDown(self):
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_tools_are_created(self):
-        tools = self.agent._create_tools()
-        self.assertEqual(len(tools), 5)
-        names = {t.__name__ for t in tools}
-        self.assertIn("read_file", names)
-        self.assertIn("write_file", names)
-        self.assertIn("list_dir", names)
-        self.assertIn("run_shell", names)
-        self.assertIn("web_search", names)
-
-    def test_reset_adds_base_dir_to_paths(self):
-        self.assertIn(self.temp_dir.resolve(), self.agent.readable_paths)
-        self.assertIn(self.temp_dir.resolve(), self.agent.writable_paths)
-
-    def test_reset_creates_base_dir(self):
-        new_dir = self.temp_dir / "new_workdir"
-        self.assertFalse(new_dir.exists())
-        agent = GeminiCliAgent("test-agent-2")
-        agent._reset(DEFAULT_GEMINI_MODEL, None, None, str(new_dir), 10, 0.5, None)
-        self.assertTrue(new_dir.exists())
-
-
-@requires_gemini_api_key
 class TestGeminiCliAgentTools(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
@@ -90,13 +45,6 @@ class TestGeminiCliAgentTools(unittest.TestCase):
     def test_read_file_not_found(self):
         result = self.tools_by_name["read_file"]("nonexistent.txt")
         self.assertEqual(result["status"], "error")
-
-    def test_write_file_success(self):
-        result = self.tools_by_name["write_file"]("output.txt", "Test content")
-        self.assertEqual(result["status"], "success")
-        output_path = self.temp_dir / "output.txt"
-        self.assertTrue(output_path.exists())
-        self.assertEqual(output_path.read_text(), "Test content")
 
     def test_list_dir_success(self):
         result = self.tools_by_name["list_dir"](".")

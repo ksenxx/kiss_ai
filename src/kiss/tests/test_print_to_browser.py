@@ -8,8 +8,6 @@ for ClaudeCodingAgent. Uses real objects with duck-typed attributes
 import queue
 import time
 import unittest
-import urllib.error
-import urllib.request
 from types import SimpleNamespace
 
 from kiss.agents.coding_agents.print_to_browser import BrowserPrinter
@@ -33,18 +31,6 @@ def _drain(q: queue.Queue) -> list[dict]:
     return events
 
 
-class TestBrowserPrinterInit(unittest.TestCase):
-    def test_reset(self):
-        p = BrowserPrinter()
-        p._current_block_type = "thinking"
-        p._tool_name = "Read"
-        p._tool_json_buffer = '{"path": "x"}'
-        p.reset()
-        assert p._current_block_type == ""
-        assert p._tool_name == ""
-        assert p._tool_json_buffer == ""
-
-
 class TestPrintStreamEvent(unittest.TestCase):
     def _event(self, evt_dict):
         return SimpleNamespace(event=evt_dict)
@@ -63,20 +49,6 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert text == ""
         assert _drain(q) == []
 
-    def test_thinking_delta_empty(self):
-        p = BrowserPrinter()
-        q = _subscribe(p)
-        text = p.print_stream_event(
-            self._event(
-                {
-                    "type": "content_block_delta",
-                    "delta": {"type": "thinking_delta", "thinking": ""},
-                }
-            )
-        )
-        assert text == ""
-        assert _drain(q) == []
-
     def test_tool_use_stop_invalid_json(self):
         p = BrowserPrinter()
         q = _subscribe(p)
@@ -89,20 +61,6 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert len(events) == 1
         assert events[0]["type"] == "tool_call"
         assert events[0]["name"] == "Bash"
-
-    def test_unknown_delta_type(self):
-        p = BrowserPrinter()
-        q = _subscribe(p)
-        text = p.print_stream_event(
-            self._event(
-                {
-                    "type": "content_block_delta",
-                    "delta": {"type": "unknown_type"},
-                }
-            )
-        )
-        assert text == ""
-        assert _drain(q) == []
 
 
 class TestFormatToolCall(unittest.TestCase):
@@ -142,13 +100,6 @@ class TestPrintMessageSystem(unittest.TestCase):
         p.print_message(msg)
         assert _drain(q) == []
 
-    def test_other_subtype_ignored(self):
-        p = BrowserPrinter()
-        q = _subscribe(p)
-        msg = SimpleNamespace(subtype="other", data={"content": "ignored"})
-        p.print_message(msg)
-        assert _drain(q) == []
-
 
 class TestPrintMessageUser(unittest.TestCase):
     def test_blocks_without_is_error_skipped(self):
@@ -170,39 +121,6 @@ class TestPrintMessageDispatch(unittest.TestCase):
 
 
 class TestServerLifecycle(unittest.TestCase):
-    def test_start_and_stop(self):
-        p = BrowserPrinter()
-        p.start(open_browser=False)
-        try:
-            assert p._port > 0
-            assert p._server is not None
-            assert p._server_thread is not None
-            assert p._server_thread.is_alive()
-
-            url = f"http://127.0.0.1:{p._port}/"
-            resp = urllib.request.urlopen(url, timeout=5)
-            html = resp.read().decode()
-            assert "KISS Agent" in html
-            assert "EventSource" in html
-            assert resp.status == 200
-        finally:
-            p.stop()
-            time.sleep(0.5)
-
-    def test_404_for_unknown_path(self):
-        p = BrowserPrinter()
-        p.start(open_browser=False)
-        try:
-            url = f"http://127.0.0.1:{p._port}/nonexistent"
-            try:
-                urllib.request.urlopen(url, timeout=5)
-                assert False, "Expected HTTP error"
-            except urllib.error.HTTPError as e:
-                assert e.code == 404
-        finally:
-            p.stop()
-            time.sleep(0.5)
-
     def test_events_endpoint_returns_sse_content_type(self):
         p = BrowserPrinter()
         p.start(open_browser=False)

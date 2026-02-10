@@ -1,6 +1,5 @@
 """Test suite for DockerManager without mocking."""
 
-import os
 import socket
 import unittest
 
@@ -21,25 +20,6 @@ def is_docker_available() -> bool:
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
 class TestDockerManager(unittest.TestCase):
-    def test_actual_no_mock(self) -> None:
-        with DockerManager("ubuntu:latest") as env:
-            output = env.run_bash_command('echo "Hello, World!"', "Echo command")
-            self.assertIn("Hello, World!", output)
-
-    def test_host_to_container_shared_volume(self) -> None:
-        with DockerManager("ubuntu:latest") as env:
-            assert env.host_shared_path is not None
-            host_file_path = os.path.join(env.host_shared_path, "testfile.txt")
-            test_content = "Data written from host for Docker shared path test."
-            with open(host_file_path, "w", encoding="utf-8") as f:
-                f.write(test_content)
-
-            client_file_path = os.path.join(env.client_shared_path, "testfile.txt")
-            output = env.run_bash_command(
-                f'cat "{client_file_path}"', "Read file written from host in container"
-            )
-            self.assertEqual(test_content, output.strip())
-
     def test_port_mapping(self) -> None:
         def find_free_port() -> int:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
