@@ -14,6 +14,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 - [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
 - [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
+- [Interactive Demo with Streaming Output](#-interactive-demo-with-streaming-output)
 - [Blogs](#-blogs)
 - [Multi-Agent Orchestration](#-multi-agent-orchestration)
 - [Using Agent Creator and Optimizer](#-using-agent-creator-and-optimizer)
@@ -80,6 +81,45 @@ print(result)  # 127.05
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 
 KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works.
+
+## 🎬 Interactive Demo with Streaming Output
+
+Run the built-in demo to see a KISSAgent solve arithmetic problems with real-time token streaming to both the terminal and a live browser UI:
+
+```bash
+uv run python -m kiss.demo.kiss_demo
+```
+
+This launches an agent that uses a `simple_calculator` tool to solve three math problems step by step. Output is streamed in real-time via the `token_callback` mechanism to:
+
+- **Terminal** — using `ConsolePrinter` from `print_to_console.py` for rich-formatted output (tool call panels, result rules, final result panel)
+- **Browser** — using `BrowserPrinter` from `print_to_browser.py` for a live dark-themed web UI with scrollable panels, syntax highlighting, and tool call cards
+
+The demo shows how to connect the `token_callback` to `ConsolePrinter` and `BrowserPrinter` for nicely formatted streaming output:
+
+```python
+from kiss.agents.coding_agents.print_to_browser import BrowserPrinter
+from kiss.agents.coding_agents.print_to_console import ConsolePrinter
+from kiss.core.kiss_agent import KISSAgent
+
+console_printer = ConsolePrinter()
+browser_printer = BrowserPrinter()
+browser_printer.start()
+
+async def token_callback(token: str) -> None:
+    console_printer._stream_delta(token)
+    browser_printer._broadcast({"type": "text_delta", "text": token})
+
+agent = KISSAgent("Arithmetic Demo Agent")
+result = agent.run(
+    model_name="claude-sonnet-4-5",
+    prompt_template="Calculate 127 * 843, (1234 + 5678) / 2, and 2**10 - 1",
+    tools=[simple_calculator],
+    token_callback=token_callback,
+)
+```
+
+See [`src/kiss/demo/kiss_demo.py`](src/kiss/demo/kiss_demo.py) for the full working example.
 
 ## 📝 Blogs
 
@@ -863,6 +903,8 @@ kiss/
 │   │   └── multiprocess.py
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
+│   ├── demo/            # Demo scripts
+│   │   └── kiss_demo.py               # Interactive demo with streaming output to terminal and browser
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
