@@ -274,9 +274,13 @@ class KISSAgent(Base):
                 raise KISSError(f"Function {function_name} is not a registered tool")
             function_response = str(self.function_map[function_name](**function_args))
         except Exception as e:
-            sig = inspect.signature(self.function_map[function_name]) if function_name in self.function_map else None
+            fn = self.function_map.get(function_name)
+            sig = inspect.signature(fn) if fn else None
             sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
-            function_response = f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
+            function_response = (
+                f"Failed to call {function_name} with "
+                f"{function_args}: {e}{sig_str}\n"
+            )
 
         if self.printer:
             self.printer.print(function_response, type="tool_result")

@@ -910,13 +910,14 @@ class UsefulTools:
         """
         return self.Edit(file_path, old_string, new_string, replace_all, timeout_seconds)
 
-    def Bash(self, command: str, description: str, timeout_seconds: float = 30) -> str:  # noqa: N802
+    def Bash(self, command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str:  # noqa: N802
         """Runs a bash command and returns its output.
 
         Args:
             command: The bash command to run.
             description: A brief description of the command.
             timeout_seconds: Timeout in seconds for the command.
+            max_output_chars: Maximum characters in output before truncation.
 
         Returns:
             The output of the command.
@@ -948,7 +949,15 @@ class UsefulTools:
                 text=True,
                 timeout=timeout_seconds,
             )
-            return result.stdout
+            output = result.stdout
+            if len(output) > max_output_chars:
+                half = max_output_chars // 2
+                output = (
+                    output[:half]
+                    + f"\n\n... [truncated {len(output) - max_output_chars} chars] ...\n\n"
+                    + output[-half:]
+                )
+            return output
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:

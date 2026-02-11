@@ -18,6 +18,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Blogs](#-blogs)
 - [Multi-Agent Orchestration](#-multi-agent-orchestration)
 - [Using Agent Creator and Optimizer](#-using-agent-creator-and-optimizer)
+- [Using Optimize Agent (Pareto Frontier)](#-using-optimize-agent-pareto-frontier)
 - [Using Relentless Coding Agent](#-using-relentless-coding-agent)
 - [Output Formatting](#-output-formatting)
 - [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
@@ -220,6 +221,50 @@ print(f"Metrics: {best_variant.metrics}")
 
 For usage examples, API reference, and configuration options, please see the [Agent Creator and Optimizer README](src/kiss/agents/create_and_optimize_agent/README.md).
 
+## 🔬 Using Optimize Agent (Pareto Frontier)
+
+The Optimize Agent (`optimize_agent.py`) provides a standalone Pareto frontier optimization system for evolving any KISS coding agent. It uses genetic algorithms with mutation and crossover to improve agent performance across multiple objectives simultaneously.
+
+```python
+from kiss.agents.coding_agents.optimize_agent import optimize
+
+best = optimize(
+    tasks=[
+        "Create a key-value database engine using Bash scripts...",
+        "Build a task scheduler with dependency resolution in Bash...",
+    ],
+    folder="path/to/agent/folder",
+    program_path="relentless_coding_agent.py",
+    metrics_description="unsuccess_rate (highest priority), running_time (second), cost (third)",
+    max_generations=10,
+    initial_frontier_size=3,
+    max_frontier_size=6,
+    eval_sample_size=2,
+    eval_runs=2,
+    mutation_probability=0.8,
+)
+
+print(f"Best variant: {best.id}")
+print(f"Metrics: {best.metrics}")
+print(f"Score: {best.score():.2f}")
+```
+
+**How It Works:**
+
+1. **Phase 1 — Seed**: Creates a baseline copy and generates initial variants by improving the baseline using a ClaudeCodingAgent
+2. **Phase 2 — Evolve**: Iterates for `max_generations`, applying mutation (improving one variant) or crossover (combining two variants) with probability `mutation_probability`
+3. **Evaluation**: Each variant is evaluated on a sample of tasks, measuring success rate, token usage, execution time, and cost
+4. **Pareto Frontier**: Non-dominated solutions are maintained; dominated variants are pruned via crowding distance
+
+**Key Features:**
+
+- **Multi-Objective Optimization**: Optimizes for success rate, tokens, time, and cost simultaneously
+- **Pareto Frontier Maintenance**: Tracks all non-dominated solutions with automatic pruning
+- **Evolutionary Operations**: Mutation (single-parent improvement) and crossover (two-parent combination)
+- **Uses ClaudeCodingAgent**: Leverages Claude for making targeted code improvements
+- **Weighted Scoring**: Configurable score weights for ranking variants (failure_rate × 1M, tokens × 1, time × 1K, cost × 100K)
+- **Built-in Tasks**: Includes 5 complex Bash scripting tasks for evaluation (key-value DB, task scheduler, VCS, log analyzer, build system)
+
 ## 💪 Using Relentless Coding Agent
 
 For very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task using a single-agent architecture with smart continuation:
@@ -357,6 +402,7 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
 - **Relentless Coding Agent**: Single-agent coding system with smart auto-continuation for infinite tasks (💡 new idea)
 - **Create and Optimize Agent**: Multi-objective agent evolution and improvement with Pareto frontier (💡 new idea)
+- **Optimize Agent**: Standalone Pareto frontier optimizer for evolving coding agents with mutation, crossover, and multi-objective evaluation (💡 new idea)
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
@@ -824,7 +870,8 @@ kiss/
 │   │   │   ├── kiss_coding_agent.py       # Multi-agent coding system with orchestration
 │   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
 │   │   │   ├── claude_coding_agent.py     # Claude Coding Agent using Claude Agent SDK
-│   │   │   ├── optimize_agent.py          # Pareto frontier agent optimizer
+│   │   │   ├── optimize_agent.py          # Pareto frontier agent optimizer with genetic algorithms
+│   │   │   ├── repo_agent.py              # Repo-level task agent using RelentlessCodingAgent
 │   │   │   └── config.py                  # Coding agent configuration (RelentlessCodingAgent, KISSCodingAgent)
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
 │   │   │   ├── agent_evolver.py       # Agent evolution logic
@@ -1067,30 +1114,30 @@ find . -type f -name "*.pyc" -delete
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
 - **Together AI (Qwen)**: Qwen2.5-72B/7B-Instruct-Turbo, Qwen2.5-Coder-32B, Qwen2.5-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, QwQ-32B (with function calling)
 - **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3-0324, DeepSeek-V3.1 (with function calling)
-- **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Thinking, Kimi-K2.5
+- **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Instruct-0905, Kimi-K2-Thinking, Kimi-K2.5
 - **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.2/v0.3, Mistral-Small-24B
-- **Together AI (Other)**: GLM-4.5-Air/4.7, Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2, essentialai/rnj-1, marin-community/marin-8b
+- **Together AI (Other)**: GLM-4.5-Air/4.7, Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2/2-Small, essentialai/rnj-1, marin-community/marin-8b
 - **OpenRouter**: Access to 400+ models from 60+ providers via unified API:
-  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2/5.3 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
+  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
   - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6)
   - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-2-9b/27b, gemma-3-4b/12b/27b, gemma-3n-e4b)
   - Meta Llama (llama-3-8b/70b, llama-3.1-8b/70b/405b, llama-3.2-1b/3b/11b-vision, llama-3.3-70b, llama-4-maverick/scout, llama-guard-2/3/4)
   - DeepSeek (deepseek-chat/v3/v3.1/v3.2/v3.2-speciale, deepseek-r1/r1-0528/r1-turbo, deepseek-r1-distill variants, deepseek-coder-v2, deepseek-prover-v2)
-  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next/coder-flash, qwen3-vl variants, qwq-32b, qwen3-next/max)
+  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next/coder-flash/coder-30b, qwen3-vl variants, qwq-32b, qwen3-next-80b, qwen3-max)
   - Amazon Nova (nova-micro/lite/pro, nova-2-lite, nova-premier)
   - Cohere (command-r, command-r-plus, command-a, command-r7b)
-  - X.AI Grok (grok-3/3-mini, grok-4/4-fast, grok-4.1-fast, grok-code-fast)
+  - X.AI Grok (grok-3/3-mini/3-beta/3-mini-beta, grok-4/4-fast, grok-4.1-fast, grok-code-fast-1)
   - MiniMax (minimax-01, minimax-m1, minimax-m2/m2.1/m2-her)
   - ByteDance Seed (seed-1.6, seed-1.6-flash, seed-2.0, seed-2.0-thinking)
   - MoonshotAI (kimi-k2, kimi-k2-thinking, kimi-k2.5, kimi-dev-72b)
   - Mistral (codestral, devstral/devstral-medium/devstral-small, mistral-large/medium/small, mixtral-8x7b/8x22b, ministral-3b/8b/14b, pixtral, voxtral)
-  - NVIDIA (llama-3.1-nemotron-70b/ultra-253b, llama-3.3-nemotron-super-49b, nemotron-nano-9b/12b-vl, nemotron-3-nano-30b)
+  - NVIDIA (llama-3.1-nemotron-70b/ultra-253b, llama-3.3-nemotron-super-49b, nemotron-nano-9b-v2/12b-v2-vl, nemotron-3-nano-30b)
   - Z.AI/GLM (glm-4-32b, glm-4.5/4.5-air/4.5v, glm-4.6/4.6v, glm-4.7/4.7-flash)
   - AllenAI (olmo-2/3-7b/32b-instruct/think, olmo-3.1-32b-instruct/think, molmo-2-8b)
   - Perplexity (sonar, sonar-pro, sonar-pro-search, sonar-deep-research, sonar-reasoning-pro)
-  - NousResearch (hermes-2-pro/3/4-llama series, deephermes-3)
+  - NousResearch (hermes-2-pro/3/4-llama series, hermes-4-70b/405b, deephermes-3)
   - Baidu ERNIE (ernie-4.5 series including VL and thinking variants)
-  - And 30+ more providers (ai21, aion-labs, arcee-ai, deepcogito, essentialai, ibm-granite, inception, inflection, liquid, morph, opengvlab, prime-intellect, relace, sao10k, stepfun, tencent, thedrummer, tngtech, upstage, writer, xiaomi, etc.)
+  - And 30+ more providers (ai21, aion-labs, alfredpros, alpindale, anthracite-org, arcee-ai, bytedance, deepcogito, essentialai, ibm-granite, inception, inflection, kwaipilot, liquid, meituan, morph, nex-agi, opengvlab, prime-intellect, relace, sao10k, stepfun-ai, tencent, thedrummer, tngtech, upstage, writer, xiaomi, etc.)
 
 **Embedding Models** (for RAG and semantic search):
 

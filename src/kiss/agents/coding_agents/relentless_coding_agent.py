@@ -243,7 +243,7 @@ class RelentlessCodingAgent(Base):
                     max_budget=self.max_budget,
                     printer=self.printer,
                 )
-            except KISSError:
+            except Exception as e:
                 last_msgs = executor.messages[-2:] if hasattr(executor, "messages") else []
                 context = " ".join(
                     str(m.get("content", ""))[:100]

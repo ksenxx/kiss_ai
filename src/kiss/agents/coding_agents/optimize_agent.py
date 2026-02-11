@@ -144,6 +144,7 @@ Operate within `./my_db`. No docs.""",
 failure propagation.
 
 **Constraints:** Pure Bash, standard utilities. State in `./scheduler_data/`. No docs.""",
+
     """**Task:** Implement a file version control system in Bash.
 
 **Requirements:**
@@ -161,6 +162,7 @@ failure propagation.
 log, diff, checkout restore, and status accuracy.
 
 **Constraints:** Pure Bash (diff, sha256sum, cp). Data in `.vcs/`. No docs.""",
+
     """**Task:** Build a log file analyzer and statistics reporter in Bash.
 
 **Requirements:**
@@ -234,7 +236,6 @@ class AgentVariant:
         if weights is None:
             weights = {
                 "unsuccess_rate": 1_000_000,
-                "tokens_used": 1,
                 "execution_time": 1000,
                 "cost": 100_000,
             }
@@ -294,9 +295,8 @@ def _evaluate_on_task(
     variant_folder: str,
     program_path: str,
     task: str,
-
 ) -> tuple[dict[str, float], str]:
-    fail_metrics = {"success": 1, "tokens_used": 0, "execution_time": 0.0, "cost": 0.0}
+    fail_metrics = {"success": 1, "execution_time": 0.0, "cost": 0.0}
     agent_file = str(Path(variant_folder) / program_path)
     if not Path(agent_file).exists():
         return fail_metrics, "Agent file not found"
@@ -317,6 +317,7 @@ def _evaluate_on_task(
     start = time.time()
     agent = None
     error_msg = ""
+    old_global_budget_used = Base.global_budget_used
     try:
         agent = _create_agent(agent_cls)
         os.chdir(work_dir)
@@ -348,9 +349,8 @@ def _evaluate_on_task(
         print(f"Task took {elapsed:.0f}s (limit {EVAL_TIMEOUT}s)")
     return {
         "success": success,
-        "tokens_used": getattr(agent, "total_tokens_used", 0) if agent else 0,
         "execution_time": elapsed,
-        "cost": getattr(agent, "budget_used", 0.0) if agent else 0.0,
+        "cost": Base.global_budget_used - old_global_budget_used,
     }, error_msg
 
 
@@ -370,7 +370,6 @@ def evaluate_variant(
 ) -> tuple[dict[str, float], str]:
     sample = random.sample(tasks, min(eval_sample_size, len(tasks)))
     all_failures: list[float] = []
-    all_tokens: list[float] = []
     all_times: list[float] = []
     all_costs: list[float] = []
     errors: list[str] = []
@@ -383,7 +382,6 @@ def evaluate_variant(
                 variant_folder, program_path, task
             )
             all_failures.append(metrics["success"])
-            all_tokens.append(max(metrics["tokens_used"], 1))
             all_times.append(max(metrics["execution_time"], 0.01))
             all_costs.append(max(metrics["cost"], 0.0001))
             if error:
@@ -393,7 +391,6 @@ def evaluate_variant(
     n = len(all_failures)
     return {
         "unsuccess_rate": sum(all_failures) / n,
-        "tokens_used": _geometric_mean(all_tokens),
         "execution_time": _geometric_mean(all_times),
         "cost": _geometric_mean(all_costs),
     }, "; ".join(errors)
@@ -650,7 +647,7 @@ def optimize(
 
 def main() -> None:
     folder = str(Path(__file__).parent)
-    program_path = "claude_coding_agent.py"
+    program_path = "relentless_coding_agent.py"
 
     best = optimize(
         tasks=TASKS,
@@ -659,13 +656,12 @@ def main() -> None:
             "unsuccess_rate (highest priority), "
             "running_time (second), "
             "cost (third), "
-            "tokens_used (fourth)"
         ),
         program_path=program_path,
-        max_generations=2,
-        initial_frontier_size=2,
-        max_frontier_size=3,
-        eval_sample_size=1,
+        max_generations=10,
+        initial_frontier_size=3,
+        max_frontier_size=6,
+        eval_sample_size=2,
         eval_runs=2,
     )
 
