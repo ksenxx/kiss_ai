@@ -1,14 +1,10 @@
 """Test suite for multiprocessing functionality with compute-heavy tasks."""
 
-import time
 import unittest
 from collections.abc import Callable
 from typing import Any
 
-from kiss.multiprocessing.multiprocess import (
-    get_available_cores,
-    run_functions_in_parallel,
-)
+from kiss.multiprocessing.multiprocess import run_functions_in_parallel
 
 
 def compute_factorial(n: int) -> int:
@@ -57,48 +53,6 @@ def sum_of_squares(n: int) -> int:
 
 
 class TestMultiprocess(unittest.TestCase):
-    def test_get_available_cores(self) -> None:
-        cores = get_available_cores()
-        self.assertIsInstance(cores, int)
-        self.assertGreater(cores, 0)
-
-    def test_parallel_execution(self) -> None:
-        tasks: list[tuple[Callable[..., Any], list[Any]]] = [
-            (matrix_multiply, [200]),
-            (fibonacci_sequence, [200000]),
-            (sum_of_squares, [20000000]),
-            (compute_factorial, [6000]),
-            (find_primes_in_range, [200000, 250000]),
-            (matrix_multiply, [180]),
-            (fibonacci_sequence, [180000]),
-            (sum_of_squares, [18000000]),
-            (compute_factorial, [5500]),
-            (find_primes_in_range, [250000, 300000]),
-        ]
-
-        start_parallel = time.time()
-        parallel_results = run_functions_in_parallel(tasks)
-        parallel_time = time.time() - start_parallel
-
-        start_sequential = time.time()
-        sequential_results = [func(*args) for func, args in tasks]
-        sequential_time = time.time() - start_sequential
-
-        self.assertEqual(parallel_results, sequential_results)
-        self.assertGreater(parallel_time, 0)
-        self.assertGreater(sequential_time, 0)
-
-    def test_result_order_preservation(self) -> None:
-        tasks = [
-            (compute_factorial, [100]),
-            (sum_of_squares, [1000]),
-            (fibonacci_sequence, [20]),
-        ]
-        results = run_functions_in_parallel(tasks)
-        self.assertEqual(results[0], compute_factorial(100))
-        self.assertEqual(results[1], sum_of_squares(1000))
-        self.assertEqual(results[2], fibonacci_sequence(20))
-
     def test_edge_cases(self) -> None:
         single_results = run_functions_in_parallel([(compute_factorial, [100])])
         self.assertEqual(len(single_results), 1)

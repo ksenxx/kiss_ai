@@ -1,4 +1,4 @@
-"""Browser output streaming for Claude Coding Agent via SSE."""
+"""Browser output streaming for KISS agents via SSE."""
 
 import asyncio
 import json
@@ -8,34 +8,14 @@ import threading
 import time
 import webbrowser
 from collections.abc import AsyncGenerator
-from pathlib import Path
 from typing import Any
 
-_LANG_MAP = {
-    "py": "python",
-    "js": "javascript",
-    "ts": "typescript",
-    "sh": "bash",
-    "bash": "bash",
-    "zsh": "bash",
-    "rb": "ruby",
-    "rs": "rust",
-    "go": "go",
-    "java": "java",
-    "c": "c",
-    "cpp": "cpp",
-    "h": "c",
-    "json": "json",
-    "yaml": "yaml",
-    "yml": "yaml",
-    "toml": "toml",
-    "xml": "xml",
-    "html": "html",
-    "css": "css",
-    "sql": "sql",
-    "md": "markdown",
-}
-_MAX_RESULT_LEN = 3000
+from kiss.core.printer import (
+    Printer,
+    extract_extras,
+    extract_path_and_lang,
+    truncate_result,
+)
 
 
 def _find_free_port() -> int:
@@ -149,9 +129,29 @@ main{flex:1;overflow-y:auto;padding:20px 28px;scroll-behavior:smooth}
   padding:16px 20px;font-size:14px;max-height:400px;overflow-y:auto;
   white-space:pre-wrap;word-break:break-word;line-height:1.7;
 }
+.prompt{
+  border:1px solid var(--cyan);border-radius:8px;margin:10px 0;
+  overflow:hidden;background:var(--surface);
+}
+.prompt-h{
+  padding:8px 16px;background:rgba(121,192,255,.08);
+  font-size:12px;font-weight:600;color:var(--cyan);
+  text-transform:uppercase;letter-spacing:.04em;
+}
+.prompt-body{
+  padding:12px 16px;font-size:14px;white-space:pre-wrap;
+  word-break:break-word;line-height:1.6;max-height:400px;overflow-y:auto;
+}
 .sys{
   font-size:13px;color:var(--dim);font-family:'SF Mono','Fira Code',monospace;
   white-space:pre-wrap;word-break:break-word;padding:2px 0;
+}
+.usage{
+  border:1px solid var(--border);border-radius:4px;margin:6px 0;
+  padding:4px 12px;background:var(--surface);
+  font-size:11px;color:var(--dim);font-style:italic;
+  font-family:'SF Mono','Fira Code',monospace;
+  white-space:nowrap;overflow-x:auto;
 }
 footer{
   background:var(--surface);border-top:1px solid var(--border);
@@ -180,10 +180,11 @@ code{font-family:'SF Mono','Fira Code',monospace}
 const O=document.getElementById('out'),D=document.getElementById('dot'),
   ST=document.getElementById('stxt'),EC=document.getElementById('evcnt'),
   EL=document.getElementById('elapsed');
-let ec=0,auto=true,thinkEl=null,txtEl=null;
+let ec=0,auto=true,thinkEl=null,txtEl=null,scrollRaf=0;
 const t0=Date.now();
 O.addEventListener('scroll',()=>{auto=O.scrollTop+O.clientHeight>=O.scrollHeight-60});
-function sb(){if(auto)O.scrollTop=O.scrollHeight}
+function sb(){if(!scrollRaf){scrollRaf=requestAnimationFrame(()=>{
+if(auto)O.scrollTop=O.scrollHeight;scrollRaf=0})}}
 function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
 setInterval(()=>{
   const s=Math.floor((Date.now()-t0)/1000),m=Math.floor(s/60);
@@ -223,7 +224,7 @@ src.onmessage=function(e){
       }
       thinkEl=null;break;
     case'text_delta':
-      if(!txtEl){txtEl=document.createElement('div');txtEl.className='ev txt';O.appendChild(txtEl)}
+      if(!txtEl){txtEl=document.createElement('div');txtEl.className='txt';O.appendChild(txtEl)}
       txtEl.textContent+=ev.text||'';break;
     case'text_end':txtEl=null;break;
     case'tool_call':{
@@ -264,6 +265,14 @@ src.onmessage=function(e){
         +'Cost: <b>'+(ev.cost||'N/A')+'</b>'
         +'</div></div><div class="rc-body">'+esc(ev.text||'(no result)')+'</div>';
       O.appendChild(c);break}
+    case'prompt':{
+      const p=document.createElement('div');p.className='ev prompt';
+      p.innerHTML='<div class="prompt-h">Prompt</div>'
+        +'<div class="prompt-body">'+esc(ev.text||'')+'</div>';
+      O.appendChild(p);break}
+    case'usage_info':{
+      const u=document.createElement('div');u.className='ev usage';
+      u.textContent=ev.text||'';O.appendChild(u);break}
     case'done':
       D.classList.add('done');ST.textContent='Completed';src.close();break;
   }
@@ -275,24 +284,7 @@ src.onerror=function(){D.classList.add('done');ST.textContent='Disconnected'};
 </html>"""
 
 
-class BrowserPrinter:
-    """Handles all browser output for Claude Coding Agent via SSE.
-
-    API:
-        start(open_browser=True) -> None:
-            Start the uvicorn server and optionally open browser.
-
-        stop() -> None:
-            Send done event and stop server.
-
-        print_stream_event(event) -> str:
-            Handle a streaming event and send to browser.
-            Returns extracted text content for token callbacks.
-
-        print_message(message, **context) -> None:
-            Send a complete message to browser.
-    """
-
+class BrowserPrinter(Printer):
     def __init__(self) -> None:
         self._clients: list[queue.Queue[dict[str, Any]]] = []
         self._clients_lock = threading.Lock()
@@ -370,26 +362,65 @@ class BrowserPrinter:
             for cq in self._clients:
                 cq.put(event)
 
-    @staticmethod
-    def _lang_for_path(path: str) -> str:
-        ext = Path(path).suffix.lstrip(".")
-        return _LANG_MAP.get(ext, ext or "text")
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+        if type == "text":
+            from io import StringIO
+
+            from rich.console import Console
+
+            buf = StringIO()
+            Console(
+                file=buf, highlight=False, width=120, no_color=True,
+            ).print(content)
+            text = buf.getvalue()
+            if text.strip():
+                self._broadcast({"type": "text_delta", "text": text})
+            return ""
+        if type == "prompt":
+            self._broadcast({"type": "prompt", "text": str(content)})
+            return ""
+        if type == "stream_event":
+            return self._handle_stream_event(content)
+        if type == "message":
+            self._handle_message(content, **kwargs)
+            return ""
+        if type == "usage_info":
+            self._broadcast({"type": "usage_info", "text": str(content).strip()})
+            return ""
+        if type == "tool_call":
+            self._broadcast({"type": "text_end"})
+            self._format_tool_call(str(content), kwargs.get("tool_input", {}))
+            return ""
+        if type == "tool_result":
+            self._print_tool_result(str(content), kwargs.get("is_error", False))
+            return ""
+        if type == "result":
+            self._broadcast({"type": "text_end"})
+            self._broadcast({
+                "type": "result",
+                "text": str(content) or "(no result)",
+                "step_count": kwargs.get("step_count", 0),
+                "total_tokens": kwargs.get("total_tokens", 0),
+                "cost": kwargs.get("cost", "N/A"),
+            })
+            return ""
+        return ""
+
+    async def token_callback(self, token: str) -> None:
+        if token:
+            self._broadcast({"type": "text_delta", "text": token})
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
-        file_path = str(tool_input.get("file_path") or tool_input.get("path") or "")
-        lang = self._lang_for_path(file_path) if file_path else "text"
+        file_path, lang = extract_path_and_lang(tool_input)
         event: dict[str, Any] = {"type": "tool_call", "name": name}
         if file_path:
             event["path"] = file_path
             event["lang"] = lang
-        desc = tool_input.get("description")
-        if desc:
+        if desc := tool_input.get("description"):
             event["description"] = str(desc)
-        command = tool_input.get("command")
-        if command:
+        if command := tool_input.get("command"):
             event["command"] = str(command)
-        content = tool_input.get("content")
-        if content:
+        if content := tool_input.get("content"):
             event["content"] = str(content)
         old_string = tool_input.get("old_string")
         new_string = tool_input.get("new_string")
@@ -397,34 +428,19 @@ class BrowserPrinter:
             event["old_string"] = str(old_string)
         if new_string is not None:
             event["new_string"] = str(new_string)
-        skip = {
-            "file_path",
-            "path",
-            "content",
-            "command",
-            "old_string",
-            "new_string",
-            "description",
-        }
-        extras: dict[str, str] = {}
-        for k, v in tool_input.items():
-            if k not in skip:
-                val = str(v)
-                if len(val) > 200:
-                    val = val[:200] + "..."
-                extras[k] = val
+        extras = extract_extras(tool_input)
         if extras:
             event["extras"] = extras
         self._broadcast(event)
 
     def _print_tool_result(self, content: str, is_error: bool) -> None:
-        display = content
-        if len(display) > _MAX_RESULT_LEN:
-            half = _MAX_RESULT_LEN // 2
-            display = display[:half] + "\n... (truncated) ...\n" + display[-half:]
-        self._broadcast({"type": "tool_result", "content": display, "is_error": is_error})
+        self._broadcast({
+            "type": "tool_result",
+            "content": truncate_result(content),
+            "is_error": is_error,
+        })
 
-    def print_stream_event(self, event: Any) -> str:
+    def _handle_stream_event(self, event: Any) -> str:
         evt = event.event
         evt_type = evt.get("type", "")
         text = ""
@@ -469,42 +485,27 @@ class BrowserPrinter:
 
         return text
 
-    def print_message(
-        self,
-        message: Any,
-        step_count: int = 0,
-        budget_used: float = 0.0,
-        total_tokens_used: int = 0,
-    ) -> None:
+    def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
-            self._print_system(message)
+            if message.subtype == "tool_output":
+                text = message.data.get("content", "")
+                if text:
+                    self._broadcast({"type": "system_output", "text": text})
         elif hasattr(message, "result"):
-            self._print_result(message, step_count, budget_used, total_tokens_used)
-        elif hasattr(message, "content"):
-            self._print_tool_results(message)
-
-    def _print_system(self, message: Any) -> None:
-        if message.subtype == "tool_output":
-            text = message.data.get("content", "")
-            if text:
-                self._broadcast({"type": "system_output", "text": text})
-
-    def _print_result(
-        self, message: Any, step_count: int, budget_used: float, total_tokens_used: int
-    ) -> None:
-        cost_str = f"${budget_used:.4f}" if budget_used else "N/A"
-        self._broadcast(
-            {
+            step_count = kwargs.get("step_count", 0)
+            budget_used = kwargs.get("budget_used", 0.0)
+            total_tokens_used = kwargs.get("total_tokens_used", 0)
+            self._broadcast({
                 "type": "result",
                 "text": message.result or "(no result)",
                 "step_count": step_count,
                 "total_tokens": total_tokens_used,
-                "cost": cost_str,
-            }
-        )
-
-    def _print_tool_results(self, message: Any) -> None:
-        for block in message.content:
-            if hasattr(block, "is_error") and hasattr(block, "content"):
-                content = block.content if isinstance(block.content, str) else str(block.content)
-                self._print_tool_result(content, bool(block.is_error))
+                "cost": f"${budget_used:.4f}" if budget_used else "N/A",
+            })
+        elif hasattr(message, "content"):
+            for block in message.content:
+                if hasattr(block, "is_error") and hasattr(block, "content"):
+                    content = (
+                        block.content if isinstance(block.content, str) else str(block.content)
+                    )
+                    self._print_tool_result(content, bool(block.is_error))

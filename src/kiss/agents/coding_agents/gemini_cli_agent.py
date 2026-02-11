@@ -5,12 +5,17 @@
 
 """Gemini CLI Coding Agent using the Google ADK (Agent Development Kit)."""
 
+from __future__ import annotations
+
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
+
+if TYPE_CHECKING:
+    from kiss.core.printer import Printer
 from google.adk.agents import Agent
 from google.adk.events.event import Event
 from google.adk.runners import Runner
@@ -19,10 +24,7 @@ from google.genai import types
 
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
-from kiss.core.formatter import Formatter
-from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
-from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import is_subpath, resolve_path
 
@@ -48,22 +50,14 @@ class GeminiCliAgent(Base):
         base_dir: str,
         max_steps: int,
         max_budget: float,
-        formatter: Formatter | None,
     ) -> None:
-        """Reset the agent's state for a new run.
-
-        Args:
-            model_name: The model name to use.
-            readable_paths: Paths allowed for reading.
-            writable_paths: Paths allowed for writing.
-            base_dir: Base directory for path resolution.
-            max_steps: Maximum steps allowed.
-            max_budget: Maximum budget in USD.
-            formatter: Optional formatter for output display.
-        """
-        self._init_run_state(
-            model_name, ["read_file", "write_file", "list_dir", "run_shell", "web_search"]
-        )
+        self.model_name = model_name
+        self.function_map = ["read_file", "write_file", "list_dir", "run_shell", "web_search"]
+        self.messages: list[dict[str, Any]] = []
+        self.step_count = 0
+        self.total_tokens_used = 0
+        self.budget_used = 0.0
+        self.run_start_timestamp = int(time.time())
         Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = base_dir
         base_path = Path(base_dir).resolve()
@@ -75,9 +69,6 @@ class GeminiCliAgent(Base):
         self.is_agentic = True
         self.max_steps = max_steps
         self.max_budget = max_budget
-        self._formatter = formatter or SimpleFormatter()
-        self.step_count: int = 0
-        self.run_start_timestamp = int(time.time())
         self.useful_tools = UsefulTools(
             base_dir=base_dir,
             readable_paths=[str(p) for p in self.readable_paths],
@@ -213,7 +204,7 @@ class GeminiCliAgent(Base):
 
         Returns:
             A tuple of (final_text, streamed_texts) where streamed_texts
-            are text chunks suitable for streaming to token_callback.
+            are text chunks suitable for streaming to the printer.
         """
         final_text = None
         streamed_texts: list[str] = []
@@ -235,7 +226,6 @@ class GeminiCliAgent(Base):
                     for part in event.content.parts:
                         if hasattr(part, "text") and part.text:
                             final_text = part.text
-                            self._formatter.print_label_and_value("FINAL", f"{part.text[:200]}...")
                             self._add_message("model", part.text, timestamp)
                             streamed_texts.append(part.text)
 
@@ -243,18 +233,14 @@ class GeminiCliAgent(Base):
             elif event.content and event.content.parts:
                 for part in event.content.parts:
                     if hasattr(part, "text") and part.text:
-                        self._formatter.print_label_and_value("MESSAGE", f"{part.text[:200]}...")
                         self._add_message("model", part.text, timestamp)
                         streamed_texts.append(part.text)
                     elif hasattr(part, "function_call") and part.function_call:
                         name = part.function_call.name
                         args = part.function_call.args
-                        self._formatter.print_label_and_value("TOOL CALL", f"{name}({args})")
                         self._add_message("model", f"Tool call: {name}({args})", timestamp)
                     elif hasattr(part, "function_response") and part.function_response:
                         response = part.function_response.response
-                        display = str(response)[:200]
-                        self._formatter.print_label_and_value("TOOL RESULT", f"{display}...")
                         self._add_message("user", str(response), timestamp)
                         streamed_texts.append(str(response))
 
@@ -270,27 +256,9 @@ class GeminiCliAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        formatter: Formatter | None = None,
-        token_callback: TokenCallback | None = None,
+        printer: Printer | None = None,
     ) -> str | None:
-        """Run the Gemini CLI agent for a given task.
-
-        Args:
-            model_name: The name of the model to use.
-            prompt_template: The prompt template for the task.
-            arguments: The arguments for the task.
-            max_steps: The maximum number of steps to take.
-            max_budget: The maximum budget in USD to spend.
-            base_dir: The base directory relative to which readable and writable
-                paths are resolved if they are not absolute.
-            readable_paths: The paths from which the agent is allowed to read from.
-            writable_paths: The paths to which the agent is allowed to write to.
-            token_callback: Optional async callback invoked with each streamed text token.
-                Default is None.
-
-        Returns:
-            The result of the task.
-        """
+        """Run the Gemini CLI agent for a given task."""
         cfg = config_module.DEFAULT_CONFIG.agent
         actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
         actual_max_budget = max_budget if max_budget is not None else cfg.max_agent_budget
@@ -306,11 +274,10 @@ class GeminiCliAgent(Base):
             actual_base_dir,
             actual_max_steps,
             actual_max_budget,
-            formatter,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
-        self.token_callback = token_callback
+        self.printer = printer
 
         async def _run_async() -> str | None:
             timestamp = int(time.time())
@@ -328,11 +295,6 @@ class GeminiCliAgent(Base):
                 instruction=CODING_INSTRUCTIONS,
                 description="An expert Python programmer that writes clean, simple, robust code.",
                 tools=tools,
-            )
-
-            self._formatter.print_label_and_value("GEMINI AGENT", f"Starting in {self.base_dir}")
-            self._formatter.print_label_and_value(
-                "GEMINI AGENT", f"Model: {model_name}, Max turns: {max_steps}"
             )
 
             try:
@@ -364,16 +326,11 @@ class GeminiCliAgent(Base):
                 # Process all collected events
                 final_result, streamed_texts = self._process_events(events_list, timestamp)
 
-                if self.token_callback:
+                if self.printer:
                     for text in streamed_texts:
-                        await self.token_callback(text)
-
-                self._formatter.print_label_and_value(
-                    "GEMINI AGENT", f"Completed with {self.step_count} steps"
-                )
+                        await self.printer.token_callback(text)
 
             except Exception as e:
-                self._formatter.print_label_and_value("GEMINI ERROR", str(e))
                 final_result = f"Error: {e}"
                 self._add_message("model", f"Error: {e}", timestamp)
 

@@ -1,8 +1,3 @@
-# Author: Koushik Sen (ksen@berkeley.edu)
-# Contributors:
-# Koushik Sen (ksen@berkeley.edu)
-# add your name here
-
 """Claude Coding Agent using the Claude Agent SDK."""
 
 import time
@@ -28,23 +23,16 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent
 
-from kiss.agents.coding_agents.print_to_console import ConsolePrinter
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
-from kiss.core.models.model import TokenCallback
-from kiss.core.models.model_info import get_max_context_length
+from kiss.core.kiss_error import KISSError
+from kiss.core.models.model_info import calculate_cost, get_max_context_length
+from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.utils import is_subpath, resolve_path
 
 BUILTIN_TOOLS = [
-    "Read",
-    "Write",
-    "Edit",
-    "MultiEdit",
-    "Glob",
-    "Grep",
-    "Bash",
-    "WebSearch",
-    "WebFetch",
+    "Read", "Write", "Edit", "MultiEdit",
+    "Glob", "Grep", "Bash", "WebSearch", "WebFetch",
 ]
 
 READ_TOOLS = {"Read", "Grep", "Glob"}
@@ -52,38 +40,36 @@ WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 
 
 class ClaudeCodingAgent(Base):
-    """Claude Coding Agent using the Claude Agent SDK."""
-
-    def __init__(self, name: str, use_browser: bool = False) -> None:
+    def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._use_browser = use_browser
-        if use_browser:
-            from kiss.agents.coding_agents.print_to_browser import BrowserPrinter
-
-            self._printer: Any = BrowserPrinter()
-        else:
-            self._printer = ConsolePrinter()
 
     def _reset(
         self,
-        model_name: str,
+        model_name: str | None,
         readable_paths: list[str] | None,
         writable_paths: list[str] | None,
         base_dir: str,
-        max_steps: int,
-        max_budget: float,
+        max_steps: int | None,
+        max_budget: float | None,
     ) -> None:
-        self._init_run_state(model_name, BUILTIN_TOOLS)
-        Path(base_dir).mkdir(parents=True, exist_ok=True)
+        self.model_name = model_name or "claude-sonnet-4-5"
+        self.function_map = list(BUILTIN_TOOLS)
+        self.messages: list[dict[str, Any]] = []
+        self.step_count = 0
+        self.total_tokens_used: int = 0
+        self.budget_used: float = 0.0
+        self.run_start_timestamp = int(time.time())
         self.base_dir = str(Path(base_dir).resolve())
         self.readable_paths = [resolve_path(p, base_dir) for p in readable_paths or []]
         self.writable_paths = [resolve_path(p, base_dir) for p in writable_paths or []]
-        self.max_tokens = get_max_context_length(model_name)
+        self.max_tokens = get_max_context_length(self.model_name)
         self.is_agentic = True
-        self.max_steps = max_steps
-        self.max_budget = max_budget
-        self.budget_used: float = 0.0
-        self.total_tokens_used: int = 0
+        self.max_steps = max_steps or config_module.DEFAULT_CONFIG.agent.max_steps
+        self.max_budget = max_budget or config_module.DEFAULT_CONFIG.agent.max_agent_budget
+        self.input_tokens_used: int = 0
+        self.output_tokens_used: int = 0
+        self.last_step_input_tokens: int = 0
+        self.last_step_output_tokens: int = 0
 
     def _check_path_permission(
         self, path_str: str, allowed_paths: list[Path]
@@ -103,27 +89,68 @@ class ClaudeCodingAgent(Base):
         path_str = tool_input.get("file_path") or tool_input.get("path")
         if not path_str:
             return PermissionResultAllow(behavior="allow")
-
         if tool_name in READ_TOOLS:
             return self._check_path_permission(path_str, self.readable_paths)
         if tool_name in WRITE_TOOLS:
             return self._check_path_permission(path_str, self.writable_paths)
         return PermissionResultAllow(behavior="allow")
 
-    def _update_token_usage(self, message: Any) -> None:
-        usage = getattr(message, "usage", None)
-        if not usage:
-            return
-        if isinstance(usage, dict):
-            self.total_tokens_used += usage.get("input_tokens", 0)
-            self.total_tokens_used += usage.get("output_tokens", 0)
-        else:
-            self.total_tokens_used += getattr(usage, "input_tokens", 0)
-            self.total_tokens_used += getattr(usage, "output_tokens", 0)
+    def _update_token_usage_from_stream(self, event: StreamEvent) -> None:
+        evt = event.event
+        evt_type = evt.get("type", "")
+        if evt_type == "message_start":
+            self.input_tokens_used += evt.get("message", {}).get("usage", {}).get("input_tokens", 0)
+        elif evt_type == "message_delta":
+            self.output_tokens_used += evt.get("usage", {}).get("output_tokens", 0)
+        self.total_tokens_used = self.input_tokens_used + self.output_tokens_used
+
+    def _update_step_cost(self) -> None:
+        step_input = self.input_tokens_used - self.last_step_input_tokens
+        step_output = self.output_tokens_used - self.last_step_output_tokens
+        self.last_step_input_tokens = self.input_tokens_used
+        self.last_step_output_tokens = self.output_tokens_used
+        if step_input > 0 or step_output > 0:
+            step_cost = calculate_cost(self.model_name, step_input, step_output)
+            self.budget_used += step_cost
+            Base.global_budget_used += step_cost
+
+    def _check_limits(self) -> None:
+        if self.step_count > self.max_steps:
+            raise KISSError(f"Step limit exceeded: {self.step_count}/{self.max_steps}")
+        if self.total_tokens_used > self.max_tokens:
+            raise KISSError(f"Token limit exceeded: {self.total_tokens_used}/{self.max_tokens}")
+        if self.budget_used > self.max_budget:
+            raise KISSError(
+                f"Agent budget exceeded: ${self.budget_used:.4f}/${self.max_budget:.2f}"
+            )
+        global_max = config_module.DEFAULT_CONFIG.agent.global_max_budget
+        if Base.global_budget_used > global_max:
+            raise KISSError(
+                f"Global budget exceeded: ${Base.global_budget_used:.4f}/${global_max:.2f}"
+            )
+
+    def _get_usage_info_string(self) -> str:
+        global_max = config_module.DEFAULT_CONFIG.agent.global_max_budget
+        return (
+            f"\nTokens: {self.total_tokens_used}/{self.max_tokens}  "
+            f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}  "
+            f"Global Budget: ${Base.global_budget_used:.4f}/${global_max:.2f}  "
+            f"Steps: {self.step_count}/{self.max_steps}\n"
+        )
+
+    def _finalize_prev_model_message(self) -> None:
+        self._update_step_cost()
+        usage_info = self._get_usage_info_string()
+        for msg in reversed(self.messages):
+            if msg["role"] == "model":
+                msg["content"] += usage_info
+                return
 
     def _process_assistant_message(self, message: AssistantMessage, timestamp: int) -> None:
+        if self.step_count > 0:
+            self._finalize_prev_model_message()
         self.step_count += 1
-        self._update_token_usage(message)
+        self._check_limits()
 
         thought, tool_call = "", ""
         for block in message.content:
@@ -144,62 +171,58 @@ class ClaudeCodingAgent(Base):
                 content = block.content if isinstance(block.content, str) else str(block.content)
                 status = "Tool Call Failed" if block.is_error else "Tool Call Succeeded"
                 result += f"{status}\n{content}\n"
-
         self._add_message("user", result, timestamp)
         return result
 
     def _process_result_message(self, message: ResultMessage, timestamp: int) -> str | None:
-        self._update_token_usage(message)
-        if hasattr(message, "total_cost_usd") and message.total_cost_usd:
-            cost = message.total_cost_usd
-            self.budget_used += cost
-            Base.global_budget_used += cost
+        self._finalize_prev_model_message()
 
-        final_result = message.result
-        self._add_message("model", final_result, timestamp)
+        usage = getattr(message, "usage", None)
+        if isinstance(usage, dict):
+            self.total_tokens_used = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+        if hasattr(message, "total_cost_usd") and message.total_cost_usd:
+            cost_diff = message.total_cost_usd - self.budget_used
+            self.budget_used = message.total_cost_usd
+            Base.global_budget_used += cost_diff
+
+        final_result = message.result or ""
+        self._add_message("model", final_result + "\n" + self._get_usage_info_string(), timestamp)
         return final_result
 
     def run(
         self,
-        prompt_template: str = "",
         model_name: str | None = None,
-        subtasker_model_name: str | None = None,
+        prompt_template: str = "",
         arguments: dict[str, str] | None = None,
         max_steps: int | None = None,
         max_budget: float | None = None,
-        base_dir: str | None = None,
         work_dir: str | None = None,
+        base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        token_callback: TokenCallback | None = None,
-        formatter: Any = None,
-        trials: int | None = None,
+        use_browser: bool = True,
         max_thinking_tokens: int = 1024,
     ) -> str:
+        if use_browser:
+            from kiss.core.print_to_browser import BrowserPrinter
+            printer: Any = BrowserPrinter()
+        else:
+            printer = ConsolePrinter()
+
         cfg = config_module.DEFAULT_CONFIG.agent
-        actual_model = model_name or subtasker_model_name or "claude-sonnet-4-5"
-        actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
-        actual_max_budget = max_budget if max_budget is not None else cfg.max_agent_budget
-        actual_base_dir = (
-            work_dir or base_dir
-            or str(Path(cfg.artifact_dir).resolve() / "claude_workdir")
-        )
+        work_dir = work_dir or str(Path(cfg.artifact_dir).resolve() / "claude_workdir")
+        Path(work_dir).mkdir(parents=True, exist_ok=True)
         self._reset(
-            actual_model,
-            readable_paths,
-            writable_paths,
-            actual_base_dir,
-            actual_max_steps,
-            actual_max_budget,
+            model_name, readable_paths, writable_paths,
+            base_dir or ".", max_steps, max_budget,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
-        self.token_callback = token_callback
 
         async def _run_async() -> str | None:
-            if self._use_browser:
-                self._printer.start()
-            self._printer.reset()
+            if use_browser:
+                printer.start()
+            printer.reset()
             system_prompt = (
                 CODING_INSTRUCTIONS
                 + "\n## Efficiency\n"
@@ -208,16 +231,14 @@ class ClaudeCodingAgent(Base):
                 "- Minimize conversation turns\n"
             )
             options = ClaudeAgentOptions(
-                model=actual_model,
+                model=model_name,
                 system_prompt=system_prompt,
                 can_use_tool=self.permission_handler,
-                permission_mode="bypassPermissions",
                 allowed_tools=BUILTIN_TOOLS,
-                disallowed_tools=["EnterPlanMode"],
-                cwd=str(self.base_dir),
+                cwd=work_dir,
                 include_partial_messages=True,
                 max_thinking_tokens=max_thinking_tokens,
-                max_budget_usd=actual_max_budget,
+                max_budget_usd=max_budget,
             )
 
             async def prompt_stream() -> AsyncGenerator[dict[str, Any]]:
@@ -226,49 +247,54 @@ class ClaudeCodingAgent(Base):
 
             timestamp = int(time.time())
             final_result: str | None = None
+            usage_printed = False
 
-            async for message in query(prompt=prompt_stream(), options=options):
-                if isinstance(message, StreamEvent):
-                    text = self._printer.print_stream_event(message)
-                    if self.token_callback and text:
-                        await self.token_callback(text)
-                elif isinstance(message, SystemMessage):
-                    self._printer.print_message(message)
-                elif isinstance(message, AssistantMessage):
-                    self._process_assistant_message(message, timestamp)
-                    timestamp = int(time.time())
-                elif isinstance(message, UserMessage):
-                    self._printer.print_message(message)
-                    text = self._process_user_message(message, timestamp)
-                    if self.token_callback and text:
-                        await self.token_callback(text)
-                    timestamp = int(time.time())
-                elif isinstance(message, ResultMessage):
-                    final_result = self._process_result_message(message, timestamp)
-                    self._printer.print_message(
-                        message,
-                        step_count=self.step_count,
-                        budget_used=self.budget_used,
-                        total_tokens_used=self.total_tokens_used,
-                    )
-                    if self.token_callback and final_result:
-                        await self.token_callback(final_result)
-                    timestamp = int(time.time())
-
-            self._save()
-            if self._use_browser:
-                self._printer.stop()
+            try:
+                async for message in query(prompt=prompt_stream(), options=options):
+                    if isinstance(message, StreamEvent):
+                        self._update_token_usage_from_stream(message)
+                        printer.print(message, type="stream_event")
+                    elif isinstance(message, SystemMessage):
+                        printer.print(message, type="message")
+                    elif isinstance(message, AssistantMessage):
+                        self._process_assistant_message(message, timestamp)
+                        usage_printed = False
+                        timestamp = int(time.time())
+                    elif isinstance(message, UserMessage):
+                        if not usage_printed:
+                            printer.print(
+                                self._get_usage_info_string(), type="usage_info",
+                            )
+                            usage_printed = True
+                        printer.print(message, type="message")
+                        self._process_user_message(message, timestamp)
+                        timestamp = int(time.time())
+                    elif isinstance(message, ResultMessage):
+                        final_result = self._process_result_message(message, timestamp)
+                        printer.print(
+                            self._get_usage_info_string(), type="usage_info",
+                        )
+                        printer.print(
+                            message, type="message",
+                            step_count=self.step_count,
+                            budget_used=self.budget_used,
+                            total_tokens_used=self.total_tokens_used,
+                        )
+                        timestamp = int(time.time())
+            finally:
+                self._save()
+            if use_browser:
+                printer.stop()
             return final_result
 
-        result = anyio.run(_run_async)
-        return result or ""
+        return anyio.run(_run_async) or ""
 
 
 def main() -> None:
     import os
     import tempfile
 
-    agent = ClaudeCodingAgent("Example agent", use_browser=False)
+    agent = ClaudeCodingAgent("Example agent")
     task_description = """
  **Task:** Create a robust database engine using only Bash scripts.
 
@@ -301,7 +327,8 @@ def main() -> None:
             prompt_template=task_description,
             model_name="claude-sonnet-4-5",
             work_dir=work_dir,
-            max_steps=25,
+            max_steps=100,
+            use_browser=True,
         )
     finally:
         os.chdir(old_cwd)
@@ -314,7 +341,7 @@ def main() -> None:
     print(f"Total tokens: {agent.total_tokens_used}")
     print(f"Work directory: {work_dir}")
     if result:
-        print(f"RESULT:\n{result[:500]}")
+        print(f"RESULT:\n{result}")
 
 
 if __name__ == "__main__":
