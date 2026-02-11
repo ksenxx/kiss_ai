@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 import traceback
 from collections.abc import Callable
@@ -16,9 +17,6 @@ from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
-from kiss.core.print_to_browser import BrowserPrinter
-from kiss.core.print_to_console import ConsolePrinter
-from kiss.core.printer import MultiPrinter
 from kiss.core.useful_tools import fetch_url, search_web
 
 if TYPE_CHECKING:
@@ -45,20 +43,7 @@ class KISSAgent(Base):
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
     ) -> None:
-        self.printer: Printer | None = None
-        if config_module.DEFAULT_CONFIG.agent.verbose:
-            if printer:
-                self.printer = printer
-            else:
-                printers: list[Printer] = []
-                if config_module.DEFAULT_CONFIG.agent.print_to_browser:
-                    self.browser_printer = BrowserPrinter()
-                    self.browser_printer.start()
-                    printers.append(self.browser_printer)
-                if config_module.DEFAULT_CONFIG.agent.print_to_console:
-                    printers.append(ConsolePrinter())
-                if printers:
-                    self.printer = MultiPrinter(printers)
+        self.set_printer(printer)
         token_callback = self.printer.token_callback if self.printer else None
 
         self.model = model(model_name, model_config=model_config, token_callback=token_callback)
@@ -289,7 +274,9 @@ class KISSAgent(Base):
                 raise KISSError(f"Function {function_name} is not a registered tool")
             function_response = str(self.function_map[function_name](**function_args))
         except Exception as e:
-            function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
+            sig = inspect.signature(self.function_map[function_name]) if function_name in self.function_map else None
+            sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
+            function_response = f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
 
         if self.printer:
             self.printer.print(function_response, type="tool_result")

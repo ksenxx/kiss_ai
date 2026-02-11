@@ -12,8 +12,7 @@ import pytest
 
 from kiss.core.printer import Printer
 from kiss.tests.conftest import (
-    requires_gemini_api_key,
-    requires_openai_api_key,
+    requires_anthropic_api_key,
 )
 
 
@@ -31,50 +30,26 @@ class CollectorPrinter(Printer):
         self.tokens.clear()
 
 
-def _run_gemini_cli_agent(tmp_path: Path, printer: Printer | None):
-    from kiss.agents.coding_agents.gemini_cli_agent import GeminiCliAgent
+def _run_claude_coding_agent(tmp_path: Path, printer: Printer | None):
+    from kiss.agents.coding_agents.claude_coding_agent import ClaudeCodingAgent
 
-    base_dir = tmp_path / "gemini_work"
+    base_dir = tmp_path / "claude_work"
     base_dir.mkdir()
     output_dir = base_dir / "output"
     output_dir.mkdir()
-    agent = GeminiCliAgent("test-gemini-callback")
+    agent = ClaudeCodingAgent("test-claude-callback")
     return agent.run(
-        model_name="gemini-2.5-flash",
+        model_name="claude-sonnet-4-5",
         prompt_template="What is 2 + 2? Reply with just the number.",
-        base_dir=str(base_dir),
-        writable_paths=[str(output_dir)],
-        printer=printer,
-    )
-
-
-def _run_openai_codex_agent(tmp_path: Path, printer: Printer | None):
-    from kiss.agents.coding_agents.openai_codex_agent import OpenAICodexAgent
-
-    base_dir = tmp_path / "codex_work"
-    base_dir.mkdir()
-    output_dir = base_dir / "output"
-    output_dir.mkdir()
-    agent = OpenAICodexAgent("test-codex-callback")
-    return agent.run(
-        model_name="gpt-4.1-mini",
-        prompt_template="What is 2 + 2? Reply with just the number.",
-        base_dir=str(base_dir),
+        work_dir=str(base_dir),
         writable_paths=[str(output_dir)],
         printer=printer,
     )
 
 
 CALLBACK_CASES = [
-    pytest.param(_run_gemini_cli_agent, marks=requires_gemini_api_key, id="gemini"),
     pytest.param(
-        _run_openai_codex_agent, marks=requires_openai_api_key, id="openai-codex"
-    ),
-]
-
-REGRESSION_CASES = [
-    pytest.param(
-        _run_openai_codex_agent, marks=requires_openai_api_key, id="openai-codex"
+        _run_claude_coding_agent, marks=requires_anthropic_api_key, id="claude"
     ),
 ]
 
@@ -91,7 +66,7 @@ class TestCodingAgentPrinter:
         assert len(printer.tokens) > 0
         assert all(isinstance(t, str) for t in printer.tokens)
 
-    @pytest.mark.parametrize("runner", REGRESSION_CASES)
+    @pytest.mark.parametrize("runner", CALLBACK_CASES)
     @pytest.mark.timeout(300)
     def test_no_printer_regression(self, runner, tmp_path: Path):
         try:

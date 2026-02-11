@@ -16,6 +16,9 @@ from yaml.nodes import ScalarNode
 
 from kiss.core import config as config_module
 from kiss.core.models.model_info import get_max_context_length
+from kiss.core.print_to_browser import BrowserPrinter
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import MultiPrinter, Printer
 from kiss.core.utils import config_to_dict
 
 
@@ -87,6 +90,8 @@ class Base:
     budget_used: float
     total_tokens_used: int
     step_count: int
+    printer: Printer | None
+    browser_printer: BrowserPrinter | None
 
     def __init__(self, name: str) -> None:
         """Initialize a Base agent instance.
@@ -98,6 +103,24 @@ class Base:
         self.id = Base.agent_counter
         Base.agent_counter += 1
         self.base_dir = ""
+
+    def set_printer(self, printer: Printer | None = None) -> None:
+        self.printer: Printer | None = None
+        self.browser_printer: BrowserPrinter | None = None
+        if config_module.DEFAULT_CONFIG.agent.verbose:
+            if printer:
+                self.printer = printer
+            else:
+                printers: list[Printer] = []
+                if config_module.DEFAULT_CONFIG.agent.print_to_browser:
+                    self.browser_printer = BrowserPrinter()
+                    self.browser_printer.start()
+                    printers.append(self.browser_printer)
+                if config_module.DEFAULT_CONFIG.agent.print_to_console:
+                    printers.append(ConsolePrinter())
+                if printers:
+                    self.printer = MultiPrinter(printers)
+
 
     def _build_state_dict(self) -> dict[str, Any]:
         """Build state dictionary for saving.

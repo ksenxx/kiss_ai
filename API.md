@@ -14,8 +14,6 @@ For a high-level overview and quick start guide, see [README.md](README.md).
 - [RelentlessCodingAgent](#relentlesscodingagent) - Single-agent coding system with auto-continuation
 - [KISSCodingAgent](#kisscodingagent) - Multi-agent coding system with planning and orchestration
 - [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
-- [GeminiCliAgent](#geminicliagent) - Google ADK-based coding agent
-- [OpenAICodexAgent](#openaicodexagent) - OpenAI Agents SDK-based coding agent
 - [DockerManager](#dockermanager) - Docker container management
 - [Multiprocessing](#multiprocessing) - Parallel execution utilities
 - [SimpleRAG](#simplerag) - Simple RAG system for document retrieval
@@ -188,7 +186,7 @@ def run(
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    use_browser: bool = False,
+    printer: Printer | None = None,
     trials: int | None = None,
     docker_image: str | None = None,
 ) -> str
@@ -207,7 +205,7 @@ Run the single-agent coding system with auto-continuation.
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
-- `use_browser` (bool): If True, starts a local browser window for real-time streaming output using `BrowserPrinter` alongside `ConsolePrinter`. If False, uses `ConsolePrinter` only. Default is False.
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags. Default is None.
 - `trials` (int | None): Number of continuation attempts. Default is None (uses config default: 200).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
 
@@ -368,7 +366,7 @@ def run(
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    use_browser: bool = False,
+    printer: Printer | None = None,
     docker_image: str | None = None,
 ) -> str
 ```
@@ -389,7 +387,7 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
-- `use_browser` (bool): If True, starts a local browser window for real-time streaming output using `BrowserPrinter` alongside `ConsolePrinter`. If False, uses `ConsolePrinter` only. Default is False.
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags. Default is None.
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
 
 **Returns:**
@@ -562,7 +560,7 @@ def run(
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    use_browser: bool = False,
+    printer: Printer | None = None,
     max_thinking_tokens: int = 1024,
 ) -> str
 ```
@@ -580,7 +578,7 @@ Run the Claude coding agent for a given task.
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None.
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for Read/Grep/Glob.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for Write/Edit/MultiEdit.
-- `use_browser` (bool): If True, starts a local uvicorn server and opens a browser window for real-time streaming output. If False, uses `ConsolePrinter` for terminal output. Default is False.
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags. Default is None.
 - `max_thinking_tokens` (int): Maximum tokens for Claude's extended thinking. Default is 1024.
 
 **Returns:**
@@ -620,8 +618,7 @@ Returns the agent's conversation trajectory as a JSON string.
 
 - **Real-time Streaming**: Uses `include_partial_messages=True` to receive `StreamEvent` messages, enabling live streaming of assistant text, thinking content, and tool call inputs as they are generated.
 - **Extended Thinking**: Supports Claude's extended thinking via `max_thinking_tokens` (default: 1024), allowing the model to reason through complex problems before responding. `ThinkingBlock` content is captured in the trajectory.
-- **Rich Console Output**: Uses a dedicated `ConsolePrinter` class (`print_to_console.py`) for formatted terminal output with Rich panels for tool calls (syntax-highlighted file content, diffs, commands), thinking block delimiters, streaming text deltas, and result summaries with cost/token stats.
-- **Browser Streaming Output**: When `use_browser=True`, uses `BrowserPrinter` class (`print_to_browser.py`) which starts a local uvicorn/starlette SSE server and opens a browser window for real-time streaming with a modern dark-themed UI featuring scrollable panels for thinking, text, tool calls with syntax highlighting, tool results, and a final result card with stats.
+- **Printer-based Output**: Accepts a `printer` parameter (`ConsolePrinter`, `BrowserPrinter`, or `MultiPrinter`) for formatted output. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags (`print_to_console`, `print_to_browser`).
 - **Message Processing**: Handles five message types from the Claude Agent SDK query stream:
   - `StreamEvent`: Partial streaming deltas (text, thinking, tool input JSON) — printed in real-time
   - `SystemMessage`: System-level messages (e.g., tool output) — printed to console
@@ -661,13 +658,19 @@ if result:
 
 ```python
 from kiss.agents.coding_agents import ClaudeCodingAgent
+from kiss.core.print_to_browser import BrowserPrinter
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import MultiPrinter
 
-# Browser window opens automatically with live streaming output
+browser_printer = BrowserPrinter()
+browser_printer.start()
+printer = MultiPrinter([browser_printer, ConsolePrinter()])
+
 agent = ClaudeCodingAgent("My Agent")
 result = agent.run(
     model_name="claude-sonnet-4-5",
     prompt_template="Write a fibonacci function with tests",
-    use_browser=True,
+    printer=printer,
 )
 if result:
     print(f"Result: {result}")
@@ -842,222 +845,6 @@ Unified output method that handles all content types and prints to terminal with
 **Returns:**
 
 - `str`: Extracted text content (for `stream_event` type), empty string otherwise.
-
-______________________________________________________________________
-
-## GeminiCliAgent
-
-> **Requires:** `google-adk` and `google-genai` packages. Install with `uv sync --group gemini`. This class is `None` if the SDK is not installed.
-
-A coding agent that uses the Google ADK (Agent Development Kit) to generate tested Python programs with file system access controls.
-
-### Constructor
-
-```python
-GeminiCliAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent. Used for identification and artifact naming.
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    model_name: str = DEFAULT_GEMINI_MODEL,
-    prompt_template: str = "",
-    arguments: dict[str, str] | None = None,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    base_dir: str | None = None,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-    use_browser: bool = False,
-) -> str | None
-```
-
-Run the Gemini CLI agent for a given task.
-
-**Parameters:**
-
-- `model_name` (str): The name of the model to use. Default is "gemini-2.5-flash".
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/gemini_workdir`).
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
-- `use_browser` (bool): If True, starts a local browser window for real-time streaming output using `BrowserPrinter` alongside `ConsolePrinter`. If False, uses `ConsolePrinter` only. Default is False.
-
-**Returns:**
-
-- `str | None`: The result of the task, or None if no result.
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-**Returns:**
-
-- `str`: JSON-formatted string containing the list of messages.
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model_name` (str): The name of the model being used.
-- `function_map` (list[str]): List of built-in tools available (read_file, write_file, etc.).
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
-- `step_count` (int): Current step number.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
-- `run_start_timestamp` (int): Unix timestamp when the run started.
-- `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (list[Path]): List of paths the agent can read from.
-- `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps allowed.
-- `max_budget` (float): Maximum budget allowed for this run.
-
-### Available Built-in Tools
-
-The agent has access to these built-in tools:
-
-- `read_file`: Read file contents from the working directory
-- `write_file`: Create or overwrite files
-- `list_dir`: List directory contents
-- `run_shell`: Execute shell commands with timeout
-- `web_search`: Search the web for information (placeholder)
-
-### Example
-
-```python
-from kiss.agents.coding_agents import GeminiCliAgent
-
-agent = GeminiCliAgent("my_agent")
-result = agent.run(
-    model_name="gemini-2.5-flash",
-    prompt_template="Write a fibonacci function with tests"
-)
-if result:
-    print(f"Result: {result}")
-```
-
-______________________________________________________________________
-
-## OpenAICodexAgent
-
-> **Requires:** `openai-agents` package. Install with `uv sync --group openai`. This class is `None` if the SDK is not installed.
-
-A coding agent that uses the OpenAI Agents SDK to generate tested Python programs with file system access controls.
-
-### Constructor
-
-```python
-OpenAICodexAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent. Used for identification and artifact naming.
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    model_name: str = DEFAULT_CODEX_MODEL,
-    prompt_template: str = "",
-    arguments: dict[str, str] | None = None,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    base_dir: str | None = None,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-    use_browser: bool = False,
-) -> str | None
-```
-
-Run the OpenAI Codex agent for a given task.
-
-**Parameters:**
-
-- `model_name` (str): The name of the model to use. Default is "gpt-5.2-codex".
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/codex_workdir`).
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
-- `use_browser` (bool): If True, starts a local browser window for real-time streaming output using `BrowserPrinter` alongside `ConsolePrinter`. If False, uses `ConsolePrinter` only. Default is False.
-
-**Returns:**
-
-- `str | None`: The result of the task, or None if no result.
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-**Returns:**
-
-- `str`: JSON-formatted string containing the list of messages.
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model_name` (str): The name of the model being used.
-- `function_map` (list[str]): List of built-in tools available (read_file, write_file, etc.).
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
-- `step_count` (int): Current step number.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
-- `run_start_timestamp` (int): Unix timestamp when the run started.
-- `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (list[Path]): List of paths the agent can read from.
-- `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps allowed.
-- `max_budget` (float): Maximum budget allowed for this run.
-
-### Available Built-in Tools
-
-The agent has access to these built-in tools:
-
-- `read_file`: Read file contents from the working directory
-- `write_file`: Create or overwrite files
-- `list_dir`: List directory contents
-- `run_shell`: Execute shell commands with timeout
-- `web_search`: Search the web for information (via OpenAI SDK WebSearchTool)
-
-### Example
-
-```python
-from kiss.agents.coding_agents import OpenAICodexAgent
-
-agent = OpenAICodexAgent("My Agent")
-result = agent.run(
-    model_name="gpt-5.2-codex",
-    prompt_template="Write a fibonacci function with tests"
-)
-if result:
-    print(f"Result: {result}")
-```
 
 ______________________________________________________________________
 
@@ -2409,13 +2196,11 @@ When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter
 
 ### Coding Agent Integration
 
-Coding agents support streaming output through different mechanisms:
+Coding agents support streaming output through the `printer` parameter:
 
-- **KISSCodingAgent**: Uses the `use_browser` parameter (default: False). When True, creates a `BrowserPrinter` alongside `ConsolePrinter`. The printer is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents.
-- **RelentlessCodingAgent**: Uses the `use_browser` parameter (default: False). When True, creates a `BrowserPrinter` alongside `ConsolePrinter`. The printer is passed through to the underlying `KISSAgent.run()` calls for each trial.
-- **ClaudeCodingAgent**: Uses the `use_browser` parameter (default: False). When True, creates a `BrowserPrinter` alongside `ConsolePrinter`. When False, uses `ConsolePrinter` only.
-- **GeminiCliAgent**: Uses the `use_browser` parameter (default: False). When True, creates a `BrowserPrinter` alongside `ConsolePrinter`. The printer receives text content and tool response text from ADK events.
-- **OpenAICodexAgent**: Uses the `use_browser` parameter (default: False). When True, creates a `BrowserPrinter` alongside `ConsolePrinter`. The printer receives message text and tool output text from the Agents SDK run result.
+- **KISSCodingAgent**: Accepts a `printer` parameter (default: None). When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags. The printer is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents.
+- **RelentlessCodingAgent**: Accepts a `printer` parameter (default: None). When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags. The printer is passed through to the underlying `KISSAgent.run()` calls for each trial.
+- **ClaudeCodingAgent**: Accepts a `printer` parameter (default: None). When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags.
 
 ### Example
 

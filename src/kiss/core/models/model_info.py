@@ -600,7 +600,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.1-codex": _mi(400000, 1.25, 10.00),
     "openrouter/openai/gpt-5.1-codex-mini": _mi(400000, 0.25, 2.00),
     "openrouter/openai/gpt-5.1-codex-max": _mi(400000, 1.25, 10.00),
-    "openrouter/openai/gpt-5.2-codex": _mi(400000, 1.75, 14.00),
     "openrouter/openai/gpt-audio": _mi(128000, 2.50, 10.00, fc=False),  # Audio model
     "openrouter/openai/gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),  # Audio model
     "openrouter/openai/gpt-oss-safeguard-20b": _mi(131072, 0.075, 0.30, fc=False),  # Safety model

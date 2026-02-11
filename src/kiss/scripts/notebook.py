@@ -111,29 +111,7 @@ def test_imports() -> bool:
         print(f"✗ Failed to import/create ClaudeCodingAgent: {e}")
         tests_failed += 1
 
-    # Test 6: GeminiCliAgent
-    try:
-        from kiss.agents.coding_agents import GeminiCliAgent
-
-        _ = GeminiCliAgent(name="test_gemini_agent")
-        print("✓ GeminiCliAgent created successfully")
-        tests_passed += 1
-    except Exception as e:
-        print(f"✗ Failed to import/create GeminiCliAgent: {e}")
-        tests_failed += 1
-
-    # Test 7: OpenAICodexAgent
-    try:
-        from kiss.agents.coding_agents import OpenAICodexAgent
-
-        _ = OpenAICodexAgent(name="TestOpenAIAgent")
-        print("✓ OpenAICodexAgent created successfully")
-        tests_passed += 1
-    except Exception as e:
-        print(f"✗ Failed to import/create OpenAICodexAgent: {e}")
-        tests_failed += 1
-
-    # Test 8: ARVO agent imports
+    # Test 6: ARVO agent imports
     try:
         from kiss.evals.arvo_agent.arvo_agent import (  # noqa: F401
             find_vulnerability,

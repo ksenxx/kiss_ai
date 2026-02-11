@@ -14,15 +14,13 @@ from pathlib import Path
 
 import yaml
 
-from kiss.core.printer import MultiPrinter
-
-from kiss.core.print_to_console import ConsolePrinter
+import kiss.agents.coding_agents.config as _coding_config  # noqa: F401  # register coding_agent config
 from kiss.core import config as config_module
-import kiss.agents.coding_agents.config as _  # noqa: F401  # register coding_agent config
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import get_max_context_length
+from kiss.core.printer import Printer
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
 from kiss.docker.docker_manager import DockerManager
@@ -295,7 +293,7 @@ class RelentlessCodingAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        use_browser: bool = False,
+        printer: Printer | None = None,
         trials: int | None = None,
         docker_image: str | None = None,
     ) -> str:
@@ -314,13 +312,7 @@ class RelentlessCodingAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        if use_browser:
-            from kiss.core.print_to_browser import BrowserPrinter
-            self.browser_printer = BrowserPrinter()
-            self.browser_printer.start()
-            self.printer = MultiPrinter([self.browser_printer, ConsolePrinter()])
-        else:
-            self.printer = ConsolePrinter()
+        self.set_printer(printer)
 
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
@@ -370,7 +362,6 @@ def main() -> None:
             model_name="claude-sonnet-4-5",
             max_steps=25,
             work_dir=work_dir,
-            use_browser=True,
         )
     finally:
         os.chdir(old_cwd)

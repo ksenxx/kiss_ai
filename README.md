@@ -29,8 +29,6 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Using Self-Evolving Multi-Agent](#-using-self-evolving-multi-agent)
 - [Using KISS Coding Agent](#-using-kiss-coding-agent)
 - [Using Claude Coding Agent](#-using-claude-coding-agent)
-- [Using Gemini CLI Agent](#-using-gemini-cli-agent)
-- [Using OpenAI Codex Agent](#-using-openai-codex-agent)
 - [Using SimpleRAG for Retrieval-Augmented Generation](#-using-simplerag-for-retrieval-augmented-generation)
 - [Multiprocessing](#-multiprocessing)
 - [Docker Manager](#-docker-manager)
@@ -430,7 +428,7 @@ uv sync --group claude --group dev
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
 
-> **Optional Dependencies:** All LLM provider SDKs (`openai`, `anthropic`, `google-genai`) are optional. You can import `kiss.core` and `kiss.agents` without installing all of them. When you try to use a model whose SDK is not installed, KISS raises a clear `KISSError` telling you which package to install. Similarly, the coding agents (`ClaudeCodingAgent`, `GeminiCliAgent`, `OpenAICodexAgent`) only require their respective SDKs — you won't get import errors for agents whose SDKs you haven't installed.
+> **Optional Dependencies:** All LLM provider SDKs (`openai`, `anthropic`, `google-genai`) are optional. You can import `kiss.core` and `kiss.agents` without installing all of them. When you try to use a model whose SDK is not installed, KISS raises a clear `KISSError` telling you which package to install. Similarly, the coding agents (`ClaudeCodingAgent`) only require their respective SDKs — you won't get import errors for agents whose SDKs you haven't installed.
 
 ## 📚 KISSAgent API Reference
 
@@ -574,22 +572,29 @@ if result:
     print(f"Result: {result}")
 ```
 
-**Browser Streaming Output:**
+**Streaming Output with Printer:**
 
-The Claude Coding Agent supports real-time browser streaming. When `use_browser=True` is set, a local server is started and a browser window opens automatically to display live output with a modern dark-themed UI:
+The Claude Coding Agent supports real-time streaming via the `printer` parameter. Pass a `ConsolePrinter`, `BrowserPrinter`, or `MultiPrinter` to stream output:
 
 ```python
 from kiss.agents.coding_agents import ClaudeCodingAgent
+from kiss.core.print_to_browser import BrowserPrinter
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import MultiPrinter
+
+browser_printer = BrowserPrinter()
+browser_printer.start()
+printer = MultiPrinter([browser_printer, ConsolePrinter()])
 
 agent = ClaudeCodingAgent(name="My Agent")
 result = agent.run(
     model_name="claude-sonnet-4-5",
     prompt_template="Write a fibonacci function with tests",
-    use_browser=True,  # Defaults to False; set True for browser output
+    printer=printer,
 )
 ```
 
-When running `claude_coding_agent.py` directly, browser output is enabled explicitly:
+When running `claude_coding_agent.py` directly:
 
 ```bash
 uv run python -m kiss.agents.coding_agents.claude_coding_agent
@@ -601,8 +606,7 @@ The browser interface features scrollable panels for thinking blocks, text outpu
 
 - **Real-time Streaming**: Uses `include_partial_messages` for live streaming of assistant text, thinking, and tool calls as they happen
 - **Extended Thinking**: Supports Claude's extended thinking with configurable `max_thinking_tokens` for improved reasoning
-- **Rich Console Output**: Uses `ConsolePrinter` from `kiss.core.print_to_console` for formatted terminal output with syntax-highlighted tool calls, thinking blocks, and result panels
-- **Browser Streaming Output**: Uses `BrowserPrinter` from `kiss.core.print_to_browser` with uvicorn/starlette SSE server for real-time browser display with modern UI, scrollable panels, and syntax highlighting
+- **Printer-based Output**: Accepts a `printer` parameter (`ConsolePrinter`, `BrowserPrinter`, or `MultiPrinter`) for formatted output. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags.
 - **Path Access Control**: Enforces read/write permissions on file system paths
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring
 
@@ -612,51 +616,6 @@ The browser interface features scrollable panels for thinking blocks, text outpu
 - `Glob`, `Grep`: File search and content search
 - `Bash`: Shell command execution
 - `WebSearch`, `WebFetch`: Web access
-
-## 🤖 Using Gemini CLI Agent
-
-> **Requires:** `google-adk` and `google-genai` packages. Install with `uv sync --group gemini`.
-
-The Gemini CLI Agent uses the Google ADK (Agent Development Kit) to generate tested Python programs:
-
-```python
-from kiss.agents.coding_agents import GeminiCliAgent
-
-# Create agent with a name (must be a valid identifier - use underscores, not hyphens)
-agent = GeminiCliAgent(name="my_coding_agent")
-
-result = agent.run(
-    model_name="gemini-3-pro-preview",
-    prompt_template="Write a fibonacci function with tests",
-    readable_paths=["src/"],
-    writable_paths=["output/"],
-    base_dir="."
-)
-if result:
-    print(f"Result: {result}")
-```
-
-## 🌐 Using OpenAI Codex Agent
-
-> **Requires:** `openai-agents` package. Install with `uv sync --group openai`.
-
-The OpenAI Codex Agent uses the OpenAI Agents SDK to generate tested Python programs:
-
-```python
-from kiss.agents.coding_agents import OpenAICodexAgent
-
-agent = OpenAICodexAgent(name="My Coding Agent")
-
-result = agent.run(
-    model_name="gpt-5.2-codex",
-    prompt_template="Write a fibonacci function with tests",
-    readable_paths=["src/"],
-    writable_paths=["output/"],
-    base_dir="."
-)
-if result:
-    print(f"Result: {result}")
-```
 
 ## 🔍 Using SimpleRAG for Retrieval-Augmented Generation
 
@@ -853,9 +812,7 @@ kiss/
 │   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
 │   │   │   ├── claude_coding_agent.py     # Claude Coding Agent using Claude Agent SDK
 │   │   │   ├── optimize_agent.py          # Pareto frontier agent optimizer
-│   │   │   ├── config.py                  # Coding agent configuration (RelentlessCodingAgent, KISSCodingAgent)
-│   │   │   ├── gemini_cli_agent.py        # Gemini CLI Agent using Google ADK
-│   │   │   └── openai_codex_agent.py      # OpenAI Codex Agent using OpenAI Agents SDK
+│   │   │   └── config.py                  # Coding agent configuration (RelentlessCodingAgent, KISSCodingAgent)
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
 │   │   │   ├── agent_evolver.py       # Agent evolution logic
 │   │   │   ├── multi_agent.py         # Multi-agent orchestration
@@ -922,8 +879,6 @@ kiss/
 │   │   ├── test_gemini_model_internals.py # Tests for Gemini model internals
 │   │   ├── test_cli_options.py            # Tests for CLI option parsing
 │   │   ├── test_claude_coding_agent.py    # Tests for Claude Coding Agent
-│   │   ├── test_gemini_cli_agent.py       # Tests for Gemini CLI Agent
-│   │   ├── test_openai_codex_agent.py     # Tests for OpenAI Codex Agent
 │   │   ├── test_evolver_progress_callback.py # Tests for AgentEvolver progress callbacks
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents

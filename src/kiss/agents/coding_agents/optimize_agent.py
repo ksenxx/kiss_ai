@@ -280,8 +280,6 @@ def _create_agent(agent_cls: type) -> Any:
     for name, param in sig.parameters.items():
         if name == "name":
             kwargs["name"] = "OptEval"
-        elif name == "use_browser":
-            kwargs["use_browser"] = False
         elif param.default is inspect.Parameter.empty:
             kwargs[name] = "OptEval"
     return agent_cls(**kwargs)
@@ -436,7 +434,6 @@ def improve_variant(
             work_dir=resolved_target,
             readable_paths=[resolved_target, str(PROJECT_ROOT)],
             writable_paths=[resolved_target],
-            use_browser=False,
         )
         return True
     except Exception as e:
