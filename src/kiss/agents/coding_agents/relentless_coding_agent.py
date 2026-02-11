@@ -298,6 +298,8 @@ class RelentlessCodingAgent(Base):
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> str:
         """Run the coding agent."""
         self._reset(
@@ -314,7 +316,11 @@ class RelentlessCodingAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.set_printer(printer)
+        self.set_printer(
+            printer,
+            print_to_console=print_to_console,
+            print_to_browser=print_to_browser,
+        )
 
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:

@@ -202,8 +202,14 @@ class ClaudeCodingAgent(Base):
         writable_paths: list[str] | None = None,
         printer: Printer | None = None,
         max_thinking_tokens: int = 1024,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> str:
-        self.set_printer(printer)
+        self.set_printer(
+            printer,
+            print_to_console=print_to_console,
+            print_to_browser=print_to_browser,
+        )
 
         cfg = config_module.DEFAULT_CONFIG.agent
         work_dir = work_dir or str(Path(cfg.artifact_dir).resolve() / "claude_workdir")

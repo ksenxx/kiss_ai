@@ -42,8 +42,14 @@ class KISSAgent(Base):
         max_budget: float | None,
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> None:
-        self.set_printer(printer)
+        self.set_printer(
+            printer,
+            print_to_console=print_to_console,
+            print_to_browser=print_to_browser,
+        )
         token_callback = self.printer.token_callback if self.printer else None
 
         self.model = model(model_name, model_config=model_config, token_callback=token_callback)
@@ -94,6 +100,8 @@ class KISSAgent(Base):
         max_budget: float | None = None,
         model_config: dict[str, Any] | None = None,
         printer: Printer | None = None,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -114,11 +122,18 @@ class KISSAgent(Base):
                 Default is None.
             printer (Printer | None): Optional printer for streaming output.
                 Default is None.
+            print_to_console (bool | None): Override config to enable/disable console printing.
+                Default is None (uses config).
+            print_to_browser (bool | None): Override config to enable/disable browser printing.
+                Default is None (uses config).
         Returns:
             str: The result of the agent's task.
         """
         try:
-            self._reset(model_name, is_agentic, max_steps, max_budget, model_config, printer)
+            self._reset(
+                model_name, is_agentic, max_steps, max_budget,
+                model_config, printer, print_to_console, print_to_browser,
+            )
 
             if not self.is_agentic and tools is not None:
                 raise KISSError(

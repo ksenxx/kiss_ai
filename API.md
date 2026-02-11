@@ -58,6 +58,8 @@ def run(
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     printer: Printer | None = None,
+    print_to_console: bool | None = None,
+    print_to_browser: bool | None = None,
 ) -> str
 ```
 
@@ -73,7 +75,9 @@ Runs the agent's main ReAct loop to solve the task.
 - `max_steps` (int | None): Maximum number of ReAct loop iterations. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
 - `max_budget` (float | None): Maximum budget in USD for this agent run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`, which is 10.0).
 - `model_config` (dict[str, Any] | None): Optional model configuration to pass to the model. Default is None.
-- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a `MultiPrinter` is created automatically based on config flags: `print_to_browser` (default: False) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. The printer's `token_callback` is used for real-time token streaming. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a `MultiPrinter` is created automatically based on config flags (or the `print_to_console`/`print_to_browser` parameters below). The printer's `token_callback` is used for real-time token streaming. Default is None.
+- `print_to_console` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_console` to enable/disable `ConsolePrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to True).
+- `print_to_browser` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_browser` to enable/disable `BrowserPrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to False).
 
 **Returns:**
 
@@ -187,6 +191,8 @@ def run(
     printer: Printer | None = None,
     max_sub_sessions: int | None = None,
     docker_image: str | None = None,
+    print_to_console: bool | None = None,
+    print_to_browser: bool | None = None,
 ) -> str
 ```
 
@@ -203,9 +209,11 @@ Run the single-agent coding system with auto-continuation.
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
-- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags (or the `print_to_console`/`print_to_browser` parameters below). Default is None.
 - `max_sub_sessions` (int | None): Maximum number of sub-sessions for auto-continuation. Default is None (uses config default: 200).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
+- `print_to_console` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_console` to enable/disable `ConsolePrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to True).
+- `print_to_browser` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_browser` to enable/disable `BrowserPrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to False).
 
 **Returns:**
 
@@ -1821,7 +1829,7 @@ When no printer is provided and `verbose=False`, all providers fall back to thei
 
 ### KISSAgent Integration
 
-When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter` based on config flags: `print_to_browser` (default: False) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. You can also pass a custom printer. The printer receives:
+When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter` based on config flags: `print_to_browser` (default: False) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. These defaults can be overridden per-call via the `print_to_console` and `print_to_browser` parameters on `run()`. You can also pass a custom printer. The printer receives:
 
 1. **Model response tokens** as they are generated.
 1. **Tool execution output** after each tool call completes.
@@ -1830,7 +1838,7 @@ When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter
 
 Coding agents support streaming output through the `printer` parameter:
 
-- **RelentlessCodingAgent**: Accepts a `printer` parameter (default: None). When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags. The printer is passed through to the underlying `KISSAgent.run()` calls for each sub-session.
+- **RelentlessCodingAgent**: Accepts `printer`, `print_to_console`, and `print_to_browser` parameters (all default: None). When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags or the per-call `print_to_console`/`print_to_browser` overrides. The printer is passed through to the underlying `KISSAgent.run()` calls for each sub-session.
 
 ### Example
 
@@ -1887,8 +1895,8 @@ DEFAULT_CONFIG.agent.print_to_browser = False
 - `verbose` (bool): Enable verbose output (default: True)
 - `use_web` (bool): Enable web search tool (default: True)
 - `debug` (bool): Enable debug mode (default: False)
-- `print_to_console` (bool): Enable ConsolePrinter for Rich terminal output (default: True)
-- `print_to_browser` (bool): Enable BrowserPrinter for live browser UI output (default: False)
+- `print_to_console` (bool): Enable ConsolePrinter for Rich terminal output (default: True). Can be overridden per-call via the `print_to_console` parameter on `run()`.
+- `print_to_browser` (bool): Enable BrowserPrinter for live browser UI output (default: False). Can be overridden per-call via the `print_to_browser` parameter on `run()`.
 - `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
 
 #### `coding_agent.relentless_coding_agent`
