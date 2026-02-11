@@ -7,18 +7,16 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
 
-if TYPE_CHECKING:
-    from kiss.core.printer import Printer
-
 from kiss.agents.kiss import prompt_refiner_agent
 from kiss.core import config as config_module
+import kiss.agents.coding_agents.config as _  # noqa: F401  # register coding_agent config
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
@@ -26,6 +24,9 @@ from kiss.core.models.model_info import get_max_context_length
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
 from kiss.docker.docker_manager import DockerManager
+from kiss.core.printer import MultiPrinter
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.print_to_browser import BrowserPrinter
 
 ORCHESTRATOR_PROMPT = """
 ## Task
@@ -346,8 +347,8 @@ class KISSCodingAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
+        use_browser: bool = False,
         docker_image: str | None = None,
-        printer: Printer | None = None,
     ) -> str:
         """Run the multi-agent coding system."""
         self._reset(
@@ -366,7 +367,13 @@ class KISSCodingAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.printer = printer
+        if use_browser:
+            from kiss.core.print_to_browser import BrowserPrinter
+            browser_printer = BrowserPrinter()
+            browser_printer.start()
+            self.printer = MultiPrinter([browser_printer, ConsolePrinter()])
+        else:
+            self.printer = ConsolePrinter()
 
         # Run with Docker container if docker_image is provided
         if self.docker_image:
@@ -388,24 +395,43 @@ def main() -> None:
 
     agent = KISSCodingAgent("Example Multi-Agent")
     task_description = """
-    Create, test, and document a Python script that:
-    1. Reads a CSV file with two columns (name, age)
-    2. Filters rows where age > 18
-    3. Writes the filtered results to a new CSV file
-    4. Includes error handling for missing files
-    Return a summary of your work.
+ **Task:** Create a robust database engine using only Bash scripts.
+
+ **Requirements:**
+ 1.  Create a script named `db.sh` that interacts with a local data folder.
+ 2.  **Basic Operations:** Implement `db.sh set <key> <value>`,
+     `db.sh get <key>`, and `db.sh delete <key>`.
+ 3.  **Atomicity:** Implement transaction support.
+     *   `db.sh begin` starts a session where writes are cached but not visible to others.
+     *   `db.sh commit` atomically applies all cached changes.
+     *   `db.sh rollback` discards pending changes.
+ 4.  **Concurrency:** Ensure that if two different terminal windows run `db.sh`
+     simultaneously, the data is never corrupted (use `mkdir`-based mutex locking).
+ 5.  **Validation:** Write a test script `test_stress.sh` that launches 10
+     concurrent processes to spam the database, verifying no data is lost.
+
+ **Constraints:**
+ *   No external database tools (no sqlite3, no python).
+ *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
+ *   Safe: Operate entirely within a `./my_db` directory.
+ *   No README or docs.
     """
 
     work_dir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+
     try:
         result = agent.run(
             prompt_template=task_description,
+            model_name="claude-sonnet-4-5",
             work_dir=work_dir,
+            use_browser=True,
         )
         print("FINAL RESULT:")
         print(result)
     finally:
-        shutil.rmtree(work_dir)
+        os.chdir(old_cwd)
 
 
 if __name__ == "__main__":

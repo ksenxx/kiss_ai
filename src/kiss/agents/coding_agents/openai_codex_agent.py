@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import anyio
 
-if TYPE_CHECKING:
-    from kiss.core.printer import Printer
 from agents import Agent, Runner, function_tool
 from agents.tool import WebSearchTool
 
@@ -18,6 +18,8 @@ from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import is_subpath, resolve_path
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import MultiPrinter
 
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 
@@ -159,7 +161,7 @@ class OpenAICodexAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        printer: Printer | None = None,
+        use_browser: bool = False,
     ) -> str | None:
         cfg = config_module.DEFAULT_CONFIG.agent
         actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
@@ -179,7 +181,13 @@ class OpenAICodexAgent(Base):
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
-        self.printer = printer
+        if use_browser:
+            from kiss.core.print_to_browser import BrowserPrinter
+            browser_printer = BrowserPrinter()
+            browser_printer.start()
+            self.printer = MultiPrinter([browser_printer, ConsolePrinter()])
+        else:
+            self.printer = ConsolePrinter()
 
         async def _run_async() -> str | None:
             task = prompt_template.format(**(arguments or {}))
@@ -215,12 +223,42 @@ class OpenAICodexAgent(Base):
 
 
 def main() -> None:
-    agent = OpenAICodexAgent("Example agent")
+    import time as time_mod
+    work_dir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
     task_description = """
-    can you write, test, and optimize a fibonacci function in Python that is efficient and correct?
-    """
-    result = agent.run(model_name="gpt-5.3-codex", prompt_template=task_description)
+ **Task:** Create a robust database engine using only Bash scripts.
 
+ **Requirements:**
+ 1.  Create a script named `db.sh` that interacts with a local data folder.
+ 2.  **Basic Operations:** Implement `db.sh set <key> <value>`,
+     `db.sh get <key>`, and `db.sh delete <key>`.
+ 3.  **Atomicity:** Implement transaction support.
+     *   `db.sh begin` starts a session where writes are cached but not visible to others.
+     *   `db.sh commit` atomically applies all cached changes.
+     *   `db.sh rollback` discards pending changes.
+ 4.  **Concurrency:** Ensure that if two different terminal windows run `db.sh`
+     simultaneously, the data is never corrupted (use `mkdir`-based mutex locking).
+ 5.  **Validation:** Write a test script `test_stress.sh` that launches 10
+     concurrent processes to spam the database, verifying no data is lost.
+
+ **Constraints:**
+ *   No external database tools (no sqlite3, no python).
+ *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
+ *   Safe: Operate entirely within a `./my_db` directory.
+ *   No README or docs.
+    """
+
+    try:
+        agent = OpenAICodexAgent("Example agent")
+        result = agent.run(model_name="gpt-5.3-codex", prompt_template=task_description, use_browser=True)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Result: {result}")
     if result:
         print("\n--- FINAL AGENT REPORT ---")
         print(f"RESULT:\n{result}")

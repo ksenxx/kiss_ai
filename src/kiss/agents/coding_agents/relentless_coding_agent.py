@@ -11,14 +11,14 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
 
-if TYPE_CHECKING:
-    from kiss.core.printer import Printer
+from kiss.core.printer import MultiPrinter
 
+from kiss.core.print_to_console import ConsolePrinter
 from kiss.core import config as config_module
+import kiss.agents.coding_agents.config as _  # noqa: F401  # register coding_agent config
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
@@ -296,9 +296,9 @@ class RelentlessCodingAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
+        use_browser: bool = False,
         trials: int | None = None,
         docker_image: str | None = None,
-        printer: Printer | None = None,
     ) -> str:
         """Run the coding agent."""
         self._reset(
@@ -315,7 +315,13 @@ class RelentlessCodingAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.printer = printer
+        if use_browser:
+            from kiss.core.print_to_browser import BrowserPrinter
+            browser_printer = BrowserPrinter()
+            browser_printer.start()
+            self.printer = MultiPrinter([browser_printer, ConsolePrinter()])
+        else:
+            self.printer = ConsolePrinter()
 
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
@@ -357,14 +363,15 @@ def main() -> None:
 
     work_dir = tempfile.mkdtemp()
     old_cwd = os.getcwd()
+    os.chdir(work_dir)
     start_time = time_mod.time()
     try:
-        os.chdir(work_dir)
         result = agent.run(
             prompt_template=task_description,
             model_name="claude-sonnet-4-5",
             max_steps=25,
             work_dir=work_dir,
+            use_browser=True,
         )
     finally:
         os.chdir(old_cwd)

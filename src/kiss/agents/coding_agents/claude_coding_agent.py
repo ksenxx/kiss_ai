@@ -28,6 +28,7 @@ from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import MultiPrinter
 from kiss.core.utils import is_subpath, resolve_path
 
 BUILTIN_TOOLS = [
@@ -200,14 +201,17 @@ class ClaudeCodingAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        use_browser: bool = True,
+        use_browser: bool = False,
         max_thinking_tokens: int = 1024,
     ) -> str:
         if use_browser:
             from kiss.core.print_to_browser import BrowserPrinter
-            printer: Any = BrowserPrinter()
+            browser_printer = BrowserPrinter()
+            browser_printer.start()
+            printer: Any = MultiPrinter([browser_printer, ConsolePrinter()])
         else:
             printer = ConsolePrinter()
+        self.printer = printer
 
         cfg = config_module.DEFAULT_CONFIG.agent
         work_dir = work_dir or str(Path(cfg.artifact_dir).resolve() / "claude_workdir")
@@ -220,9 +224,6 @@ class ClaudeCodingAgent(Base):
         self.arguments = arguments or {}
 
         async def _run_async() -> str | None:
-            if use_browser:
-                printer.start()
-            printer.reset()
             system_prompt = (
                 CODING_INSTRUCTIONS
                 + "\n## Efficiency\n"
