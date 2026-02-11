@@ -16,7 +16,6 @@ from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
-from kiss.core.simple_formatter import SimpleFormatter
 
 
 class DockerManager:
@@ -44,7 +43,7 @@ class DockerManager:
         """
         self.client = docker.from_env()
         self.container: Container | None = None
-        self.formatter = SimpleFormatter()
+
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
         self.ports = ports
@@ -69,13 +68,13 @@ class DockerManager:
         tag = self.tag
         full_image_name = f"{image}:{tag}"
         # Pull the image if it doesn't exist locally
-        self.formatter.print_status(f"Pulling Docker image: {full_image_name}")
+        print(f"Pulling Docker image: {full_image_name}")
         try:
             self.client.images.get(full_image_name)
         except docker.errors.ImageNotFound:  # type: ignore[attr-defined]
             self.client.images.pull(image, tag=tag)
         # Create and start a container
-        self.formatter.print_status(f"Creating and starting container from {full_image_name}")
+        print(f"Creating and starting container from {full_image_name}")
         container_kwargs: dict[str, Any] = {
             "detach": True,
             "tty": True,
@@ -93,7 +92,7 @@ class DockerManager:
         self.container = self.client.containers.run(full_image_name, **container_kwargs)
         assert self.container is not None
         container_id = self.container.id[:12] if self.container.id else "unknown"
-        self.formatter.print_status(f"Container {container_id} is now running")
+        print(f"Container {container_id} is now running")
 
     def run_bash_command(self, command: str, description: str) -> str:
         """
@@ -108,7 +107,7 @@ class DockerManager:
         if self.container is None:
             raise KISSError("No container is open. Please call open() first.")
 
-        self.formatter.print_status(f"{description}")
+        print(f"{description}")
         exec_result = self.container.exec_run(
             f"/bin/bash -c {shlex.quote(command)}",
             stdout=True,
@@ -161,16 +160,16 @@ class DockerManager:
 
         container_id = self.container.id[:12] if self.container.id else "unknown"
         try:
-            self.formatter.print_status(f"Stopping container {container_id}")
+            print(f"Stopping container {container_id}")
             self.container.stop()
         except Exception as e:
-            self.formatter.print_error(f"Failed to stop container {container_id}: {e}")
+            print(f"Failed to stop container {container_id}: {e}")
 
         try:
-            self.formatter.print_status(f"Removing container {container_id}")
+            print(f"Removing container {container_id}")
             self.container.remove()
         except Exception as e:
-            self.formatter.print_error(f"Failed to remove container {container_id}: {e}")
+            print(f"Failed to remove container {container_id}: {e}")
 
         self.container = None
 
@@ -179,7 +178,7 @@ class DockerManager:
             try:
                 shutil.rmtree(self.host_shared_path)
             except Exception as e:
-                self.formatter.print_error(f"Failed to clean up temp directory: {e}")
+                print(f"Failed to clean up temp directory: {e}")
 
         print("Container closed successfully")
 

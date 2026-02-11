@@ -24,9 +24,9 @@ For a high-level overview and quick start guide, see [README.md](README.md).
 - [KISSEvolve](#kissevolve) - Evolutionary algorithm discovery
 - [UsefulTools](#usefultools) - File operations and bash execution with path-based access control
 - [Utility Functions](#utility-functions) - Helper functions
+- [Printer](#printer) - Abstract printer base class and MultiPrinter
 - [BrowserPrinter](#browserprinter) - Browser SSE streaming output
-- [SimpleFormatter](#simpleformatter) - Rich terminal output formatting
-- [CompactFormatter](#compactformatter) - Compact single-line output formatting
+- [ConsolePrinter](#consoleprinter) - Rich terminal output
 - [Pre-built Agents](#pre-built-agents) - Ready-to-use agents
 - [Configuration System](#configuration-system) - Config management
 
@@ -57,12 +57,11 @@ def run(
     prompt_template: str,
     arguments: dict[str, str] | None = None,
     tools: list[Callable[..., Any]] | None = None,
-    formatter: Formatter | None = None,
     is_agentic: bool = True,
     max_steps: int | None = None,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
-    token_callback: TokenCallback | None = None,
+    printer: Printer | None = None,
 ) -> str
 ```
 
@@ -74,12 +73,11 @@ Runs the agent's main ReAct loop to solve the task.
 - `prompt_template` (str): The prompt template for the agent. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web` is enabled in config, `search_web` and `fetch_url` is also automatically added. Default is None.
-- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
 - `is_agentic` (bool): If True, runs in agentic mode with tools. If False, returns raw LLM response. Default is True.
 - `max_steps` (int | None): Maximum number of ReAct loop iterations. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
 - `max_budget` (float | None): Maximum budget in USD for this agent run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`, which is 10.0).
 - `model_config` (dict[str, Any] | None): Optional model configuration to pass to the model. Default is None.
-- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. When set, model responses are streamed and each text delta is passed to this callback. Tool execution output is also streamed through this callback. The callback signature is `async def callback(token: str) -> None`. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a `MultiPrinter` is created automatically based on config flags: `print_to_browser` (default: True) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. The printer's `token_callback` is used for real-time token streaming. Default is None.
 
 **Returns:**
 
@@ -125,7 +123,7 @@ Built-in method that serves as the default finish tool for the agent. This metho
 - `name` (str): The agent's name.
 - `model_name` (str): The name of the model being used.
 - `model`: The model instance being used.
-- `function_map` (list[str]): List of function/tool names available to this agent.
+- `function_map` (dict[str, Callable]): Dictionary mapping tool names to callable functions.
 - `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
 - `step_count` (int): Current step number.
 - `total_tokens_used` (int): Total tokens used in this run.
@@ -181,19 +179,18 @@ RelentlessCodingAgent(name: str)
 ```python
 def run(
     self,
-    prompt_template: str,
+    model_name: str | None = None,
+    prompt_template: str = "",
     arguments: dict[str, str] | None = None,
-    subtasker_model_name: str | None = None,
-    trials: int | None = None,
     max_steps: int | None = None,
     max_budget: float | None = None,
     work_dir: str | None = None,
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
+    trials: int | None = None,
     docker_image: str | None = None,
-    formatter: Formatter | None = None,
-    token_callback: TokenCallback | None = None,
+    printer: Printer | None = None,
 ) -> str
 ```
 
@@ -201,19 +198,18 @@ Run the single-agent coding system with auto-continuation.
 
 **Parameters:**
 
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
+- `model_name` (str | None): Model for task execution. Default is None (uses config default: "claude-opus-4-6").
+- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution. Default is "".
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `subtasker_model_name` (str | None): Model for task execution. Default is None (uses config default: "claude-opus-4-6").
-- `trials` (int | None): Number of continuation attempts. Default is None (uses config default: 200).
 - `max_steps` (int | None): Maximum number of steps per trial. Default is None (uses config default: 200).
 - `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses config default: 200.0).
 - `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
+- `trials` (int | None): Number of continuation attempts. Default is None (uses config default: 200).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
-- `formatter` (Formatter | None): Custom formatter for output. Default is `CompactFormatter`.
-- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. The callback is passed through to the underlying KISSAgent instances for each trial. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting. Default is None.
 
 **Returns:**
 
@@ -239,7 +235,7 @@ Execute the main task using multiple trials with auto-continuation. Each trial r
 
 - `id` (int): Unique identifier for this agent instance.
 - `name` (str): The agent's name.
-- `subtasker_model_name` (str): Model name for task execution.
+- `model_name` (str): Model name for task execution.
 - `task_description` (str): The formatted task description.
 - `total_tokens_used` (int): Total tokens used across all trials in this run.
 - `budget_used` (float): Total budget used across all trials in this run.
@@ -254,7 +250,6 @@ Execute the main task using multiple trials with auto-continuation. Each trial r
 - `docker_image` (str | None): The Docker image name if Docker execution is enabled.
 - `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
 - `useful_tools` (UsefulTools): The UsefulTools instance used for bash/read/edit/write operations.
-- `token_callback` (TokenCallback | None): The token callback passed to `run()`.
 
 ### Key Features
 
@@ -272,7 +267,7 @@ Execute the main task using multiple trials with auto-continuation. Each trial r
 ### Example
 
 ```python
-from kiss.agents.coding_agents import RelentlessCodingAgent
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 
 agent = RelentlessCodingAgent("My Relentless Agent")
 
@@ -281,7 +276,7 @@ result = agent.run(
         Write, test, and optimize a fibonacci function in Python
         that is efficient and correct. Save it to fibonacci.py.
     """,
-    subtasker_model_name="claude-sonnet-4-5",
+    model_name="claude-sonnet-4-5",
     readable_paths=["src/"],
     writable_paths=["output/"],
     base_dir="workdir",
@@ -300,7 +295,7 @@ print(f"Summary: {result_dict['summary']}")
 ### Example with Docker
 
 ```python
-from kiss.agents.coding_agents import RelentlessCodingAgent
+from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 
 agent = RelentlessCodingAgent("Docker Relentless Agent")
 
@@ -374,8 +369,7 @@ def run(
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     docker_image: str | None = None,
-    formatter: Formatter | None = None,
-    token_callback: TokenCallback | None = None,
+    printer: Printer | None = None,
 ) -> str
 ```
 
@@ -385,19 +379,18 @@ Run the multi-agent coding system with orchestration and sub-task delegation.
 
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `orchestrator_model_name` (str | None): Model for the main orchestrator agent. Default is None (uses config default: "claude-sonnet-4-5").
+- `orchestrator_model_name` (str | None): Model for the main orchestrator agent. Default is None (uses config default: "claude-opus-4-6").
 - `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-6").
 - `refiner_model_name` (str | None): Model for dynamic prompt refinement when tasks fail. Default is None (uses config default: "claude-sonnet-4-5").
 - `trials` (int | None): Number of retry attempts for each task/subtask. Default is None (uses config default: 200).
-- `max_steps` (int | None): Maximum number of steps per agent. Default is None (uses `DEFAULT_CONFIG.agent.kiss_coding_agent.max_steps`, which is 200).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.kiss_coding_agent.max_budget`, which is 100.0).
+- `max_steps` (int | None): Maximum number of steps per agent. Default is None (uses `DEFAULT_CONFIG.coding_agent.kiss_coding_agent.max_steps`, which is 200).
+- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.coding_agent.kiss_coding_agent.max_budget`, which is 100.0).
 - `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
-- `formatter` (Formatter | None): Custom formatter for output. Default is `CompactFormatter`.
-- `token_callback` (TokenCallback | None): Optional async callback invoked with each streamed text token. The callback is passed through to the underlying KISSAgent instances for both orchestrator and executor sub-agents. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting. Default is None.
 
 **Returns:**
 
@@ -469,7 +462,6 @@ Execute a sub-task using a dedicated executor agent (using `subtasker_model_name
 - `docker_image` (str | None): The Docker image name if Docker execution is enabled.
 - `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
 - `useful_tools` (UsefulTools): The UsefulTools instance used for bash/edit operations.
-- `token_callback` (TokenCallback | None): The token callback passed to `run()`.
 
 ### Key Features
 
@@ -547,13 +539,12 @@ A coding agent that uses the Claude Agent SDK to generate tested Python programs
 ### Constructor
 
 ```python
-ClaudeCodingAgent(name: str, use_browser: bool = False)
+ClaudeCodingAgent(name: str)
 ```
 
 **Parameters:**
 
 - `name` (str): Name of the agent. Used for identification and artifact naming.
-- `use_browser` (bool): If True, starts a local uvicorn server and opens a browser window for real-time streaming output with a modern dark-themed UI. If False (default), uses `ConsolePrinter` for terminal output.
 
 ### Methods
 
@@ -562,19 +553,16 @@ ClaudeCodingAgent(name: str, use_browser: bool = False)
 ```python
 def run(
     self,
-    prompt_template: str = "",
     model_name: str | None = None,
-    subtasker_model_name: str | None = None,
+    prompt_template: str = "",
     arguments: dict[str, str] | None = None,
     max_steps: int | None = None,
     max_budget: float | None = None,
-    base_dir: str | None = None,
     work_dir: str | None = None,
+    base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    token_callback: TokenCallback | None = None,
-    formatter: Any = None,
-    trials: int | None = None,
+    use_browser: bool = True,
     max_thinking_tokens: int = 1024,
 ) -> str
 ```
@@ -583,19 +571,16 @@ Run the Claude coding agent for a given task.
 
 **Parameters:**
 
+- `model_name` (str | None): The name of the model to use (e.g., "claude-sonnet-4-5"). Default is None (uses "claude-sonnet-4-5").
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution. Default is "".
-- `model_name` (str | None): The name of the model to use (e.g., "claude-sonnet-4-5"). Default is None (falls back to `subtasker_model_name`, then "claude-sonnet-4-5").
-- `subtasker_model_name` (str | None): Alternative parameter name for the model. Used as fallback if `model_name` is None. Default is None.
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
 - `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
 - `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `work_dir` if provided, otherwise `{artifact_dir}/claude_workdir`).
-- `work_dir` (str | None): Alternative parameter name for the working directory. Takes precedence over `base_dir`. Default is None.
+- `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/claude_workdir`).
+- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None.
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for Read/Grep/Glob.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for Write/Edit/MultiEdit.
-- `token_callback` (TokenCallback | None): Optional async callback invoked with streaming text deltas (from `StreamEvent` messages), tool result text, and the final result. When set, the agent streams assistant text and thinking content in real-time as they are generated. Default is None.
-- `formatter` (Any): Unused parameter for interface compatibility with other coding agents. Default is None.
-- `trials` (int | None): Unused parameter for interface compatibility with other coding agents. Default is None.
+- `use_browser` (bool): If True, starts a local uvicorn server and opens a browser window for real-time streaming output. If False, uses `ConsolePrinter` for terminal output. Default is True.
 - `max_thinking_tokens` (int): Maximum tokens for Claude's extended thinking. Default is 1024.
 
 **Returns:**
@@ -634,14 +619,14 @@ Returns the agent's conversation trajectory as a JSON string.
 ### Key Features
 
 - **Real-time Streaming**: Uses `include_partial_messages=True` to receive `StreamEvent` messages, enabling live streaming of assistant text, thinking content, and tool call inputs as they are generated.
-- **Extended Thinking**: Supports Claude's extended thinking via `max_thinking_tokens=10000`, allowing the model to reason through complex problems before responding. `ThinkingBlock` content is captured in the trajectory.
+- **Extended Thinking**: Supports Claude's extended thinking via `max_thinking_tokens` (default: 1024), allowing the model to reason through complex problems before responding. `ThinkingBlock` content is captured in the trajectory.
 - **Rich Console Output**: Uses a dedicated `ConsolePrinter` class (`print_to_console.py`) for formatted terminal output with Rich panels for tool calls (syntax-highlighted file content, diffs, commands), thinking block delimiters, streaming text deltas, and result summaries with cost/token stats.
 - **Browser Streaming Output**: When `use_browser=True`, uses `BrowserPrinter` class (`print_to_browser.py`) which starts a local uvicorn/starlette SSE server and opens a browser window for real-time streaming with a modern dark-themed UI featuring scrollable panels for thinking, text, tool calls with syntax highlighting, tool results, and a final result card with stats.
 - **Message Processing**: Handles five message types from the Claude Agent SDK query stream:
-  - `StreamEvent`: Partial streaming deltas (text, thinking, tool input JSON) — printed in real-time and forwarded to `token_callback`
+  - `StreamEvent`: Partial streaming deltas (text, thinking, tool input JSON) — printed in real-time
   - `SystemMessage`: System-level messages (e.g., tool output) — printed to console
   - `AssistantMessage`: Complete assistant turns with `TextBlock`, `ThinkingBlock`, and `ToolUseBlock` content — recorded in trajectory
-  - `UserMessage`: Tool result blocks — printed and forwarded to `token_callback`
+  - `UserMessage`: Tool result blocks — printed to console
   - `ResultMessage`: Final result with cost tracking — printed with stats panel
 
 ### Available Built-in Tools
@@ -678,10 +663,11 @@ if result:
 from kiss.agents.coding_agents import ClaudeCodingAgent
 
 # Browser window opens automatically with live streaming output
-agent = ClaudeCodingAgent("My Agent", use_browser=True)
+agent = ClaudeCodingAgent("My Agent")
 result = agent.run(
     model_name="claude-sonnet-4-5",
-    prompt_template="Write a fibonacci function with tests"
+    prompt_template="Write a fibonacci function with tests",
+    use_browser=True,
 )
 if result:
     print(f"Result: {result}")
@@ -689,11 +675,46 @@ if result:
 
 ______________________________________________________________________
 
+## Printer
+
+Abstract base class for KISS agent output and the `MultiPrinter` composite.
+
+**Location:** `kiss.core.printer`
+
+### Printer (ABC)
+
+```python
+class Printer(ABC):
+    @abstractmethod
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str: ...
+
+    @abstractmethod
+    async def token_callback(self, token: str) -> None: ...
+
+    @abstractmethod
+    def reset(self) -> None: ...
+```
+
+All concrete printers (`ConsolePrinter`, `BrowserPrinter`) implement this interface.
+
+### MultiPrinter
+
+```python
+class MultiPrinter(Printer):
+    def __init__(self, printers: list[Printer]) -> None: ...
+```
+
+A composite printer that delegates to multiple printers. Used by `KISSAgent` to stream output to both the terminal and browser simultaneously.
+
+______________________________________________________________________
+
 ## BrowserPrinter
 
 > **Requires:** `uvicorn` and `starlette` packages. Included in `uv sync --group claude-coding-agent`.
 
-Browser output streaming handler for ClaudeCodingAgent. Starts a local uvicorn server with SSE (Server-Sent Events) and opens a browser window to display agent output in real-time with a modern dark-themed UI.
+**Location:** `kiss.core.print_to_browser`
+
+Browser output streaming handler. Starts a local uvicorn server with SSE (Server-Sent Events) and opens a browser window to display agent output in real-time with a modern dark-themed UI.
 
 ### Constructor
 
@@ -731,39 +752,31 @@ def reset(self) -> None
 
 Reset internal state (block type, tool name, JSON buffer).
 
-#### `print_stream_event()`
+#### `print()`
 
 ```python
-def print_stream_event(self, event: Any) -> str
+def print(self, content: Any, type: str = "text", **kwargs: Any) -> str
 ```
 
-Handle a streaming event and send to browser via SSE. Returns extracted text content for token callbacks. Handles the same event types as `ConsolePrinter`: `content_block_start`, `content_block_delta`, `content_block_stop`.
+Unified output method that handles all content types and sends to browser via SSE.
 
 **Parameters:**
 
-- `event`: A StreamEvent (or any object with an `event` dict attribute).
+- `content` (Any): The content to display.
+- `type` (str): The content type. Supported types:
+  - `"text"`: General text output
+  - `"prompt"`: Agent prompt display
+  - `"stream_event"`: Streaming event from Claude Agent SDK (handles `content_block_start`, `content_block_delta`, `content_block_stop`)
+  - `"message"`: Complete message (SystemMessage, ResultMessage, UserMessage)
+  - `"usage_info"`: Usage information (step count, token counts, etc.)
+  - `"tool_call"`: Tool call display (pass `tool_input` dict in kwargs)
+  - `"tool_result"`: Tool result display (pass `is_error` bool in kwargs)
+  - `"result"`: Final result display (pass `step_count`, `total_tokens`, `cost` in kwargs)
+- `**kwargs`: Additional keyword arguments specific to the content type.
 
 **Returns:**
 
-- `str`: Extracted text content.
-
-#### `print_message()`
-
-```python
-def print_message(
-    self,
-    message: Any,
-    step_count: int = 0,
-    budget_used: float = 0.0,
-    total_tokens_used: int = 0,
-) -> None
-```
-
-Send a complete message to the browser. Supports the same duck-typed message detection as `ConsolePrinter`:
-
-- SystemMessage (has `subtype` and `data`): tool output text
-- ResultMessage (has `result`): final result with stats
-- UserMessage (has `content`): tool result blocks
+- `str`: Extracted text content (for `stream_event` type), empty string otherwise.
 
 ### Browser UI Features
 
@@ -775,6 +788,60 @@ Send a complete message to the browser. Supports the same duck-typed message det
 - **Auto-scroll** with smart detection (pauses when user scrolls up)
 - **Live status indicator** with event count and elapsed time
 - **SSE-based streaming** for instant updates without polling
+
+______________________________________________________________________
+
+## ConsolePrinter
+
+**Location:** `kiss.core.print_to_console`
+
+Rich terminal output handler. Provides formatted console output with syntax-highlighted tool calls, thinking block delimiters, streaming text deltas, and result summaries.
+
+### Constructor
+
+```python
+ConsolePrinter(file: Any = None)
+```
+
+**Parameters:**
+
+- `file` (Any): Optional file object for output. Default is None (uses `sys.stdout`).
+
+### Methods
+
+#### `reset()`
+
+```python
+def reset(self) -> None
+```
+
+Reset internal state (block type, tool name, JSON buffer, mid-line flag).
+
+#### `print()`
+
+```python
+def print(self, content: Any, type: str = "text", **kwargs: Any) -> str
+```
+
+Unified output method that handles all content types and prints to terminal with Rich formatting.
+
+**Parameters:**
+
+- `content` (Any): The content to display.
+- `type` (str): The content type. Supported types:
+  - `"text"`: General text output
+  - `"prompt"`: Agent prompt display (Rich Panel)
+  - `"stream_event"`: Streaming event from Claude Agent SDK (handles `content_block_start`, `content_block_delta`, `content_block_stop`)
+  - `"message"`: Complete message (SystemMessage, ResultMessage, UserMessage)
+  - `"usage_info"`: Usage information as a Rich Panel
+  - `"tool_call"`: Tool call display with syntax highlighting (pass `tool_input` dict in kwargs)
+  - `"tool_result"`: Tool result display (pass `is_error` bool in kwargs)
+  - `"result"`: Final result display as a Rich Panel with stats (pass `step_count`, `total_tokens`, `cost` in kwargs)
+- `**kwargs`: Additional keyword arguments specific to the content type.
+
+**Returns:**
+
+- `str`: Extracted text content (for `stream_event` type), empty string otherwise.
 
 ______________________________________________________________________
 
@@ -809,8 +876,7 @@ def run(
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    formatter: Formatter | None = None,
-    token_callback: TokenCallback | None = None,
+    printer: Printer | None = None,
 ) -> str | None
 ```
 
@@ -826,8 +892,7 @@ Run the Gemini CLI agent for a given task.
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/gemini_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
-- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
-- `token_callback` (TokenCallback | None): Optional async callback invoked with text content and tool response text from ADK events. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting. Default is None.
 
 **Returns:**
 
@@ -919,8 +984,7 @@ def run(
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    formatter: Formatter | None = None,
-    token_callback: TokenCallback | None = None,
+    printer: Printer | None = None,
 ) -> str | None
 ```
 
@@ -936,8 +1000,7 @@ Run the OpenAI Codex agent for a given task.
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/codex_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
-- `formatter` (Formatter | None): Custom formatter for output. Default is `SimpleFormatter`.
-- `token_callback` (TokenCallback | None): Optional async callback invoked with message text and tool output text from the Agents SDK result. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting. Default is None.
 
 **Returns:**
 
@@ -2325,266 +2388,9 @@ Read a file from the project root using Python package conventions.
 
 ______________________________________________________________________
 
-## SimpleFormatter
+## Token Streaming via Printer
 
-Simple formatter implementation using Rich for terminal output. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting - when verbose is False, no output is produced.
-
-### Constructor
-
-```python
-SimpleFormatter()
-```
-
-### Methods
-
-#### `format_message()`
-
-```python
-def format_message(self, message: dict[str, Any]) -> str
-```
-
-Format a single message as a string. Returns empty string if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (dict): Message dictionary with 'role' and 'content' keys.
-
-**Returns:**
-
-- `str`: Formatted message string, or empty string if verbose is False.
-
-#### `format_messages()`
-
-```python
-def format_messages(self, messages: list[dict[str, Any]]) -> str
-```
-
-Format a list of messages as a string. Returns empty string if verbose mode is disabled.
-
-**Parameters:**
-
-- `messages` (list[dict]): List of message dictionaries.
-
-**Returns:**
-
-- `str`: Formatted messages string, or empty string if verbose is False.
-
-#### `print_message()`
-
-```python
-def print_message(self, message: dict[str, Any]) -> None
-```
-
-Print a single message to the console with Rich formatting. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (dict): Message dictionary with 'role' and 'content' keys.
-
-#### `print_messages()`
-
-```python
-def print_messages(self, messages: list[dict[str, Any]]) -> None
-```
-
-Print a list of messages to the console. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `messages` (list[dict]): List of message dictionaries.
-
-#### `print_status()`
-
-```python
-def print_status(self, message: str) -> None
-```
-
-Print a status message in green. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (str): The status message to print.
-
-#### `print_error()`
-
-```python
-def print_error(self, message: str) -> None
-```
-
-Print an error message in red to stderr. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (str): The error message to print.
-
-#### `print_warning()`
-
-```python
-def print_warning(self, message: str) -> None
-```
-
-Print a warning message in yellow. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (str): The warning message to print.
-
-#### `print_label_and_value()`
-
-```python
-def print_label_and_value(self, label: str, value: str) -> None
-```
-
-Print a label and value pair with distinct colors. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `label` (str): The label to print (displayed in cyan).
-- `value` (str): The value to print (displayed in bold white).
-
-______________________________________________________________________
-
-## CompactFormatter
-
-Compact formatter that parses model message content into structured parts (thought, tool action, usage info) and renders them concisely. This formatter is used by default in `RelentlessCodingAgent` and `KISSCodingAgent` for cleaner logs during agent execution. All output methods respect the `DEFAULT_CONFIG.agent.verbose` setting.
-
-**Key internal features:**
-
-- **Markdown stripping**: Thought text is converted from markdown to plain text using `markdown-it-py`, collapsing multiple spaces into one via `_strip_markdown()`.
-- **AST-based tool call parsing**: Tool calls in ```` ```python ```` fenced code blocks are parsed with Python's `ast` module via `_parse_tool_desc()`. If the call has a `description` keyword argument, that string is used as the action label; otherwise a compact `func(key=value, ...)` summary is generated with values truncated to `LINE_LENGTH` (160 characters).
-- **Content splitting**: `_extract_parts()` splits message content into three parts: the thought (text before the tool call code block), the tool action description, and usage information (text matching `#### Usage Information`).
-- **User message handling**: User messages are displayed directly without tool-call parsing, truncated to `LINE_LENGTH` if needed.
-- **Consolidated `_print()` helper**: Status, error, and warning printing are unified through a single `_print(message, style, stderr)` method that dispatches to the appropriate Rich console or plain stdout/stderr.
-
-### Constructor
-
-```python
-CompactFormatter()
-```
-
-### Methods
-
-#### `format_message()`
-
-```python
-def format_message(self, message: dict[str, Any]) -> str
-```
-
-Parse and format a single message. The content is split into three parts: the thought (text before the tool call code block, with markdown stripped), the tool action description (from the `description` parameter of the tool call, or a generated summary), and usage information. Returns empty string if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (dict): Message dictionary with 'role' and 'content' keys.
-
-**Returns:**
-
-- `str`: Multi-line formatted output with `[role]: thought...`, `[action]: description`, and usage info. User messages are displayed directly without tool-call parsing. Returns `[role]: (empty)` if content is empty, or empty string if verbose is False.
-
-#### `format_messages()`
-
-```python
-def format_messages(self, messages: list[dict[str, Any]]) -> str
-```
-
-Format a list of messages by applying `format_message()` to each. Returns empty string if verbose mode is disabled.
-
-**Parameters:**
-
-- `messages` (list[dict]): List of message dictionaries.
-
-**Returns:**
-
-- `str`: Formatted messages string with each message's output joined by newlines, or empty string if verbose is False.
-
-#### `print_message()`
-
-```python
-def print_message(self, message: dict[str, Any]) -> None
-```
-
-Print a single formatted message. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (dict): Message dictionary with 'role' and 'content' keys.
-
-#### `print_messages()`
-
-```python
-def print_messages(self, messages: list[dict[str, Any]]) -> None
-```
-
-Print a list of formatted messages. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `messages` (list[dict]): List of message dictionaries.
-
-#### `print_status()`
-
-```python
-def print_status(self, message: str) -> None
-```
-
-Print a status message in green. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (str): The status message to print.
-
-#### `print_error()`
-
-```python
-def print_error(self, message: str) -> None
-```
-
-Print an error message in red to stderr. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (str): The error message to print.
-
-#### `print_warning()`
-
-```python
-def print_warning(self, message: str) -> None
-```
-
-Print a warning message in yellow. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `message` (str): The warning message to print.
-
-#### `print_label_and_value()`
-
-```python
-def print_label_and_value(self, label: str, value: str) -> None
-```
-
-Print a label and value pair with distinct colors. No output if verbose mode is disabled.
-
-**Parameters:**
-
-- `label` (str): The label to print.
-- `value` (str): The value to print.
-
-______________________________________________________________________
-
-## Token Streaming Callback
-
-The KISS framework supports real-time token streaming through an async callback mechanism. When a `token_callback` is provided, model responses are streamed token-by-token instead of waiting for the full response. Tool execution output is also streamed through the same callback.
-
-### TokenCallback Type
-
-```python
-from kiss.core.models.model import TokenCallback
-
-# Type alias:
-TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
-```
-
-A `TokenCallback` is an async function that receives a single string token and returns nothing. It is invoked synchronously from the model layer using an internal event loop bridge.
+The KISS framework supports real-time token streaming through the `Printer` abstraction. Each `Printer` implements a `token_callback` method that receives streamed tokens. When a printer is provided to `KISSAgent.run()` (or when `verbose=True` creates one automatically), model responses are streamed token-by-token in real-time.
 
 ### Streaming Behavior by Provider
 
@@ -2592,48 +2398,38 @@ A `TokenCallback` is an async function that receives a single string token and r
 - **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
 - **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`.
 
-When `token_callback` is `None`, all providers fall back to their original non-streaming code paths with no behavioral change.
+When no printer is provided and `verbose=False`, all providers fall back to their original non-streaming code paths.
 
 ### KISSAgent Integration
 
-When passed to `KISSAgent.run()`, the callback receives:
+When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter` based on config flags: `print_to_browser` (default: True) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. You can also pass a custom printer. The printer receives:
 
 1. **Model response tokens** as they are generated.
-1. **Tool execution output** after each tool call completes (including error messages from failed tool calls).
+1. **Tool execution output** after each tool call completes.
 
 ### Coding Agent Integration
 
-All coding agents support `token_callback` in their `run()` methods:
+All coding agents support the `printer` parameter in their `run()` methods:
 
-- **KISSCodingAgent**: The callback is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents. Streamed content includes model response tokens and tool output from all sub-agents.
-- **RelentlessCodingAgent**: The callback is passed through to the underlying `KISSAgent.run()` calls for each trial. Streamed content includes model response tokens and tool output from all trials.
-- **ClaudeCodingAgent**: The callback receives real-time streaming text deltas from `StreamEvent` messages (assistant text, thinking content) as they are generated, tool result text from `UserMessage` processing, and the final result string. Streaming is enabled via `include_partial_messages=True` in the Claude Agent SDK options.
-- **GeminiCliAgent**: The callback receives text content and tool response text from ADK events after all events are collected and processed.
-- **OpenAICodexAgent**: The callback receives message text and tool output text from the Agents SDK run result after processing.
+- **KISSCodingAgent**: The printer is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents.
+- **RelentlessCodingAgent**: The printer is passed through to the underlying `KISSAgent.run()` calls for each trial.
+- **GeminiCliAgent**: The printer receives text content and tool response text from ADK events.
+- **OpenAICodexAgent**: The printer receives message text and tool output text from the Agents SDK run result.
+- **ClaudeCodingAgent**: Uses its own built-in streaming output via `ConsolePrinter` (terminal) or `BrowserPrinter` (browser UI) controlled by the `use_browser` parameter.
 
 ### Example
 
 ```python
-import asyncio
 from kiss.core.kiss_agent import KISSAgent
-
-# Collect tokens into a list
-tokens: list[str] = []
-
-async def my_callback(token: str) -> None:
-    tokens.append(token)
-    print(token, end="", flush=True)  # Print tokens as they arrive
+from kiss.core.print_to_console import ConsolePrinter
 
 agent = KISSAgent("streaming-agent")
 result = agent.run(
     model_name="gpt-4o",
     prompt_template="Write a haiku about programming.",
     is_agentic=False,
-    token_callback=my_callback,
+    printer=ConsolePrinter(),
 )
-
-# tokens now contains each streamed text delta
-print(f"\nTotal tokens received: {len(tokens)}")
 ```
 
 ______________________________________________________________________
@@ -2654,6 +2450,8 @@ DEFAULT_CONFIG.agent.max_agent_budget = 10.0
 DEFAULT_CONFIG.agent.global_max_budget = 200.0
 DEFAULT_CONFIG.agent.verbose = True
 DEFAULT_CONFIG.agent.use_web = True
+DEFAULT_CONFIG.agent.print_to_console = True
+DEFAULT_CONFIG.agent.print_to_browser = True
 ```
 
 ### Configuration Sections
@@ -2674,18 +2472,20 @@ DEFAULT_CONFIG.agent.use_web = True
 - `verbose` (bool): Enable verbose output (default: True)
 - `use_web` (bool): Enable web search tool (default: True)
 - `debug` (bool): Enable debug mode (default: False)
+- `print_to_console` (bool): Enable ConsolePrinter for Rich terminal output (default: True)
+- `print_to_browser` (bool): Enable BrowserPrinter for live browser UI output (default: True)
 - `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
 
-#### `agent.relentless_coding_agent`
+#### `coding_agent.relentless_coding_agent`
 
-- `subtasker_model_name` (str): Model for task execution (default: "claude-opus-4-6")
+- `model_name` (str): Model for task execution (default: "claude-opus-4-6")
 - `max_steps` (int): Maximum steps per trial for the Relentless Coding Agent (default: 200)
 - `max_budget` (float): Maximum budget in USD for the Relentless Coding Agent (default: 200.0)
 - `trials` (int): Number of continuation attempts (default: 200)
 
-#### `agent.kiss_coding_agent`
+#### `coding_agent.kiss_coding_agent`
 
-- `orchestrator_model_name` (str): Model for main orchestration (default: "claude-sonnet-4-5")
+- `orchestrator_model_name` (str): Model for main orchestration (default: "claude-opus-4-6")
 - `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-6")
 - `refiner_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
 - `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 200)

@@ -1,24 +1,21 @@
-# Author: Koushik Sen (ksen@berkeley.edu)
-# Contributors:
-# Koushik Sen (ksen@berkeley.edu)
-# add your name here
-
 """OpenAI Codex Coding Agent using the OpenAI Agents SDK."""
+
+from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
+
+if TYPE_CHECKING:
+    from kiss.core.printer import Printer
 from agents import Agent, Runner, function_tool
 from agents.tool import WebSearchTool
 
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
-from kiss.core.formatter import Formatter
-from kiss.core.models.model import TokenCallback
 from kiss.core.models.model_info import get_max_context_length
-from kiss.core.simple_formatter import SimpleFormatter
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import is_subpath, resolve_path
 
@@ -33,11 +30,6 @@ class OpenAICodexAgent(Base):
     """OpenAI Codex Coding Agent using the OpenAI Agents SDK."""
 
     def __init__(self, name: str) -> None:
-        """Initialize an OpenAICodexAgent instance.
-
-        Args:
-            name: The name identifier for the agent.
-        """
         super().__init__(name)
 
     def _reset(
@@ -48,21 +40,14 @@ class OpenAICodexAgent(Base):
         base_dir: str,
         max_steps: int,
         max_budget: float,
-        formatter: Formatter | None,
     ) -> None:
-        """Reset the agent's state for a new run.
-
-        Args:
-            model_name: The model name to use.
-            readable_paths: Paths allowed for reading.
-            writable_paths: Paths allowed for writing.
-            base_dir: Base directory for path resolution.
-            max_steps: Maximum steps allowed.
-            max_budget: Maximum budget in USD.
-            formatter: Optional formatter for output display.
-        """
-        tools = ["read_file", "write_file", "list_dir", "run_shell", "web_search"]
-        self._init_run_state(model_name, tools)
+        self.model_name = model_name
+        self.function_map = ["read_file", "write_file", "list_dir", "run_shell", "web_search"]
+        self.messages: list[dict[str, Any]] = []
+        self.step_count = 0
+        self.total_tokens_used = 0
+        self.budget_used = 0.0
+        self.run_start_timestamp = int(time.time())
         Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = base_dir
         base_path = Path(base_dir).resolve()
@@ -74,7 +59,6 @@ class OpenAICodexAgent(Base):
         self.is_agentic = True
         self.max_steps = max_steps
         self.max_budget = max_budget
-        self._formatter = formatter or SimpleFormatter()
         self.useful_tools = UsefulTools(
             base_dir=base_dir,
             readable_paths=[str(p) for p in self.readable_paths],
@@ -82,12 +66,6 @@ class OpenAICodexAgent(Base):
         )
 
     def _create_tools(self) -> list[Any]:
-        """Create tools with path restrictions.
-
-        Returns:
-            list[Any]: A list of tool functions for the agent.
-        """
-
         @function_tool
         def read_file(path: str) -> str:
             """Read file contents. Args: path - file path."""
@@ -139,11 +117,6 @@ class OpenAICodexAgent(Base):
         return [read_file, write_file, list_dir, run_shell, WebSearchTool()]
 
     def _update_token_usage(self, result: Any) -> None:
-        """Update token counts from result.
-
-        Args:
-            result: The result object with optional raw_responses.
-        """
         if hasattr(result, "raw_responses"):
             for response in result.raw_responses:
                 if hasattr(response, "usage") and response.usage:
@@ -151,15 +124,6 @@ class OpenAICodexAgent(Base):
                     self.total_tokens_used += getattr(response.usage, "output_tokens", 0)
 
     def _process_run_result(self, result: Any, timestamp: int) -> list[str]:
-        """Process run result and update state.
-
-        Args:
-            result: The run result from the agent.
-            timestamp: Unix timestamp for the result.
-
-        Returns:
-            list[str]: Text chunks suitable for streaming to token_callback.
-        """
         streamed_texts: list[str] = []
         for item in result.new_items:
             self.step_count += 1
@@ -169,21 +133,17 @@ class OpenAICodexAgent(Base):
                 raw = getattr(item, "raw_item", None)
                 raw_content = getattr(raw, "content", None)
                 text = str(getattr(raw_content[0], "text", "")) if raw_content else ""
-                self._formatter.print_label_and_value("MESSAGE", f"{text[:200]}...")
                 self._add_message("model", text, timestamp)
                 if text:
                     streamed_texts.append(text)
             elif item_type == "ToolCallItem":
                 name = getattr(item.raw_item, "name", "unknown")
-                self._formatter.print_label_and_value("TOOL", name)
                 self._add_message("model", f"Tool: {name}", timestamp)
             elif item_type == "ToolCallOutputItem":
                 output = str(item.output)
-                self._formatter.print_label_and_value("TOOL RESULT", f"{output[:200]}...")
                 self._add_message("user", output, timestamp)
                 streamed_texts.append(output)
             elif item_type == "ReasoningItem":
-                self._formatter.print_label_and_value("REASONING", "...")
                 self._add_message("model", "Reasoning", timestamp)
 
         self._update_token_usage(result)
@@ -199,27 +159,8 @@ class OpenAICodexAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        formatter: Formatter | None = None,
-        token_callback: TokenCallback | None = None,
+        printer: Printer | None = None,
     ) -> str | None:
-        """Run the OpenAI Codex agent for a given task.
-
-        Args:
-            model_name: The name of the model to use.
-            prompt_template: The prompt template for the task.
-            arguments: The arguments for the task.
-            max_steps: The maximum number of steps to take.
-            max_budget: The maximum budget in USD to spend.
-            base_dir: The base directory relative to which readable and writable
-                paths are resolved if they are not absolute.
-            readable_paths: The paths from which the agent is allowed to read from.
-            writable_paths: The paths to which the agent is allowed to write to.
-            token_callback: Optional async callback invoked with each streamed text token.
-                Default is None.
-
-        Returns:
-            The result of the task.
-        """
         cfg = config_module.DEFAULT_CONFIG.agent
         actual_max_steps = max_steps if max_steps is not None else cfg.max_steps
         actual_max_budget = max_budget if max_budget is not None else cfg.max_agent_budget
@@ -235,11 +176,10 @@ class OpenAICodexAgent(Base):
             actual_base_dir,
             actual_max_steps,
             actual_max_budget,
-            formatter,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
-        self.token_callback = token_callback
+        self.printer = printer
 
         async def _run_async() -> str | None:
             task = prompt_template.format(**(arguments or {}))
@@ -253,27 +193,18 @@ class OpenAICodexAgent(Base):
                 tools=self._create_tools(),
             )
 
-            self._formatter.print_label_and_value("CODEX AGENT", f"Starting in {self.base_dir}")
-            self._formatter.print_label_and_value(
-                "CODEX AGENT", f"Model: {model_name}, Max turns: {actual_max_steps}"
-            )
-
             try:
                 result = await Runner.run(agent, input=task, max_turns=actual_max_steps)
                 timestamp = int(time.time())
                 streamed_texts = self._process_run_result(result, timestamp)
 
-                if self.token_callback:
+                if self.printer:
                     for text in streamed_texts:
-                        await self.token_callback(text)
+                        await self.printer.token_callback(text)
 
                 final_result = str(result.final_output) if result.final_output else None
-                self._formatter.print_label_and_value(
-                    "CODEX AGENT", f"Output: {str(result.final_output)[:500]}..."
-                )
 
             except Exception as e:
-                self._formatter.print_label_and_value("CODEX ERROR", str(e))
                 final_result = f"Error: {e}"
                 self._add_message("model", f"Error: {e}", timestamp)
 
@@ -284,7 +215,6 @@ class OpenAICodexAgent(Base):
 
 
 def main() -> None:
-    """Example usage of the OpenAICodexAgent."""
     agent = OpenAICodexAgent("Example agent")
     task_description = """
     can you write, test, and optimize a fibonacci function in Python that is efficient and correct?

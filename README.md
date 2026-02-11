@@ -1,6 +1,6 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.11
+**Version:** 0.1.12
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Evolutionary Framework
 
@@ -14,6 +14,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 - [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
 - [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
+- [Interactive Demo with Streaming Output](#-interactive-demo-with-streaming-output)
 - [Blogs](#-blogs)
 - [Multi-Agent Orchestration](#-multi-agent-orchestration)
 - [Using Agent Creator and Optimizer](#-using-agent-creator-and-optimizer)
@@ -80,6 +81,43 @@ print(result)  # 127.05
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 
 KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works.
+
+## 🎬 Interactive Demo with Streaming Output
+
+Run the built-in demo to see a KISSAgent solve arithmetic problems with real-time token streaming to both the terminal and a live browser UI:
+
+```bash
+uv run python -m kiss.demo.kiss_demo
+```
+
+This launches an agent that uses a `simple_calculator` tool to solve three math problems step by step. Output is streamed in real-time via the `Printer` system to:
+
+- **Terminal** — using `ConsolePrinter` from `kiss.core.print_to_console` for rich-formatted output (tool call panels, result rules, final result panel)
+- **Browser** — using `BrowserPrinter` from `kiss.core.print_to_browser` for a live dark-themed web UI with scrollable panels, syntax highlighting, and tool call cards
+
+The demo uses the built-in `Printer` system. When `verbose=True` (the default), `KISSAgent` automatically creates a `MultiPrinter` based on config flags: `print_to_browser` (default: True) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`, for real-time streaming to both the terminal and a live browser UI. You can also pass a custom `printer` parameter:
+
+```python
+from kiss.core.print_to_browser import BrowserPrinter
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import MultiPrinter
+from kiss.core.kiss_agent import KISSAgent
+
+browser_printer = BrowserPrinter()
+browser_printer.start()
+console_printer = ConsolePrinter()
+printer = MultiPrinter([browser_printer, console_printer])
+
+agent = KISSAgent("Arithmetic Demo Agent")
+result = agent.run(
+    model_name="claude-sonnet-4-5",
+    prompt_template="Calculate 127 * 843, (1234 + 5678) / 2, and 2**10 - 1",
+    tools=[simple_calculator],
+    printer=printer,
+)
+```
+
+See [`src/kiss/demo/kiss_demo.py`](src/kiss/demo/kiss_demo.py) for the full working example.
 
 ## 📝 Blogs
 
@@ -185,7 +223,7 @@ result = agent.run(
         Create a Python script that reads a CSV file,
         filters rows where age > 18, and writes to a new file.
     """,
-    subtasker_model_name="claude-sonnet-4-5",
+    model_name="claude-sonnet-4-5",
     work_dir="./workspace",
     max_steps=200,
     trials=200
@@ -487,9 +525,9 @@ result = agent.run(
         Write, test, and optimize a fibonacci function in Python
         that is efficient and correct.
     """,
-    orchestrator_model_name="claude-sonnet-4-5",  # Model for orchestration and execution
-    subtasker_model_name="claude-opus-4-5",  # Model for subtask generation and execution
-    refiner_model_name="claude-haiku-4-5",  # Model for prompt refinement on failures
+    orchestrator_model_name="claude-opus-4-6",  # Model for orchestration and execution
+    subtasker_model_name="claude-opus-4-6",  # Model for subtask generation and execution
+    refiner_model_name="claude-sonnet-4-5",  # Model for prompt refinement on failures
     readable_paths=["src/"],  # Allowed read paths (relative to base_dir)
     writable_paths=["output/"],  # Allowed write paths (relative to base_dir)
     base_dir=".",  # Base working directory (project root)
@@ -543,10 +581,11 @@ The Claude Coding Agent supports real-time browser streaming. When `use_browser=
 ```python
 from kiss.agents.coding_agents import ClaudeCodingAgent
 
-agent = ClaudeCodingAgent(name="My Agent", use_browser=True)
+agent = ClaudeCodingAgent(name="My Agent")
 result = agent.run(
     model_name="claude-sonnet-4-5",
-    prompt_template="Write a fibonacci function with tests"
+    prompt_template="Write a fibonacci function with tests",
+    use_browser=True,
 )
 ```
 
@@ -562,8 +601,8 @@ The browser interface features scrollable panels for thinking blocks, text outpu
 
 - **Real-time Streaming**: Uses `include_partial_messages` for live streaming of assistant text, thinking, and tool calls as they happen
 - **Extended Thinking**: Supports Claude's extended thinking with configurable `max_thinking_tokens` for improved reasoning
-- **Rich Console Output**: Uses a dedicated `ConsolePrinter` for formatted terminal output with syntax-highlighted tool calls, thinking blocks, and result panels
-- **Browser Streaming Output**: Uses `BrowserPrinter` with uvicorn/starlette SSE server for real-time browser display with modern UI, scrollable panels, and syntax highlighting
+- **Rich Console Output**: Uses `ConsolePrinter` from `kiss.core.print_to_console` for formatted terminal output with syntax-highlighted tool calls, thinking blocks, and result panels
+- **Browser Streaming Output**: Uses `BrowserPrinter` from `kiss.core.print_to_browser` with uvicorn/starlette SSE server for real-time browser display with modern UI, scrollable panels, and syntax highlighting
 - **Path Access Control**: Enforces read/write permissions on file system paths
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring
 
@@ -814,8 +853,7 @@ kiss/
 │   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
 │   │   │   ├── claude_coding_agent.py     # Claude Coding Agent using Claude Agent SDK
 │   │   │   ├── optimize_agent.py          # Pareto frontier agent optimizer
-│   │   │   ├── print_to_console.py        # Console output formatting for Claude Coding Agent
-│   │   │   ├── print_to_browser.py        # Browser SSE streaming for Claude Coding Agent
+│   │   │   ├── config.py                  # Coding agent configuration (RelentlessCodingAgent, KISSCodingAgent)
 │   │   │   ├── gemini_cli_agent.py        # Gemini CLI Agent using Google ADK
 │   │   │   └── openai_codex_agent.py      # OpenAI Codex Agent using OpenAI Agents SDK
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
@@ -827,9 +865,9 @@ kiss/
 │   ├── core/            # Core framework components
 │   │   ├── base.py            # Base class with common functionality for all KISS agents
 │   │   ├── kiss_agent.py      # KISS agent with native function calling
-│   │   ├── formatter.py       # Output formatting base class
-│   │   ├── simple_formatter.py # Rich-formatted detailed output
-│   │   ├── compact_formatter.py # Compact output with markdown stripping and AST-based tool parsing
+│   │   ├── printer.py         # Abstract Printer base class and MultiPrinter
+│   │   ├── print_to_console.py # ConsolePrinter: Rich-formatted terminal output
+│   │   ├── print_to_browser.py # BrowserPrinter: SSE streaming to browser UI
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
@@ -861,23 +899,22 @@ kiss/
 │   │   └── multiprocess.py
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
+│   ├── demo/            # Demo scripts
+│   │   └── kiss_demo.py               # Interactive demo with streaming output to terminal and browser
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
-│   │   └── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
+│   │   ├── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
+│   │   └── release.sh                  # Release automation script
 │   ├── tests/           # Test suite
 │   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_kissevolve_bubblesort.py
-│   │   ├── test_gepa_squad.py
 │   │   ├── test_gepa_hotpotqa.py
-│   │   ├── test_gepa_integration.py
 │   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
 │   │   ├── test_docker_manager.py
-│   │   ├── test_model_config.py
 │   │   ├── test_model_implementations.py  # Integration tests for model implementations
-│   │   ├── test_a_model.py
 │   │   ├── run_all_models_test.py # Comprehensive tests for all models
 │   │   ├── test_multiprocess.py
 │   │   ├── test_internal.py
@@ -887,13 +924,12 @@ kiss/
 │   │   ├── test_claude_coding_agent.py    # Tests for Claude Coding Agent
 │   │   ├── test_gemini_cli_agent.py       # Tests for Gemini CLI Agent
 │   │   ├── test_openai_codex_agent.py     # Tests for OpenAI Codex Agent
-│   │   ├── test_agent_evolver.py          # Tests for Agent Evolver
 │   │   ├── test_evolver_progress_callback.py # Tests for AgentEvolver progress callbacks
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents
-│   │   ├── test_compact_formatter.py        # Tests for CompactFormatter
-│   │   ├── test_print_to_console.py         # Tests for ConsolePrinter (Claude Coding Agent output)
-│   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter (Claude Coding Agent browser output)
+│   │   ├── test_a_model.py                    # Tests for model implementations
+│   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
+│   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter browser output
 │   │   ├── test_search_web.py
 │   │   └── test_useful_tools.py
 │   ├── py.typed          # PEP 561 marker for type checking
@@ -926,7 +962,7 @@ print(f"KISS version: {__version__}")
 To update the version, simply edit `src/kiss/_version.py`:
 
 ```python
-__version__ = "0.1.9"  # Update to new version
+__version__ = "0.2.0"  # Update to new version
 ```
 
 ## ⚙️ Configuration
@@ -941,14 +977,16 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
   - `use_web`: Automatically add web browsing and search tool if enabled (default: True)
+  - `print_to_console`: Enable ConsolePrinter for Rich terminal output (default: True)
+  - `print_to_browser`: Enable BrowserPrinter for live browser UI output (default: True)
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
-- **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.relentless_coding_agent`:
-  - `subtasker_model_name`: Model for task execution (default: "claude-opus-4-6")
+- **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
+  - `model_name`: Model for task execution (default: "claude-opus-4-6")
   - `trials`: Number of continuation attempts (default: 200)
   - `max_steps`: Maximum steps per trial (default: 200)
   - `max_budget`: Maximum budget in USD (default: 200.0)
-- **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.agent.kiss_coding_agent`:
-  - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-sonnet-4-5")
+- **KISS Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.kiss_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
+  - `orchestrator_model_name`: Model for orchestration and execution (default: "claude-opus-4-6")
   - `subtasker_model_name`: Model for subtask generation and execution (default: "claude-opus-4-6")
   - `refiner_model_name`: Model for prompt refinement on failures (default: "claude-sonnet-4-5")
   - `trials`: Number of retry attempts per task/subtask (default: 200)
@@ -1017,7 +1055,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run pytest src/kiss/tests/test_kiss_agent_agentic.py -v` - Run agentic agent tests
 - `uv run pytest src/kiss/tests/test_kiss_agent_non_agentic.py -v` - Run non-agentic agent tests
 - `uv run pytest src/kiss/tests/test_multiprocess.py -v` - Run multiprocessing tests
-- `uv run python -m unittest src.kiss.tests.test_gepa_squad -v` - Run GEPA Squad tests (unittest)
 - `uv run python -m unittest src.kiss.tests.test_docker_manager -v` - Run docker manager tests (unittest)
 - `uv run python -m unittest discover -s src/kiss/tests -v` - Run all tests using unittest
 

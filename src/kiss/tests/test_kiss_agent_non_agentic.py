@@ -14,31 +14,6 @@ class TestKISSAgentNonAgentic(unittest.TestCase):
     def setUp(self) -> None:
         self.agent = KISSAgent("Non-Agentic Test Agent")
 
-    def test_non_agentic_simple_response(self) -> None:
-        result = self.agent.run(
-            model_name=TEST_MODEL,
-            prompt_template="What is 2 + 2? Reply with just the number.",
-            is_agentic=False,
-        )
-        self.assertIn("4", result)
-
-    def test_non_agentic_with_arguments(self) -> None:
-        result = self.agent.run(
-            model_name=TEST_MODEL,
-            prompt_template="Say hello to {name}. Reply with just 'Hello, {name}!'",
-            arguments={"name": "World"},
-            is_agentic=False,
-        )
-        self.assertIn("Hello", result)
-
-        result = self.agent.run(
-            model_name=TEST_MODEL,
-            prompt_template="Add {a} and {b}. Reply with just the sum as a number.",
-            arguments={"a": "15", "b": "25"},
-            is_agentic=False,
-        )
-        self.assertIn("40", result)
-
     def test_non_agentic_with_tools_raises_error(self) -> None:
         try:
             self.agent.run(

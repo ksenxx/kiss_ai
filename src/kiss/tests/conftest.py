@@ -137,15 +137,6 @@ def temp_dir(tmp_path):
     os.chdir(original_dir)
 
 
-@pytest.fixture
-def verbose_config():
-    from kiss.core import config as config_module
-
-    original = config_module.DEFAULT_CONFIG.agent.verbose
-    yield
-    config_module.DEFAULT_CONFIG.agent.verbose = original
-
-
 def simple_test_tool(message: str) -> str:
     """A simple test tool that echoes a message.
 
