@@ -1,7 +1,52 @@
 """Optimize an agent using genetic Pareto frontier optimization.
 
-Given a list of tasks, a source folder, metrics to minimize, and a program path,
-evolves improved variants using mutation and crossover on a Pareto frontier.
+Pseudocode
+----------
+
+OPTIMIZE(Tasks, Folder, Program, Metrics-Description,
+         Generations, Frontier-Size, Max-Frontier, Sample-Size, Runs, P-mutate):
+
+  Frontier := empty
+
+  PHASE 1 — Seed:
+    First variant is an unmodified copy of Folder (the baseline).
+    Create up to Frontier-Size additional variants by calling IMPROVE on the baseline.
+    Evaluate each; add to Frontier via UPDATE-PARETO.
+
+  PHASE 2 — Evolve:
+    Repeat Generations times:
+      With probability P-mutate (or if |Frontier| < 2): MUTATION
+        Pick a random member of Frontier as parent.
+        Child := IMPROVE(parent, Tasks, parent's metrics and history)
+      Otherwise: CROSSOVER
+        Pick two members; let Primary be the one with lower Score.
+        Child := IMPROVE(Primary, Tasks, combined histories of both parents)
+      Evaluate Child; add to Frontier via UPDATE-PARETO.
+
+  Return the Frontier member with the lowest Score.
+  Copy its files back to Folder.
+
+EVALUATE(Variant, Program, Tasks, Sample-Size, Runs):
+  Pick Sample-Size random tasks.  Run each Runs times.
+  Each run: load the agent from Variant/Program, execute it on the task
+    (up to 15 steps, $0.50 budget, using Claude Sonnet 4.5).
+  Record: success/failure, tokens, time, cost.
+  Return: failure-rate (arithmetic mean), tokens/time/cost (geometric means).
+
+IMPROVE(Source, Tasks, Metrics-Description, Current-Metrics, History):
+  Copy Source to a new folder.
+  Invoke an LLM coding agent (up to 15 steps) with a prompt describing
+    the code, the tasks, current metrics, past history, and optimization rules.
+  The agent edits the code to reduce the target metrics.
+
+UPDATE-PARETO(Frontier, Candidate, Max-Frontier):
+  Reject if any member dominates Candidate (all metrics <= and at least one <).
+  Remove members that Candidate dominates.  Add Candidate.
+  If |Frontier| > Max-Frontier, trim by crowding distance.
+
+SCORE(Variant):
+  Weighted sum of metrics: failure-rate x 1M, tokens x 1, time x 1K, cost x 100K.
+
 """
 
 import importlib.util
