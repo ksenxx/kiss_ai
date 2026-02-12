@@ -311,11 +311,12 @@ query execution, indexing, and transactions.
    - Rows are stored as length-prefixed byte sequences within pages. \
 Pages use a slotted-page layout: a header with slot count and free-space offset, \
 a slot directory at the top growing downward, and row data at the bottom growing upward.
-   - Support column types: `INT` (4 bytes, signed 32-bit), `TEXT` (variable length, max 255 bytes), \
-`FLOAT` (8 bytes, IEEE 754 double).
+   - Support column types: `INT` (4 bytes, signed 32-bit), \
+`TEXT` (variable length, max 255 bytes), `FLOAT` (8 bytes, IEEE 754 double).
    - Implement a buffer pool of 64 pages using LRU eviction. Pages are pinned while in use; \
 eviction must never discard a pinned or dirty page.
-   - Implement `page_alloc()`, `page_read(page_id)`, `page_write(page_id, data)`, `page_free(page_id)`.
+   - Implement `page_alloc()`, `page_read(page_id)`, \
+`page_write(page_id, data)`, `page_free(page_id)`.
 2. Implement a B+ tree index (`btree.c` / `btree.h`):
    - Order-32 B+ tree (max 31 keys per internal node, max 31 key-value pairs per leaf).
    - Leaf nodes are linked in a doubly-linked list for range scans.
@@ -329,7 +330,8 @@ underflowing nodes (less than half full) with siblings or redistribute keys.
 1. Implement a recursive-descent SQL parser supporting:
    - `CREATE TABLE name (col1 INT, col2 TEXT, col3 FLOAT, PRIMARY KEY(col1))`
    - `DROP TABLE name`
-   - `INSERT INTO name VALUES (1, 'hello', 3.14)` and `INSERT INTO name (col1, col3) VALUES (1, 3.14)`
+   - `INSERT INTO name VALUES (1, 'hello', 3.14)` \
+and `INSERT INTO name (col1, col3) VALUES (1, 3.14)`
    - `SELECT col1, col2 FROM t1 WHERE col1 > 10 AND col2 = 'foo' ORDER BY col1 DESC LIMIT 20`
    - `SELECT * FROM t1 INNER JOIN t2 ON t1.id = t2.fk_id WHERE t1.val > 5`
    - `UPDATE name SET col2 = 'new' WHERE col1 = 42`
@@ -340,16 +342,21 @@ underflowing nodes (less than half full) with siblings or redistribute keys.
 has its own struct: `CreateTableNode`, `SelectNode`, `InsertNode`, `UpdateNode`, `DeleteNode`, \
 `WhereClause` (supporting `AND`, `OR`, `NOT`, comparisons `=`, `!=`, `<`, `>`, `<=`, `>=`), \
 `JoinClause`, `OrderByClause`, `LimitClause`.
-3. The tokenizer must handle: identifiers, single-quoted strings (with `''` escape for embedded quotes), \
-integer literals, float literals, parentheses, commas, operators, and SQL keywords (case-insensitive).
+3. The tokenizer must handle: identifiers, single-quoted strings \
+(with `''` escape for embedded quotes), integer literals, float literals, \
+parentheses, commas, operators, and SQL keywords (case-insensitive).
 
 ### Part 3: Query Executor (`executor.c` / `executor.h`)
 1. Walk the AST and execute queries:
    - `CREATE TABLE`: allocate metadata, store schema (column names, types, primary key).
-   - `INSERT`: validate types, enforce primary key uniqueness (if PK exists), write row to table pages, update all indexes.
-   - `SELECT`: full table scan or index scan (use index when WHERE filters on an indexed column with `=` or range). \
-Implement a simple nested-loop join for INNER JOIN queries. Apply WHERE filter, ORDER BY (in-memory quicksort), and LIMIT.
-   - `UPDATE`: find matching rows, modify in place (or delete+reinsert if row size changes), update indexes.
+   - `INSERT`: validate types, enforce primary key uniqueness \
+(if PK exists), write row to table pages, update all indexes.
+   - `SELECT`: full table scan or index scan (use index when \
+WHERE filters on an indexed column with `=` or range). Implement a simple \
+nested-loop join for INNER JOIN queries. Apply WHERE filter, \
+ORDER BY (in-memory quicksort), and LIMIT.
+   - `UPDATE`: find matching rows, modify in place \
+(or delete+reinsert if row size changes), update indexes.
    - `DELETE`: remove rows, compact page slots, update indexes.
    - `CREATE INDEX`: scan existing rows and bulk-load them into a new B+ tree.
 2. Query results are returned as an array of result rows. Each row is an array of column values.
@@ -360,14 +367,16 @@ whether a usable index exists for the WHERE predicate.
 1. Implement MVCC-style transactions with snapshot isolation:
    - Each row version has `created_by_txn` and `deleted_by_txn` fields.
    - `BEGIN` assigns an incrementing transaction ID and takes a snapshot of active transaction IDs.
-   - A transaction can only see row versions where `created_by_txn` is committed and not in the snapshot, \
-and `deleted_by_txn` is either null or an uncommitted/in-snapshot transaction.
+   - A transaction can only see row versions where \
+`created_by_txn` is committed and not in the snapshot, and `deleted_by_txn` \
+is either null or an uncommitted/in-snapshot transaction.
    - `COMMIT` marks the transaction as committed in a global transaction table.
    - `ROLLBACK` marks it as aborted; all its row versions become invisible.
 2. Detect write-write conflicts: if two concurrent transactions modify the same row, \
 the second to commit must abort with an error message.
 3. Implement a write-ahead log (WAL):
-   - Before any page modification, write a log record: `(txn_id, page_id, offset, old_data, new_data)`.
+   - Before any page modification, write a log record: \
+`(txn_id, page_id, offset, old_data, new_data)`.
    - On `COMMIT`, flush the WAL to disk (an in-memory buffer representing disk).
    - Implement `recover()` that replays committed transactions and undoes aborted ones from the WAL.
 
@@ -383,30 +392,38 @@ the second to commit must abort with an error message.
    - `make debug` — compile with `-g -fsanitize=address -fsanitize=undefined`
    - `make test` — compile and run the test suite
    - `make clean` — remove binaries and objects
-3. Create `test_db.c` with comprehensive tests (using a simple assertion macro, no test framework needed):
+3. Create `test_db.c` with comprehensive tests \
+(using a simple assertion macro, no test framework needed):
    - **Schema tests:** CREATE TABLE, DROP TABLE, duplicate table error, type validation.
-   - **CRUD tests:** INSERT rows, SELECT with WHERE, UPDATE, DELETE. Verify correct row counts and values.
+   - **CRUD tests:** INSERT rows, SELECT with WHERE, UPDATE, DELETE. \
+Verify correct row counts and values.
    - **Index tests:** CREATE INDEX, verify index scan is used (check a flag or counter), \
 insert 1000 rows and verify point lookup and range query return correct results.
-   - **Join test:** Two tables with foreign key relationship, INNER JOIN returns correct combined rows.
-   - **B+ tree stress test:** Insert 10000 sequential keys, then 10000 random keys. Delete half randomly. \
-Verify all remaining keys are findable. Verify range scans return correct sorted results.
+   - **Join test:** Two tables with foreign key relationship, \
+INNER JOIN returns correct combined rows.
+   - **B+ tree stress test:** Insert 10000 sequential keys, \
+then 10000 random keys. Delete half randomly. Verify all remaining keys \
+are findable. Verify range scans return correct sorted results.
    - **Transaction tests:**
      - Begin, insert, rollback — row must not be visible.
      - Begin T1, begin T2, T1 inserts row, T2 cannot see it, T1 commits, T2 still cannot see it \
 (snapshot isolation). New T3 can see it.
      - Write-write conflict: T1 updates row, T2 updates same row, T2 commit must fail.
-   - **WAL recovery test:** Begin transaction, insert rows, commit, simulate crash (discard buffer pool), \
-call `recover()`, verify rows are present. Also test: uncommitted transaction's changes are rolled back.
-   - **Edge cases:** Empty table SELECT, DELETE from empty table, INSERT with wrong number of columns, \
-INSERT with type mismatch, SELECT from nonexistent table, ORDER BY on TEXT column, \
+   - **WAL recovery test:** Begin transaction, insert rows, commit, \
+simulate crash (discard buffer pool), call `recover()`, verify rows are \
+present. Also test: uncommitted transaction's changes are rolled back.
+   - **Edge cases:** Empty table SELECT, DELETE from empty table, \
+INSERT with wrong number of columns, INSERT with type mismatch, \
+SELECT from nonexistent table, ORDER BY on TEXT column, \
 NULL-like behavior for missing columns in partial INSERT.
-   - **Concurrency simulation:** Run 100 transactions sequentially (simulating concurrent interleaving), \
-each inserting a unique row. Verify final table has exactly 100 rows.
+   - **Concurrency simulation:** Run 100 transactions sequentially \
+(simulating concurrent interleaving), each inserting a unique row. \
+Verify final table has exactly 100 rows.
    - All tests print `PASS` or `FAIL` with test name. Final summary: `X/Y tests passed`.
 
-**Constraints:** Pure C11. No external libraries beyond the C standard library (stdio, stdlib, string, \
-stdint, stdbool, assert, time). Compile with `gcc`. All source files in the current directory. \
+**Constraints:** Pure C11. No external libraries beyond the C standard \
+library (stdio, stdlib, string, stdint, stdbool, assert, time). \
+Compile with `gcc`. All source files in the current directory. \
 No docs. No comments longer than one line. Memory: all allocations must be freed (no leaks under \
 normal operation — test with address sanitizer).
 """

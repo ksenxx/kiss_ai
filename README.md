@@ -92,7 +92,7 @@ This launches an agent that uses a `simple_calculator` tool to solve three math 
 
 - [Meet KISS Agent Framework](https://dev.to/koushik_sen_d549bf321e6fb/meet-the-kiss-agent-framework-2ij6/)
 - [Agent Evolver: The Darwin of AI Agents](https://dev.to/koushik_sen_d549bf321e6fb/agent-evolver-the-darwin-of-ai-agents-4iio)
-- [Repo Optimizer: I Let a KISS AI Agent Optimize Itself Overnight. It Cut Its Own Cost by 98%.](https://dev.to/koushik_sen_d549bf321e6fb/repo-optimizer-i-let-a-kiss-ai-agent-optimize-itself-overnight-it-cut-its-own-cost-by-98-1ddi) 
+- [Repo Optimizer: I Let a KISS AI Agent Optimize Itself Overnight. It Cut Its Own Cost by 98%.](https://dev.to/koushik_sen_d549bf321e6fb/repo-optimizer-i-let-a-kiss-ai-agent-optimize-itself-overnight-it-cut-its-own-cost-by-98-1ddi)
 
 ## 🤝 Multi-Agent Orchestration
 
@@ -213,9 +213,9 @@ uv run python -m kiss.agents.coding_agents.repo_optimizer
 **How It Works:**
 
 1. Runs the target program (e.g., `relentless_coding_agent.py`) and monitors output in real time
-2. If repeated errors are observed, fixes them and reruns
-3. Once the program succeeds, analyzes output and optimizes the source for speed and cost
-4. Repeats until running time and cost are reduced significantly
+1. If repeated errors are observed, fixes them and reruns
+1. Once the program succeeds, analyzes output and optimizes the source for speed and cost
+1. Repeats until running time and cost are reduced significantly
 
 **Optimization Strategies:**
 

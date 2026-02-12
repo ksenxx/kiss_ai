@@ -541,7 +541,10 @@ class GEPA:
     def _sanitize_prompt_template(self, prompt: str, fallback: str) -> str:
         """Normalize and validate placeholders in a prompt template."""
         normalized = re.sub(r"{\s*([\"'])([^{}]+?)\1\s*}", r"{\2}", prompt)
-        placeholders = set(get_template_field_names(normalized))
+        try:
+            placeholders = set(get_template_field_names(normalized))
+        except ValueError:
+            return fallback
         if placeholders != self.valid_placeholders:
             return fallback
         return normalized
