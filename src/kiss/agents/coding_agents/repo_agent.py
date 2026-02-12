@@ -9,8 +9,7 @@ from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAg
 PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 
 TASK = """
-can you run 'uv run src/kiss/agents/coding_agents/\
-relentless_coding_agent.py' and monitor the output?
+can you run 'uv run src/kiss/agents/coding_agents/relentless_coding_agent.py' and monitor the output?
 If you observe any repeated errors in the output,
 please fix them and run the command again.
 Once the command succeeds, analyze the output and optimize
