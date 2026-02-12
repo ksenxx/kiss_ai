@@ -12,10 +12,6 @@ For a high-level overview and quick start guide, see [README.md](README.md).
 
 - [KISSAgent](#kissagent) - Core agent class with function calling
 - [RelentlessCodingAgent](#relentlesscodingagent) - Single-agent coding system with auto-continuation
-- [KISSCodingAgent](#kisscodingagent) - Multi-agent coding system with planning and orchestration
-- [ClaudeCodingAgent](#claudecodingagent) - Claude Agent SDK-based coding agent
-- [GeminiCliAgent](#geminicliagent) - Google ADK-based coding agent
-- [OpenAICodexAgent](#openaicodexagent) - OpenAI Agents SDK-based coding agent
 - [DockerManager](#dockermanager) - Docker container management
 - [Multiprocessing](#multiprocessing) - Parallel execution utilities
 - [SimpleRAG](#simplerag) - Simple RAG system for document retrieval
@@ -62,6 +58,8 @@ def run(
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     printer: Printer | None = None,
+    print_to_console: bool | None = None,
+    print_to_browser: bool | None = None,
 ) -> str
 ```
 
@@ -77,7 +75,9 @@ Runs the agent's main ReAct loop to solve the task.
 - `max_steps` (int | None): Maximum number of ReAct loop iterations. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
 - `max_budget` (float | None): Maximum budget in USD for this agent run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`, which is 10.0).
 - `model_config` (dict[str, Any] | None): Optional model configuration to pass to the model. Default is None.
-- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a `MultiPrinter` is created automatically based on config flags: `print_to_browser` (default: True) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. The printer's `token_callback` is used for real-time token streaming. Default is None.
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a `MultiPrinter` is created automatically based on config flags (or the `print_to_console`/`print_to_browser` parameters below). The printer's `token_callback` is used for real-time token streaming. Default is None.
+- `print_to_console` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_console` to enable/disable `ConsolePrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to True).
+- `print_to_browser` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_browser` to enable/disable `BrowserPrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to False).
 
 **Returns:**
 
@@ -158,9 +158,9 @@ ______________________________________________________________________
 
 ## RelentlessCodingAgent
 
-A single-agent coding system with smart auto-continuation for long-running tasks. It uses a single agent that executes the task across multiple trials, automatically continuing where it left off via structured JSON progress tracking (done/next items) and work directory scanning.
+A single-agent coding system with smart auto-continuation for long-running tasks. It uses a single agent that executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking (done/next items) and work directory scanning.
 
-The agent continues attempting tasks through multiple trials until success or exhaustion of retry attempts.
+The agent continues attempting tasks through multiple sub-sessions until success or exhaustion of retry attempts.
 
 ### Constructor
 
@@ -188,9 +188,11 @@ def run(
     base_dir: str | None = None,
     readable_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
-    trials: int | None = None,
-    docker_image: str | None = None,
     printer: Printer | None = None,
+    max_sub_sessions: int | None = None,
+    docker_image: str | None = None,
+    print_to_console: bool | None = None,
+    print_to_browser: bool | None = None,
 ) -> str
 ```
 
@@ -201,15 +203,17 @@ Run the single-agent coding system with auto-continuation.
 - `model_name` (str | None): Model for task execution. Default is None (uses config default: "claude-opus-4-6").
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution. Default is "".
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps per trial. Default is None (uses config default: 200).
+- `max_steps` (int | None): Maximum number of steps per sub-session. Default is None (uses config default: 200).
 - `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses config default: 200.0).
 - `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
 - `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
-- `trials` (int | None): Number of continuation attempts. Default is None (uses config default: 200).
+- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags (or the `print_to_console`/`print_to_browser` parameters below). Default is None.
+- `max_sub_sessions` (int | None): Maximum number of sub-sessions for auto-continuation. Default is None (uses config default: 200).
 - `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
-- `printer` (Printer | None): Optional printer for output formatting. Default is None.
+- `print_to_console` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_console` to enable/disable `ConsolePrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to True).
+- `print_to_browser` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_browser` to enable/disable `BrowserPrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to False).
 
 **Returns:**
 
@@ -221,7 +225,7 @@ Run the single-agent coding system with auto-continuation.
 def perform_task(self) -> str
 ```
 
-Execute the main task using multiple trials with auto-continuation. Each trial runs a KISSAgent with an adaptive step limit; on failure, structured progress (done/next items) and a scan of existing files are passed to the next trial.
+Execute the main task using multiple sub-sessions with auto-continuation. Each sub-session runs a KISSAgent with an adaptive step limit; on failure, structured progress (done/next items) and a scan of existing files are passed to the next sub-session.
 
 **Returns:**
 
@@ -229,7 +233,7 @@ Execute the main task using multiple trials with auto-continuation. Each trial r
 
 **Raises:**
 
-- `KISSError`: If the task fails after all continuation trials.
+- `KISSError`: If the task fails after all continuation sub-sessions.
 
 ### Instance Attributes (after `run()`)
 
@@ -237,15 +241,15 @@ Execute the main task using multiple trials with auto-continuation. Each trial r
 - `name` (str): The agent's name.
 - `model_name` (str): Model name for task execution.
 - `task_description` (str): The formatted task description.
-- `total_tokens_used` (int): Total tokens used across all trials in this run.
-- `budget_used` (float): Total budget used across all trials in this run.
+- `total_tokens_used` (int): Total tokens used across all sub-sessions in this run.
+- `budget_used` (float): Total budget used across all sub-sessions in this run.
 - `work_dir` (str): The working directory for the agent's operations.
 - `base_dir` (str): The base directory for the agent's working files.
 - `readable_paths` (list[Path]): List of paths the agent can read from.
 - `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps per trial.
+- `max_steps` (int): Maximum number of steps per sub-session.
 - `max_budget` (float): Maximum total budget allowed for this run.
-- `trials` (int): Number of continuation attempts.
+- `max_sub_sessions` (int): Maximum number of sub-sessions for auto-continuation.
 - `max_tokens` (int): Maximum context length for the model used.
 - `docker_image` (str | None): The Docker image name if Docker execution is enabled.
 - `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
@@ -253,16 +257,16 @@ Execute the main task using multiple trials with auto-continuation. Each trial r
 
 ### Key Features
 
-- **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple trials, automatically continuing where it left off via structured JSON progress tracking (done/next items)
-- **Structured Progress Tracking**: Each trial reports completed and remaining tasks in JSON format, which is deduplicated, validated, and passed to subsequent trials along with a scan of existing files in the work directory
-- **Adaptive Step Thresholds**: Step limits per trial scale based on trial number and progress, with conservative early trials and more steps for trials showing good progress
+- **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking (done/next items)
+- **Structured Progress Tracking**: Each sub-session reports completed and remaining tasks in JSON format, which is deduplicated, validated, and passed to subsequent sub-sessions along with a scan of existing files in the work directory
+- **Adaptive Step Thresholds**: Step limits per sub-session scale based on sub-session number and progress, with conservative early sub-sessions and more steps for sub-sessions showing good progress
 - **Efficiency Rules**: Built-in prompt instructions enforce step minimization, batching, and immediate completion when tests pass
 - **Output Truncation**: Long tool outputs are automatically truncated to keep context manageable
-- **Relentless Retries**: Continues attempting tasks through multiple continuation trials until success
+- **Relentless Retries**: Continues attempting tasks through multiple continuation sub-sessions until success
 - **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
 - **Docker Support**: Optional Docker container execution for bash commands via the `docker_image` parameter. When enabled, all bash commands run inside an isolated Docker container.
-- **Built-in Tools**: Each trial agent has access to `finish()`, `Bash` (or Docker bash when `docker_image` is set), `Read`, and `Edit`
+- **Built-in Tools**: Each sub-session agent has access to `finish()`, `Bash` (or Docker bash when `docker_image` is set), `Read`, and `Edit`
 
 ### Example
 
@@ -281,7 +285,7 @@ result = agent.run(
     writable_paths=["output/"],
     base_dir="workdir",
     max_steps=50,
-    trials=3
+    max_sub_sessions=3
 )
 print(f"Result: {result}")
 
@@ -307,370 +311,9 @@ result = agent.run(
     """,
     docker_image="python:3.11-slim",  # Commands run in Docker
     max_steps=50,
-    trials=2
+    max_sub_sessions=2
 )
 print(f"Result: {result}")
-```
-
-______________________________________________________________________
-
-## KISSCodingAgent
-
-A multi-agent coding system with orchestration and sub-agents using KISSAgent. It efficiently breaks down complex coding tasks into manageable sub-tasks through a multi-agent architecture with:
-
-- **Orchestrator Agent**: Manages overall task execution and delegates to sub-tasks
-- **Executor Agents**: Handle specific sub-tasks independently
-- **Prompt Refinement**: Automatically refines prompts on failures using trajectory analysis for improved retry attempts
-
-The system supports recursive sub-task delegation where any agent can call `perform_subtask()` to further decompose work.
-
-### Constructor
-
-```python
-KISSCodingAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent. Used for identification and artifact naming.
-
-### SubTask Class
-
-```python
-class SubTask:
-    def __init__(self, name: str, description: str) -> None
-```
-
-Represents a sub-task in the multi-agent coding system.
-
-**Attributes:**
-
-- `id` (int): Unique identifier for this sub-task (auto-incremented)
-- `name` (str): Name of the sub-task
-- `description` (str): Detailed description of what needs to be done
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    prompt_template: str,
-    arguments: dict[str, str] | None = None,
-    orchestrator_model_name: str | None = None,
-    subtasker_model_name: str | None = None,
-    refiner_model_name: str | None = None,
-    trials: int | None = None,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    work_dir: str | None = None,
-    base_dir: str | None = None,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-    docker_image: str | None = None,
-    printer: Printer | None = None,
-) -> str
-```
-
-Run the multi-agent coding system with orchestration and sub-task delegation.
-
-**Parameters:**
-
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `orchestrator_model_name` (str | None): Model for the main orchestrator agent. Default is None (uses config default: "claude-opus-4-6").
-- `subtasker_model_name` (str | None): Model for executor agents handling sub-tasks. Default is None (uses config default: "claude-opus-4-6").
-- `refiner_model_name` (str | None): Model for dynamic prompt refinement when tasks fail. Default is None (uses config default: "claude-sonnet-4-5").
-- `trials` (int | None): Number of retry attempts for each task/subtask. Default is None (uses config default: 200).
-- `max_steps` (int | None): Maximum number of steps per agent. Default is None (uses `DEFAULT_CONFIG.coding_agent.kiss_coding_agent.max_steps`, which is 200).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.coding_agent.kiss_coding_agent.max_budget`, which is 100.0).
-- `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
-- `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands executed by sub-agents will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
-- `printer` (Printer | None): Optional printer for output formatting. Default is None.
-
-**Returns:**
-
-- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-**Returns:**
-
-- `str`: JSON-formatted string containing the list of messages.
-
-#### `perform_task()`
-
-```python
-def perform_task(self) -> str
-```
-
-Execute the main task using the orchestrator agent. The orchestrator can delegate work by calling `perform_subtask()` as needed.
-
-**Returns:**
-
-- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
-
-#### `perform_subtask()`
-
-```python
-def perform_subtask(
-    self,
-    subtask_name: str,
-    description: str,
-) -> str
-```
-
-Execute a sub-task using a dedicated executor agent (using `subtasker_model_name`). Can be called by the orchestrator.
-
-**Parameters:**
-
-- `subtask_name` (str): Name of the sub-task for identification.
-- `description` (str): Detailed description of what needs to be done.
-
-**Returns:**
-
-- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `orchestrator_model_name` (str): Model name for orchestrator agent.
-- `subtasker_model_name` (str): Model name for executor agents handling sub-tasks.
-- `refiner_model_name` (str): Model name for dynamic prompt refinement.
-- `task_description` (str): The formatted task description.
-- `total_tokens_used` (int): Total tokens used across all agents in this run.
-- `budget_used` (float): Total budget used across all agents in this run.
-- `work_dir` (str): The working directory for the agent's operations.
-- `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (list[Path]): List of paths the agent can read from.
-- `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps per agent.
-- `max_budget` (float): Maximum total budget allowed for this run.
-- `trials` (int): Number of retry attempts for each task/subtask.
-- `max_tokens` (int): Maximum context length across all models used.
-- `docker_image` (str | None): The Docker image name if Docker execution is enabled.
-- `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
-- `useful_tools` (UsefulTools): The UsefulTools instance used for bash/edit operations.
-
-### Key Features
-
-- **Multi-Agent Architecture**: Orchestrator (using `orchestrator_model_name`) delegates to executor agents (using `subtasker_model_name`);
-- **Prompt Refinement**:
-  - Automatically refines prompts when tasks fail using trajectory analysis
-  - Uses refiner_model_name (default: claude-sonnet-4-5) for non-agentic prompt improvement
-  - Analyzes original prompt, previous prompt, and agent trajectory to generate refined prompts
-  - Retries tasks with refined prompts up to `trials` times
-- **Efficient Orchestration**: Manages execution to stay within configured step limits through smart delegation
-- **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
-- **Path Access Control**: Enforces read/write permissions on file system paths before command execution
-- **Docker Support**: Optional Docker container execution for bash commands via the `docker_image` parameter. When enabled, all bash commands from sub-agents run inside an isolated Docker container.
-- **Built-in Tools**:
-  - Orchestrator agent has access to `finish()` and `perform_subtask()`
-  - Executor agents have access to `finish()` and `Bash` (or Docker bash when `docker_image` is set), `Edit`, and `MultiEdit`
-
-### Example
-
-```python
-from kiss.agents.coding_agents import KISSCodingAgent
-
-agent = KISSCodingAgent("My Coding Agent")
-
-result = agent.run(
-    prompt_template="""
-        Write, test, and optimize a fibonacci function in Python
-        that is efficient and correct. Save it to fibonacci.py.
-    """,
-    orchestrator_model_name="claude-sonnet-4-5",
-    refiner_model_name="claude-sonnet-4-5",
-    readable_paths=["src/"],
-    writable_paths=["output/"],
-    base_dir="workdir",
-    max_steps=50,
-    trials=3
-)
-print(f"Result: {result}")
-
-# Result is YAML with 'success' and 'summary' keys
-import yaml
-result_dict = yaml.safe_load(result)
-print(f"Success: {result_dict['success']}")
-print(f"Summary: {result_dict['summary']}")
-```
-
-### Example with Docker
-
-```python
-from kiss.agents.coding_agents import KISSCodingAgent
-
-agent = KISSCodingAgent("Docker Coding Agent")
-
-# Run with Docker - bash commands execute inside the container
-result = agent.run(
-    prompt_template="""
-        Install numpy and write a Python script that creates 
-        a random matrix and computes its eigenvalues.
-    """,
-    docker_image="python:3.11-slim",  # Commands run in Docker
-    max_steps=50,
-    trials=2
-)
-print(f"Result: {result}")
-```
-
-______________________________________________________________________
-
-## ClaudeCodingAgent
-
-> **Requires:** `claude-agent-sdk` and `anthropic` packages. Install with `uv sync --group claude-coding-agent`. This class is `None` if the SDK is not installed.
-
-A coding agent that uses the Claude Agent SDK to generate tested Python programs with file system access controls.
-
-### Constructor
-
-```python
-ClaudeCodingAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent. Used for identification and artifact naming.
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    model_name: str | None = None,
-    prompt_template: str = "",
-    arguments: dict[str, str] | None = None,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    work_dir: str | None = None,
-    base_dir: str | None = None,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-    use_browser: bool = True,
-    max_thinking_tokens: int = 1024,
-) -> str
-```
-
-Run the Claude coding agent for a given task.
-
-**Parameters:**
-
-- `model_name` (str | None): The name of the model to use (e.g., "claude-sonnet-4-5"). Default is None (uses "claude-sonnet-4-5").
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution. Default is "".
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
-- `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/claude_workdir`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None.
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for Read/Grep/Glob.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for Write/Edit/MultiEdit.
-- `use_browser` (bool): If True, starts a local uvicorn server and opens a browser window for real-time streaming output. If False, uses `ConsolePrinter` for terminal output. Default is True.
-- `max_thinking_tokens` (int): Maximum tokens for Claude's extended thinking. Default is 1024.
-
-**Returns:**
-
-- `str`: The result of the task, or an empty string if no result.
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-**Returns:**
-
-- `str`: JSON-formatted string containing the list of messages.
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model_name` (str): The name of the model being used.
-- `function_map` (list[str]): List of built-in tools available (Read, Write, Edit, etc.).
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
-- `step_count` (int): Current step number.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
-- `run_start_timestamp` (int): Unix timestamp when the run started.
-- `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (list[Path]): List of paths the agent can read from.
-- `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps allowed.
-- `max_budget` (float): Maximum budget allowed for this run.
-
-### Key Features
-
-- **Real-time Streaming**: Uses `include_partial_messages=True` to receive `StreamEvent` messages, enabling live streaming of assistant text, thinking content, and tool call inputs as they are generated.
-- **Extended Thinking**: Supports Claude's extended thinking via `max_thinking_tokens` (default: 1024), allowing the model to reason through complex problems before responding. `ThinkingBlock` content is captured in the trajectory.
-- **Rich Console Output**: Uses a dedicated `ConsolePrinter` class (`print_to_console.py`) for formatted terminal output with Rich panels for tool calls (syntax-highlighted file content, diffs, commands), thinking block delimiters, streaming text deltas, and result summaries with cost/token stats.
-- **Browser Streaming Output**: When `use_browser=True`, uses `BrowserPrinter` class (`print_to_browser.py`) which starts a local uvicorn/starlette SSE server and opens a browser window for real-time streaming with a modern dark-themed UI featuring scrollable panels for thinking, text, tool calls with syntax highlighting, tool results, and a final result card with stats.
-- **Message Processing**: Handles five message types from the Claude Agent SDK query stream:
-  - `StreamEvent`: Partial streaming deltas (text, thinking, tool input JSON) — printed in real-time
-  - `SystemMessage`: System-level messages (e.g., tool output) — printed to console
-  - `AssistantMessage`: Complete assistant turns with `TextBlock`, `ThinkingBlock`, and `ToolUseBlock` content — recorded in trajectory
-  - `UserMessage`: Tool result blocks — printed to console
-  - `ResultMessage`: Final result with cost tracking — printed with stats panel
-
-### Available Built-in Tools
-
-The agent has access to these built-in tools from Claude Agent SDK:
-
-- `Read`: Read files from the working directory
-- `Write`: Create or overwrite files
-- `Edit`: Make precise string-based edits to files
-- `MultiEdit`: Make multiple precise string-based edits to files
-- `Glob`: Find files by glob pattern
-- `Grep`: Search file contents with regex
-- `Bash`: Run shell commands
-- `WebSearch`: Search the web for information
-- `WebFetch`: Fetch and process content from a URL
-
-### Example
-
-```python
-from kiss.agents.coding_agents import ClaudeCodingAgent
-
-agent = ClaudeCodingAgent("My Agent")
-result = agent.run(
-    model_name="claude-sonnet-4-5",
-    prompt_template="Write a fibonacci function with tests"
-)
-if result:
-    print(f"Result: {result}")
-```
-
-### Example with Browser Output
-
-```python
-from kiss.agents.coding_agents import ClaudeCodingAgent
-
-# Browser window opens automatically with live streaming output
-agent = ClaudeCodingAgent("My Agent")
-result = agent.run(
-    model_name="claude-sonnet-4-5",
-    prompt_template="Write a fibonacci function with tests",
-    use_browser=True,
-)
-if result:
-    print(f"Result: {result}")
 ```
 
 ______________________________________________________________________
@@ -842,222 +485,6 @@ Unified output method that handles all content types and prints to terminal with
 **Returns:**
 
 - `str`: Extracted text content (for `stream_event` type), empty string otherwise.
-
-______________________________________________________________________
-
-## GeminiCliAgent
-
-> **Requires:** `google-adk` and `google-genai` packages. Install with `uv sync --group gemini`. This class is `None` if the SDK is not installed.
-
-A coding agent that uses the Google ADK (Agent Development Kit) to generate tested Python programs with file system access controls.
-
-### Constructor
-
-```python
-GeminiCliAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent. Used for identification and artifact naming.
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    model_name: str = DEFAULT_GEMINI_MODEL,
-    prompt_template: str = "",
-    arguments: dict[str, str] | None = None,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    base_dir: str | None = None,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-    printer: Printer | None = None,
-) -> str | None
-```
-
-Run the Gemini CLI agent for a given task.
-
-**Parameters:**
-
-- `model_name` (str): The name of the model to use. Default is "gemini-2.5-flash".
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/gemini_workdir`).
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
-- `printer` (Printer | None): Optional printer for output formatting. Default is None.
-
-**Returns:**
-
-- `str | None`: The result of the task, or None if no result.
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-**Returns:**
-
-- `str`: JSON-formatted string containing the list of messages.
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model_name` (str): The name of the model being used.
-- `function_map` (list[str]): List of built-in tools available (read_file, write_file, etc.).
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
-- `step_count` (int): Current step number.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
-- `run_start_timestamp` (int): Unix timestamp when the run started.
-- `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (list[Path]): List of paths the agent can read from.
-- `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps allowed.
-- `max_budget` (float): Maximum budget allowed for this run.
-
-### Available Built-in Tools
-
-The agent has access to these built-in tools:
-
-- `read_file`: Read file contents from the working directory
-- `write_file`: Create or overwrite files
-- `list_dir`: List directory contents
-- `run_shell`: Execute shell commands with timeout
-- `web_search`: Search the web for information (placeholder)
-
-### Example
-
-```python
-from kiss.agents.coding_agents import GeminiCliAgent
-
-agent = GeminiCliAgent("my_agent")
-result = agent.run(
-    model_name="gemini-2.5-flash",
-    prompt_template="Write a fibonacci function with tests"
-)
-if result:
-    print(f"Result: {result}")
-```
-
-______________________________________________________________________
-
-## OpenAICodexAgent
-
-> **Requires:** `openai-agents` package. Install with `uv sync --group openai`. This class is `None` if the SDK is not installed.
-
-A coding agent that uses the OpenAI Agents SDK to generate tested Python programs with file system access controls.
-
-### Constructor
-
-```python
-OpenAICodexAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent. Used for identification and artifact naming.
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    model_name: str = DEFAULT_CODEX_MODEL,
-    prompt_template: str = "",
-    arguments: dict[str, str] | None = None,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    base_dir: str | None = None,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-    printer: Printer | None = None,
-) -> str | None
-```
-
-Run the OpenAI Codex agent for a given task.
-
-**Parameters:**
-
-- `model_name` (str): The name of the model to use. Default is "gpt-5.3-codex".
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution.
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/codex_workdir`).
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, only base_dir is readable.
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, only base_dir is writable.
-- `printer` (Printer | None): Optional printer for output formatting. Default is None.
-
-**Returns:**
-
-- `str | None`: The result of the task, or None if no result.
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-**Returns:**
-
-- `str`: JSON-formatted string containing the list of messages.
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model_name` (str): The name of the model being used.
-- `function_map` (list[str]): List of built-in tools available (read_file, write_file, etc.).
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
-- `step_count` (int): Current step number.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
-- `run_start_timestamp` (int): Unix timestamp when the run started.
-- `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (list[Path]): List of paths the agent can read from.
-- `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps allowed.
-- `max_budget` (float): Maximum budget allowed for this run.
-
-### Available Built-in Tools
-
-The agent has access to these built-in tools:
-
-- `read_file`: Read file contents from the working directory
-- `write_file`: Create or overwrite files
-- `list_dir`: List directory contents
-- `run_shell`: Execute shell commands with timeout
-- `web_search`: Search the web for information (via OpenAI SDK WebSearchTool)
-
-### Example
-
-```python
-from kiss.agents.coding_agents import OpenAICodexAgent
-
-agent = OpenAICodexAgent("My Agent")
-result = agent.run(
-    model_name="gpt-5.3-codex",
-    prompt_template="Write a fibonacci function with tests"
-)
-if result:
-    print(f"Result: {result}")
-```
 
 ______________________________________________________________________
 
@@ -2151,7 +1578,7 @@ readable, writable = parse_bash_command_paths("cp -r src/ dest/")
 
 **Note:**
 
-This function is used internally by `UsefulTools.Bash()` and `KISSCodingAgent.run_bash_command()` to automatically determine which paths need read/write permissions before executing bash commands.
+This function is used internally by `UsefulTools.Bash()` to automatically determine which paths need read/write permissions before executing bash commands.
 
 ______________________________________________________________________
 
@@ -2333,15 +1760,15 @@ A utility function from `kiss.core.utils` that can be used as a finish tool for 
 
 **Note:** KISSAgent has its own built-in `finish(result: str) -> str` method that takes only a result parameter and returns it directly. The utility function version is optional and provides more structured output.
 
-### `finish()` (for KISSCodingAgent / RelentlessCodingAgent)
+### `finish()` (for RelentlessCodingAgent)
 
 ```python
 def finish(success: bool, summary: str) -> str
 ```
 
-Used by KISSCodingAgent, RelentlessCodingAgent, and their sub-agents to complete task execution. This is defined separately in each coding agent module and has a different signature than the utility version.
+Used by RelentlessCodingAgent and its sub-agents to complete task execution. This is defined separately in the coding agent module and has a different signature than the utility version.
 
-**Location:** `kiss.agents.coding_agents.kiss_coding_agent` and `kiss.agents.coding_agents.relentless_coding_agent`
+**Location:** `kiss.agents.coding_agents.relentless_coding_agent`
 
 **Parameters:**
 
@@ -2402,20 +1829,16 @@ When no printer is provided and `verbose=False`, all providers fall back to thei
 
 ### KISSAgent Integration
 
-When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter` based on config flags: `print_to_browser` (default: True) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. You can also pass a custom printer. The printer receives:
+When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter` based on config flags: `print_to_browser` (default: False) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. These defaults can be overridden per-call via the `print_to_console` and `print_to_browser` parameters on `run()`. You can also pass a custom printer. The printer receives:
 
 1. **Model response tokens** as they are generated.
 1. **Tool execution output** after each tool call completes.
 
 ### Coding Agent Integration
 
-All coding agents support the `printer` parameter in their `run()` methods:
+Coding agents support streaming output through the `printer` parameter:
 
-- **KISSCodingAgent**: The printer is passed through to the underlying `KISSAgent.run()` calls for both orchestrator and executor sub-agents.
-- **RelentlessCodingAgent**: The printer is passed through to the underlying `KISSAgent.run()` calls for each trial.
-- **GeminiCliAgent**: The printer receives text content and tool response text from ADK events.
-- **OpenAICodexAgent**: The printer receives message text and tool output text from the Agents SDK run result.
-- **ClaudeCodingAgent**: Uses its own built-in streaming output via `ConsolePrinter` (terminal) or `BrowserPrinter` (browser UI) controlled by the `use_browser` parameter.
+- **RelentlessCodingAgent**: Accepts `printer`, `print_to_console`, and `print_to_browser` parameters (all default: None). When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags or the per-call `print_to_console`/`print_to_browser` overrides. The printer is passed through to the underlying `KISSAgent.run()` calls for each sub-session.
 
 ### Example
 
@@ -2451,7 +1874,7 @@ DEFAULT_CONFIG.agent.global_max_budget = 200.0
 DEFAULT_CONFIG.agent.verbose = True
 DEFAULT_CONFIG.agent.use_web = True
 DEFAULT_CONFIG.agent.print_to_console = True
-DEFAULT_CONFIG.agent.print_to_browser = True
+DEFAULT_CONFIG.agent.print_to_browser = False
 ```
 
 ### Configuration Sections
@@ -2472,25 +1895,16 @@ DEFAULT_CONFIG.agent.print_to_browser = True
 - `verbose` (bool): Enable verbose output (default: True)
 - `use_web` (bool): Enable web search tool (default: True)
 - `debug` (bool): Enable debug mode (default: False)
-- `print_to_console` (bool): Enable ConsolePrinter for Rich terminal output (default: True)
-- `print_to_browser` (bool): Enable BrowserPrinter for live browser UI output (default: True)
+- `print_to_console` (bool): Enable ConsolePrinter for Rich terminal output (default: True). Can be overridden per-call via the `print_to_console` parameter on `run()`.
+- `print_to_browser` (bool): Enable BrowserPrinter for live browser UI output (default: False). Can be overridden per-call via the `print_to_browser` parameter on `run()`.
 - `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
 
 #### `coding_agent.relentless_coding_agent`
 
 - `model_name` (str): Model for task execution (default: "claude-opus-4-6")
-- `max_steps` (int): Maximum steps per trial for the Relentless Coding Agent (default: 200)
+- `max_steps` (int): Maximum steps per sub-session for the Relentless Coding Agent (default: 200)
 - `max_budget` (float): Maximum budget in USD for the Relentless Coding Agent (default: 200.0)
-- `trials` (int): Number of continuation attempts (default: 200)
-
-#### `coding_agent.kiss_coding_agent`
-
-- `orchestrator_model_name` (str): Model for main orchestration (default: "claude-opus-4-6")
-- `subtasker_model_name` (str): Model for subtask generation and execution (default: "claude-opus-4-6")
-- `refiner_model_name` (str): Model for dynamic prompt refinement on failures (default: "claude-sonnet-4-5")
-- `max_steps` (int): Maximum steps for the KISS Coding Agent (default: 200)
-- `max_budget` (float): Maximum budget in USD for the KISS Coding Agent (default: 100.0)
-- `trials` (int): Retry attempts per task/subtask (default: 200)
+- `max_sub_sessions` (int): Maximum number of sub-sessions for auto-continuation (default: 200)
 
 #### `docker`
 

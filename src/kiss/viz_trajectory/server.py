@@ -8,6 +8,8 @@
 
 import argparse
 import sys
+import threading
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -236,10 +238,12 @@ def main():
         print(f"Error: Artifact directory '{ARTIFACT_DIR}' does not exist")
         sys.exit(1)
 
+    url = f"http://{args.host}:{args.port}"
     print("Starting trajectory visualizer server...")
     print(f"Artifact directory: {ARTIFACT_DIR}")
-    print(f"Server running at http://{args.host}:{args.port}")
+    print(f"Server running at {url}")
 
+    threading.Timer(1.0, webbrowser.open, args=[url]).start()
     app.run(host=args.host, port=args.port, debug=False)
 
 

@@ -67,7 +67,7 @@ class AgentConfig(BaseModel):
     )
     use_web: bool = Field(default=True, description="Use web browsing and search")
     print_to_console: bool = Field(default=True, description="Print to console")
-    print_to_browser: bool = Field(default=True, description="Print to browser")
+    print_to_browser: bool = Field(default=False, description="Print to browser")
 
 
 class DockerConfig(BaseModel):

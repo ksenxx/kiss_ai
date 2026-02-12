@@ -27,7 +27,7 @@ from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length
-from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import Printer
 from kiss.core.utils import is_subpath, resolve_path
 
 BUILTIN_TOOLS = [
@@ -200,14 +200,16 @@ class ClaudeCodingAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        use_browser: bool = True,
+        printer: Printer | None = None,
         max_thinking_tokens: int = 1024,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> str:
-        if use_browser:
-            from kiss.core.print_to_browser import BrowserPrinter
-            printer: Any = BrowserPrinter()
-        else:
-            printer = ConsolePrinter()
+        self.set_printer(
+            printer,
+            print_to_console=print_to_console,
+            print_to_browser=print_to_browser,
+        )
 
         cfg = config_module.DEFAULT_CONFIG.agent
         work_dir = work_dir or str(Path(cfg.artifact_dir).resolve() / "claude_workdir")
@@ -220,15 +222,13 @@ class ClaudeCodingAgent(Base):
         self.arguments = arguments or {}
 
         async def _run_async() -> str | None:
-            if use_browser:
-                printer.start()
-            printer.reset()
             system_prompt = (
                 CODING_INSTRUCTIONS
                 + "\n## Efficiency\n"
                 "- Use Write to create complete files in one step\n"
                 "- Batch related bash commands with &&\n"
                 "- Minimize conversation turns\n"
+                "- DO NOT USE PLAN MODE"
             )
             options = ClaudeAgentOptions(
                 model=model_name,
@@ -248,43 +248,54 @@ class ClaudeCodingAgent(Base):
             timestamp = int(time.time())
             final_result: str | None = None
             usage_printed = False
+            p = self.printer
 
             try:
                 async for message in query(prompt=prompt_stream(), options=options):
                     if isinstance(message, StreamEvent):
                         self._update_token_usage_from_stream(message)
-                        printer.print(message, type="stream_event")
+                        if p:
+                            p.print(message, type="stream_event")
+                            evt = message.event
+                            if evt.get("type") == "content_block_delta":
+                                delta = evt.get("delta", {})
+                                text = delta.get("text", "") or delta.get("thinking", "")
+                                if text:
+                                    await p.token_callback(text)
                     elif isinstance(message, SystemMessage):
-                        printer.print(message, type="message")
+                        if p:
+                            p.print(message, type="message")
                     elif isinstance(message, AssistantMessage):
                         self._process_assistant_message(message, timestamp)
                         usage_printed = False
                         timestamp = int(time.time())
                     elif isinstance(message, UserMessage):
-                        if not usage_printed:
-                            printer.print(
+                        if p and not usage_printed:
+                            p.print(
                                 self._get_usage_info_string(), type="usage_info",
                             )
                             usage_printed = True
-                        printer.print(message, type="message")
+                        if p:
+                            p.print(message, type="message")
                         self._process_user_message(message, timestamp)
                         timestamp = int(time.time())
                     elif isinstance(message, ResultMessage):
                         final_result = self._process_result_message(message, timestamp)
-                        printer.print(
-                            self._get_usage_info_string(), type="usage_info",
-                        )
-                        printer.print(
-                            message, type="message",
-                            step_count=self.step_count,
-                            budget_used=self.budget_used,
-                            total_tokens_used=self.total_tokens_used,
-                        )
+                        if p:
+                            p.print(
+                                self._get_usage_info_string(), type="usage_info",
+                            )
+                            p.print(
+                                message, type="message",
+                                step_count=self.step_count,
+                                budget_used=self.budget_used,
+                                total_tokens_used=self.total_tokens_used,
+                            )
                         timestamp = int(time.time())
             finally:
                 self._save()
-            if use_browser:
-                printer.stop()
+            if self.browser_printer:
+                self.browser_printer.stop()
             return final_result
 
         return anyio.run(_run_async) or ""
@@ -328,7 +339,6 @@ def main() -> None:
             model_name="claude-sonnet-4-5",
             work_dir=work_dir,
             max_steps=100,
-            use_browser=True,
         )
     finally:
         os.chdir(old_cwd)

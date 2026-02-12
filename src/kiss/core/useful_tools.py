@@ -654,6 +654,12 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                             i += 1
                         continue
 
+                    # Skip chmod mode arguments (e.g. +x, u+x, u+rwx,g+rx, 755)
+                    chmod_pat = r'^([ugoa]*[+\-=][rwxXstugo]+,?)+$|^\d{3,4}$'
+                    if cmd == "chmod" and re.match(chmod_pat, token):
+                        i += 1
+                        continue
+
                     # Skip shell operators (safety net for any unsplit separators)
                     if token in ("&&", "||", ";", "&"):
                         i += 1
@@ -904,13 +910,17 @@ class UsefulTools:
         """
         return self.Edit(file_path, old_string, new_string, replace_all, timeout_seconds)
 
-    def Bash(self, command: str, description: str, timeout_seconds: float = 30) -> str:  # noqa: N802
+    def Bash(  # noqa: N802
+        self, command: str, description: str,
+        timeout_seconds: float = 30, max_output_chars: int = 50000,
+    ) -> str:
         """Runs a bash command and returns its output.
 
         Args:
             command: The bash command to run.
             description: A brief description of the command.
             timeout_seconds: Timeout in seconds for the command.
+            max_output_chars: Maximum characters in output before truncation.
 
         Returns:
             The output of the command.
@@ -942,7 +952,15 @@ class UsefulTools:
                 text=True,
                 timeout=timeout_seconds,
             )
-            return result.stdout
+            output = result.stdout
+            if len(output) > max_output_chars:
+                half = max_output_chars // 2
+                output = (
+                    output[:half]
+                    + f"\n\n... [truncated {len(output) - max_output_chars} chars] ...\n\n"
+                    + output[-half:]
+                )
+            return output
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
