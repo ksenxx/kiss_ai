@@ -9,14 +9,15 @@ from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAg
 PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 
 TASK = """
-can you run 'uv run src/kiss/agents/coding_agents/relentless_coding_agent.py' and monitor the output?
+Can you run 'uv run src/kiss/agents/coding_agents/relentless_coding_agent.py'
+in the background so that I can see its output and you monitor the output in real time?
 If you observe any repeated errors in the output,
 please fix them and run the command again.
 Once the command succeeds, analyze the output and optimize
 src/kiss/agents/coding_agents/relentless_coding_agent.py
 so that it runs reliably, faster with less cost.
 Keep repeating the process until the running time
-and the cost is reduced significantly, such 99%.  Ensure 
+and the cost is reduced significantly, such 99%.  Ensure
 that the agent is able to handle the errors and continue
 running the task until it is successful.
 
@@ -49,7 +50,6 @@ running the task until it is successful.
 - deeply invent and implement new agent architectures that are more efficient and reliable
 - try some of these patterns in the agent's source code based on your needs
 
-- 
 """
 
 
