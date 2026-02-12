@@ -8,22 +8,12 @@ from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAg
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 
-TASK = """
-can you run 'uv run src/kiss/agents/coding_agents/relentless_coding_agent.py' and monitor the output?
-If you observe any repeated errors in the output,
-please fix them and run the command again.
-Once the command succeeds, analyze the output and optimize
-src/kiss/agents/coding_agents/relentless_coding_agent.py
-so that it runs reliably, faster with less cost.
-Keep repeating the process until the running time
-and the cost is reduced significantly, such 99%.  Ensure 
-that theagent is able to handle the errors and continue
-running the task until it is successful.
-"""
-
 
 def main() -> None:
-    task = TASK
+    task = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("Enter task: ")
+    if not task.strip():
+        raise ValueError("No task provided")
+
     agent = RelentlessCodingAgent("RepoAgent")
     result = agent.run(
         prompt_template=task,
