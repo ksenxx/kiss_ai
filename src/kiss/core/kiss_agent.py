@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 import traceback
 from collections.abc import Callable
@@ -16,9 +17,6 @@ from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
-from kiss.core.print_to_browser import BrowserPrinter
-from kiss.core.print_to_console import ConsolePrinter
-from kiss.core.printer import MultiPrinter
 from kiss.core.useful_tools import fetch_url, search_web
 
 if TYPE_CHECKING:
@@ -44,21 +42,14 @@ class KISSAgent(Base):
         max_budget: float | None,
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> None:
-        self.printer: Printer | None = None
-        if config_module.DEFAULT_CONFIG.agent.verbose:
-            if printer:
-                self.printer = printer
-            else:
-                printers: list[Printer] = []
-                if config_module.DEFAULT_CONFIG.agent.print_to_browser:
-                    bp = BrowserPrinter()
-                    bp.start()
-                    printers.append(bp)
-                if config_module.DEFAULT_CONFIG.agent.print_to_console:
-                    printers.append(ConsolePrinter())
-                if printers:
-                    self.printer = MultiPrinter(printers)
+        self.set_printer(
+            printer,
+            print_to_console=print_to_console,
+            print_to_browser=print_to_browser,
+        )
         token_callback = self.printer.token_callback if self.printer else None
 
         self.model = model(model_name, model_config=model_config, token_callback=token_callback)
@@ -109,6 +100,8 @@ class KISSAgent(Base):
         max_budget: float | None = None,
         model_config: dict[str, Any] | None = None,
         printer: Printer | None = None,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -129,11 +122,18 @@ class KISSAgent(Base):
                 Default is None.
             printer (Printer | None): Optional printer for streaming output.
                 Default is None.
+            print_to_console (bool | None): Override config to enable/disable console printing.
+                Default is None (uses config).
+            print_to_browser (bool | None): Override config to enable/disable browser printing.
+                Default is None (uses config).
         Returns:
             str: The result of the agent's task.
         """
         try:
-            self._reset(model_name, is_agentic, max_steps, max_budget, model_config, printer)
+            self._reset(
+                model_name, is_agentic, max_steps, max_budget,
+                model_config, printer, print_to_console, print_to_browser,
+            )
 
             if not self.is_agentic and tools is not None:
                 raise KISSError(
@@ -151,10 +151,9 @@ class KISSAgent(Base):
             return self._run_agentic_loop()
 
         finally:
-            if hasattr(self, "printer") and self.printer:
-                for p in getattr(self.printer, "printers", []):
-                    if isinstance(p, BrowserPrinter):
-                        p.stop()
+            if hasattr(self, "printer"):
+                if hasattr(getattr(self, "printer"), "browser_printer"):
+                    getattr(self, "browser_printer").stop()
             self._save()
 
     def _setup_tools(self, tools: list[Callable[..., Any]] | None) -> None:
@@ -290,7 +289,13 @@ class KISSAgent(Base):
                 raise KISSError(f"Function {function_name} is not a registered tool")
             function_response = str(self.function_map[function_name](**function_args))
         except Exception as e:
-            function_response = f"Failed to call {function_name} with {function_args}: {e}\n"
+            fn = self.function_map.get(function_name)
+            sig = inspect.signature(fn) if fn else None
+            sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
+            function_response = (
+                f"Failed to call {function_name} with "
+                f"{function_args}: {e}{sig_str}\n"
+            )
 
         if self.printer:
             self.printer.print(function_response, type="tool_result")

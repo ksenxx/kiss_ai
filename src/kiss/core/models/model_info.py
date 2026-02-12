@@ -99,40 +99,50 @@ def _emb(ctx: int, inp: float) -> ModelInfo:
 
 MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
-    # OpenAI models - GPT-4.1 series (current)
+    # OpenAI models - GPT-5.x series (Standard tier pricing from platform.openai.com/docs/pricing)
     # ==========================================================================
+    "gpt-5.2": _mi(400000, 1.75, 14.00),
+    "gpt-5.2-pro": _mi(400000, 21.00, 168.00),
+    "gpt-5.2-chat-latest": _mi(400000, 1.75, 14.00),
+    "gpt-5.2-codex": _mi(400000, 1.75, 14.00),
+    "gpt-5.1": _mi(400000, 1.25, 10.00),
+    "gpt-5.1-chat-latest": _mi(400000, 1.25, 10.00),
+    "gpt-5.1-codex": _mi(400000, 1.25, 10.00),
+    "gpt-5.1-codex-max": _mi(400000, 1.25, 10.00),
+    "gpt-5.1-codex-mini": _mi(400000, 0.25, 2.00),
+    "gpt-5": _mi(400000, 1.25, 10.00),
+    "gpt-5-chat-latest": _mi(400000, 1.25, 10.00),
+    "gpt-5-codex": _mi(400000, 1.25, 10.00),
+    "gpt-5-mini": _mi(400000, 0.25, 2.00),
+    "gpt-5-nano": _mi(400000, 0.05, 0.40, fc=False),
+    "gpt-5-pro": _mi(400000, 15.00, 120.00),
+    "gpt-5-search-api": _mi(400000, 1.25, 10.00),
+    "codex-mini-latest": _mi(200000, 1.50, 6.00),
+    # OpenAI models - GPT-4.1 series
     "gpt-4.1": _mi(128000, 2.00, 8.00),
     "gpt-4.1-mini": _mi(128000, 0.40, 1.60),
     "gpt-4.1-nano": _mi(128000, 0.10, 0.40, fc=False),
     # OpenAI models - GPT-4o series (legacy)
     "gpt-4o": _mi(128000, 2.50, 10.00),
+    "gpt-4o-2024-05-13": _mi(128000, 5.00, 15.00),
     "gpt-4o-mini": _mi(128000, 0.15, 0.60),
     "gpt-4-turbo": _mi(128000, 10.00, 30.00),
     "gpt-4": _mi(8192, 30.00, 60.00),
-    # GPT-5 models (Standard tier pricing from platform.openai.com/docs/pricing)
-    "gpt-5": _mi(400000, 1.25, 10.00),
-    "gpt-5-mini": _mi(400000, 0.25, 2.00),
-    "gpt-5-nano": _mi(400000, 0.05, 0.40, fc=False),
-    "gpt-5-pro": _mi(400000, 15.00, 120.00),
-    "gpt-5.1": _mi(400000, 1.25, 10.00),
-    "gpt-5.2": _mi(400000, 1.75, 14.00),
-    "gpt-5.2-pro": _mi(400000, 21.00, 168.00),
-    # OpenAI Codex models (optimized for agentic coding)
-    "gpt-5-codex": _mi(400000, 1.25, 10.00),
-    "gpt-5.1-codex": _mi(400000, 1.25, 10.00),
-    "gpt-5.1-codex-max": _mi(400000, 1.25, 10.00),
-    "gpt-5.1-codex-mini": _mi(400000, 0.25, 2.00),
-    "gpt-5.2-codex": _mi(400000, 1.75, 14.00),
-    "gpt-5.3-codex": _mi(400000, 1.75, 14.00),  # Latest Codex model (Feb 2026) - 25% faster
-    "codex-mini-latest": _mi(200000, 1.50, 6.00),
+    # OpenAI realtime and audio models (Standard tier text token pricing)
+    "gpt-realtime": _mi(128000, 4.00, 16.00, fc=False),
+    "gpt-realtime-mini": _mi(128000, 0.60, 2.40, fc=False),
+    "gpt-audio": _mi(128000, 2.50, 10.00, fc=False),
+    "gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),
+    # OpenAI computer use models
+    "computer-use-preview": _mi(128000, 3.00, 12.00),
     # OpenAI o-series reasoning models (Standard tier pricing)
     "o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
-    "o1-mini": _mi(128000, 1.10, 4.40, fc=False),  # Reasoning model
-    "o1-pro": _mi(200000, 150.00, 600.00, fc=False),  # Premium reasoning model
+    "o1-mini": _mi(128000, 1.10, 4.40, fc=False),
+    "o1-pro": _mi(200000, 150.00, 600.00, fc=False),
     "o3": _mi(200000, 2.00, 8.00),
     "o3-mini": _mi(200000, 1.10, 4.40, fc=False),
     "o3-mini-high": _mi(200000, 1.10, 4.40),
-    "o3-pro": _mi(200000, 20.00, 80.00, fc=False),  # Requires special API key
+    "o3-pro": _mi(200000, 20.00, 80.00, fc=False),
     "o3-deep-research": _mi(200000, 10.00, 40.00, fc=False),
     "o4-mini": _mi(200000, 1.10, 4.40),
     "o4-mini-high": _mi(200000, 1.10, 4.40),
@@ -146,29 +156,35 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Anthropic models (Note: Anthropic does not provide embedding API)
     # ==========================================================================
-    # Claude 4.x series (latest)
-    "claude-opus-4-6": _mi(1000000, 5.00, 25.00),  # Latest Opus (Feb 2026) - 1M context beta
-    "claude-opus-4-5": _mi(200000, 5.00, 25.00),
+    # Claude 4.x series (latest) - pricing from docs.anthropic.com/en/docs/about-claude/pricing
+    "claude-opus-4-6": _mi(200000, 5.00, 25.00),  # 1M beta via header
+    "claude-opus-4-5": _mi(200000, 5.00, 25.00),  # 1M beta via header
+    "claude-opus-4-5-20251101": _mi(200000, 5.00, 25.00),  # Snapshot version
     "claude-opus-4-1": _mi(200000, 15.00, 75.00),
-    "claude-sonnet-4-5": _mi(200000, 3.00, 15.00),
-    "claude-sonnet-4": _mi(200000, 3.00, 15.00),
+    "claude-opus-4-1-20250805": _mi(200000, 15.00, 75.00),  # Snapshot version
+    "claude-opus-4": _mi(200000, 15.00, 75.00),
+    "claude-opus-4-20250514": _mi(200000, 15.00, 75.00),  # Snapshot version
+    "claude-sonnet-4-5": _mi(200000, 3.00, 15.00),  # 1M beta via header
+    "claude-sonnet-4-5-20250929": _mi(200000, 3.00, 15.00),  # Snapshot version
+    "claude-sonnet-4": _mi(200000, 3.00, 15.00),  # 1M beta via header
+    "claude-sonnet-4-20250514": _mi(200000, 3.00, 15.00),  # Snapshot version
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
-    # Claude 3.x series (legacy but still available)
-    "claude-3-5-sonnet-20241022": _mi(200000, 3.00, 15.00),
-    "claude-3-5-haiku-20241022": _mi(200000, 0.80, 4.00),
-    "claude-3-opus-20240229": _mi(200000, 15.00, 75.00),
-    "claude-3-sonnet-20240229": _mi(200000, 3.00, 15.00),
+    "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),  # Snapshot version
+    # Claude 3.x series (legacy - check docs.anthropic.com/en/docs/about-claude/model-deprecations)
+    "claude-3-5-haiku-20241022": _mi(200000, 0.80, 4.00),  # Deprecated, retiring Feb 19, 2026
     "claude-3-haiku-20240307": _mi(200000, 0.25, 1.25),
     # ==========================================================================
     # Google Gemini models (Paid tier pricing from ai.google.dev/pricing)
     # ==========================================================================
     # Gemini 3 models (preview)
-    "gemini-3-pro-preview": _mi(1000000, 2.00, 12.00, fc=False),  # Preview - unreliable FC
-    "gemini-3-flash-preview": _mi(1000000, 0.50, 3.00, fc=False),  # Preview - unreliable FC
+    "gemini-3-pro-preview": _mi(1048576, 2.00, 12.00, fc=False),  # Preview - unreliable FC
+    "gemini-3-flash-preview": _mi(1048576, 0.50, 3.00, fc=False),  # Preview - unreliable FC
     # Gemini 2.5 models
     "gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
     "gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
+    "gemini-2.5-flash-preview-09-2025": _mi(1048576, 0.30, 2.50),
     "gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),  # Poor tool use
+    "gemini-2.5-flash-lite-preview-09-2025": _mi(1048576, 0.10, 0.40, fc=False),
     # Gemini 2.0 models
     "gemini-2.0-flash": _mi(1048576, 0.10, 0.40),
     "gemini-2.0-flash-lite": _mi(1048576, 0.075, 0.30),
@@ -183,13 +199,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Together AI models - Llama series (pricing from together.ai/pricing)
     # ==========================================================================
-    # Llama 4 models (from together.ai/pricing)
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": _mi(1048576, 0.27, 0.85),
-    "meta-llama/Llama-4-Scout-17B-16E-Instruct": _mi(1048576, 0.18, 0.59, fc=False),
-    # Llama 3.x models (most have unreliable function calling)
     "meta-llama/Llama-3.3-70B-Instruct-Turbo": _mi(131072, 0.88, 0.88, fc=False),
-    "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo": _mi(10000, 3.50, 3.50, fc=False),
-    "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": _mi(131072, 0.88, 0.88, fc=False),
     "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),
     "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),
     "meta-llama/Meta-Llama-3-8B-Instruct-Lite": _mi(8192, 0.10, 0.10, fc=False),
@@ -201,29 +212,23 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": _mi(256000, 2.00, 2.00),
     "Qwen/Qwen3-Coder-Next-FP8": _mi(262144, 0.50, 1.20),
     "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),
-    "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.65, 3.00, fc=False),
-    "Qwen/Qwen3-235B-A22B-fp8-tput": _mi(40960, 0.20, 0.60, fc=False),
+    "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.20, 0.60, fc=False),
     "Qwen/Qwen3-Next-80B-A3B-Instruct": _mi(262144, 0.15, 1.50),
     "Qwen/Qwen3-Next-80B-A3B-Thinking": _mi(262144, 0.15, 1.50, fc=False),
     "Qwen/Qwen3-VL-32B-Instruct": _mi(256000, 0.50, 1.50, fc=False),  # Vision model
     "Qwen/Qwen3-VL-8B-Instruct": _mi(262100, 0.30, 0.90, fc=False),  # Vision model
     # Qwen2.5 series
-    "Qwen/Qwen2.5-72B-Instruct-Turbo": _mi(32768, 1.20, 1.20),
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
-    "Qwen/Qwen2.5-Coder-32B-Instruct": _mi(32768, 0.80, 0.80, fc=False),
-    "Qwen/Qwen2.5-VL-72B-Instruct": _mi(131072, 1.95, 8.00, fc=False),  # Vision model
-    "Qwen/QwQ-32B": _mi(131072, 1.20, 1.20, fc=False),  # SLOW: reasoning model
     # ==========================================================================
     # Together AI models - Mistral series (most have unreliable function calling)
     # ==========================================================================
     "mistralai/Mistral-7B-Instruct-v0.2": _mi(32768, 0.20, 0.20, fc=False),
-    "mistralai/Mistral-7B-Instruct-v0.3": _mi(32768, 0.20, 0.20, fc=False),
     "mistralai/Mistral-Small-24B-Instruct-2501": _mi(32768, 0.10, 0.30, fc=False),
     "mistralai/Ministral-3-14B-Instruct-2512": _mi(262144, 0.20, 0.20, fc=False),
     # ==========================================================================
     # Together AI models - DeepSeek series (pricing from together.ai/pricing)
     # ==========================================================================
-    # DeepSeek R1 reasoning models
+    # DeepSeek R1 reasoning models (R1-0528 served as deepseek-ai/DeepSeek-R1)
     "deepseek-ai/DeepSeek-R1": _mi(163839, 3.00, 7.00, fc=False),  # Reasoning model
     # DeepSeek V3 series
     "deepseek-ai/DeepSeek-V3-0324": _mi(163839, 1.25, 1.25, fc=False),
@@ -234,11 +239,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # Google Gemma
     "google/gemma-3n-E4B-it": _mi(32768, 0.02, 0.04, fc=False),
     "google/gemma-2b-it": _mi(8192, 0.10, 0.10, fc=False),  # Deprecated
-    # MoonshotAI Kimi
-    "moonshotai/Kimi-K2-Instruct": _mi(128000, 1.00, 3.00, fc=False),  # Unreliable FC
-    "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),  # Latest version
+    # MoonshotAI Kimi (pricing from together.ai/pricing)
+    "moonshotai/Kimi-K2-Instruct": _mi(128000, 1.00, 3.00, fc=False),
+    "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),
     "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # SLOW: thinking model
-    "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),  # Multimodal + agentic
+    "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
     # Z.AI GLM models
     "zai-org/GLM-4.5-Air-FP8": _mi(131072, 0.20, 1.10),
     "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),  # Enhanced agentic coding
@@ -248,13 +253,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # NVIDIA models
     "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.10, 0.10, fc=False),
     # Arcee AI models
-    "arcee-ai/Coder-Large": _mi(131072, 0.50, 0.80, fc=False),
-    "arcee-ai/Maestro-Reasoning": _mi(131072, 0.90, 3.30, fc=False),
-    "arcee-ai/Virtuoso-Large": _mi(131072, 0.75, 1.20, fc=False),
     "arcee-ai/trinity-mini": _mi(32768, 0.04, 0.15, fc=False),
-    # Refuel LLM models
-    "refuel-ai/Refuel-LLM-2": _mi(32768, 0.60, 0.60, fc=False),
-    "refuel-ai/Refuel-LLM-2-Small": _mi(32768, 0.20, 0.20, fc=False),
     # Marin Community
     "marin-community/marin-8b-instruct": _mi(4096, 0.10, 0.10, fc=False),
     # Essential AI
@@ -262,15 +261,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Together AI models - Deep Cogito (pricing from together.ai/pricing)
     # ==========================================================================
-    "deepcogito/cogito-v2-preview-llama-70B": _mi(32768, 0.88, 0.88, fc=False),
-    "deepcogito/cogito-v2-preview-llama-109B-MoE": _mi(32768, 0.18, 0.59, fc=False),
-    "deepcogito/cogito-v2-preview-llama-405B": _mi(32768, 3.50, 3.50, fc=False),
     "deepcogito/cogito-v2-1-671b": _mi(32768, 1.25, 1.25, fc=False),  # Hybrid reasoning
     # ==========================================================================
     # Together AI Embedding models (pricing from together.ai/pricing)
     # ==========================================================================
-    "togethercomputer/m2-bert-80M-32k-retrieval": _emb(32768, 0.01),  # 768 dim, 32k ctx
-    "BAAI/bge-large-en-v1.5": _emb(512, 0.02),  # 1024 dimensions
     "BAAI/bge-base-en-v1.5": _emb(512, 0.01),  # 768 dimensions
     "Alibaba-NLP/gte-modernbert-base": _emb(8192, 0.08),  # 768 dimensions
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),  # 1024 dimensions
@@ -309,16 +303,14 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - Anthropic
     # ==========================================================================
     "openrouter/anthropic/claude-3-haiku": _mi(200000, 0.25, 1.25),
-    "openrouter/anthropic/claude-3.5-haiku": _mi(200000, 0.80, 4.00),
-    "openrouter/anthropic/claude-3.5-sonnet": _mi(200000, 6.00, 30.00),
-    "openrouter/anthropic/claude-3.7-sonnet": _mi(200000, 3.00, 15.00),
-    "openrouter/anthropic/claude-sonnet-4": _mi(1000000, 3.00, 15.00),
-    "openrouter/anthropic/claude-sonnet-4.5": _mi(1000000, 3.00, 15.00),
+    "openrouter/anthropic/claude-3.5-haiku": _mi(200000, 0.80, 4.00),  # Deprecated
+    "openrouter/anthropic/claude-sonnet-4": _mi(200000, 3.00, 15.00),
+    "openrouter/anthropic/claude-sonnet-4.5": _mi(200000, 3.00, 15.00),
     "openrouter/anthropic/claude-haiku-4.5": _mi(200000, 1.00, 5.00),
     "openrouter/anthropic/claude-opus-4": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.1": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.5": _mi(200000, 5.00, 25.00),
-    "openrouter/anthropic/claude-opus-4.6": _mi(1000000, 5.00, 25.00),
+    "openrouter/anthropic/claude-opus-4.6": _mi(200000, 5.00, 25.00),
     # ==========================================================================
     # OpenRouter models - Baidu ERNIE
     # FLAKY: ernie-4.5-21b-a3b has unreliable function calling (exceeds step limit)
@@ -501,7 +493,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5-nano": _mi(400000, 0.05, 0.40, fc=False),
     "openrouter/openai/gpt-5.1": _mi(400000, 1.25, 10.00),
     "openrouter/openai/gpt-5.2": _mi(400000, 1.75, 14.00),
-    "openrouter/openai/gpt-5.3-codex": _mi(400000, 1.75, 14.00),
+    "openrouter/openai/gpt-5.2-codex": _mi(400000, 1.75, 14.00),
     "openrouter/openai/codex-mini-latest": _mi(200000, 1.50, 6.00),
     "openrouter/openai/o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
     "openrouter/openai/o1-mini": _mi(128000, 1.10, 4.40, fc=False),
@@ -601,7 +593,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.1-codex": _mi(400000, 1.25, 10.00),
     "openrouter/openai/gpt-5.1-codex-mini": _mi(400000, 0.25, 2.00),
     "openrouter/openai/gpt-5.1-codex-max": _mi(400000, 1.25, 10.00),
-    "openrouter/openai/gpt-5.2-codex": _mi(400000, 1.75, 14.00),
     "openrouter/openai/gpt-audio": _mi(128000, 2.50, 10.00, fc=False),  # Audio model
     "openrouter/openai/gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),  # Audio model
     "openrouter/openai/gpt-oss-safeguard-20b": _mi(131072, 0.075, 0.30, fc=False),  # Safety model
@@ -642,7 +633,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Anthropic (additional)
     # ==========================================================================
-    "openrouter/anthropic/claude-3.7-sonnet:thinking": _mi(200000, 3.00, 15.00),  # SLOW: thinking
+    "openrouter/anthropic/claude-3.7-sonnet:thinking": _mi(200000, 3.00, 15.00),  # Deprecated
     # ==========================================================================
     # OpenRouter models - Arcee AI (additional)
     # ==========================================================================
@@ -929,7 +920,7 @@ def model(
         )
     # OpenAI models (generation and embedding)
     elif model_name.startswith(
-        ("gpt", "text-embedding", "o1", "o3", "o4", "codex")
+        ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
     ) and not model_name.startswith("openai/gpt-oss"):
         if OpenAICompatibleModel is None:
             raise KISSError(
@@ -956,12 +947,10 @@ def model(
             "zai-org/",
             "openai/gpt-oss",
             "arcee-ai/",
-            "refuel-ai/",
             "marin-community/",
             "essentialai/",
             # Together AI embedding models
             "BAAI/",
-            "togethercomputer/",
             "intfloat/",
             "Alibaba-NLP/",
         )

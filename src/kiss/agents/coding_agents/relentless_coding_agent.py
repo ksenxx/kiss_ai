@@ -11,18 +11,16 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
 
-if TYPE_CHECKING:
-    from kiss.core.printer import Printer
-
+import kiss.agents.coding_agents.config as _coding_config  # noqa: F401  # register coding_agent config
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import get_max_context_length
+from kiss.core.printer import Printer
 from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import resolve_path
 from kiss.docker.docker_manager import DockerManager
@@ -80,7 +78,7 @@ class RelentlessCodingAgent(Base):
     def _reset(
         self,
         model_name: str | None,
-        trials: int | None,
+        max_sub_sessions: int | None,
         max_steps: int | None,
         max_budget: float | None,
         work_dir: str | None,
@@ -106,7 +104,9 @@ class RelentlessCodingAgent(Base):
         self.writable_paths.append(Path(self.work_dir))
         self.is_agentic = True
 
-        self.trials = trials if trials is not None else cfg.trials
+        self.max_sub_sessions = (
+            max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
+        )
         self.max_steps = max_steps if max_steps is not None else cfg.max_steps
         self.max_budget = max_budget if max_budget is not None else cfg.max_budget
         self.model_name = (
@@ -142,8 +142,8 @@ class RelentlessCodingAgent(Base):
             # Validate and clean items
             if isinstance(done, list) and isinstance(next_items, list):
                 # Deduplicate while preserving order
-                done = list(dict.fromkeys(str(d)[:200] for d in done if d))
-                next_items = list(dict.fromkeys(str(n)[:200] for n in next_items if n))
+                done = list(dict.fromkeys(str(d) for d in done if d))
+                next_items = list(dict.fromkeys(str(n) for n in next_items if n))
                 return done, next_items
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass
@@ -158,7 +158,7 @@ class RelentlessCodingAgent(Base):
                     size = p.stat().st_size
                     files.append(f"  {rel} ({size}B)")
             if files:
-                return "## Existing Files\n" + "\n".join(files[:50])
+                return "## Existing Files\n" + "\n".join(files)
         except Exception:
             pass
         return ""
@@ -171,7 +171,7 @@ class RelentlessCodingAgent(Base):
             progress += f"- {item}\n"
         if next_items:
             progress += "\n## Remaining Tasks\n"
-            for item in next_items[:5]:
+            for item in next_items:
                 progress += f"- {item}\n"
         return progress
 
@@ -184,7 +184,7 @@ class RelentlessCodingAgent(Base):
             # First trial: conservative to establish baseline
             return max(6, base // 2)
         elif trial < 3:
-            # Early trials: moderate step count, focus on establishing workflow
+            # Early sub-sessions: moderate step count, focus on establishing workflow
             return max(8, int(base * 0.65))
         elif done_count > trial * 2:
             # Good progress: allow more steps per trial
@@ -213,7 +213,7 @@ class RelentlessCodingAgent(Base):
         done_items: list[str] = []
         next_items: list[str] = []
 
-        for trial in range(self.trials):
+        for trial in range(self.max_sub_sessions):
             step_threshold = self._calculate_step_threshold(trial, len(done_items))
 
             if trial == 0:
@@ -243,16 +243,15 @@ class RelentlessCodingAgent(Base):
                     ],
                     max_steps=self.max_steps,
                     max_budget=self.max_budget,
-
                     printer=self.printer,
                 )
-            except KISSError:
+            except Exception:
                 last_msgs = executor.messages[-2:] if hasattr(executor, "messages") else []
                 context = " ".join(
-                    str(m.get("content", ""))[:100]
+                    str(m.get("content", ""))
                     for m in last_msgs
                     if isinstance(m, dict)
-                )[:200]
+                )
                 result = yaml.dump(
                     {
                         "success": False,
@@ -281,9 +280,9 @@ class RelentlessCodingAgent(Base):
                         done_items.append(item)
                 next_items = trial_next
             elif summary and summary not in done_items:
-                done_items.append(summary[:100])
+                done_items.append(summary)
 
-        raise KISSError(f"Task failed after {self.trials} trials")
+        raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
 
     def run(
         self,
@@ -296,14 +295,16 @@ class RelentlessCodingAgent(Base):
         base_dir: str | None = None,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
-        trials: int | None = None,
-        docker_image: str | None = None,
         printer: Printer | None = None,
+        max_sub_sessions: int | None = None,
+        docker_image: str | None = None,
+        print_to_console: bool | None = None,
+        print_to_browser: bool | None = None,
     ) -> str:
         """Run the coding agent."""
         self._reset(
             model_name,
-            trials,
+            max_sub_sessions,
             max_steps,
             max_budget,
             work_dir,
@@ -315,7 +316,11 @@ class RelentlessCodingAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.printer = printer
+        self.set_printer(
+            printer,
+            print_to_console=print_to_console,
+            print_to_browser=print_to_browser,
+        )
 
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
@@ -333,33 +338,29 @@ def main() -> None:
 
     agent = RelentlessCodingAgent("Example Multi-Agent")
     task_description = """
- **Task:** Create a robust database engine using only Bash scripts.
+**Task:** Build a task scheduler with dependency resolution in Bash.
 
- **Requirements:**
- 1.  Create a script named `db.sh` that interacts with a local data folder.
- 2.  **Basic Operations:** Implement `db.sh set <key> <value>`,
-     `db.sh get <key>`, and `db.sh delete <key>`.
- 3.  **Atomicity:** Implement transaction support.
-     *   `db.sh begin` starts a session where writes are cached but not visible to others.
-     *   `db.sh commit` atomically applies all cached changes.
-     *   `db.sh rollback` discards pending changes.
- 4.  **Concurrency:** Ensure that if two different terminal windows run `db.sh`
-     simultaneously, the data is never corrupted (use `mkdir`-based mutex locking).
- 5.  **Validation:** Write a test script `test_stress.sh` that launches 10
-     concurrent processes to spam the database, verifying no data is lost.
+**Requirements:**
+1. Create `scheduler.sh` with:
+   - `scheduler.sh add <name> <command> [--priority <1-10>] [--depends <t1,t2>]` — enqueue task
+   - `scheduler.sh run` — execute tasks respecting priority and dependencies
+   - `scheduler.sh status` — show task states (pending/running/done/failed)
+   - `scheduler.sh log <name>` — show stdout/stderr of completed task
+2. **Dependencies:** Tasks wait for dependencies. Detect circular dependencies.
+3. **Parallel Execution:** Run up to 3 independent tasks concurrently via background processes.
+4. **Failure Handling:** Failed task blocks dependents; other independent tasks continue.
+5. **Validation:** Write `test_scheduler.sh` that creates a diamond dependency graph \
+(A->B, A->C, B->D, C->D), verifies execution order, tests circular detection and \
+failure propagation.
 
- **Constraints:**
- *   No external database tools (no sqlite3, no python).
- *   Standard Linux utilities only (sed, awk, grep, flock/mkdir).
- *   Safe: Operate entirely within a `./my_db` directory.
- *   No README or docs.
-    """
+**Constraints:** Pure Bash, standard utilities. State in `./scheduler_data/`. No docs.
+"""
 
     work_dir = tempfile.mkdtemp()
     old_cwd = os.getcwd()
+    os.chdir(work_dir)
     start_time = time_mod.time()
     try:
-        os.chdir(work_dir)
         result = agent.run(
             prompt_template=task_description,
             model_name="claude-sonnet-4-5",

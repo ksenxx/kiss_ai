@@ -64,7 +64,7 @@ def get_required_api_key_for_model(model_name: str) -> str | None:
     elif model_name == "text-embedding-004":
         return "GEMINI_API_KEY"
     elif (
-        model_name.startswith(("gpt", "text-embedding", "o1", "o3", "o4", "codex"))
+        model_name.startswith(("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use"))
         and not model_name.startswith("openai/gpt-oss")
     ):
         return "OPENAI_API_KEY"

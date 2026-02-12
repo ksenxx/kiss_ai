@@ -30,7 +30,7 @@ Here's how it works:
 
 ### 1. Seed the Population
 
-You provide a task description—what you want your agent system to accomplish. Agent Evolver then uses state-of-the-art coding agents (Claude Code, Gemini CLI, or OpenAI Codex) to generate an initial agent implementation. This isn't just a prompt—it's complete, runnable code including:
+You provide a task description—what you want your agent system to accomplish. Agent Evolver then uses the RelentlessCodingAgent to generate an initial agent implementation. This isn't just a prompt—it's complete, runnable code including:
 
 - Orchestrator patterns for long-running tasks
 - Dynamic todo list management
