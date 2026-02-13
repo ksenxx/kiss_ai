@@ -87,7 +87,6 @@ class HotPotQABenchmark:
 
 - `get_example(index)`: Get a specific example by index
 - `create_evaluation_fn(example)`: Create an evaluation function for a specific example
-- `create_agent_wrapper(model_name)`: Create an agent wrapper for GEPA
 - `run_gepa_optimization(example_indices, ...)`: Run GEPA optimization over multiple examples
 - `evaluate_prompt_on_examples(...)`: Evaluate a prompt across multiple examples
 

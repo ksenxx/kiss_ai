@@ -359,7 +359,7 @@ uv sync --group claude --group dev
 
 ## 🎯 Using GEPA for Prompt Optimization
 
-KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
+KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. It also supports optional batched evaluation via `batched_agent_wrapper`, so you can plug in prompt-merging inference pipelines to process more datapoints per API call. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
 
 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
@@ -682,6 +682,7 @@ kiss/
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_kissevolve_bubblesort.py
 │   │   ├── test_gepa_hotpotqa.py
+│   │   ├── test_gepa_batched.py           # Tests for GEPA batched wrapper behavior and performance
 │   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
 │   │   ├── test_docker_manager.py
 │   │   ├── test_model_implementations.py  # Integration tests for model implementations

@@ -179,11 +179,15 @@ class GEPA:
         max_merge_invocations: int = 5,
         merge_val_overlap_floor: int = 2,
         progress_callback: Callable[[GEPAProgress], None] | None = None,
+        batched_agent_wrapper: Callable[
+            [str, list[dict[str, str]]], list[tuple[str, list[Any]]]
+        ] | None = None,
     ):
         """Initialize GEPA optimizer.
 
         Args:
-            agent_wrapper: Function (prompt_template, arguments) -> (result, trajectory)
+            agent_wrapper: Function (prompt_template, arguments) -> (result, trajectory).
+                Used when batched_agent_wrapper is not provided, or as fallback.
             initial_prompt_template: The initial prompt template to optimize
             evaluation_fn: Function to evaluate result -> {metric: score}
             max_generations: Maximum evolutionary generations
@@ -199,8 +203,15 @@ class GEPA:
             progress_callback: Optional callback function called with GEPAProgress
                 during optimization. Use this to track progress, display progress bars,
                 or log intermediate results.
+            batched_agent_wrapper: Optional batched version of agent_wrapper.
+                Function (prompt_template, [arguments]) -> [(result, trajectory)].
+                When provided, GEPA calls this with all examples in a minibatch at once
+                instead of calling agent_wrapper one at a time. This enables prompt merging
+                (combining multiple prompts into a single API call) for significantly
+                higher throughput.
         """
         self.agent_wrapper = agent_wrapper
+        self.batched_agent_wrapper = batched_agent_wrapper
         self.evaluation_fn = evaluation_fn or (
             lambda r: {"success": 1.0 if "success" in r.lower() else 0.0}
         )
@@ -381,6 +392,10 @@ class GEPA:
     ) -> tuple[dict[str, float], list[dict[str, float]], list[str], list[Any]]:
         """Run prompt on a minibatch of examples and collect scores.
 
+        When a batched_agent_wrapper is provided, all examples are sent in a
+        single call (enabling prompt merging for higher throughput). Otherwise
+        falls back to calling agent_wrapper one example at a time.
+
         Args:
             prompt: The prompt template to evaluate.
             examples: List of example dictionaries containing input arguments.
@@ -396,6 +411,23 @@ class GEPA:
             - results: List of result strings (empty if capture_results=False).
             - trajectories: List of trajectory data (empty if capture_results=False).
         """
+        if self.batched_agent_wrapper is not None:
+            return self._run_minibatch_batched(
+                prompt, examples, capture_results, phase, generation, candidate_id,
+            )
+        return self._run_minibatch_sequential(
+            prompt, examples, capture_results, phase, generation, candidate_id,
+        )
+
+    def _run_minibatch_sequential(
+        self,
+        prompt: str,
+        examples: list[dict[str, str]],
+        capture_results: bool,
+        phase: GEPAPhase | None,
+        generation: int,
+        candidate_id: int,
+    ) -> tuple[dict[str, float], list[dict[str, float]], list[str], list[Any]]:
         all_scores: list[dict[str, float]] = []
         results: list[str] = []
         trajectories: list[list[Any]] = []
@@ -408,31 +440,75 @@ class GEPA:
                 results.append(result)
                 trajectories.append(trajectory)
 
-            # Report per-example progress if callback is set and phase is provided
-            if self.progress_callback and phase:
-                # Get first metric name and score for display
-                if scores:
-                    metric_name = next(iter(scores.keys()))
-                    metric_score = scores[metric_name]
-                else:
-                    metric_name = "score"
-                    metric_score = 0.0
-                self._report_progress(
-                    generation=generation,
-                    phase=phase,
-                    message=(
-                        f"Candidate {candidate_id}: example {i + 1}/{len(examples)} "
-                        f"({metric_name}={metric_score:.2f})"
-                    ),
-                )
+            self._report_example_progress(
+                phase, generation, candidate_id, i, len(examples), scores,
+            )
 
-        # Average scores
+        return self._aggregate_scores(all_scores), all_scores, results, trajectories
+
+    def _run_minibatch_batched(
+        self,
+        prompt: str,
+        examples: list[dict[str, str]],
+        capture_results: bool,
+        phase: GEPAPhase | None,
+        generation: int,
+        candidate_id: int,
+    ) -> tuple[dict[str, float], list[dict[str, float]], list[str], list[Any]]:
+        assert self.batched_agent_wrapper is not None
+        batch_results = self.batched_agent_wrapper(prompt, examples)
+
+        all_scores: list[dict[str, float]] = []
+        results: list[str] = []
+        trajectories: list[list[Any]] = []
+
+        for i, (result, trajectory) in enumerate(batch_results):
+            scores = self.evaluation_fn(result)
+            all_scores.append(scores)
+            if capture_results:
+                results.append(result)
+                trajectories.append(trajectory)
+
+            self._report_example_progress(
+                phase, generation, candidate_id, i, len(examples), scores,
+            )
+
+        return self._aggregate_scores(all_scores), all_scores, results, trajectories
+
+    def _report_example_progress(
+        self,
+        phase: GEPAPhase | None,
+        generation: int,
+        candidate_id: int,
+        index: int,
+        total: int,
+        scores: dict[str, float],
+    ) -> None:
+        if not self.progress_callback or not phase:
+            return
+        if scores:
+            metric_name = next(iter(scores.keys()))
+            metric_score = scores[metric_name]
+        else:
+            metric_name = "score"
+            metric_score = 0.0
+        self._report_progress(
+            generation=generation,
+            phase=phase,
+            message=(
+                f"Candidate {candidate_id}: example {index + 1}/{total} "
+                f"({metric_name}={metric_score:.2f})"
+            ),
+        )
+
+    @staticmethod
+    def _aggregate_scores(all_scores: list[dict[str, float]]) -> dict[str, float]:
+        if not all_scores:
+            return {}
         avg: dict[str, float] = {}
-        if all_scores:
-            for key in all_scores[0]:
-                avg[key] = sum(s.get(key, 0.0) for s in all_scores) / len(all_scores)
-
-        return avg, all_scores, results, trajectories
+        for key in all_scores[0]:
+            avg[key] = sum(s.get(key, 0.0) for s in all_scores) / len(all_scores)
+        return avg
 
     def _format_inputs_outputs_feedback(
         self,

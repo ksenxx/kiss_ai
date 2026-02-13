@@ -1078,6 +1078,9 @@ GEPA(
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 2,
     progress_callback: Callable[[GEPAProgress], None] | None = None,
+    batched_agent_wrapper: Callable[
+        [str, list[dict[str, str]]], list[tuple[str, list]]
+    ] | None = None,
 )
 ```
 
@@ -1097,6 +1100,7 @@ GEPA(
 - `max_merge_invocations` (int): Maximum merge attempts. Default is 5.
 - `merge_val_overlap_floor` (int): Minimum validation overlap for merge. Default is 2.
 - `progress_callback` (Callable | None): Optional callback function called with `GEPAProgress` during optimization.
+- `batched_agent_wrapper` (Callable | None): Optional batched evaluator with signature `(prompt_template, examples) -> [(result, trajectory)]`. When provided, GEPA evaluates minibatches via this function instead of calling `agent_wrapper` once per example.
 
 ### GEPAPhase
 
