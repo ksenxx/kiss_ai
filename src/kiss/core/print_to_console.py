@@ -101,7 +101,10 @@ class ConsolePrinter(Printer):
         return ""
 
     async def token_callback(self, token: str) -> None:
-        self._stream_delta(token)
+        if self._current_block_type == "thinking":
+            self._stream_delta(token, style="dim cyan italic")
+        else:
+            self._stream_delta(token)
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -173,10 +176,8 @@ class ConsolePrinter(Printer):
             delta_type = delta.get("type", "")
             if delta_type == "thinking_delta":
                 text = delta.get("thinking", "")
-                self._stream_delta(text, style="dim cyan italic")
             elif delta_type == "text_delta":
                 text = delta.get("text", "")
-                self._stream_delta(text)
             elif delta_type == "input_json_delta":
                 partial = delta.get("partial_json", "")
                 self._tool_json_buffer += partial

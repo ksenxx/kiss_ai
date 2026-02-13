@@ -408,7 +408,8 @@ class BrowserPrinter(Printer):
 
     async def token_callback(self, token: str) -> None:
         if token:
-            self._broadcast({"type": "text_delta", "text": token})
+            delta_type = "thinking_delta" if self._current_block_type == "thinking" else "text_delta"
+            self._broadcast({"type": delta_type, "text": token})
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -460,12 +461,8 @@ class BrowserPrinter(Printer):
             delta_type = delta.get("type", "")
             if delta_type == "thinking_delta":
                 text = delta.get("thinking", "")
-                if text:
-                    self._broadcast({"type": "thinking_delta", "text": text})
             elif delta_type == "text_delta":
                 text = delta.get("text", "")
-                if text:
-                    self._broadcast({"type": "text_delta", "text": text})
             elif delta_type == "input_json_delta":
                 self._tool_json_buffer += delta.get("partial_json", "")
 
