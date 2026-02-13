@@ -50,7 +50,7 @@ That's a fully functional AI agent that uses tools. No annotations. No boilerpla
 KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works.  Well you might ask "**why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well established agent frameworks?**"  Here is my response:
  
  - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) that will not only enable you write or create agents, but also automatically optimize the agents for efficiency and cost.**
- - **It has GEPA prompt optimizer builtin with a simple API.**
+ - **It has the GEPA prompt optimizer builtin with a simple API.**
  - **It has a [RelentlessCodingAgent](src/kiss/agents/coding_agents/relentless_coding_agent.py), which is pretty straightforward in terms of implementation, but it can work for very very long tasks. It was self evolved over time and is still evolving.**
  - **The framework can self optimize based on your requirements (e.g. maximize test coverage).**
  - **No bloat and simple codebase.**
