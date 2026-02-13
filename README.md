@@ -47,7 +47,7 @@ print(result)  # 127.05
 
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 
-KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works.  Well you might ask "**why not use Langchain, DSpy, OpenHands, MiniSweAgent, CrewAI, or some well established agent frameworks?**"  Here is my response:
+KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works.  Well you might ask "**why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well established agent frameworks?**"  Here is my response:
  
  - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) that will not only enable you write or create agents, but also automatically optimize the agents for efficiency and cost.**
  - **It has GEPA prompt optimizer builtin with a simple API.**
@@ -275,7 +275,7 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Native Function Calling**: Seamless tool integration using native function calling APIs (OpenAI, Anthropic, Gemini, Together AI, and OpenRouter)
 - **Docker Integration**: Built-in Docker manager for running agents in isolated environments
 - **Trajectory Tracking**: Automatic saving of agent execution trajectories with unified state management
-- **Token Streaming**: Real-time token streaming via async callback for all providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter), including tool execution output
+- **Token Streaming**: Real-time token streaming via async callback for all providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter), including thinking/reasoning tokens and tool execution output
 - **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
 - **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
 - **Self-Evolution**: Framework for agents to evolve and refine other multi agents
@@ -840,14 +840,14 @@ find . -type f -name "*.pyc" -delete
 - **OpenAI (Open Source)**: openai/gpt-oss-20b, openai/gpt-oss-120b
 - **Anthropic**: claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
 - **Anthropic (Legacy)**: claude-3-5-sonnet-20241022, claude-3-5-haiku-20241022, claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307
-- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-1.5-pro, gemini-1.5-flash
+- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-1.5-pro (deprecated), gemini-1.5-flash (deprecated)
 - **Gemini (preview, unreliable function calling)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-2.5-flash-lite
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
 - **Together AI (Qwen)**: Qwen2.5-72B/7B-Instruct-Turbo, Qwen2.5-Coder-32B, Qwen2.5-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, QwQ-32B (with function calling)
 - **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3-0324, DeepSeek-V3.1 (with function calling)
 - **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Instruct-0905, Kimi-K2-Thinking, Kimi-K2.5
 - **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.2/v0.3, Mistral-Small-24B
-- **Together AI (Other)**: GLM-4.5-Air/4.7, Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2/2-Small, essentialai/rnj-1, marin-community/marin-8b
+- **Together AI (Other)**: GLM-5.0/4.5-Air/4.7, Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2/2-Small, essentialai/rnj-1, marin-community/marin-8b
 - **OpenRouter**: Access to 400+ models from 60+ providers via unified API:
   - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
   - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6)
@@ -863,7 +863,7 @@ find . -type f -name "*.pyc" -delete
   - MoonshotAI (kimi-k2, kimi-k2-thinking, kimi-k2.5, kimi-dev-72b)
   - Mistral (codestral, devstral/devstral-medium/devstral-small, mistral-large/medium/small, mixtral-8x7b/8x22b, ministral-3b/8b/14b, pixtral, voxtral)
   - NVIDIA (llama-3.1-nemotron-70b/ultra-253b, llama-3.3-nemotron-super-49b, nemotron-nano-9b-v2/12b-v2-vl, nemotron-3-nano-30b)
-  - Z.AI/GLM (glm-4-32b, glm-4.5/4.5-air/4.5v, glm-4.6/4.6v, glm-4.7/4.7-flash)
+  - Z.AI/GLM (glm-5, glm-4-32b, glm-4.5/4.5-air/4.5v, glm-4.6/4.6v, glm-4.7/4.7-flash)
   - AllenAI (olmo-2/3-7b/32b-instruct/think, olmo-3.1-32b-instruct/think, molmo-2-8b)
   - Perplexity (sonar, sonar-pro, sonar-pro-search, sonar-deep-research, sonar-reasoning-pro)
   - NousResearch (hermes-2-pro/3/4-llama series, hermes-4-70b/405b, deephermes-3)

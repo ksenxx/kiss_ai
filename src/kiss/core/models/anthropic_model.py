@@ -139,6 +139,17 @@ class AnthropicModel(Model):
             elif isinstance(stop_val, list):
                 kwargs["stop_sequences"] = stop_val
 
+        # Enable thinking by default for Claude 4.x+ models.
+        if "thinking" not in kwargs and (
+            self.model_name.startswith(("claude-opus-4", "claude-sonnet-4", "claude-haiku-4"))
+        ):
+            if self.model_name.startswith("claude-opus-4-6"):
+                kwargs["thinking"] = {"type": "adaptive"}
+            else:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+                if max_tokens < 10000:
+                    max_tokens = 16384
+
         kwargs.update(
             {
                 "model": self.model_name,
@@ -161,8 +172,14 @@ class AnthropicModel(Model):
         """
         if self.token_callback is not None:
             with self.client.messages.stream(**kwargs) as stream:
-                for text in stream.text_stream:
-                    self._invoke_token_callback(text)
+                for event in stream:
+                    if event.type == "content_block_delta":
+                        delta = event.delta
+                        delta_type = getattr(delta, "type", "")
+                        if delta_type == "thinking_delta":
+                            self._invoke_token_callback(getattr(delta, "thinking", ""))
+                        elif delta_type == "text_delta":
+                            self._invoke_token_callback(getattr(delta, "text", ""))
             return stream.get_final_message()
         return self.client.messages.create(**kwargs)
 

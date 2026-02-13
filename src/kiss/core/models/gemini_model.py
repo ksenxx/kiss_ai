@@ -175,6 +175,26 @@ class GeminiModel(Model):
                 )
         return content, function_calls
 
+    def _build_config(
+        self, tools: list[types.Tool] | None = None
+    ) -> types.GenerateContentConfig:
+        thinking_config = self.model_config.get("thinking_config")
+        if thinking_config is None:
+            thinking_config = types.ThinkingConfig(include_thoughts=True)
+        return types.GenerateContentConfig(
+            max_output_tokens=self.model_config.get("max_tokens"),
+            temperature=self.model_config.get("temperature"),
+            top_p=self.model_config.get("top_p"),
+            stop_sequences=self.model_config.get("stop"),
+            thinking_config=thinking_config,
+            tools=tools,  # type: ignore[arg-type]
+        )
+
+    def _stream_parts(self, parts: list[Any]) -> None:
+        for part in parts:
+            if part.text:
+                self._invoke_token_callback(part.text)
+
     def generate(self) -> tuple[str, Any]:
         """Generates content from prompt without tools.
 
@@ -182,13 +202,7 @@ class GeminiModel(Model):
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
         contents = self._convert_conversation_to_gemini_contents()
-
-        config = types.GenerateContentConfig(
-            max_output_tokens=self.model_config.get("max_tokens"),
-            temperature=self.model_config.get("temperature"),
-            top_p=self.model_config.get("top_p"),
-            stop_sequences=self.model_config.get("stop"),
-        )
+        config = self._build_config()
 
         if self.token_callback is not None:
             content = ""
@@ -196,12 +210,11 @@ class GeminiModel(Model):
             for chunk in self.client.models.generate_content_stream(
                 model=self.model_name, contents=contents, config=config
             ):
+                self._stream_parts(self._parts_from_response(chunk))
                 if chunk.text:
                     content += chunk.text
-                    self._invoke_token_callback(chunk.text)
-                response = chunk  # keep last chunk for usage_metadata
+                response = chunk
             if response is None:
-                # Should not happen, but guard against empty stream
                 response = self.client.models.generate_content(
                     model=self.model_name, contents=contents, config=config
                 )
@@ -228,15 +241,8 @@ class GeminiModel(Model):
                 (function_calls, response_text, raw_response).
         """
 
-        # Convert tools to Gemini format
-        # Gemini expects a list of Tool objects
-        gemini_tools = []
         declarations = []
-
-        # We can reuse _build_openai_tools_schema but need to adapt it
-        openai_tools = self._build_openai_tools_schema(function_map)
-
-        for tool in openai_tools:
+        for tool in self._build_openai_tools_schema(function_map):
             fn = tool["function"]
             declarations.append(
                 types.FunctionDeclaration(
@@ -245,41 +251,27 @@ class GeminiModel(Model):
                     parameters=fn.get("parameters"),
                 )
             )
-
-        if declarations:
-            gemini_tools = [types.Tool(function_declarations=declarations)]
+        gemini_tools = [types.Tool(function_declarations=declarations)] if declarations else None
 
         contents = self._convert_conversation_to_gemini_contents()
-
-        config = types.GenerateContentConfig(
-            max_output_tokens=self.model_config.get("max_tokens"),
-            temperature=self.model_config.get("temperature"),
-            top_p=self.model_config.get("top_p"),
-            stop_sequences=self.model_config.get("stop"),
-            tools=gemini_tools if gemini_tools else None,  # type: ignore[arg-type]
-        )
+        config = self._build_config(tools=gemini_tools)
 
         all_parts: list[Any] = []
         if self.token_callback is not None:
-            # Stream to get text token callbacks, then collect parts.
             response = None
             for chunk in self.client.models.generate_content_stream(
                 model=self.model_name, contents=contents, config=config
             ):
-                response = chunk  # keep last for usage_metadata
+                response = chunk
                 parts = self._parts_from_response(chunk)
-                for part in parts:
-                    if part.text:
-                        self._invoke_token_callback(part.text)
+                self._stream_parts(parts)
                 all_parts.extend(parts)
             if response is None:
                 response = self.client.models.generate_content(
                     model=self.model_name, contents=contents, config=config
                 )
                 all_parts = self._parts_from_response(response)
-                for part in all_parts:
-                    if part.text:
-                        self._invoke_token_callback(part.text)
+                self._stream_parts(all_parts)
         else:
             response = self.client.models.generate_content(
                 model=self.model_name, contents=contents, config=config

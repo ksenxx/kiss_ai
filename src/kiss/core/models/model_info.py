@@ -245,6 +245,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # SLOW: thinking model
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
     # Z.AI GLM models
+    "zai-org/GLM-5.0": _mi(200000, 0.80, 2.56),  # 744B MoE, agentic systems engineering
     "zai-org/GLM-4.5-Air-FP8": _mi(131072, 0.20, 1.10),
     "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),  # Enhanced agentic coding
     # OpenAI GPT-OSS models
@@ -574,6 +575,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Z.AI GLM
     # ==========================================================================
+    "openrouter/z-ai/glm-5": _mi(203000, 0.80, 2.56),  # 744B MoE, agentic systems engineering
     "openrouter/z-ai/glm-4-32b": _mi(128000, 0.10, 0.10),
     "openrouter/z-ai/glm-4.5": _mi(131072, 0.35, 1.55),
     "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.05, 0.22),

@@ -52,7 +52,9 @@ def finish(success: bool, summary: str) -> str:
         success: True if successful, False otherwise.
         summary: Summary of work done and remaining work (JSON for continuation).
     """
-    return yaml.dump({"success": success, "summary": summary}, indent=2, sort_keys=False)
+    if isinstance(success, str):
+        success = success.strip().lower() not in ("false", "0", "no", "")
+    return yaml.dump({"success": bool(success), "summary": summary}, indent=2, sort_keys=False)
 
 
 class RelentlessCodingAgent(Base):
@@ -435,9 +437,11 @@ normal operation — test with address sanitizer).
     try:
         result = agent.run(
             prompt_template=task_description,
-            model_name="claude-opus-4-6",
+            model_name="claude-sonnet-4-5",
             max_steps=15,
             work_dir=work_dir,
+            print_to_browser=True,
+            print_to_console=True,
         )
     finally:
         os.chdir(old_cwd)

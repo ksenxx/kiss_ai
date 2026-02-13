@@ -1820,9 +1820,9 @@ The KISS framework supports real-time token streaming through the `Printer` abst
 
 ### Streaming Behavior by Provider
 
-- **Anthropic (Claude)**: Uses `messages.stream()` with `text_stream` for both `generate()` and `generate_and_process_with_tools()`.
-- **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
-- **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`.
+- **Anthropic (Claude)**: Uses `messages.stream()` with raw event iteration for both `generate()` and `generate_and_process_with_tools()`. Streams both `thinking_delta` and `text_delta` events, enabling real-time streaming of extended thinking content. Thinking is auto-enabled for Claude 4.x models (adaptive for Opus 4.6, extended for others).
+- **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. Streams both `reasoning_content` (thinking tokens) and regular `content` deltas. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
+- **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`. Thinking is auto-enabled via `ThinkingConfig(include_thoughts=True)`, streaming both thought summaries and regular text.
 
 When no printer is provided and `verbose=False`, all providers fall back to their original non-streaming code paths.
 
