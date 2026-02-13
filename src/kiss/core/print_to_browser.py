@@ -408,7 +408,11 @@ class BrowserPrinter(Printer):
 
     async def token_callback(self, token: str) -> None:
         if token:
-            delta_type = "thinking_delta" if self._current_block_type == "thinking" else "text_delta"
+            delta_type = (
+                "thinking_delta"
+                if self._current_block_type == "thinking"
+                else "text_delta"
+            )
             self._broadcast({"type": delta_type, "text": token})
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:

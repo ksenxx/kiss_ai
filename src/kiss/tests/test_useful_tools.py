@@ -7,6 +7,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -317,7 +318,7 @@ class TestSearchResultExtraction:
 
         html = '<html><body><a class="r" href="https://example.com">Link</a></body></html>'
         soup = BeautifulSoup(html, "html.parser")
-        link_tag = soup.find("a")
+        link_tag = cast(Any, soup.find("a"))
         link_tag["href"] = ["https://first.com", "https://second.com"]
         results = _extract_search_results(soup, "a.r", max_results=10)
         assert results == [("Link", "https://first.com")]
@@ -327,7 +328,7 @@ class TestSearchResultExtraction:
 
         html = '<html><body><a class="r" href="https://example.com">Link</a></body></html>'
         soup = BeautifulSoup(html, "html.parser")
-        link_tag = soup.find("a")
+        link_tag = cast(Any, soup.find("a"))
         link_tag["href"] = []
         results = _extract_search_results(soup, "a.r", max_results=10)
         assert results == []
