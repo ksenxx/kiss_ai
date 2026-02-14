@@ -2,7 +2,7 @@
 
 **Version:** 0.1.14
 
-# When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Evolutionary Framework
+# When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
@@ -12,9 +12,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
-Let's be honest. The AI agent ecosystem has become a jungle.
-
-Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, configuration files that rival tax forms, and dependency trees that make `node_modules` look tidy. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm.
+Let's be honest. The AI agent ecosystem has become a jungle.  Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, bloated with techniques that are unnecessary. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm.
 
 **What if there was another way?**
 
@@ -46,8 +44,7 @@ print(result)  # 127.05
 ```
 
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
-
-KISS uses **native function calling** from the LLM providers for efficiency and accuracy. Your Python functions become tools automatically. Type hints become schemas. Docstrings become descriptions. No crazy annotations. Everything just works. Well you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well established agent frameworks?**" Here is my response:
+Well you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well established agent frameworks?**" Here is my response:
 
 - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) that will not only enable you write or create agents, but also automatically optimize the agents for efficiency and cost.**
 - **It has the GEPA prompt optimizer builtin with a simple API.**
@@ -56,6 +53,7 @@ KISS uses **native function calling** from the LLM providers for efficiency and 
 - **No bloat and simple codebase.**
 - **Optimization strategies can be written in plain English.**
 - **New techniques will be incorporated to the framework as I research them.**
+- **The project effectively applies various programming language and software engineering principles and concepts that I learned since 1995.**
 
 ## 🤝 Multi-Agent Orchestration is Function Composition
 
@@ -102,7 +100,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 
 ## 💪 Using Relentless Coding Agent
 
-For very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task using a single-agent architecture with smart continuation:
+The **flagship** coding agent of KISS is the [relentless coding agent](src/kiss/agents/coding_agents/relentless_coding_agent.py).  For very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task using a single-agent architecture with smart continuation.  It can run for hours to days to complete a task:
 
 ```python
 from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
@@ -159,16 +157,7 @@ print(f"Result: {result}")
 
 ## 🔧 Using Repo Optimizer
 
-The `RepoOptimizer` (`repo_optimizer.py`) uses the `RelentlessCodingAgent` to optimize code within your own project repository. It runs the target program, monitors output in real time, fixes errors, and iteratively optimizes for speed and cost — all without changing the agent's interface.
-
-```python
-from kiss.agents.coding_agents.repo_optimizer import main
-
-# Run the repo optimizer (uses RelentlessCodingAgent with claude-opus-4-6)
-main()
-```
-
-Or run it directly from the command line:
+**This is the most important and usefuly feature of KISS.**  The `RepoOptimizer` (`repo_optimizer.py`) uses the `RelentlessCodingAgent` to optimize code within your own project repository. It runs the target program, monitors output in real time, fixes errors, and iteratively optimizes for speed and cost — all without changing the agent's interface.  The code can be found [here.](src/kiss/agents/coding_agents/repo_optimizer.py).  It has less than 100 lines of code consisting of a detailed short  prompt.  Modify the prompt in `repo_optimizer` to provide the agent path that you want to optimize.  You can run it using the following command.
 
 ```bash
 uv run python -m kiss.agents.coding_agents.repo_optimizer
@@ -262,7 +251,7 @@ The visualizer provides:
 
 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
-## 📖 Overview
+## 📖 Features of The KISS Framework
 
 KISS is a lightweight, yet powerful, multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
 
@@ -357,137 +346,18 @@ uv sync --group claude --group dev
 
 ## 🎯 Using GEPA for Prompt Optimization
 
-KISS has a fresh implementation of GEPA with some improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. It also supports optional batched evaluation via `batched_agent_wrapper`, so you can plug in prompt-merging inference pipelines to process more datapoints per API call. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
+KISS has a fresh implementation of GEPA with some key improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. It also supports optional batched evaluation via `batched_agent_wrapper`, so you can plug in prompt-merging inference pipelines to process more datapoints per API call. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
 
 📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
 
-KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
+This is where I started building an optimizer for agents.  Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run.  Finally I switched to [`repo_optimizer`] for efficiency and simplicity.  I am still keeping KISSEvolve around.  KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
 📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
 
-## 🔄 Using Self-Evolving Multi-Agent
-
-The Self-Evolving Multi-Agent is an advanced coding agent with planning, error recovery, dynamic tool creation, and the ability to evolve itself for better efficiency and accuracy using KISSEvolve.
-
-📖 **For detailed Self-Evolving Multi-Agent documentation, see [Self-Evolving Multi-Agent README](src/kiss/agents/self_evolving_multi_agent/README.md)**
-
-```python
-from kiss.agents.self_evolving_multi_agent import SelfEvolvingMultiAgent
-
-# Create and run the agent
-agent = SelfEvolvingMultiAgent()
-result = agent.run("""
-    Create a Python script that:
-    1. Generates the first 20 Fibonacci numbers
-    2. Saves them to a file called 'fibonacci.txt'
-    3. Reads the file back and prints the sum
-""")
-print(result)
-
-# Access execution statistics
-stats = agent.get_stats()
-print(f"Completed todos: {stats['completed']}/{stats['total_todos']}")
-print(f"Dynamic tools created: {stats['dynamic_tools']}")
-```
-
-**Key Features:**
-
-- **Planning & Task Tracking**: Creates and manages a todo list with status tracking (pending → in_progress → completed/failed)
-- **Sub-Agent Delegation**: Spawns focused sub-agents for individual task execution
-- **Dynamic Tool Creation**: Creates reusable tools at runtime when prompted by the orchestrator
-- **Error Recovery**: Automatic retry logic with configurable max retries
-- **Docker Isolation**: Runs code execution in isolated Docker containers
-- **Self-Evolution**: Uses KISSEvolve to optimize for efficiency and accuracy
-
-**Evolving the Agent:**
-
-```python
-from kiss.agents.self_evolving_multi_agent.agent_evolver import AgentEvolver
-
-# Create evolver
-evolver = AgentEvolver(
-    package_name="kiss.agents.self_evolving_multi_agent",
-    agent_file_path="multi_agent.py",
-    model_name="gemini-3-flash-preview",
-    focus_on_efficiency=True,
-)
-
-# Run baseline evaluation first
-baseline = evolver.run_baseline_evaluation()
-print(f"Baseline fitness: {baseline['fitness']:.4f}")
-
-# Evolve the agent
-best = evolver.evolve()
-print(f"Evolved fitness: {best.fitness:.4f}")
-
-# Save the best variant
-evolver.save_best(best)
-```
-
-## 🔍 Using SimpleRAG for Retrieval-Augmented Generation
-
-SimpleRAG provides a lightweight RAG system with in-memory vector storage and similarity search:
-
-> **Note**: SimpleRAG requires a model with embedding support. Currently, OpenAI, Together AI, and Gemini models support embeddings. Anthropic models do not provide embedding APIs.
-
-```python
-from kiss.rag import SimpleRAG
-
-# Initialize RAG system with a model name that supports embeddings
-rag = SimpleRAG(model_name="gpt-4o", metric="cosine")  # or "l2" for L2 distance
-
-# Add documents
-documents = [
-    {
-        "id": "1",
-        "text": "Python is a programming language known for its simplicity.",
-        "metadata": {"topic": "programming", "language": "Python"},
-    },
-    {
-        "id": "2",
-        "text": "Machine learning uses algorithms to learn from data.",
-        "metadata": {"topic": "ML", "field": "AI"},
-    },
-    {
-        "id": "3",
-        "text": "Docker containers provide isolated execution environments.",
-        "metadata": {"topic": "devops", "tool": "Docker"},
-    },
-]
-rag.add_documents(documents)
-
-# Query similar documents
-results = rag.query("What is Python?", top_k=2)
-for result in results:
-    print(f"ID: {result['id']}")
-    print(f"Text: {result['text']}")
-    print(f"Score: {result['score']:.4f}")
-    print(f"Metadata: {result['metadata']}")
-    print()
-
-# Query with filter
-def filter_by_topic(doc: dict) -> bool:
-    return doc.get("metadata", {}).get("topic") == "programming"
-
-filtered_results = rag.query("programming language", top_k=5, filter_fn=filter_by_topic)
-
-# Get collection statistics
-stats = rag.get_collection_stats()
-print(f"Documents: {stats['num_documents']}, Embedding dim: {stats['embedding_dimension']}")
-
-# Delete documents
-rag.delete_documents(["1", "2"])
-
-# Get a specific document
-doc = rag.get_document("3")
-
-# Clear all documents
-rag.clear_collection()
-```
 
 ## ⚡ Multiprocessing
 

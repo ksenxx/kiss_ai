@@ -242,48 +242,66 @@ class KISSAgent(Base):
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
 
-        if len(function_calls) != 1:  # pragma: no cover
+        if not function_calls:  # pragma: no cover
             self._add_message(
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
-            if function_calls:
-                error_msg = (
-                    f"**Your response MUST have exactly one function call. "
-                    f"Your response has {len(function_calls)} function calls.**"
-                )
-                function_results = [
-                    (fc["name"], {"result": error_msg})
-                    for fc in function_calls
-                ]
-                self.model.add_function_results_to_conversation_and_return(function_results)
-                self._add_message("user", error_msg)
-            else:
-                self._add_message(
-                    "user",
-                    "**Your response MUST have exactly one function call. "
-                    "Your response has 0 function calls.**",
-                )
+            self._add_message(
+                "user",
+                "**Your response MUST have at least one function call. "
+                "Your response has 0 function calls.**",
+            )
             return None
 
-        return self._execute_tool(function_calls[0], response_text, usage_info, start_timestamp)
+        if self.printer:
+            self.printer.print(usage_info, type="usage_info")
+
+        call_reprs = []
+        function_results: list[tuple[str, dict[str, Any]]] = []
+        finish_result: str | None = None
+
+        for fc in function_calls:
+            name, response_str = self._execute_tool(fc)
+            raw_args = fc.get("arguments")
+            func_args = raw_args if isinstance(raw_args, dict) else {}
+            args_str = ", ".join(f"{k}={v!r}" for k, v in func_args.items())
+            call_reprs.append(f"```python\n{name}({args_str})\n```")
+            function_results.append((name, {"result": response_str}))
+            if name == "finish":
+                finish_result = response_str
+
+        model_content = (
+            response_text + "\n" + "\n".join(call_reprs)
+            + "\n```text\n" + usage_info + "\n```\n"
+        )
+        tool_call_timestamp = int(time.time())
+        self._add_message("model", model_content, start_timestamp)
+        self._add_message(
+            "user",
+            "\n\n".join(f"[{name}]: {result['result']}" for name, result in function_results),
+            tool_call_timestamp,
+        )
+
+        if finish_result is not None:
+            return finish_result
+
+        self.model.add_function_results_to_conversation_and_return(function_results)
+        return None
 
     def _execute_tool(
         self,
         function_call: dict[str, Any],
-        response_text: str,
-        usage_info: str,
-        start_timestamp: int,
-    ) -> str | None:
+    ) -> tuple[str, str]:
+        """Execute a single tool call.
+
+        Returns:
+            tuple[str, str]: (function_name, function_response_string).
+        """
         function_name = function_call["name"]
         raw_args = function_call.get("arguments")
         function_args = raw_args if isinstance(raw_args, dict) else {}
 
-        args_str = ", ".join(f"{k}={v!r}" for k, v in function_args.items())
-        call_repr = f"```python\n{function_name}({args_str})\n```"
-        tool_call_timestamp = int(time.time())
-
         if self.printer:
-            self.printer.print(usage_info, type="usage_info")
             self.printer.print(function_name, type="tool_call", tool_input=function_args)
 
         try:
@@ -302,17 +320,7 @@ class KISSAgent(Base):
         if self.printer:
             self.printer.print(function_response, type="tool_result")
 
-        model_content = response_text + "\n" + call_repr + "\n```text\n" + usage_info + "\n```\n"
-        self._add_message("model", model_content, start_timestamp)
-        self._add_message("user", function_response, tool_call_timestamp)
-
-        if function_name == "finish":
-            return function_response
-
-        self.model.add_function_results_to_conversation_and_return(
-            [(function_name, {"result": function_response})]
-        )
-        return None
+        return function_name, function_response
 
     def _check_limits(self) -> None:
         """Check budget and step limits, raise KISSError if exceeded.
