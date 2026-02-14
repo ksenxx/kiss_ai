@@ -1,20 +1,23 @@
-"""Repo agent that solves tasks in the current project root using RelentlessCodingAgent."""
+"""Repo agent that optimizes agent code using RelentlessCodingAgent."""
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 
-PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
+DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
+DEFAULT_AGENT_CODE = "src/kiss/agents/coding_agents/relentless_coding_agent.py"
+DEFAULT_MODEL = "claude-opus-4-6"
 
-TASK = """
-Can you run 'uv run src/kiss/agents/coding_agents/relentless_coding_agent.py'
+TASK_TEMPLATE = """
+Can you run 'uv run {agent_code}'
 in the background so that I can see its output and you monitor the output in real time?
 If you observe any repeated errors in the output,
 please fix them and run the command again.
 Once the command succeeds, analyze the output and optimize
-src/kiss/agents/coding_agents/relentless_coding_agent.py
+{agent_code}
 so that it runs reliably, faster with less cost.
 Keep repeating the process until the running time
 and the cost is reduced significantly, such 99%.  Ensure
@@ -54,12 +57,21 @@ running the task until it is successful.
 
 
 def main() -> None:
-    task = TASK
-    agent = RelentlessCodingAgent("RepoAgent")
+    parser = argparse.ArgumentParser(description="Optimize an agent using RelentlessCodingAgent")
+    parser.add_argument("--project-root", default=DEFAULT_PROJECT_ROOT,
+                        help=f"Project root directory (default: {DEFAULT_PROJECT_ROOT})")
+    parser.add_argument("--agent-code", default=DEFAULT_AGENT_CODE,
+                        help=f"Path to agent code to optimize (default: {DEFAULT_AGENT_CODE})")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Model name to use (default: {DEFAULT_MODEL})")
+    args = parser.parse_args()
+
+    task = TASK_TEMPLATE.format(agent_code=args.agent_code)
+    agent = RelentlessCodingAgent("RepoOptimizer")
     result = agent.run(
         prompt_template=task,
-        model_name="claude-opus-4-6",
-        work_dir=PROJECT_ROOT
+        model_name=args.model,
+        work_dir=args.project_root
     )
     print(result)
 

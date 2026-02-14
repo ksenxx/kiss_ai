@@ -12,7 +12,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
-Let's be honest. The AI agent ecosystem has become a jungle.  Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, bloated with techniques that are unnecessary. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm.
+Let's be honest. The AI agent ecosystem has become a jungle. Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, bloated with techniques that are unnecessary. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm.
 
 **What if there was another way?**
 
@@ -100,7 +100,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 
 ## 💪 Using Relentless Coding Agent
 
-The **flagship** coding agent of KISS is the [relentless coding agent](src/kiss/agents/coding_agents/relentless_coding_agent.py).  For very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task using a single-agent architecture with smart continuation.  It can run for hours to days to complete a task:
+The **flagship** coding agent of KISS is the [relentless coding agent](src/kiss/agents/coding_agents/relentless_coding_agent.py). For very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task using a single-agent architecture with smart continuation. It can run for hours to days to complete a task:
 
 ```python
 from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
@@ -157,7 +157,7 @@ print(f"Result: {result}")
 
 ## 🔧 Using Repo Optimizer
 
-**This is the most important and usefuly feature of KISS.**  The `RepoOptimizer` (`repo_optimizer.py`) uses the `RelentlessCodingAgent` to optimize code within your own project repository. It runs the target program, monitors output in real time, fixes errors, and iteratively optimizes for speed and cost — all without changing the agent's interface.  The code can be found [here.](src/kiss/agents/coding_agents/repo_optimizer.py).  It has less than 100 lines of code consisting of a detailed short  prompt.  Modify the prompt in `repo_optimizer` to provide the agent path that you want to optimize.  You can run it using the following command.
+**This is the most important and usefuly feature of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `RelentlessCodingAgent` to optimize code within your own project repository. It runs the target program, monitors output in real time, fixes errors, and iteratively optimizes for speed and cost — all without changing the agent's interface. The code can be found [here.](src/kiss/agents/coding_agents/repo_optimizer.py). It has less than 100 lines of code consisting of a detailed short prompt. Modify the prompt in `repo_optimizer` to provide the agent path that you want to optimize. You can run it using the following command.
 
 ```bash
 uv run python -m kiss.agents.coding_agents.repo_optimizer
@@ -352,12 +352,11 @@ KISS has a fresh implementation of GEPA with some key improvements. GEPA (Geneti
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
 
-This is where I started building an optimizer for agents.  Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run.  Finally I switched to [`repo_optimizer`] for efficiency and simplicity.  I am still keeping KISSEvolve around.  KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
+This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run. Finally I switched to \[`repo_optimizer`\] for efficiency and simplicity. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
 📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
-
 
 ## ⚡ Multiprocessing
 
