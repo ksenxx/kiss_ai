@@ -7,7 +7,6 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 from kiss.agents.kissclaw.agent_runner import run_agent
@@ -144,7 +143,9 @@ class KissClawOrchestrator:
         """Poll for new messages and enqueue processing. Returns count of new message groups."""
         registered = self.db.get_all_registered_groups()
         jids = list(registered.keys())
-        messages, new_ts = self.db.get_new_messages(jids, self._last_timestamp, self.config.assistant_name)
+        messages, new_ts = self.db.get_new_messages(
+            jids, self._last_timestamp, self.config.assistant_name,
+        )
 
         if not messages:
             return 0

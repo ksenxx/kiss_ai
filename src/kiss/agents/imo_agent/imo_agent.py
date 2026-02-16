@@ -22,7 +22,10 @@ SOLVER_PROMPT = """\
 {problem}
 
 ### Instructions ###
-Produce a complete, rigorously justified solution. Every step must be logically sound. If you cannot find a complete solution, present only significant partial results you can rigorously prove. Use TeX for all math (e.g., `$n$`).
+Produce a complete, rigorously justified solution. Every step must be logically sound.
+If you cannot find a complete solution, present only significant
+partial results you can rigorously prove.
+Use TeX for all math (e.g., `$n$`).
 
 ### Output Format ###
 **1. Summary**
@@ -36,7 +39,8 @@ Before finalizing, self-review for correctness and rigor. Fix any errors or gaps
 """
 
 VERIFIER_PROMPT = """\
-You are a meticulous IMO grader. Verify the solution step-by-step. Find and report all issues. Do NOT fix errors—only identify them.
+You are a meticulous IMO grader. Verify the solution step-by-step.
+Find and report all issues. Do NOT fix errors—only identify them.
 
 Classify issues as:
 * **Critical Error:** Breaks logical chain (logical fallacy or factual error).
@@ -44,7 +48,8 @@ Classify issues as:
 
 ### Output Format ###
 **Summary:**
-* **Final Verdict**: "The solution is correct" or "The solution contains a Critical Error" (one sentence).
+* **Final Verdict**: "The solution is correct" or
+  "The solution contains a Critical Error" (one sentence).
 * **List of Findings**: Bulleted list of issues found (Location + Issue).
 
 **Detailed Verification Log:** Step-by-step check with quotes.
@@ -67,7 +72,10 @@ CORRECTION_PROMPT = """\
 {bug_report}
 
 ### Instructions ###
-Review the bug report. If you agree with items, fix your solution. If you disagree, add detailed explanations. Output the improved solution in the same format (Summary + Detailed Solution). Ensure every step is rigorously justified.
+Review the bug report. If you agree with items, fix your solution.
+If you disagree, add detailed explanations.
+Output the improved solution in the same format (Summary + Detailed Solution).
+Ensure every step is rigorously justified.
 """
 
 VALIDATION_PROMPT = """\
@@ -86,7 +94,8 @@ Validate whether this IMO solution is correct against the known answer.
 {validation_criteria}
 
 ### Instructions ###
-Check if the solution arrives at the correct answer and satisfies the criteria. Be lenient on presentation but strict on mathematical correctness.
+Check if the solution arrives at the correct answer and satisfies the criteria.
+Be lenient on presentation but strict on mathematical correctness.
 
 Start with exactly one of:
 **VERDICT: PASS** — if correct and meets criteria.
@@ -160,7 +169,10 @@ class IMOAgent(Base):
             return True
         if "critical error" in report_lower:
             return False
-        if "the solution is **invalid**" in report_lower or "the solution is invalid" in report_lower:
+        if (
+            "the solution is **invalid**" in report_lower
+            or "the solution is invalid" in report_lower
+        ):
             return False
         if "justification gap" in report_lower and "critical" not in report_lower:
             return True

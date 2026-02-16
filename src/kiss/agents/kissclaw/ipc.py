@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kiss.agents.kissclaw.config import KissClawConfig
@@ -66,14 +66,21 @@ class IpcWatcher:
                 for f in sorted(messages_dir.glob("*.json")):
                     try:
                         data = json.loads(f.read_text())
-                        if data.get("type") == "message" and data.get("chatJid") and data.get("text"):
+                        if (
+                            data.get("type") == "message"
+                            and data.get("chatJid")
+                            and data.get("text")
+                        ):
                             target_jid = data["chatJid"]
                             target_group = registered.get(target_jid)
                             if is_main or (target_group and target_group.folder == source_group):
                                 self.send_message_fn(target_jid, data["text"])
                                 count += 1
                             else:
-                                logger.warning("Blocked unauthorized IPC message from %s to %s", source_group, target_jid)
+                                logger.warning(
+                                    "Blocked unauthorized IPC message from %s to %s",
+                                    source_group, target_jid,
+                                )
                         f.unlink()
                     except Exception:
                         logger.exception("Error processing IPC message %s", f)
@@ -143,7 +150,7 @@ class IpcWatcher:
                 context_mode=context_mode,
                 next_run=next_run,
                 status="active",
-                created_at=datetime.now(timezone.utc).isoformat(),
+                created_at=datetime.now(UTC).isoformat(),
             ))
 
         elif action == "pause_task":
@@ -171,7 +178,7 @@ class IpcWatcher:
             if all([jid, name, folder, trigger]):
                 group = RegisteredGroup(
                     name=name, folder=folder, trigger=trigger,
-                    added_at=datetime.now(timezone.utc).isoformat(),
+                    added_at=datetime.now(UTC).isoformat(),
                     requires_trigger=data.get("requiresTrigger", True),
                 )
                 self.db.set_registered_group(jid, group)

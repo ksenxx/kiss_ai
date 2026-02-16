@@ -4,7 +4,7 @@
 
 KISSClaw is a Python clone of [NanoClaw](https://github.com/nicholasgriffintn/NanoClaw), providing message routing, per-group isolation, scheduled tasks, and agent execution. It acts as an orchestration layer that connects messaging channels (e.g., console, WhatsApp) to an LLM-powered agent, managing conversations across multiple groups with independent context.
 
----
+______________________________________________________________________
 
 ## Architecture Overview
 
@@ -48,6 +48,7 @@ KISSClaw is a Python clone of [NanoClaw](https://github.com/nicholasgriffintn/Na
 The central coordinator. It wires together every subsystem and runs the main message loop.
 
 **Responsibilities:**
+
 - Registers groups and manages their per-group directories
 - Polls for new messages via a background thread (`poll_interval`, default 2s)
 - Enqueues messages into the `GroupQueue` for concurrent processing
@@ -85,6 +86,7 @@ A SQLite-backed persistence layer (in-memory by default for testing).
 A per-group message queue with global concurrency limiting.
 
 **Design:**
+
 - Each group gets its own logical queue so messages are processed in order
 - A global semaphore (`max_concurrent`, default 5) limits how many groups run agents simultaneously
 - Work items are dispatched to background threads — `enqueue_message_check()` returns immediately
@@ -92,6 +94,7 @@ A per-group message queue with global concurrency limiting.
 - Deduplication: the same task ID won't be enqueued twice
 
 **Flow:**
+
 ```
 enqueue_message_check("group_jid")
   │
@@ -109,9 +112,10 @@ enqueue_message_check("group_jid")
 Builds a prompt and invokes the LLM agent.
 
 **Prompt construction:**
+
 1. Loads per-group memory from `{groups_dir}/{folder}/MEMORY.md`
-2. Fills the `AGENT_SYSTEM_PROMPT` template with assistant name, group name, memory, and XML-formatted messages
-3. Calls either:
+1. Fills the `AGENT_SYSTEM_PROMPT` template with assistant name, group name, memory, and XML-formatted messages
+1. Calls either:
    - A user-provided `agent_fn(prompt) → str` (for testing/custom agents), or
    - `KISSAgent.run(...)` with the configured model (default: `claude-sonnet-4-5`)
 
@@ -143,18 +147,20 @@ Polls for due scheduled tasks and executes them.
 | `once` | ISO datetime | Runs once, then status → `completed` |
 
 **Execution flow:**
+
 1. `poll_once()` queries `get_due_tasks(now)`
-2. For each due task, creates a synthetic `Message` from the task prompt
-3. Runs the agent via `run_agent()`
-4. Sends the result to the task's `chat_jid`
-5. Computes `next_run` (or marks `completed` for one-shot tasks)
-6. Logs the run in `task_run_logs`
+1. For each due task, creates a synthetic `Message` from the task prompt
+1. Runs the agent via `run_agent()`
+1. Sends the result to the task's `chat_jid`
+1. Computes `next_run` (or marks `completed` for one-shot tasks)
+1. Logs the run in `task_run_logs`
 
 ### 7. `IpcWatcher` — *ipc.py*
 
 Watches the filesystem for inter-process communication files — allowing agents or external scripts to send messages and manage tasks.
 
 **Directory structure:**
+
 ```
 {data_dir}/ipc/
   {group_folder}/
@@ -164,6 +170,7 @@ Watches the filesystem for inter-process communication files — allowing agents
 ```
 
 **Security model:**
+
 - The **main** group can send messages to any group and register new groups
 - Non-main groups can only send messages to their own JID
 - Unauthorized cross-group messages are blocked and logged
@@ -183,6 +190,7 @@ Watches the filesystem for inter-process communication files — allowing agents
 Abstract interface for messaging backends.
 
 **`Channel` (ABC):**
+
 - `connect()` / `disconnect()` — Lifecycle
 - `send_message(jid, text)` — Send outbound message
 - `is_connected()` / `owns_jid(jid)` — Status checks
@@ -220,7 +228,7 @@ Configuration dataclass with sensible defaults:
 | `max_budget` | `10.0` | Max budget per invocation |
 | `idle_timeout` | `1800.0s` | 30 min idle timeout |
 
----
+______________________________________________________________________
 
 ## Message Flow
 
@@ -253,7 +261,7 @@ Configuration dataclass with sensible defaults:
                                               → User sees reply
 ```
 
----
+______________________________________________________________________
 
 ## Sample Session
 
@@ -418,11 +426,12 @@ EOF
 # The IPC watcher will pick this up within 1 second (ipc_poll_interval)
 ```
 
----
+______________________________________________________________________
 
 ## Per-Group Isolation
 
 Each registered group gets:
+
 - Its own **folder** under `{groups_dir}/{folder}/`
 - An optional **`MEMORY.md`** file that is injected into every agent prompt for that group
 - Independent **message cursors** — the agent processes each group's messages separately
@@ -430,7 +439,7 @@ Each registered group gets:
 
 This ensures conversations in one group never leak context to another.
 
----
+______________________________________________________________________
 
 ## File Layout
 

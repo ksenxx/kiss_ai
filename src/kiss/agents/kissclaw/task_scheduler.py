@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from kiss.agents.kissclaw.config import KissClawConfig
 from kiss.agents.kissclaw.db import KissClawDB
@@ -21,10 +21,10 @@ def compute_next_cron_run(cron_expr: str) -> str | None:
     Uses croniter if available, otherwise returns None.
     """
     try:
-        from croniter import croniter
-        now = datetime.now(timezone.utc)
+        from croniter import croniter  # type: ignore[import-untyped]
+        now = datetime.now(UTC)
         cron = croniter(cron_expr, now)
-        return cron.get_next(datetime).isoformat()
+        return str(cron.get_next(datetime).isoformat())
     except ImportError:
         logger.warning("croniter not installed, cron scheduling unavailable")
         return None
@@ -38,8 +38,8 @@ def compute_next_interval_run(interval_ms_str: str) -> str | None:
         ms = int(interval_ms_str)
         if ms <= 0:
             return None
-        next_time = datetime.now(timezone.utc).timestamp() + ms / 1000.0
-        return datetime.fromtimestamp(next_time, tz=timezone.utc).isoformat()
+        next_time = datetime.now(UTC).timestamp() + ms / 1000.0
+        return datetime.fromtimestamp(next_time, tz=UTC).isoformat()
     except (ValueError, TypeError):
         return None
 
@@ -71,7 +71,7 @@ def run_scheduled_task(
         logger.error(error)
         db.log_task_run(TaskRunLog(
             task_id=task.id,
-            run_at=datetime.now(timezone.utc).isoformat(),
+            run_at=datetime.now(UTC).isoformat(),
             duration_ms=int(time.time() * 1000) - start_ms,
             status="error", error=error,
         ))
@@ -86,7 +86,7 @@ def run_scheduled_task(
         sender="scheduler",
         sender_name="Scheduler",
         content=task.prompt,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
     )
     formatted = format_messages([synthetic_msg])
 
@@ -94,7 +94,7 @@ def run_scheduled_task(
 
     duration_ms = int(time.time() * 1000) - start_ms
     result_text = output.result
-    error = output.error
+    error = output.error  # type: ignore[assignment]
 
     if result_text:
         text = format_outbound(result_text)
@@ -103,7 +103,7 @@ def run_scheduled_task(
 
     db.log_task_run(TaskRunLog(
         task_id=task.id,
-        run_at=datetime.now(timezone.utc).isoformat(),
+        run_at=datetime.now(UTC).isoformat(),
         duration_ms=duration_ms,
         status="error" if error else "success",
         result=result_text,
@@ -152,7 +152,7 @@ class TaskScheduler:
 
     def poll_once(self) -> int:
         """Check for and run due tasks. Returns number of tasks run."""
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         due_tasks = self.db.get_due_tasks(now_iso)
         count = 0
         for task in due_tasks:

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
+from datetime import UTC
 from pathlib import Path
 
 from kiss.agents.kissclaw.types import (
@@ -113,7 +113,10 @@ class KissClawDB:
         rows = self.conn.execute(
             "SELECT jid, name, last_message_time FROM chats ORDER BY last_message_time DESC"
         ).fetchall()
-        return [ChatInfo(jid=r["jid"], name=r["name"], last_message_time=r["last_message_time"]) for r in rows]
+        return [
+            ChatInfo(jid=r["jid"], name=r["name"], last_message_time=r["last_message_time"])
+            for r in rows
+        ]
 
     # --- Messages ---
     def store_message(self, msg: Message) -> None:
@@ -341,5 +344,5 @@ class KissClawDB:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from datetime import datetime
+    return datetime.now(UTC).isoformat()

@@ -15,8 +15,8 @@ class ConsoleChannel(Channel):
         self._jid_prefix = jid_prefix
         self._connected = False
         self._sent_messages: list[tuple[str, str]] = []
-        self._on_message: Callable[[str, Message], None] | None = None
-        self._on_chat_metadata: Callable[[str, str], None] | None = None
+        self._on_message: Callable[[str, Message], None] | None = None  # type: ignore[assignment]
+        self._on_chat_metadata: Callable[[str, str], None] | None = None  # type: ignore[assignment]
 
     @property
     def name(self) -> str:

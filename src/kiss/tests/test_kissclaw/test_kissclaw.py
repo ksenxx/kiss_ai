@@ -5,12 +5,10 @@ import os
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
-
-from kiss.agents.kissclaw.agent_runner import run_agent, AGENT_SYSTEM_PROMPT
+from kiss.agents.kissclaw.agent_runner import run_agent
 from kiss.agents.kissclaw.channels.console import ConsoleChannel
 from kiss.agents.kissclaw.config import KissClawConfig
 from kiss.agents.kissclaw.db import KissClawDB
@@ -36,7 +34,6 @@ from kiss.agents.kissclaw.types import (
     ScheduledTask,
     TaskRunLog,
 )
-
 
 # ============================================================================
 # Config tests
@@ -211,6 +208,7 @@ class TestDB:
 
         self.db.update_task("t1", status="paused")
         got = self.db.get_task_by_id("t1")
+        assert got is not None
         assert got.status == "paused"
 
         self.db.delete_task("t1")
@@ -237,6 +235,7 @@ class TestDB:
         self.db.create_task(task)
         self.db.update_task_after_run("t1", None, "done")
         got = self.db.get_task_by_id("t1")
+        assert got is not None
         assert got.status == "completed"
         assert got.last_result == "done"
 
@@ -258,7 +257,9 @@ class TestDB:
                              created_at="2024-01-01T00:00:00Z")
         self.db.create_task(task)
         self.db.update_task("t1")  # no kwargs -> no-op
-        assert self.db.get_task_by_id("t1").prompt == "x"
+        task_got = self.db.get_task_by_id("t1")
+        assert task_got is not None
+        assert task_got.prompt == "x"
 
     def test_db_file_persistence(self):
         with tempfile.TemporaryDirectory() as td:
@@ -423,7 +424,8 @@ class TestGroupQueue:
         q = GroupQueue(max_concurrent=2)
         q.set_process_messages_fn(fail_process)
         q.enqueue_message_check("g1")
-        # Allow time for retry (base_retry=5s is too long for test, but we can verify attempt was made)
+        # Allow time for retry (base_retry=5s is too long for test,
+        # but we can verify attempt was made)
         time.sleep(0.3)
         assert attempts["n"] >= 1
 
@@ -470,7 +472,7 @@ class TestAgentRunner:
 
             output = run_agent(config, "TestGroup", "test", "<messages/>", agent_fn=failing_agent)
             assert output.status == "error"
-            assert "Agent crashed" in output.error
+            assert output.error is not None and "Agent crashed" in output.error
 
     def test_agent_prompt_includes_group_name(self):
         config = KissClawConfig()
@@ -526,6 +528,7 @@ class TestTaskScheduler:
 
         # Check task completed
         updated = self.db.get_task_by_id("t1")
+        assert updated is not None
         assert updated.status == "completed"
 
         # Check message sent
@@ -567,6 +570,7 @@ class TestTaskScheduler:
 
         run_scheduled_task(task, self.db, self.config, self._send, agent_fn=mock_agent)
         updated = self.db.get_task_by_id("t1")
+        assert updated is not None
         assert updated.next_run is not None
         assert updated.status == "active"
 
@@ -613,7 +617,7 @@ class TestTaskScheduler:
         assert result is not None
         # Should be about 60s in the future
         dt = datetime.fromisoformat(result)
-        assert dt > datetime.now(timezone.utc)
+        assert dt > datetime.now(UTC)
 
     def test_compute_next_interval_invalid(self):
         assert compute_next_interval_run("abc") is None
@@ -727,12 +731,16 @@ class TestIpcWatcher:
         (ipc_dir / "1.json").write_text(json.dumps({"type": "pause_task", "taskId": "t1"}))
         watcher = IpcWatcher(self.db, self.config, self._send)
         watcher.poll_once()
-        assert self.db.get_task_by_id("t1").status == "paused"
+        paused_task = self.db.get_task_by_id("t1")
+        assert paused_task is not None
+        assert paused_task.status == "paused"
 
         # Resume
         (ipc_dir / "2.json").write_text(json.dumps({"type": "resume_task", "taskId": "t1"}))
         watcher.poll_once()
-        assert self.db.get_task_by_id("t1").status == "active"
+        resumed_task = self.db.get_task_by_id("t1")
+        assert resumed_task is not None
+        assert resumed_task.status == "active"
 
         # Cancel
         (ipc_dir / "3.json").write_text(json.dumps({"type": "cancel_task", "taskId": "t1"}))
