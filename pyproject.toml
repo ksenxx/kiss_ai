@@ -149,6 +149,7 @@ timeout = 120
 [tool.coverage.run]
 source = ["src/kiss"]
 omit = ["src/kiss/tests/*"]
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -235,3 +236,4 @@ ignore = []
 check = "kiss.scripts.check:main"
 algotune = "kiss.evals.algotune.run_algotune:main"
 notebook = "kiss.scripts.notebook:main"
+chatbot = "kiss.agents.coding_agents.chatbot:main"

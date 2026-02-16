@@ -128,8 +128,9 @@ class AnthropicModel(Model):
         max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:
             max_tokens = kwargs.pop("max_completion_tokens", None)
+        user_set_max_tokens = max_tokens is not None
         if max_tokens is None:
-            max_tokens = 4096
+            max_tokens = 16384
 
         # Map OpenAI-style stop -> Anthropic stop_sequences (best-effort).
         if "stop" in kwargs and "stop_sequences" not in kwargs:
@@ -138,6 +139,17 @@ class AnthropicModel(Model):
                 kwargs["stop_sequences"] = [stop_val]
             elif isinstance(stop_val, list):
                 kwargs["stop_sequences"] = stop_val
+
+        # Enable thinking by default for Claude 4.x+ models.
+        if "thinking" not in kwargs and (
+            self.model_name.startswith(("claude-opus-4", "claude-sonnet-4", "claude-haiku-4"))
+        ):
+            if self.model_name.startswith("claude-opus-4-6"):
+                kwargs["thinking"] = {"type": "adaptive"}
+            else:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+                if not user_set_max_tokens and max_tokens < 10000:
+                    max_tokens = 16384
 
         kwargs.update(
             {
@@ -161,8 +173,14 @@ class AnthropicModel(Model):
         """
         if self.token_callback is not None:
             with self.client.messages.stream(**kwargs) as stream:
-                for text in stream.text_stream:
-                    self._invoke_token_callback(text)
+                for event in stream:
+                    if event.type == "content_block_delta":
+                        delta = event.delta
+                        delta_type = getattr(delta, "type", "")
+                        if delta_type == "thinking_delta":
+                            self._invoke_token_callback(getattr(delta, "thinking", ""))
+                        elif delta_type == "text_delta":
+                            self._invoke_token_callback(getattr(delta, "text", ""))
             return stream.get_final_message()
         return self.client.messages.create(**kwargs)
 
@@ -196,7 +214,14 @@ class AnthropicModel(Model):
         kwargs = self._build_create_kwargs(tools=tools or None)
         response = self._create_message(kwargs)
 
+        stop_reason = getattr(response, "stop_reason", None)
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
+
+        # When max_tokens is hit, tool_use blocks may be truncated/incomplete.
+        # Strip them to avoid calling tools with missing arguments.
+        if stop_reason == "max_tokens":
+            blocks = [b for b in blocks if b.get("type") != "tool_use"]
+
         content = self._extract_text_from_blocks(blocks)
 
         function_calls: list[dict[str, Any]] = []

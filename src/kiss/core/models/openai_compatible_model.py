@@ -228,6 +228,7 @@ class OpenAICompatibleModel(Model):
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
+            timeout=600.0,
         )
         self.conversation = [{"role": "user", "content": prompt}]
 
@@ -341,9 +342,13 @@ class OpenAICompatibleModel(Model):
             last_chunk = chunk
             if chunk.choices:
                 delta = chunk.choices[0].delta
-                if delta and delta.content:
-                    content += delta.content
-                    self._invoke_token_callback(delta.content)
+                if delta:
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        self._invoke_token_callback(reasoning)
+                    if delta.content:
+                        content += delta.content
+                        self._invoke_token_callback(delta.content)
             if chunk.usage is not None:
                 response = chunk
         response = self._finalize_stream_response(response, last_chunk)
@@ -414,6 +419,9 @@ class OpenAICompatibleModel(Model):
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if delta:
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning:
+                            self._invoke_token_callback(reasoning)
                         if delta.content:
                             content += delta.content
                             self._invoke_token_callback(delta.content)

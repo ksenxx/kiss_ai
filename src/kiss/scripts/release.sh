@@ -126,11 +126,16 @@ main() {
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
     print_info "Current branch: $CURRENT_BRANCH"
 
-    # Check for uncommitted changes
-    if ! git diff-index --quiet HEAD --; then
-        print_error "You have uncommitted changes. Please commit or stash them first."
-        exit 1
+    # Stash uncommitted changes if any
+    STASHED=false
+    if ! git diff-index --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+        print_warn "Uncommitted changes detected - stashing..."
+        git stash --include-untracked
+        STASHED=true
     fi
+
+    # Restore stash on exit (success or failure)
+    trap '[[ "$STASHED" == true ]] && git stash pop && print_info "Restored stashed changes"' EXIT
 
     # Get version
     VERSION=$(get_version)

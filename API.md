@@ -225,7 +225,7 @@ Run the single-agent coding system with auto-continuation.
 def perform_task(self) -> str
 ```
 
-Execute the main task using multiple sub-sessions with auto-continuation. Each sub-session runs a KISSAgent with an adaptive step limit; on failure, structured progress (done/next items) and a scan of existing files are passed to the next sub-session.
+Execute the main task using multiple sub-sessions with auto-continuation. Each sub-session runs a KISSAgent; on failure, structured progress (done/next items) and a scan of existing files are passed to the next sub-session.
 
 **Returns:**
 
@@ -259,14 +259,13 @@ Execute the main task using multiple sub-sessions with auto-continuation. Each s
 
 - **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking (done/next items)
 - **Structured Progress Tracking**: Each sub-session reports completed and remaining tasks in JSON format, which is deduplicated, validated, and passed to subsequent sub-sessions along with a scan of existing files in the work directory
-- **Adaptive Step Thresholds**: Step limits per sub-session scale based on sub-session number and progress, with conservative early sub-sessions and more steps for sub-sessions showing good progress
-- **Efficiency Rules**: Built-in prompt instructions enforce step minimization, batching, and immediate completion when tests pass
-- **Output Truncation**: Long tool outputs are automatically truncated to keep context manageable
+- **Compressed Prompts**: Minimal, high-signal task prompts with critical rules (use Write() for new files, bounded poll loops, immediate finish on success)
+- **Efficiency Rules**: Built-in prompt instructions enforce immediate completion when tests pass, timeout guidance for bash, and bounded loops for background jobs
 - **Relentless Retries**: Continues attempting tasks through multiple continuation sub-sessions until success
 - **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
 - **Path Access Control**: Enforces read/write permissions on file system paths before command execution
 - **Docker Support**: Optional Docker container execution for bash commands via the `docker_image` parameter. When enabled, all bash commands run inside an isolated Docker container.
-- **Built-in Tools**: Each sub-session agent has access to `finish()`, `Bash` (or Docker bash when `docker_image` is set), `Read`, and `Edit`
+- **Built-in Tools**: Each sub-session agent has access to `finish()`, `Bash` (or Docker bash when `docker_image` is set), `Read`, `Edit`, and `Write`
 
 ### Example
 
@@ -1079,6 +1078,9 @@ GEPA(
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 2,
     progress_callback: Callable[[GEPAProgress], None] | None = None,
+    batched_agent_wrapper: Callable[
+        [str, list[dict[str, str]]], list[tuple[str, list]]
+    ] | None = None,
 )
 ```
 
@@ -1098,6 +1100,7 @@ GEPA(
 - `max_merge_invocations` (int): Maximum merge attempts. Default is 5.
 - `merge_val_overlap_floor` (int): Minimum validation overlap for merge. Default is 2.
 - `progress_callback` (Callable | None): Optional callback function called with `GEPAProgress` during optimization.
+- `batched_agent_wrapper` (Callable | None): Optional batched evaluator with signature `(prompt_template, examples) -> [(result, trajectory)]`. When provided, GEPA evaluates minibatches via this function instead of calling `agent_wrapper` once per example.
 
 ### GEPAPhase
 
@@ -1346,8 +1349,8 @@ UsefulTools(
 **Parameters:**
 
 - `base_dir` (str): The base directory for operations (created if it doesn't exist).
-- `readable_paths` (list[str] | None): List of paths the tools can read from. Default is None (no restrictions).
-- `writable_paths` (list[str] | None): List of paths the tools can write to. Default is None (no restrictions).
+- `readable_paths` (list[str] | None): List of paths the tools can read from. Default is None (empty allowlist; no file reads are allowed unless paths are provided).
+- `writable_paths` (list[str] | None): List of paths the tools can write to. Default is None (empty allowlist; no file writes are allowed unless paths are provided).
 
 ### Methods
 
@@ -1388,7 +1391,13 @@ Write content to a file, creating it if it doesn't exist or overwriting if it do
 #### `Bash()`
 
 ```python
-def Bash(self, command: str, description: str, timeout_seconds: float = 30) -> str
+def Bash(
+    self,
+    command: str,
+    description: str,
+    timeout_seconds: float = 30,
+    max_output_chars: int = 50000,
+) -> str
 ```
 
 Execute a bash command with automatic path permission checks and security validation.
@@ -1398,15 +1407,19 @@ Execute a bash command with automatic path permission checks and security valida
 - `command` (str): The bash command to execute.
 - `description` (str): A brief description of what the command does.
 - `timeout_seconds` (float): Timeout in seconds for the command. Default is 30.
+- `max_output_chars` (int): Maximum output length before truncation. Default is 50000.
 
 **Returns:**
 
-- `str`: The command output (stdout), or an error message if permission denied, security violation, or execution failed.
+- `str`: The command output (stdout), or an error message if permission denied, security violation, or execution failed. Very large outputs are truncated from the middle with a truncation marker.
 
 **Security Features:**
 
 - Automatically parses commands to detect file operations
 - Enforces readable_paths and writable_paths restrictions
+- Blocks unsafe shell control commands: `.`, `cd`, `env`, `eval`, `exec`
+- Blocks inline interpreter execution flags (`python -c`, `node -e/--eval`, `bash -c`, etc.)
+- Treats `/proc/self/root/...` as unsafe (not a safe special path)
 - Returns descriptive error messages for violations
 
 #### `Edit()`
@@ -1542,10 +1555,12 @@ This function analyzes bash commands to intelligently determine which directorie
 - Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
 - Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
 - Output redirection: >, >>, &>, 2>, etc.
+- Additional output redirection operators: `>|`, `>>|`, `1>>`, `2>>`, `&>>`, `&>|`
 - Input redirection: \<, \<<, \<<\<
 - Heredoc stripping: heredoc body text (between `<< DELIM` and `DELIM`) is stripped before parsing so that heredoc content is not misinterpreted as command arguments
 - Command separators: `&&`, `||`, `;` chains
 - Pipe chains with multiple commands
+- Environment-variable-prefixed commands (e.g., `FOO=bar cat file.txt`)
 - Flags and arguments parsing
 - Special commands like tee (reads stdin and writes to file)
 - Path cleaning: trailing punctuation characters (e.g., `)`, `'`, `"`, `;`, `}`, `]`) are stripped from paths before safety checks
@@ -1821,9 +1836,9 @@ The KISS framework supports real-time token streaming through the `Printer` abst
 
 ### Streaming Behavior by Provider
 
-- **Anthropic (Claude)**: Uses `messages.stream()` with `text_stream` for both `generate()` and `generate_and_process_with_tools()`.
-- **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
-- **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`.
+- **Anthropic (Claude)**: Uses `messages.stream()` with raw event iteration for both `generate()` and `generate_and_process_with_tools()`. Streams both `thinking_delta` and `text_delta` events, enabling real-time streaming of extended thinking content. Thinking is auto-enabled for Claude 4.x models (adaptive for Opus 4.6, extended for others).
+- **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. Streams both `reasoning_content` (thinking tokens) and regular `content` deltas. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
+- **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`. Thinking is auto-enabled via `ThinkingConfig(include_thoughts=True)`, streaming both thought summaries and regular text.
 
 When no printer is provided and `verbose=False`, all providers fall back to their original non-streaming code paths.
 
