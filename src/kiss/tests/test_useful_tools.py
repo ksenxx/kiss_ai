@@ -12,11 +12,12 @@ from typing import Any, cast
 import pytest
 
 from kiss.core.useful_tools import (
+    INLINE_CODE_FLAGS,
     UsefulTools,
     _extract_command_names,
     _extract_leading_command_name,
+    _extract_paths_from_code,
     _extract_search_results,
-    _has_disallowed_inline_interpreter_execution,
     _is_safe_special_path,
     _render_page_with_playwright,
     _resolve_path,
@@ -625,24 +626,58 @@ class TestBashEdgeCases:
         result = tools.Bash("echo test > /dev/null", "Write to dev null")
         assert "Error:" not in result
 
-    def test_bash_rejects_inline_python_execution(self, tools_sandbox):
+    def test_bash_blocks_inline_python_outside_readable(self, tools_sandbox):
         tools, _, _, temp_test_dir = tools_sandbox
-        outside = temp_test_dir / "outside_inline.py"
+        outside = temp_test_dir / "outside_inline.txt"
+        outside.write_text("secret")
         result = tools.Bash(
-            f"python -c \"open('{outside}', 'w').write('x')\"",
-            "Inline python",
+            f"python3 -c \"print(open('{outside}').read())\"",
+            "Inline python outside",
         )
-        assert "Error: Inline interpreter execution flags are not allowed" in result
-        assert not outside.exists()
+        assert "Error: Access denied" in result
 
-    def test_bash_rejects_cd_for_context_switch(self, tools_sandbox):
+    def test_bash_allows_inline_python_in_readable_dir(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        test_file = readable_dir / "data.txt"
+        test_file.write_text("hello")
+        result = tools.Bash(
+            f"python3 -c \"print(open('{test_file}').read().strip())\"",
+            "Inline python read",
+        )
+        assert "hello" in result
+
+    def test_bash_blocks_inline_python_write_outside_readable(self, tools_sandbox):
+        tools, _, _, temp_test_dir = tools_sandbox
+        target = temp_test_dir / "outside_write.txt"
+        result = tools.Bash(
+            f"python3 -c \"open('{target}', 'w').write('x')\"",
+            "Inline python write outside readable",
+        )
+        assert "Error: Access denied for reading" in result
+
+    def test_bash_allows_inline_node_in_readable_dir(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        test_file = readable_dir / "data.txt"
+        test_file.write_text("node-hello")
+        result = tools.Bash(
+            f"node -e \"console.log(require('fs').readFileSync('{test_file}', 'utf8').trim())\"",
+            "Inline node read",
+        )
+        assert "node-hello" in result
+
+    def test_bash_blocks_cd_to_non_readable_dir(self, tools_sandbox):
         tools, _, _, temp_test_dir = tools_sandbox
         outside_dir = temp_test_dir / "outside_dir"
         outside_dir.mkdir()
         outside_file = outside_dir / "secret.txt"
         outside_file.write_text("secret")
         result = tools.Bash(f"cd {outside_dir} && cat secret.txt", "cd bypass")
-        assert "Error: Command 'cd' is not allowed in Bash tool" == result
+        assert "Error: Access denied for reading" in result
+
+    def test_bash_allows_cd_to_readable_dir(self, tools_sandbox):
+        tools, readable_dir, _, _ = tools_sandbox
+        result = tools.Bash(f"cd {readable_dir} && pwd", "cd to readable")
+        assert str(readable_dir) in result
 
     def test_bash_allows_dynamic_variable_expansion(self, tools_sandbox):
         tools, _, _, _ = tools_sandbox
@@ -656,6 +691,29 @@ class TestBashEdgeCases:
 
 
 class TestParseBashEdgeCases:
+    def test_cd_extracts_readable_path(self, temp_test_dir):
+        target = temp_test_dir / "subdir"
+        target.mkdir()
+        readable, writable = parse_bash_command_paths(f"cd {target}")
+        assert str(target) in readable
+        assert writable == []
+
+    def test_inline_python_extracts_paths(self, temp_test_dir):
+        target = temp_test_dir / "file.txt"
+        cmd = f"python3 -c \"open('{target}').read()\""
+        readable, writable = parse_bash_command_paths(cmd)
+        assert str(target) in readable
+
+    def test_inline_node_eval_extracts_paths(self, temp_test_dir):
+        target = temp_test_dir / "data.json"
+        cmd = f"node --eval \"require('fs').readFileSync('{target}')\""
+        readable, writable = parse_bash_command_paths(cmd)
+        assert str(target) in readable
+
+    def test_inline_code_no_paths(self):
+        readable, writable = parse_bash_command_paths("python3 -c \"print('hello')\"")
+        assert readable == [] and writable == []
+
     def test_read_command_with_no_file_args(self):
         readable, writable = parse_bash_command_paths("ls")
         assert readable == [] and writable == []
@@ -832,18 +890,45 @@ class TestExtractCommandNames:
         assert _extract_command_names("echo hi | | cat") == ["echo", "cat"]
 
 
-class TestHasDisallowedInlineInterpreterExecution:
-    def test_empty_pipe_segment(self):
-        assert not _has_disallowed_inline_interpreter_execution("echo hi | | echo done")
+class TestExtractPathsFromCode:
+    def test_single_quoted_absolute_path(self):
+        paths = _extract_paths_from_code("open('/tmp/foo.txt').read()")
+        assert len(paths) == 1
+        assert "tmp/foo.txt" in paths[0]
 
-    def test_unterminated_quote_segment(self):
-        assert not _has_disallowed_inline_interpreter_execution('"unterminated')
+    def test_double_quoted_absolute_path(self):
+        paths = _extract_paths_from_code('open("/tmp/bar.txt").read()')
+        assert len(paths) == 1
+        assert "tmp/bar.txt" in paths[0]
 
-    def test_empty_string_segment(self):
-        assert not _has_disallowed_inline_interpreter_execution("")
+    def test_relative_path_dot_slash(self, temp_test_dir):
+        paths = _extract_paths_from_code("open('./data/file.txt')")
+        assert len(paths) == 1
+        assert "data/file.txt" in paths[0]
 
-    def test_only_env_vars_no_command(self):
-        assert not _has_disallowed_inline_interpreter_execution("FOO=bar")
+    def test_relative_path_dotdot_slash(self, temp_test_dir):
+        paths = _extract_paths_from_code("open('../parent/file.txt')")
+        assert len(paths) == 1
+        assert "parent/file.txt" in paths[0]
+
+    def test_multiple_paths(self):
+        code = "open('/tmp/a.txt'); open('/tmp/b.txt')"
+        paths = _extract_paths_from_code(code)
+        assert len(paths) == 2
+
+    def test_no_paths(self):
+        assert _extract_paths_from_code("print('hello')") == []
+
+    def test_safe_special_path_filtered(self):
+        assert _extract_paths_from_code("open('/dev/null')") == []
+
+    def test_inline_code_flags_has_expected_keys(self):
+        assert "python" in INLINE_CODE_FLAGS
+        assert "python3" in INLINE_CODE_FLAGS
+        assert "node" in INLINE_CODE_FLAGS
+        assert "-c" in INLINE_CODE_FLAGS["python"]
+        assert "-e" in INLINE_CODE_FLAGS["node"]
+        assert "--eval" in INLINE_CODE_FLAGS["node"]
 
 
 class TestEditScriptLiteralGrep:

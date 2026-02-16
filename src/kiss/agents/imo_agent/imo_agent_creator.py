@@ -10,13 +10,21 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 
 
 task = """
-can you create an agent in src/kiss/agents/imo_agent/imo_agent.py using
+- can you create an agent in src/kiss/agents/imo_agent/imo_agent.py using
+src/kiss/core/kiss_agent.py and 
 src/kiss/agents/coding_agents/relentless_coding_agent.py based on the agent
 described in the paper https://arxiv.org/abs/2507.15855 .
-The agent should be run on all the IMO 2025 tasks, where each task is a string
-consisting of an actual IMO 2025 problem statement followed by the criterion
-to validate the results. Run the agent on the simplest task of all the tasks
-from IMO 2025.
+- First, add all the IMO 2025 problems accurately and their validation criterion and their hardness.
+- Second, create the agent imo_agent.py.
+- Make sure that that the imo_agent.py does not get to see the validation criterion or the answers.
+- In the main function, call the imo_agent.py to solve the problem 4.
+- Monitor the output of the imo_agent.py to make sure that it is solving the problem successfully.
+  If it fails, modify the imo_agent.py agent code and try again.
+- Use an independent KISSagent to validate the results against the validation criterion.
+- If validation fails, modify the imo_agent.py agent code and try again.
+- Keep repeating the process until the agent can run the task successfully to completion.
+- Repeat the process until the agent can solve all the IMO 2025 problems successfully to completion.
+- Try using the most powerful models for the solver and the verifier.
 """
 
 def main() -> None:

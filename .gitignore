@@ -25,4 +25,5 @@ artifacts/
 .cursorrules
 .coverage_per_test
 *.log
+*.txt
 

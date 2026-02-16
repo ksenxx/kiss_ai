@@ -222,10 +222,20 @@ def _resolve_path(path_str: str) -> str | None:
 
 DISALLOWED_BASH_COMMANDS = {
     ".",
-    "cd",
     "env",
     "eval",
     "exec",
+}
+
+INLINE_CODE_FLAGS: dict[str, set[str]] = {
+    "python": {"-c"},
+    "python3": {"-c"},
+    "node": {"-e", "-p", "--eval", "--print"},
+    "ruby": {"-e"},
+    "perl": {"-e"},
+    "bash": {"-c"},
+    "sh": {"-c"},
+    "zsh": {"-c"},
 }
 
 
@@ -257,44 +267,16 @@ def _extract_command_names(command: str) -> list[str]:
     return names
 
 
-def _has_disallowed_inline_interpreter_execution(command: str) -> bool:
-    """Block inline interpreter execution that defeats static path validation."""
-    inline_flags = {
-        "python": {"-c"},
-        "python3": {"-c"},
-        "node": {"-e", "-p", "--eval", "--print"},
-        "ruby": {"-e"},
-        "perl": {"-e"},
-        "bash": {"-c"},
-        "sh": {"-c"},
-        "zsh": {"-c"},
-    }
-
-    stripped_command = _strip_heredocs(command)
-    segments = re.split(r"&&|\|\||;", stripped_command)
-    for segment in segments:
-        for part in re.split(r"(?<!>)\|(?!\|)", segment):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                tokens = shlex.split(part)
-            except ValueError:
-                continue
-
-            i = 0
-            while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*", tokens[i]):
-                i += 1
-            if i >= len(tokens):
-                continue
-
-            cmd = tokens[i].split("/")[-1]
-            flags = inline_flags.get(cmd)
-            if not flags:
-                continue
-            if any(token in flags for token in tokens[i + 1 :]):
-                return True
-    return False
+def _extract_paths_from_code(code: str) -> list[str]:
+    """Extract file paths from an inline code string (e.g. python -c argument)."""
+    paths: set[str] = set()
+    for match in re.finditer(r"""['"]((\.{0,2}/)[^\s'"*?]*)['"]""", code):
+        p = match.group(1)
+        if not _is_safe_special_path(p):
+            resolved = _resolve_path(p)
+            if resolved:
+                paths.add(resolved)
+    return sorted(paths)
 
 
 # Safari browser configuration for web scraping
@@ -553,6 +535,7 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
     # EXPANDED: Commands that read files/directories
     read_commands = {
         "cat",
+        "cd",
         "less",
         "more",
         "head",
@@ -843,6 +826,14 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
                                 if dir_path:
                                     writable_paths.add(dir_path)
 
+            inline_flags = INLINE_CODE_FLAGS.get(cmd)
+            if inline_flags:
+                for j in range(cmd_idx + 1, len(tokens)):
+                    if tokens[j] in inline_flags and j + 1 < len(tokens):
+                        for p in _extract_paths_from_code(tokens[j + 1]):
+                            readable_paths.add(p)
+                        break
+
     except Exception as e:
         # If parsing fails completely, return empty lists
         print(f"Failed to parse command '{command}': {e}")
@@ -1036,9 +1027,6 @@ class UsefulTools:
             The output of the command.
         """
         del description
-
-        if _has_disallowed_inline_interpreter_execution(command):
-            return "Error: Inline interpreter execution flags are not allowed (-c/-e/--eval style)"
 
         for command_name in _extract_command_names(command):
             if command_name in DISALLOWED_BASH_COMMANDS:

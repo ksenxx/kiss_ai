@@ -12,17 +12,21 @@ DEFAULT_AGENT_CODE = "src/kiss/agents/coding_agents/relentless_coding_agent.py"
 DEFAULT_MODEL = "claude-opus-4-6"
 
 TASK_TEMPLATE = """
-Can you run 'uv run {agent_code}'
-in the background so that I can see its output and you monitor the output in real time?
-If you observe any repeated errors in the output,
-please fix them and run the command again.
-Once the command succeeds, analyze the output and optimize
-{agent_code}
-so that it runs reliably, faster with less cost.
-Keep repeating the process until the running time
-and the cost is reduced significantly, such 99%.  Ensure
-that the agent is able to handle the errors and continue
-running the task until it is successful.
+Can you run the agent code by executing the command 'uv run {agent_code}'
+in the background so that I can see its output and you can continue 
+to monitor the output in real time, and correct the agent code if needed?
+If you observe any repeated errors in the output or the agent is not able 
+to finish the task successfully, please fix the agent code and run the 
+command again.  Once the command succeeds and solves the task successfully, 
+analyze the output and optimize {agent_code}
+so that the agent is able to solve the task successfully (1st priority), 
+faster (2nd priority) and with less cost (3rd priority).
+Run the agent on the task to validate that it is successful in solving the task 
+completely and faster with lower cost.  If validation fails, roll back the changes 
+and try again.
+Keep repeating the process until the agent can solve the task successfully, and 
+until the running time and the cost are reduced significantly.
+DO NOT STOP CORRECTING THE AGENT CODE UNTIL IT IS SUCCESSFUL AT SOLVING THE TASK.
 
 ## Instructions:
 1. Do NOT change the agent's interface or streaming mechanism
