@@ -11,7 +11,7 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 
 task = """
 - can you create an agent in src/kiss/agents/imo_agent/imo_agent.py using
-src/kiss/core/kiss_agent.py and 
+src/kiss/core/kiss_agent.py and
 src/kiss/agents/coding_agents/relentless_coding_agent.py based on the agent
 described in the paper https://arxiv.org/abs/2507.15855 .
 - First, add all the IMO 2025 problems accurately and their validation criterion and their hardness.

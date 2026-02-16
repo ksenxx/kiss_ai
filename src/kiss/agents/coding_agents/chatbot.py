@@ -17,6 +17,7 @@ from typing import Any
 import yaml
 
 from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+from kiss.core.kiss_agent import KISSAgent
 from kiss.core.printer import Printer, extract_extras, extract_path_and_lang, truncate_result
 
 HISTORY_FILE = Path.home() / ".kiss_task_history.json"
@@ -47,10 +48,44 @@ def _save_history(tasks: list[str]) -> None:
         pass
 
 
+def _find_semantic_duplicates(new_task: str, existing_tasks: list[str]) -> list[int]:
+    if not existing_tasks:
+        return []
+    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(existing_tasks))
+    agent = KISSAgent("Task Deduplicator")
+    result = agent.run(
+        model_name="gemini-2.0-flash",
+        prompt_template=(
+            "Which existing tasks are semantically the same as the new task? "
+            '"Same" means they ask for essentially the same work, just worded differently.\n\n'
+            "New task: {new_task}\n\n"
+            "Existing tasks:\n{existing_tasks}\n\n"
+            "Return ONLY a JSON array of indices of duplicate tasks. "
+            "If none are duplicates, return []. Examples: [2, 5] or []"
+        ),
+        arguments={"new_task": new_task, "existing_tasks": numbered},
+        is_agentic=False,
+    )
+    try:
+        start = result.index("[")
+        end = result.index("]", start) + 1
+        indices = json.loads(result[start:end])
+        return [i for i in indices if isinstance(i, int) and 0 <= i < len(existing_tasks)]
+    except (ValueError, json.JSONDecodeError):
+        return []
+
+
 def _add_task(task: str) -> None:
     history = _load_history()
     if task in history:
         history.remove(task)
+    else:
+        try:
+            duplicates = _find_semantic_duplicates(task, history)
+            for idx in sorted(duplicates, reverse=True):
+                history.pop(idx)
+        except Exception:
+            pass
     history.insert(0, task)
     _save_history(history[:MAX_HISTORY])
 
@@ -273,6 +308,8 @@ _running_lock = threading.Lock()
 _work_dir = os.getcwd()
 _file_cache: list[str] = []
 _agent_thread: threading.Thread | None = None
+_proposed_tasks: list[str] = []
+_proposed_lock = threading.Lock()
 
 
 class _StopRequested(BaseException):
@@ -284,9 +321,43 @@ def _refresh_file_cache() -> None:
     _file_cache = _scan_files(_work_dir)
 
 
+def _refresh_proposed_tasks() -> None:
+    global _proposed_tasks
+    history = _load_history()
+    if not history:
+        with _proposed_lock:
+            _proposed_tasks = []
+        return
+    task_list = "\n".join(f"- {t}" for t in history[:20])
+    agent = KISSAgent("Task Proposer")
+    try:
+        result = agent.run(
+            model_name="gemini-2.0-flash",
+            prompt_template=(
+                "Based on these past tasks a developer has worked on, suggest 5 new "
+                "tasks they might want to do next. Tasks should be natural follow-ups, "
+                "related improvements, or complementary work.\n\n"
+                "Past tasks:\n{task_list}\n\n"
+                "Return ONLY a JSON array of 5 short task description strings. "
+                'Example: ["Add unit tests for X", "Refactor Y module"]'
+            ),
+            arguments={"task_list": task_list},
+            is_agentic=False,
+        )
+        start = result.index("[")
+        end = result.index("]", start) + 1
+        proposals = json.loads(result[start:end])
+        proposals = [str(p) for p in proposals if isinstance(p, str) and p.strip()][:5]
+    except Exception:
+        proposals = []
+    with _proposed_lock:
+        _proposed_tasks = proposals
+
+
 def _run_agent_thread(task: str) -> None:
     global _running, _agent_thread
     try:
+        _add_task(task)
         _printer.broadcast({"type": "clear"})
         agent = RelentlessCodingAgent("Chatbot")
         agent.run(
@@ -304,6 +375,10 @@ def _run_agent_thread(task: str) -> None:
             _running = False
             _agent_thread = None
         _refresh_file_cache()
+        try:
+            _refresh_proposed_tasks()
+        except Exception:
+            pass
 
 
 def _stop_agent() -> bool:
@@ -619,10 +694,15 @@ header{
   overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;
 }
-#recent{
-  flex:1;overflow-y:auto;padding:10px 24px;min-height:0;
+#bottom-panel{
+  flex:1;display:flex;gap:1px;
+  background:var(--border);min-height:0;
 }
-#recent-hdr{
+.panel-col{
+  flex:1;overflow-y:auto;padding:10px 16px;
+  background:var(--bg);min-height:0;
+}
+.panel-hdr{
   font-size:11px;font-weight:600;
   text-transform:uppercase;letter-spacing:.06em;
   color:var(--dim);margin-bottom:8px;padding:0 2px;
@@ -637,7 +717,21 @@ header{
 .task-item:hover{
   border-color:var(--accent);background:var(--surface2);
 }
+.proposed-item{
+  padding:8px 12px;background:var(--surface);
+  border:1px solid var(--border);border-radius:6px;
+  margin-bottom:6px;cursor:pointer;font-size:13px;
+  transition:all .15s;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;
+}
+.proposed-item:hover{
+  border-color:var(--purple);background:var(--surface2);
+}
 .no-tasks{color:var(--dim);font-size:13px;padding:8px 2px}
+.loading-proposals{
+  color:var(--dim);font-size:12px;
+  font-style:italic;padding:8px 2px;
+}
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{
@@ -675,9 +769,15 @@ code{font-family:'SF Mono','Fira Code',monospace}
     <button id="stop-btn">Stop</button>
   </div>
 </div>
-<div id="recent">
-  <div id="recent-hdr">Recent Tasks</div>
-  <div id="recent-list"></div>
+<div id="bottom-panel">
+  <div class="panel-col">
+    <div class="panel-hdr">Recent Tasks</div>
+    <div id="recent-list"></div>
+  </div>
+  <div class="panel-col">
+    <div class="panel-hdr">Proposed Tasks</div>
+    <div id="proposed-list"></div>
+  </div>
 </div>
 <script>
 var O=document.getElementById('output');
@@ -688,6 +788,7 @@ var btn=document.getElementById('send-btn');
 var stopBtn=document.getElementById('stop-btn');
 var ac=document.getElementById('autocomplete');
 var rl=document.getElementById('recent-list');
+var pl=document.getElementById('proposed-list');
 var running=false,autoScroll=true;
 var thinkEl=null,txtEl=null,scrollRaf=0;
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
@@ -897,20 +998,20 @@ function handleEvent(ev){
     var em=Math.floor(el/60);
     setReady('Done ('+
       (em>0?em+'m ':'')+el%60+'s)');
-    loadTasks();break;}
+    loadTasks();loadProposed();break;}
   case'task_error':{
     var err=mkEl('div','ev tr err');
     err.innerHTML='<div class="rl fail">ERROR</div>'
       +esc(ev.text||'Unknown error');
     O.appendChild(err);
-    setReady('Error');loadTasks();break;}
+    setReady('Error');loadTasks();loadProposed();break;}
   case'task_stopped':{
     var stEl=mkEl('div','ev tr err');
     stEl.innerHTML=
       '<div class="rl fail">STOPPED</div>'
       +'Agent execution stopped by user';
     O.appendChild(stEl);
-    setReady('Stopped');loadTasks();break;}
+    setReady('Stopped');loadTasks();loadProposed();break;}
   }
   sb();
 }
@@ -1033,7 +1134,34 @@ function loadTasks(){
     });
   }).catch(function(){});
 }
-connectSSE();loadTasks();inp.focus();
+function loadProposed(){
+  pl.innerHTML='<div class="loading-proposals">'
+    +'Loading suggestions\u2026</div>';
+  fetch('/proposed_tasks')
+  .then(function(r){return r.json();})
+  .then(function(tasks){
+    pl.innerHTML='';
+    if(!tasks.length){
+      pl.innerHTML=
+        '<div class="no-tasks">'
+        +'No suggestions yet</div>';
+      return;
+    }
+    tasks.forEach(function(t){
+      var d=mkEl('div','proposed-item');
+      d.textContent=t;d.title=t;
+      d.addEventListener('click',function(){
+        inp.value=t;inp.focus();
+      });
+      pl.appendChild(d);
+    });
+  }).catch(function(){
+    pl.innerHTML=
+      '<div class="no-tasks">'
+      +'Could not load suggestions</div>';
+  });
+}
+connectSSE();loadTasks();loadProposed();inp.focus();
 </script>
 </body>
 </html>"""
@@ -1094,7 +1222,6 @@ def main() -> None:
             return JSONResponse(
                 {"error": "Empty task"}, status_code=400,
             )
-        _add_task(task)
         t = threading.Thread(
             target=_run_agent_thread,
             args=(task,),
@@ -1137,6 +1264,10 @@ def main() -> None:
     async def tasks(request: Request) -> JSONResponse:
         return JSONResponse(_load_history())
 
+    async def proposed_tasks(request: Request) -> JSONResponse:
+        with _proposed_lock:
+            return JSONResponse(list(_proposed_tasks))
+
     app = Starlette(routes=[
         Route("/", index),
         Route("/events", events),
@@ -1144,7 +1275,10 @@ def main() -> None:
         Route("/stop", stop_task, methods=["POST"]),
         Route("/suggestions", suggestions),
         Route("/tasks", tasks),
+        Route("/proposed_tasks", proposed_tasks),
     ])
+
+    threading.Thread(target=_refresh_proposed_tasks, daemon=True).start()
 
     port = _find_free_port()
     url = f"http://127.0.0.1:{port}"

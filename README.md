@@ -49,8 +49,6 @@ Well you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, Crew
 - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) that will not only enable you write or create agents, but also automatically optimize the agents for efficiency and cost.**
 - **It has the GEPA prompt optimizer builtin with a simple API.**
 - **It has a [RelentlessCodingAgent](src/kiss/agents/coding_agents/relentless_coding_agent.py), which is pretty straightforward in terms of implementation, but it can work for very very long tasks. It was self evolved over time and is still evolving.**
-- **It has an [IMO Agent](src/kiss/agents/imo_agent/imo_agent.py) for solving competition math problems using a verification-and-refinement pipeline.**
-- **The framework can self optimize based on your requirements (e.g. maximize test coverage).**
 - **No bloat and simple codebase.**
 - **Optimization strategies can be written in plain English.**
 - **New techniques will be incorporated to the framework as I research them.**
@@ -154,7 +152,7 @@ print(f"Result: {result}")
 - **Docker Support**: Optional isolated execution via Docker containers
 - **Path Access Control**: Enforces read/write permissions on file system paths
 - **Built-in Tools**: Bash, Read, Edit, Write, search_web, and fetch_url tools for file and web operations
-- **Safer Bash Execution**: `Bash()` blocks inline interpreter eval flags (e.g., `python -c`, `node -e`) and disallows shell control commands like `cd`, `env`, `eval`, and `exec`
+- **Safer Bash Execution**: `Bash()` validates file paths inside inline interpreter flags (e.g., `python -c`, `node -e`) against path access controls, and disallows shell control commands like `env`, `eval`, and `exec`
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
 ## 💬 Browser-Based Chatbot
@@ -216,47 +214,6 @@ uv run python -m kiss.agents.coding_agents.repo_optimizer \
 - Inventing and implementing new agent architectures for efficiency and reliability
 
 📖 **For the full story of how the repo optimizer self-optimized the RelentlessCodingAgent, see [BLOG.md](src/kiss/agents/coding_agents/BLOG.md)**
-
-## 🧮 IMO Agent — Mathematical Problem Solving
-
-The [IMO Agent](src/kiss/agents/imo_agent/imo_agent.py) is a verification-and-refinement pipeline for solving competition mathematics problems, based on [arXiv:2507.15855](https://arxiv.org/abs/2507.15855). It uses a solver-verifier-corrector loop to produce rigorous, step-by-step solutions to hard math problems (e.g., IMO 2025).
-
-```python
-from kiss.agents.imo_agent.imo_agent import IMOAgent, get_problem
-
-# Get an IMO 2025 problem
-problem = get_problem(4)  # Problem 4: Number Theory (easy)
-
-agent = IMOAgent()
-solution = agent.solve(
-    problem["statement"],
-    print_to_console=True,
-)
-
-if solution:
-    print(solution)
-    print(f"Cost: ${agent.budget_used:.4f}")
-```
-
-**How It Works:**
-
-1. **Solve**: A strong LLM generates a complete, rigorously justified solution
-1. **Verify**: A separate verifier LLM checks the solution step-by-step, classifying issues as critical errors or justification gaps
-1. **Correct**: If verification fails, the solver receives the bug report and produces a corrected solution
-1. **Repeat**: The verify-correct loop continues until the solution passes consecutive verification rounds or the iteration/budget limit is reached
-1. **Multiple Runs**: If a single run fails, the agent starts fresh with a new independent attempt
-
-**Running from the command line:**
-
-```bash
-# Solve IMO 2025 Problem 4 (default)
-uv run python -m kiss.agents.imo_agent.imo_agent
-
-# Solve a specific problem (1-6)
-uv run python -m kiss.agents.imo_agent.imo_agent 2
-```
-
-All six IMO 2025 problems are included in the agent with their statements, known answers, and validation criteria.
 
 ## 🎨 Output Formatting
 
@@ -569,6 +526,7 @@ kiss/
 │   │   ├── imo_agent/              # IMO mathematical problem-solving agent
 │   │   │   ├── __init__.py
 │   │   │   ├── imo_agent.py            # Verification-and-refinement pipeline (arXiv:2507.15855)
+│   │   │   ├── imo_problems.py         # IMO 2025 problem statements, validation criteria, and difficulty
 │   │   │   ├── imo_agent_creator.py    # Repo agent that created the IMO agent
 │   │   │   └── config.py               # IMO agent configuration
 │   │   ├── kiss_evolve/            # KISSEvolve evolutionary algorithm discovery
@@ -718,17 +676,14 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 200)
   - `max_steps`: Maximum steps per sub-session (default: 200)
   - `max_budget`: Maximum budget in USD (default: 200.0)
-- **IMO Agent Settings**: Modify `DEFAULT_CONFIG.imo.imo_agent` in `src/kiss/agents/imo_agent/config.py`:
-  - `model_name`: Strong LLM for solving/correcting (default: "gemini-3-pro-preview")
-  - `verifier_model_name`: LLM for verification (default: "gemini-2.5-pro")
-  - `temperature`: Sampling temperature (default: 0.1)
-  - `thinking_budget`: Max thinking tokens for solver (default: 32768)
-  - `verifier_thinking_budget`: Max thinking tokens for verifier (default: 16384)
-  - `consecutive_passes_to_accept`: Accept solution after this many consecutive passes (default: 2)
-  - `consecutive_errors_to_reject`: Reject after this many consecutive failures (default: 3)
-  - `max_refinement_iterations`: Max verify-correct iterations per run (default: 8)
-  - `max_runs`: Max independent solver attempts (default: 3)
-  - `max_budget`: Maximum budget in USD (default: 200.0)
+- **IMO Agent Settings**: Modify `DEFAULT_CONFIG.imo_agent` in `src/kiss/agents/imo_agent/config.py`:
+  - `solver_model`: Model for solving IMO problems (default: "o3")
+  - `verifier_model`: Model for verifying solutions (default: "gemini-2.5-pro")
+  - `validator_model`: Model for independent validation against known answers (default: "gemini-2.5-pro")
+  - `max_refinement_rounds`: Max verification-refinement iterations per attempt (default: 5)
+  - `num_verify_passes`: Number of verification passes required to accept a solution (default: 3)
+  - `max_attempts`: Max independent attempts per problem (default: 3)
+  - `max_budget`: Maximum budget in USD per problem (default: 50.0)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
   - `max_generations`: Maximum number of evolutionary generations (default: 10)

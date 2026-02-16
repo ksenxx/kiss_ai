@@ -13,20 +13,21 @@ DEFAULT_MODEL = "claude-opus-4-6"
 
 TASK_TEMPLATE = """
 Can you run the agent code by executing the command 'uv run {agent_code}'
-in the background so that I can see its output and you can continue 
+in the background so that I can see its output and you can continue
 to monitor the output in real time, and correct the agent code if needed?
-If you observe any repeated errors in the output or the agent is not able 
-to finish the task successfully, please fix the agent code and run the 
-command again.  Once the command succeeds and solves the task successfully, 
+If you observe any repeated errors in the output or the agent is not able
+to finish the task successfully, please fix the agent code and run the
+command again.  Once the command succeeds and solves the task successfully,
 analyze the output and optimize {agent_code}
-so that the agent is able to solve the task successfully (1st priority), 
+so that the agent is able to solve the task successfully (1st priority),
 faster (2nd priority) and with less cost (3rd priority).
-Run the agent on the task to validate that it is successful in solving the task 
-completely and faster with lower cost.  If validation fails, roll back the changes 
+Run the agent on the task to validate that it is successful in solving the task
+completely and faster with lower cost.  If validation fails, roll back the changes
 and try again.
-Keep repeating the process until the agent can solve the task successfully, and 
+Keep repeating the process until the agent can solve the task successfully, and
 until the running time and the cost are reduced significantly.
 DO NOT STOP CORRECTING THE AGENT CODE UNTIL IT IS SUCCESSFUL AT SOLVING THE TASK.
+DO NOT KILL the current process running repo_optimizer.py.
 
 ## Instructions:
 1. Do NOT change the agent's interface or streaming mechanism
