@@ -10,6 +10,8 @@ import webbrowser
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import yaml
+
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -33,6 +35,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 <link rel="stylesheet"
   href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -259,11 +262,23 @@ src.onmessage=function(e){
       s.textContent=ev.text||'';O.appendChild(s);break}
     case'result':{
       const c=document.createElement('div');c.className='ev rc';
+      let rb='';
+      if(ev.success!==undefined){
+        const sl=ev.success?'color:var(--green);font-weight:700':'color:var(--red);font-weight:700';
+        const st=ev.success?'PASSED':'FAILED';
+        rb+='<div style="'+sl+';font-size:16px;margin-bottom:12px">Status: '+st+'</div>';
+      }
+      if(ev.summary){
+        rb+=typeof marked!=='undefined'?marked.parse(ev.summary):esc(ev.summary);
+      }else{
+        rb+=esc(ev.text||'(no result)');
+      }
       c.innerHTML='<div class="rc-h"><h3>Result</h3><div class="rs">'
         +'Steps: <b>'+(ev.step_count||0)+'</b>'
         +'Tokens: <b>'+(ev.total_tokens||0)+'</b>'
         +'Cost: <b>'+(ev.cost||'N/A')+'</b>'
-        +'</div></div><div class="rc-body">'+esc(ev.text||'(no result)')+'</div>';
+        +'</div></div><div class="rc-body">'+rb+'</div>';
+      c.querySelectorAll('pre code').forEach(bl=>hljs.highlightElement(bl));
       O.appendChild(c);break}
     case'prompt':{
       const p=document.createElement('div');p.className='ev prompt';
@@ -357,6 +372,16 @@ class BrowserPrinter(Printer):
         self._tool_name = ""
         self._tool_json_buffer = ""
 
+    @staticmethod
+    def _parse_result_yaml(raw: str) -> dict[str, Any] | None:
+        try:
+            data = yaml.safe_load(raw)
+        except Exception:
+            return None
+        if isinstance(data, dict) and "summary" in data:
+            return data
+        return None
+
     def _broadcast(self, event: dict[str, Any]) -> None:
         with self._clients_lock:
             for cq in self._clients:
@@ -396,19 +421,29 @@ class BrowserPrinter(Printer):
             return ""
         if type == "result":
             self._broadcast({"type": "text_end"})
-            self._broadcast({
+            event: dict[str, Any] = {
                 "type": "result",
                 "text": str(content) or "(no result)",
                 "step_count": kwargs.get("step_count", 0),
                 "total_tokens": kwargs.get("total_tokens", 0),
                 "cost": kwargs.get("cost", "N/A"),
-            })
+            }
+            parsed = self._parse_result_yaml(str(content)) if content else None
+            if parsed:
+                event["success"] = parsed.get("success")
+                event["summary"] = str(parsed["summary"])
+            self._broadcast(event)
             return ""
         return ""
 
     async def token_callback(self, token: str) -> None:
         if token:
-            self._broadcast({"type": "text_delta", "text": token})
+            delta_type = (
+                "thinking_delta"
+                if self._current_block_type == "thinking"
+                else "text_delta"
+            )
+            self._broadcast({"type": delta_type, "text": token})
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -460,12 +495,8 @@ class BrowserPrinter(Printer):
             delta_type = delta.get("type", "")
             if delta_type == "thinking_delta":
                 text = delta.get("thinking", "")
-                if text:
-                    self._broadcast({"type": "thinking_delta", "text": text})
             elif delta_type == "text_delta":
                 text = delta.get("text", "")
-                if text:
-                    self._broadcast({"type": "text_delta", "text": text})
             elif delta_type == "input_json_delta":
                 self._tool_json_buffer += delta.get("partial_json", "")
 
@@ -495,13 +526,18 @@ class BrowserPrinter(Printer):
             step_count = kwargs.get("step_count", 0)
             budget_used = kwargs.get("budget_used", 0.0)
             total_tokens_used = kwargs.get("total_tokens_used", 0)
-            self._broadcast({
+            event: dict[str, Any] = {
                 "type": "result",
                 "text": message.result or "(no result)",
                 "step_count": step_count,
                 "total_tokens": total_tokens_used,
                 "cost": f"${budget_used:.4f}" if budget_used else "N/A",
-            })
+            }
+            parsed = self._parse_result_yaml(message.result) if message.result else None
+            if parsed:
+                event["success"] = parsed.get("success")
+                event["summary"] = str(parsed["summary"])
+            self._broadcast(event)
         elif hasattr(message, "content"):
             for block in message.content:
                 if hasattr(block, "is_error") and hasattr(block, "content"):

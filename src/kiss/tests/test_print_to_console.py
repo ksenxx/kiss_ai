@@ -86,7 +86,7 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert p._tool_json_buffer == '{"path":'
 
     def test_content_block_delta_thinking(self):
-        p, _ = self._make_printer()
+        p, buf = self._make_printer()
         text = p.print(
             self._event({
                 "type": "content_block_delta",
@@ -95,6 +95,19 @@ class TestPrintStreamEvent(unittest.TestCase):
             type="stream_event",
         )
         assert text == "Let me think..."
+        assert "Let me think" not in buf.getvalue()
+
+    def test_content_block_delta_text(self):
+        p, buf = self._make_printer()
+        text = p.print(
+            self._event({
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Hello world"},
+            }),
+            type="stream_event",
+        )
+        assert text == "Hello world"
+        assert "Hello world" not in buf.getvalue()
 
     def test_content_block_delta_unknown_delta_type(self):
         p, _ = self._make_printer()
@@ -246,6 +259,101 @@ class TestTokenCallback(unittest.TestCase):
         p, buf = self._make_printer()
         asyncio.run(p.token_callback("line\n"))
         assert p._mid_line is False
+
+    def test_token_callback_during_thinking_block(self):
+        import asyncio
+        p, buf = self._make_printer()
+        p._current_block_type = "thinking"
+        asyncio.run(p.token_callback("deep thought"))
+        assert "deep thought" in buf.getvalue()
+        assert p._mid_line is True
+
+    def test_token_callback_during_text_block(self):
+        import asyncio
+        p, buf = self._make_printer()
+        p._current_block_type = "text"
+        asyncio.run(p.token_callback("regular text"))
+        assert "regular text" in buf.getvalue()
+
+
+class TestStreamingFlow(unittest.TestCase):
+    """Test the full streaming flow: block_start -> token_callback -> block_stop."""
+
+    def _make_printer(self):
+        buf = io.StringIO()
+        return ConsolePrinter(file=buf), buf
+
+    def _event(self, evt_dict):
+        return SimpleNamespace(event=evt_dict)
+
+    def test_thinking_block_flow(self):
+        import asyncio
+        p, buf = self._make_printer()
+        p.print(
+            self._event({
+                "type": "content_block_start",
+                "content_block": {"type": "thinking"},
+            }),
+            type="stream_event",
+        )
+        assert p._current_block_type == "thinking"
+        text = p.print(
+            self._event({
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "hmm"},
+            }),
+            type="stream_event",
+        )
+        assert text == "hmm"
+        asyncio.run(p.token_callback("hmm"))
+        assert "hmm" in buf.getvalue()
+        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
+        assert p._current_block_type == ""
+
+    def test_text_block_flow(self):
+        import asyncio
+        p, buf = self._make_printer()
+        p.print(
+            self._event({
+                "type": "content_block_start",
+                "content_block": {"type": "text"},
+            }),
+            type="stream_event",
+        )
+        assert p._current_block_type == "text"
+        text = p.print(
+            self._event({
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "hello"},
+            }),
+            type="stream_event",
+        )
+        assert text == "hello"
+        asyncio.run(p.token_callback("hello"))
+        assert "hello" in buf.getvalue()
+        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
+        assert p._current_block_type == ""
+
+    def test_no_double_print(self):
+        import asyncio
+        p, buf = self._make_printer()
+        p.print(
+            self._event({
+                "type": "content_block_start",
+                "content_block": {"type": "text"},
+            }),
+            type="stream_event",
+        )
+        p.print(
+            self._event({
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "unique_token"},
+            }),
+            type="stream_event",
+        )
+        asyncio.run(p.token_callback("unique_token"))
+        output = buf.getvalue()
+        assert output.count("unique_token") == 1
 
 
 if __name__ == "__main__":

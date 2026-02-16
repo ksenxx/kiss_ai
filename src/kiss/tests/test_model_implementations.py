@@ -9,7 +9,10 @@ import pytest
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import (
+    MODEL_INFO,
+    calculate_cost,
     get_flaky_reason,
+    get_max_context_length,
     is_model_flaky,
     model,
 )
@@ -72,6 +75,14 @@ class TestAnthropicModel:
         m.initialize("test")
         kwargs = m._build_create_kwargs()
         assert kwargs.get(expected_key) == expected_value
+
+    @pytest.mark.timeout(60)
+    def test_default_max_tokens(self):
+        m = model("claude-haiku-4-5")
+        assert isinstance(m, AnthropicModel)
+        m.initialize("test")
+        kwargs = m._build_create_kwargs()
+        assert kwargs["max_tokens"] == 16384
 
 
 @requires_gemini_api_key
@@ -167,6 +178,30 @@ class TestModelInfo:
     def test_get_flaky_reason_for_non_flaky_model(self):
         reason = get_flaky_reason("gpt-4.1-mini")
         assert reason is None or reason == ""
+
+    def test_calculate_cost_known_models(self):
+        assert calculate_cost("gpt-5.2", 1_000_000, 0) == 1.75
+        assert calculate_cost("gpt-5.2", 0, 1_000_000) == 14.0
+        assert calculate_cost("claude-haiku-4-5", 1_000_000, 1_000_000) == 6.0
+        assert calculate_cost("gemini-2.5-pro", 1_000_000, 1_000_000) == 11.25
+
+    def test_get_max_context_length_known_models(self):
+        assert get_max_context_length("gpt-5.2") == 400000
+        assert get_max_context_length("gpt-4.1-mini") == 128000
+        assert get_max_context_length("claude-opus-4-6") == 200000
+        assert get_max_context_length("gemini-2.5-pro") == 1048576
+
+    def test_get_max_context_length_unknown_model_raises(self):
+        with pytest.raises(KeyError, match="not found"):
+            get_max_context_length("nonexistent-model-xyz")
+
+    def test_all_models_have_valid_context_and_pricing(self):
+        for name, info in MODEL_INFO.items():
+            assert info.context_length > 0, f"{name}: invalid context_length"
+            assert info.input_price_per_1M >= 0, f"{name}: invalid input_price"
+            assert info.output_price_per_1M >= 0, f"{name}: invalid output_price"
+            if info.is_embedding_supported:
+                assert info.output_price_per_1M == 0.0, f"{name}: embedding should have 0 output"
 
     def test_text_embedding_004_is_gemini(self):
         from kiss.core.models.gemini_model import GeminiModel

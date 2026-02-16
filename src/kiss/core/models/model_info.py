@@ -126,7 +126,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-4o": _mi(128000, 2.50, 10.00),
     "gpt-4o-2024-05-13": _mi(128000, 5.00, 15.00),
     "gpt-4o-mini": _mi(128000, 0.15, 0.60),
+    "gpt-4o-mini-realtime-preview": _mi(128000, 0.60, 2.40, fc=False),
+    "gpt-4o-realtime-preview": _mi(128000, 4.00, 16.00, fc=False),
+    "gpt-4o-transcribe-diarize": _mi(128000, 2.50, 10.00, fc=False),
     "gpt-4-turbo": _mi(128000, 10.00, 30.00),
+    "gpt-4.5-preview": _mi(128000, 2.50, 10.00),  # Deprecated
     "gpt-4": _mi(8192, 30.00, 60.00),
     # OpenAI realtime and audio models (Standard tier text token pricing)
     "gpt-realtime": _mi(128000, 4.00, 16.00, fc=False),
@@ -171,6 +175,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
     "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),  # Snapshot version
     # Claude 3.x series (legacy - check docs.anthropic.com/en/docs/about-claude/model-deprecations)
+    "claude-3-5-haiku": _mi(200000, 0.80, 4.00),  # Alias for claude-3-5-haiku-20241022
     "claude-3-5-haiku-20241022": _mi(200000, 0.80, 4.00),  # Deprecated, retiring Feb 19, 2026
     "claude-3-haiku-20240307": _mi(200000, 0.25, 1.25),
     # ==========================================================================
@@ -187,7 +192,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-2.5-flash-lite-preview-09-2025": _mi(1048576, 0.10, 0.40, fc=False),
     # Gemini 2.0 models
     "gemini-2.0-flash": _mi(1048576, 0.10, 0.40),
-    "gemini-2.0-flash-lite": _mi(1048576, 0.075, 0.30),
+    "gemini-2.0-flash-lite": _mi(1048576, 0.08, 0.30),
     # Gemini 1.5 models (legacy but still available)
     "gemini-1.5-pro": _mi(2097152, 1.25, 5.00),  # 2M context window
     "gemini-1.5-flash": _mi(1048576, 0.075, 0.30),
@@ -200,6 +205,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # Together AI models - Llama series (pricing from together.ai/pricing)
     # ==========================================================================
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": _mi(1048576, 0.27, 0.85),
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": _mi(327680, 0.18, 0.59),
     "meta-llama/Llama-3.3-70B-Instruct-Turbo": _mi(131072, 0.88, 0.88, fc=False),
     "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),
     "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),
@@ -245,6 +251,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # SLOW: thinking model
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
     # Z.AI GLM models
+    "zai-org/GLM-5.0": _mi(200000, 1.00, 3.20),  # 744B MoE (GLM-5-FP4 pricing from together.ai)
     "zai-org/GLM-4.5-Air-FP8": _mi(131072, 0.20, 1.10),
     "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),  # Enhanced agentic coding
     # OpenAI GPT-OSS models
@@ -268,6 +275,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "BAAI/bge-base-en-v1.5": _emb(512, 0.01),  # 768 dimensions
     "Alibaba-NLP/gte-modernbert-base": _emb(8192, 0.08),  # 768 dimensions
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),  # 1024 dimensions
+    # ==========================================================================
+    # OpenRouter models - Aurora (free cloaked reasoning model)
+    # ==========================================================================
+    "openrouter/aurora-alpha": _mi(128000, 0.00, 0.00, fc=False),  # Free cloaked reasoning
     # ==========================================================================
     # OpenRouter models - AI21 (unreliable function calling)
     # ==========================================================================
@@ -310,7 +321,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-opus-4": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.1": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.5": _mi(200000, 5.00, 25.00),
-    "openrouter/anthropic/claude-opus-4.6": _mi(200000, 5.00, 25.00),
+    "openrouter/anthropic/claude-opus-4.6": _mi(1000000, 5.00, 25.00),  # 1M context
     # ==========================================================================
     # OpenRouter models - Baidu ERNIE
     # FLAKY: ernie-4.5-21b-a3b has unreliable function calling (exceeds step limit)
@@ -370,7 +381,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - Google (pricing from ai.google.dev/pricing)
     # ==========================================================================
     "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
-    "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.075, 0.30),
+    "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.08, 0.30),
     "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "openrouter/google/gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),  # Unreliable FC
     "openrouter/google/gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
@@ -535,6 +546,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-coder-flash": _mi(128000, 0.30, 1.50),
     "openrouter/qwen/qwen3-coder-plus": _mi(128000, 1.00, 5.00, fc=False),
     "openrouter/qwen/qwen3-coder-next": _mi(262144, 0.07, 0.30),  # Latest agentic coding model
+    "openrouter/qwen/qwen3-max-thinking": _mi(262144, 1.20, 6.00, fc=False),  # SLOW: thinking
     "openrouter/qwen/qwen3-max": _mi(256000, 1.20, 6.00),
     "openrouter/qwen/qwen3-next-80b-a3b-instruct": _mi(262144, 0.06, 0.60),
     "openrouter/qwen/qwen3-vl-32b-instruct": _mi(262144, 0.50, 1.50, fc=False),  # Vision model
@@ -547,7 +559,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - StepFun
     # ==========================================================================
     "openrouter/stepfun-ai/step3": _mi(65536, 0.57, 1.42, fc=False),
-    "openrouter/stepfun-ai/step-3.5-flash": _mi(256000, 0.00, 0.00, fc=False),  # Free
+    "openrouter/stepfun-ai/step-3.5-flash": _mi(256000, 0.10, 0.30, fc=False),
     # ==========================================================================
     # OpenRouter models - Upstage
     # ==========================================================================
@@ -574,6 +586,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Z.AI GLM
     # ==========================================================================
+    "openrouter/z-ai/glm-5": _mi(203000, 1.00, 3.20),  # 744B MoE (GLM-5-FP4 pricing)
     "openrouter/z-ai/glm-4-32b": _mi(128000, 0.10, 0.10),
     "openrouter/z-ai/glm-4.5": _mi(131072, 0.35, 1.55),
     "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.05, 0.22),
@@ -581,7 +594,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-4.6": _mi(202752, 0.35, 1.50, fc=False),  # Unreliable FC
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
     "openrouter/z-ai/glm-4.7": _mi(202752, 0.40, 1.50),
-    "openrouter/z-ai/glm-4.7-flash": _mi(200000, 0.07, 0.40),
+    "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
     # ==========================================================================
     # OpenRouter models - OpenAI (additional)
     # ==========================================================================
@@ -711,6 +724,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - MiniMax (additional)
     # ==========================================================================
     "openrouter/minimax/minimax-01": _mi(1000192, 0.20, 1.10, fc=False),
+    "openrouter/minimax/minimax-m2.5": _mi(204800, 0.30, 1.20),
     # ==========================================================================
     # OpenRouter models - Mistral (additional)
     # ==========================================================================

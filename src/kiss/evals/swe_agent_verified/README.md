@@ -6,6 +6,8 @@ This module provides integration with the [SWE-bench Verified](https://www.swebe
 
 SWE-bench (Software Engineering Benchmark) evaluates language models on their ability to resolve real-world GitHub issues. Given a codebase and an issue description, the model must generate a patch that resolves the described problem.
 
+The default solver prompt in `run_swebench.py` is intentionally compact and issue-focused. It avoids prescriptive command recipes so the agent can adapt workflow to each repository and issue.
+
 **Key Features:**
 
 - **500 Verified Instances**: Human-validated samples ensuring solvability

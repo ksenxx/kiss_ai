@@ -91,6 +91,9 @@ GEPA(
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 2,
     progress_callback: Callable[[GEPAProgress], None] | None = None,
+    batched_agent_wrapper: Callable[
+        [str, list[dict[str, str]]], list[tuple[str, list[Any]]]
+    ] | None = None,
 )
 ```
 
@@ -110,6 +113,9 @@ GEPA(
 - `max_merge_invocations`: Maximum merge attempts per optimization run (default: 5)
 - `merge_val_overlap_floor`: Minimum shared validation instances for merge (default: 2)
 - `progress_callback`: Optional callback function called with `GEPAProgress` during optimization
+- `batched_agent_wrapper`: Optional function `(prompt_template, examples) -> [(result, trajectory)]`.
+  When provided, GEPA evaluates a minibatch through one batched call instead of one call per example.
+  This is useful for prompt-merging inference pipelines that combine multiple examples into one API request.
 
 ### `GEPA.optimize`
 
@@ -180,9 +186,30 @@ class PromptCandidate:
 - **Instance-Level Pareto**: Tracks best candidate per validation instance
 - **Mutation Gating**: Only accepts mutations that don't degrade
 - **Weighted Selection**: Parents selected by number of instance wins
+- **Optional Batched Inference**: Supports `batched_agent_wrapper` for prompt-merging and higher throughput
 - **Trajectory-Based Reflection**: Uses agent trajectories (tool calls, reasoning steps) to guide prompt improvements
 - **Structural 3-Way Merge**: Combines complementary candidates using ancestry tracking and conflict resolution
 - **Progress Callbacks**: Real-time visibility into optimization progress for UI integration
+
+## Optional Batched Wrapper
+
+If your inference stack can merge prompts before the API call, pass `batched_agent_wrapper`:
+
+```python
+def batched_agent_wrapper(
+    prompt_template: str,
+    examples: list[dict[str, str]],
+) -> list[tuple[str, list]]:
+    # Merge all example prompts into one API call, then split outputs back
+    # into one (result, trajectory) tuple per example.
+    ...
+
+gepa = GEPA(
+    agent_wrapper=agent_wrapper,  # fallback for non-batched mode
+    batched_agent_wrapper=batched_agent_wrapper,
+    initial_prompt_template=initial_prompt,
+)
+```
 
 ## Progress Callback
 

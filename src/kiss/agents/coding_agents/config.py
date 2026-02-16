@@ -11,7 +11,7 @@ class RelentlessCodingAgentConfig(BaseModel):
         description="LLM model to use",
     )
     max_steps: int = Field(
-        default=200,
+        default=25,
         description="Maximum steps for the Relentless Coding Agent",
     )
     max_budget: float = Field(

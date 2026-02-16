@@ -63,6 +63,7 @@ SLOW_MODELS = {
     "openrouter/qwen/qwq-32b",
     "openrouter/qwen/qwen-plus-2025-07-28:thinking",
     "openrouter/qwen/qwen3-235b-a22b-thinking-2507",
+    "openrouter/qwen/qwen3-max-thinking",
     "openrouter/qwen/qwen3-30b-a3b-thinking-2507",
     "openrouter/qwen/qwen3-next-80b-a3b-thinking",
     "openrouter/qwen/qwen3-vl-235b-a22b-thinking",
