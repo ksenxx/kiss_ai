@@ -144,15 +144,16 @@ IMO_2025_PROBLEMS: dict[int, IMOProblem] = {
         day=1,
         problem_type="determine",
         validation_criteria=(
-            "The solution must correctly determine that c = 2. Specifically:\n"
-            "1. Show c >= 2 by exhibiting a bonza function f with f(n) = 2n for some n "
-            "(e.g., f(2) = 4, and f(odd) = 1, with appropriate definition for other evens).\n"
-            "2. Show c <= 2 by proving f(n) <= 2n for all bonza f and all n.\n"
+            "The solution must correctly determine that c = 4. Specifically:\n"
+            "1. Show c >= 4 by exhibiting a bonza function with f(4) = 16 = 4*4 "
+            "(e.g., f(n) = 1 for odd n, f(4) = 16, f(n) = 2 for even n != 4).\n"
+            "2. Show c <= 4 by proving f(n) <= 4n for all bonza f and all n.\n"
             "3. The proof that f(a) | b^a - f(b)^{f(a)} constrains f must be rigorous.\n"
-            "4. Key steps include: showing f(p) | p^p for primes p, analyzing f at primes, "
-            "using properties of orders and Fermat/Euler to bound f."
+            "4. Key steps include: showing f(n) | n^n (from P(n,n)), that f(p) = 1 for "
+            "odd primes p (unless f = id), that f(n) is always a power of 2, and that "
+            "f(n) <= 2^{v_2(n)+2} <= 4n where v_2 is the 2-adic valuation."
         ),
-        known_answer="c = 2",
+        known_answer="c = 4",
     ),
     4: IMOProblem(
         number=4,
@@ -211,17 +212,20 @@ IMO_2025_PROBLEMS: dict[int, IMOProblem] = {
         day=2,
         problem_type="determine",
         validation_criteria=(
-            "The solution must correctly determine the minimum number of tiles is 1013. "
-            "The proof must:\n"
-            "1. Show that 1013 tiles suffice by providing a valid construction.\n"
-            "2. Show that fewer than 1013 tiles are not sufficient (lower bound).\n"
+            "The solution must correctly determine the minimum number of tiles is 2112. "
+            "Since 2025 = 45^2, the answer is 45^2 + 2*45 - 3 = 2112. In general for "
+            "n = k^2, the answer is k^2 + 2k - 3. The proof must:\n"
+            "1. Show that 2112 tiles suffice by providing a valid construction (e.g., "
+            "(k-1)^2 = 1936 tiles of size k x k plus 4(k-1) = 176 boundary tiles).\n"
+            "2. Show that fewer than 2112 tiles are not sufficient (lower bound), e.g., "
+            "using the Erdos-Szekeres theorem on the permutation of uncovered cells.\n"
             "3. The construction must explicitly satisfy: each row and each column has "
             "exactly one uncovered unit square, tiles are rectangles with sides on grid "
             "lines, no overlapping.\n"
             "NOTE: This is the hardest problem. The paper's pipeline (arXiv:2507.15855) "
             "failed to solve this problem with any of the three leading models."
         ),
-        known_answer="1013",
+        known_answer="2112",
     ),
 }
 

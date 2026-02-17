@@ -26,4 +26,6 @@ artifacts/
 .coverage_per_test
 *.log
 *.txt
+*.png
+
 

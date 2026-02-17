@@ -230,6 +230,103 @@ Configuration dataclass with sensible defaults:
 
 ______________________________________________________________________
 
+## Pseudocode
+
+```
+ORCHESTRATOR.start():
+    load_state(last_timestamp, last_agent_timestamp, sessions) from DB
+    create directories: data_dir, groups_dir, store_dir
+    channel.connect()
+    scheduler.start()                              // background thread: poll for due tasks
+    ipc_watcher.start()                            // background thread: watch for IPC files
+    recover_pending_messages()                      // re-enqueue any unprocessed messages
+    spawn message_loop thread                       // polls every poll_interval (2s)
+
+ORCHESTRATOR.poll_messages_once():
+    messages, new_ts = DB.get_new_messages(registered_jids, since=last_timestamp)
+    if no messages: return 0
+    last_timestamp = new_ts; save_state()
+    group messages by chat_jid
+    for each (chat_jid, group_msgs):
+        if non-main group AND requires_trigger:
+            if no message matches trigger_pattern (e.g. "@Andy"): skip
+        group_queue.enqueue_message_check(chat_jid)
+    return count of enqueued groups
+
+GROUP_QUEUE.enqueue_message_check(jid):
+    if group already active: mark pending_messages = true; return
+    if active_count >= max_concurrent: add to waiting list (FIFO); return
+    acquire slot (active_count++); spawn worker thread → worker_messages(jid)
+
+GROUP_QUEUE.worker_messages(jid):
+    success = orchestrator.process_group_messages(jid)
+    if success: reset retry_count
+    else:       schedule_retry(jid)                // exponential backoff, max 5 retries
+    release_and_drain(jid)                         // free slot, start next waiting group
+
+GROUP_QUEUE.release_and_drain(jid):
+    state.active = false; active_count--
+    if group has pending_tasks:  pop and dispatch next task
+    elif group has pending_msgs: dispatch message processing
+    else: pop next group from global waiting list and dispatch
+
+ORCHESTRATOR.process_group_messages(chat_jid):
+    group = registered_groups[chat_jid]
+    missed = DB.get_messages_since(chat_jid, last_agent_timestamp[chat_jid])
+    if no missed messages: return true
+    if non-main AND requires_trigger AND no trigger found: return true
+    formatted_xml = ROUTER.format_messages(missed)
+    save cursor: last_agent_timestamp[chat_jid] = missed[-1].timestamp
+    output = AGENT_RUNNER.run_agent(group_name, group_folder, formatted_xml)
+    if error: rollback cursor; return false
+    if output.result:
+        text = ROUTER.format_outbound(output.result)   // strip <internal> tags
+        channel.send_message(chat_jid, text)
+    return true
+
+AGENT_RUNNER.run_agent(group_name, group_folder, formatted_messages):
+    memory = read("{groups_dir}/{group_folder}/MEMORY.md") or ""
+    prompt = SYSTEM_PROMPT.format(assistant_name, group_name, memory, formatted_messages)
+    if agent_fn provided: return agent_fn(prompt)       // mock/custom agent
+    else: return KISSAgent.run(model=model_name, prompt=prompt)
+
+ROUTER.format_messages(messages):                       // list[Message] → XML string
+    return "<messages>" + for each m: "<message sender=.. ts=..>{content}</message>" + "</messages>"
+
+ROUTER.format_outbound(raw_text):                       // strip internal reasoning
+    return strip_regex("<internal>...</internal>", raw_text).strip()
+
+TASK_SCHEDULER.poll_once():                             // runs every scheduler_poll_interval (60s)
+    due_tasks = DB.get_due_tasks(now)
+    for each task in due_tasks:
+        if task.status != "active": skip
+        synthetic_msg = Message(sender="scheduler", content=task.prompt)
+        output = AGENT_RUNNER.run_agent(group_name, group_folder, format([synthetic_msg]))
+        if output.result: send_message(task.chat_jid, format_outbound(result))
+        DB.log_task_run(task_id, duration, status, result)
+        next_run = compute_next_run(task.schedule_type, task.schedule_value)
+        DB.update_task_after_run(task_id, next_run)     // once-tasks → status="completed"
+
+IPC_WATCHER.poll_once():                                // runs every ipc_poll_interval (1s)
+    for each group_dir in {data_dir}/ipc/:
+        is_main = (group_dir.name == main_group_folder)
+        for each JSON file in group_dir/messages/:
+            if authorized(is_main, source_group, target_jid):
+                send_message(target_jid, text)
+            else: log "blocked unauthorized message"
+            delete file (or move to errors/ on failure)
+        for each JSON file in group_dir/tasks/:
+            match data.type:
+                "schedule_task"  → validate, compute next_run, DB.create_task()
+                "pause_task"     → DB.update_task(status="paused")
+                "resume_task"    → DB.update_task(status="active")
+                "cancel_task"    → DB.delete_task()
+                "register_group" → DB.set_registered_group() [main only]
+            delete file (or move to errors/ on failure)
+```
+
+______________________________________________________________________
+
 ## Message Flow
 
 ```
