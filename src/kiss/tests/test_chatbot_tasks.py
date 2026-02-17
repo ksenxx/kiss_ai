@@ -45,7 +45,7 @@ class TestHistoryFileOps(unittest.TestCase):
         assert chatbot._load_history() == []
 
     def test_save_truncates_to_max(self) -> None:
-        tasks = [f"task{i}" for i in range(200)]
+        tasks = [f"task{i}" for i in range(chatbot.MAX_HISTORY + 200)]
         chatbot._save_history(tasks)
         loaded = chatbot._load_history()
         assert len(loaded) == chatbot.MAX_HISTORY

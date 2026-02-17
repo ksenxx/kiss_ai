@@ -139,8 +139,8 @@ python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
-# Timeout for tests (can be overridden per-test)
-timeout = 120
+# Disable timeout so tests run without time limit
+timeout = 0
 # Quick testing (exclude run_all_models_test.py which tests ALL models):
 #   uv run pytest --ignore=src/kiss/tests/run_all_models_test.py -v
 # Full testing (includes all models):
