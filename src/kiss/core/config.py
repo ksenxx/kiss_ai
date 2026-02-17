@@ -51,6 +51,10 @@ class APIKeysConfig(BaseModel):
         default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""),
         description="OpenRouter API key (can also be set via OPENROUTER_API_KEY env var)",
     )
+    MINIMAX_API_KEY: str = Field(
+        default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""),
+        description="MiniMax API key (can also be set via MINIMAX_API_KEY env var)",
+    )
 
 
 class AgentConfig(BaseModel):

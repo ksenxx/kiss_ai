@@ -127,7 +127,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-4o-2024-05-13": _mi(128000, 5.00, 15.00),
     "gpt-4o-mini": _mi(128000, 0.15, 0.60),
     "gpt-4o-mini-realtime-preview": _mi(128000, 0.60, 2.40, fc=False),
-    "gpt-4o-realtime-preview": _mi(128000, 4.00, 16.00, fc=False),
+    "gpt-4o-mini-audio-preview": _mi(128000, 0.15, 0.60, fc=False),
+    "gpt-4o-realtime-preview": _mi(128000, 5.00, 20.00, fc=False),
     "gpt-4o-transcribe-diarize": _mi(128000, 2.50, 10.00, fc=False),
     "gpt-4-turbo": _mi(128000, 10.00, 30.00),
     "gpt-4.5-preview": _mi(128000, 2.50, 10.00),  # Deprecated
@@ -168,6 +169,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "claude-opus-4-1-20250805": _mi(200000, 15.00, 75.00),  # Snapshot version
     "claude-opus-4": _mi(200000, 15.00, 75.00),
     "claude-opus-4-20250514": _mi(200000, 15.00, 75.00),  # Snapshot version
+    "claude-sonnet-4-6": _mi(200000, 3.00, 15.00),  # 1M beta via header
     "claude-sonnet-4-5": _mi(200000, 3.00, 15.00),  # 1M beta via header
     "claude-sonnet-4-5-20250929": _mi(200000, 3.00, 15.00),  # Snapshot version
     "claude-sonnet-4": _mi(200000, 3.00, 15.00),  # 1M beta via header
@@ -192,7 +194,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-2.5-flash-lite-preview-09-2025": _mi(1048576, 0.10, 0.40, fc=False),
     # Gemini 2.0 models
     "gemini-2.0-flash": _mi(1048576, 0.10, 0.40),
-    "gemini-2.0-flash-lite": _mi(1048576, 0.08, 0.30),
+    "gemini-2.0-flash-lite": _mi(1048576, 0.075, 0.30),
     # Gemini 1.5 models (legacy but still available)
     "gemini-1.5-pro": _mi(2097152, 1.25, 5.00),  # 2M context window
     "gemini-1.5-flash": _mi(1048576, 0.075, 0.30),
@@ -201,6 +203,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     "gemini-embedding-001": _emb(8192, 0.15),  # Newest embedding model
     "text-embedding-004": _emb(2048, 0.00),  # 768 dimensions, free tier
+    # ==========================================================================
+    # MiniMax models (direct API - pricing from api.minimax.chat)
+    # ==========================================================================
+    # M2.5 series (230B MoE, 10B active params, 1M context window)
+    "minimax-m2.5": _mi(1000000, 0.15, 1.20),  # Standard: 50 TPS
+    "minimax-m2.5-lightning": _mi(1000000, 0.30, 2.40),  # Lightning: 100 TPS
     # ==========================================================================
     # Together AI models - Llama series (pricing from together.ai/pricing)
     # ==========================================================================
@@ -316,6 +324,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-3-haiku": _mi(200000, 0.25, 1.25),
     "openrouter/anthropic/claude-3.5-haiku": _mi(200000, 0.80, 4.00),  # Deprecated
     "openrouter/anthropic/claude-sonnet-4": _mi(200000, 3.00, 15.00),
+    "openrouter/anthropic/claude-sonnet-4.6": _mi(200000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.5": _mi(200000, 3.00, 15.00),
     "openrouter/anthropic/claude-haiku-4.5": _mi(200000, 1.00, 5.00),
     "openrouter/anthropic/claude-opus-4": _mi(200000, 15.00, 75.00),
@@ -1001,6 +1010,19 @@ def model(
         return GeminiModel(
             model_name=model_name,
             api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
+            model_config=model_config,
+            token_callback=token_callback,
+        )
+    # MiniMax models (direct MiniMax API, OpenAI-compatible)
+    elif model_name.startswith("minimax-"):
+        if OpenAICompatibleModel is None:
+            raise KISSError(
+                "OpenAI SDK not installed. Install 'openai' to use MiniMax models."
+            )
+        return OpenAICompatibleModel(
+            model_name=model_name,
+            base_url="https://api.minimax.chat/v1",
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.MINIMAX_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
         )

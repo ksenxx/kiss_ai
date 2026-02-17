@@ -16,9 +16,11 @@ from kiss.core.models.model_info import (
     is_model_flaky,
     model,
 )
+from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,
+    requires_minimax_api_key,
     requires_openai_api_key,
 )
 
@@ -209,6 +211,56 @@ class TestModelInfo:
         m = model("text-embedding-004")
         assert isinstance(m, GeminiModel)
         assert m.model_name == "text-embedding-004"
+
+    def test_minimax_m2_5_in_model_info(self):
+        assert "minimax-m2.5" in MODEL_INFO
+        info = MODEL_INFO["minimax-m2.5"]
+        assert info.context_length == 1000000
+        assert info.input_price_per_1M == 0.15
+        assert info.output_price_per_1M == 1.20
+        assert info.is_function_calling_supported is True
+        assert info.is_generation_supported is True
+        assert info.is_embedding_supported is False
+
+    def test_minimax_m2_5_lightning_in_model_info(self):
+        assert "minimax-m2.5-lightning" in MODEL_INFO
+        info = MODEL_INFO["minimax-m2.5-lightning"]
+        assert info.context_length == 1000000
+        assert info.input_price_per_1M == 0.30
+        assert info.output_price_per_1M == 2.40
+        assert info.is_function_calling_supported is True
+
+    def test_minimax_m2_5_openrouter_in_model_info(self):
+        assert "openrouter/minimax/minimax-m2.5" in MODEL_INFO
+
+    def test_minimax_m2_5_model_routing(self):
+        m = model("minimax-m2.5")
+        assert isinstance(m, OpenAICompatibleModel)
+        assert m.model_name == "minimax-m2.5"
+
+    def test_minimax_m2_5_lightning_model_routing(self):
+        m = model("minimax-m2.5-lightning")
+        assert isinstance(m, OpenAICompatibleModel)
+        assert m.model_name == "minimax-m2.5-lightning"
+
+    def test_minimax_m2_5_calculate_cost(self):
+        assert calculate_cost("minimax-m2.5", 1_000_000, 0) == 0.15
+        assert calculate_cost("minimax-m2.5", 0, 1_000_000) == 1.20
+        assert abs(calculate_cost("minimax-m2.5", 1_000_000, 1_000_000) - 1.35) < 1e-9
+
+    def test_minimax_m2_5_lightning_calculate_cost(self):
+        assert calculate_cost("minimax-m2.5-lightning", 1_000_000, 0) == 0.30
+        assert calculate_cost("minimax-m2.5-lightning", 0, 1_000_000) == 2.40
+
+    def test_minimax_m2_5_context_length(self):
+        assert get_max_context_length("minimax-m2.5") == 1000000
+        assert get_max_context_length("minimax-m2.5-lightning") == 1000000
+
+    def test_minimax_api_key_routing(self):
+        from kiss.tests.conftest import get_required_api_key_for_model
+
+        assert get_required_api_key_for_model("minimax-m2.5") == "MINIMAX_API_KEY"
+        assert get_required_api_key_for_model("minimax-m2.5-lightning") == "MINIMAX_API_KEY"
 
 
 if __name__ == "__main__":

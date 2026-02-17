@@ -513,6 +513,10 @@ The Docker manager automatically handles image pulling, container lifecycle, and
 kiss/
 ├── src/kiss/
 │   ├── agents/          # Agent implementations
+│   │   ├── assistant/              # Assistant agent with coding + browser tools
+│   │   │   ├── assistant_agent.py      # AssistantAgent with coding and browser automation
+│   │   │   ├── chatbot.py              # Browser-based chatbot UI for AssistantAgent
+│   │   │   └── config.py               # Assistant agent configuration
 │   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
 │   │   │   ├── improver_agent.py       # Agent improvement through generations
@@ -559,6 +563,7 @@ kiss/
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
 │   │   ├── useful_tools.py    # UsefulTools class with path-restricted Read, Write, Bash, Edit, search_web, fetch_url
+│   │   ├── web_use_tool.py    # WebUseTool class with Playwright-based browser automation
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface with TokenCallback streaming support
 │   │       ├── gemini_model.py    # Gemini model implementation
@@ -617,7 +622,12 @@ kiss/
 │   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
 │   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter browser output
 │   │   ├── test_search_web.py
-│   │   └── test_useful_tools.py
+│   │   ├── test_useful_tools.py
+│   │   ├── test_web_use_tool.py             # Tests for WebUseTool browser automation
+│   │   ├── test_chatbot_tasks.py            # Tests for chatbot task handling
+│   │   ├── integration_test_assistant_agent.py  # Integration tests for AssistantAgent
+│   │   ├── integration_test_google_search.py    # Integration tests for Google search
+│   │   └── integration_test_web_use_tool.py     # Integration tests for WebUseTool
 │   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
@@ -660,7 +670,7 @@ __version__ = "0.2.0"  # Update to new version
 
 Configuration is managed through environment variables and the `DEFAULT_CONFIG` object:
 
-- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, and/or `OPENROUTER_API_KEY` environment variables
+- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, and/or `MINIMAX_API_KEY` environment variables
 - **Agent Settings**: Modify `DEFAULT_CONFIG.agent` in `src/kiss/core/config.py`:
   - `max_steps`: Maximum iterations in the ReAct loop (default: 100)
   - `verbose`: Enable verbose output (default: True)
@@ -674,15 +684,15 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
   - `model_name`: Model for task execution (default: "claude-opus-4-6")
   - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 200)
-  - `max_steps`: Maximum steps per sub-session (default: 200)
+  - `max_steps`: Maximum steps per sub-session (default: 25)
   - `max_budget`: Maximum budget in USD (default: 200.0)
 - **IMO Agent Settings**: Modify `DEFAULT_CONFIG.imo_agent` in `src/kiss/agents/imo_agent/config.py`:
-  - `solver_model`: Model for solving IMO problems (default: "o3")
+  - `solver_model`: Model for solving IMO problems (default: "gemini-3-pro-preview")
   - `verifier_model`: Model for verifying solutions (default: "gemini-2.5-pro")
   - `validator_model`: Model for independent validation against known answers (default: "gemini-2.5-pro")
-  - `max_refinement_rounds`: Max verification-refinement iterations per attempt (default: 5)
-  - `num_verify_passes`: Number of verification passes required to accept a solution (default: 3)
-  - `max_attempts`: Max independent attempts per problem (default: 3)
+  - `max_refinement_rounds`: Max verification-refinement iterations per attempt (default: 2)
+  - `num_verify_passes`: Number of verification passes required to accept a solution (default: 1)
+  - `max_attempts`: Max independent attempts per problem (default: 1)
   - `max_budget`: Maximum budget in USD per problem (default: 50.0)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
@@ -755,8 +765,17 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 
 ### Chatbot
 
-- `uv run chatbot` - Launch the browser-based chatbot UI
+- `uv run chatbot` - Launch the browser-based chatbot UI for RelentlessCodingAgent
 - `uv run chatbot --work-dir ./my-project` - Launch with custom working directory
+
+### Assistant
+
+- `uv run assistant` - Launch the browser-based assistant UI (coding + browser automation)
+- `uv run assistant --work-dir ./my-project` - Launch with custom working directory
+
+### AlgoTune
+
+- `uv run algotune` - Run the AlgoTune benchmark
 
 ### Cleanup
 
