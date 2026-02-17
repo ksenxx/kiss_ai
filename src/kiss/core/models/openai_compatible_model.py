@@ -228,7 +228,7 @@ class OpenAICompatibleModel(Model):
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
-            timeout=600.0,
+            timeout=1800.0,
         )
         self.conversation = [{"role": "user", "content": prompt}]
 

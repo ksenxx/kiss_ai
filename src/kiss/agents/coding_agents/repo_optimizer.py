@@ -11,23 +11,39 @@ DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 DEFAULT_AGENT_CODE = "src/kiss/agents/coding_agents/relentless_coding_agent.py"
 DEFAULT_MODEL = "claude-opus-4-6"
 
+# Once the command succeeds and solves the task successfully,
+# analyze the output and optimize {agent_code}
+# so that the agent is able to solve the task successfully (1st priority),
+# faster (2nd priority) and with less cost (3rd priority).
+
+# , and
+# until the running time and the cost are reduced significantly.
+# DO NOT STOP CORRECTING THE AGENT CODE UNTIL IT IS SUCCESSFUL AT SOLVING THE TASK.
+# DO NOT KILL the current process running repo_optimizer.py.
+
+
 TASK_TEMPLATE = """
 Can you run the agent code by executing the command 'uv run {agent_code}'
-in the background so that I can see its output and you can continue
-to monitor the output in real time, and correct the agent code if needed?
+in the background so that you can continue to monitor the output in real time,
+and correct the agent code if needed?  I MUST be able to see the agent output
+in real time.
+
 If you observe any repeated errors in the output or the agent is not able
 to finish the task successfully, please fix the agent code and run the
-command again.  Once the command succeeds and solves the task successfully,
-analyze the output and optimize {agent_code}
-so that the agent is able to solve the task successfully (1st priority),
-faster (2nd priority) and with less cost (3rd priority).
-Run the agent on the task to validate that it is successful in solving the task
-completely and faster with lower cost.  If validation fails, roll back the changes
-and try again.
-Keep repeating the process until the agent can solve the task successfully, and
-until the running time and the cost are reduced significantly.
-DO NOT STOP CORRECTING THE AGENT CODE UNTIL IT IS SUCCESSFUL AT SOLVING THE TASK.
-DO NOT KILL the current process running repo_optimizer.py.
+command again.  Repeat the process until the agent can solve the task successfully.
+
+After the agent code manages to solve the task successfully, run the agent again
+and monitor its output in real time.  Check for opportunities to optimize the agent code
+for higher speed and lower cost.  If you find any opportunities, optimize the agent code
+and run the agent again.  Repeat the process until the agent can solve the task successfully,
+at higer speed and lower cost.
+
+While editing the agent code, make sure that the agent does not get to see any
+validation criterion or the answers to the problems in any possible way.
+Even feedback from a validation agent must not be used by the agent.  Basically,
+make sure that the agent is not aware of the validation criterion or the answers
+to the problems in any possible way.
+
 
 ## Instructions:
 1. Do NOT change the agent's interface or streaming mechanism
