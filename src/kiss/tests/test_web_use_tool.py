@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.web_use_tool import WebUseTool
+from kiss.core.web_use_tool import KISS_PROFILE_DIR, WebUseTool
 
 FORM_PAGE = b"""<!DOCTYPE html>
 <html><head><title>Test Form</title></head>
@@ -108,7 +108,7 @@ def http_server():
 
 @pytest.fixture(scope="module")
 def web_tool():
-    tool = WebUseTool(browser_type="chromium", headless=True)
+    tool = WebUseTool(browser_type="chromium", headless=True, user_data_dir=None)
     yield tool
     tool.close()
 
@@ -354,7 +354,7 @@ class TestScreenshot:
 
 class TestBrowserLifecycle:
     def test_lazy_init(self):
-        tool = WebUseTool()
+        tool = WebUseTool(user_data_dir=None)
         assert tool._page is None
         assert tool._browser is None
 
@@ -367,12 +367,12 @@ class TestBrowserLifecycle:
         assert "Page: Test Form" in result
 
     def test_close_when_never_opened(self):
-        tool = WebUseTool()
+        tool = WebUseTool(user_data_dir=None)
         result = tool.close()
         assert "Browser closed" in result
 
     def test_get_tools_returns_all_methods(self):
-        tool = WebUseTool()
+        tool = WebUseTool(user_data_dir=None)
         tools = tool.get_tools()
         names = {t.__name__ for t in tools}
         assert names == {
@@ -387,7 +387,7 @@ class TestBrowserLifecycle:
 
     def test_constructor_accepts_browser_types(self):
         for browser_type in ["chromium", "firefox", "webkit"]:
-            tool = WebUseTool(browser_type=browser_type, headless=True)
+            tool = WebUseTool(browser_type=browser_type, headless=True, user_data_dir=None)
             assert tool.browser_type == browser_type
             assert tool._page is None
 
@@ -397,6 +397,38 @@ class TestDOMTreeTruncation:
         web_tool.go_to_url(http_server + "/")
         result = web_tool._get_dom_tree(max_chars=50)
         assert "... [truncated]" in result
+
+
+class TestKissProfile:
+    def test_kiss_profile_dir_is_under_home(self):
+        assert ".kiss" in KISS_PROFILE_DIR
+        assert "browser_profile" in KISS_PROFILE_DIR
+
+    def test_default_constructor_uses_kiss_profile(self):
+        tool = WebUseTool()
+        assert tool.user_data_dir == KISS_PROFILE_DIR
+
+    def test_explicit_none_gives_no_profile(self):
+        tool = WebUseTool(user_data_dir=None)
+        assert tool.user_data_dir is None
+
+    def test_explicit_path_is_used(self):
+        tool = WebUseTool(user_data_dir="/tmp/custom_profile")
+        assert tool.user_data_dir == "/tmp/custom_profile"
+
+    def test_no_profile_uses_regular_browser(self, http_server, web_tool):
+        web_tool.go_to_url(http_server + "/")
+        assert web_tool._context is not None
+        assert web_tool._browser is not None
+
+    def test_user_data_dir_stored_correctly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebUseTool(
+                browser_type="chromium", headless=True, user_data_dir=tmpdir
+            )
+            assert tool.user_data_dir == tmpdir
+            assert tool._browser is None
+            assert tool._context is None
 
 
 if __name__ == "__main__":

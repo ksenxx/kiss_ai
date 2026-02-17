@@ -6,6 +6,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+_AUTO_DETECT = "auto"
+KISS_PROFILE_DIR = str(Path.home() / ".kiss" / "browser_profile")
+
 DOM_EXTRACTION_JS = """
 (() => {
     const INTERACTIVE_TAGS = new Set([
@@ -203,12 +206,16 @@ class WebUseTool:
         browser_type: str = "chromium",
         headless: bool = False,
         viewport: tuple[int, int] = (1280, 900),
-        user_data_dir: str | None = None,
+        user_data_dir: str | None = _AUTO_DETECT,
     ) -> None:
         self.browser_type = browser_type
         self.headless = headless
         self.viewport = viewport
-        self.user_data_dir = user_data_dir
+        self.user_data_dir: str | None
+        if user_data_dir == _AUTO_DETECT:
+            self.user_data_dir = KISS_PROFILE_DIR
+        else:
+            self.user_data_dir = user_data_dir
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None

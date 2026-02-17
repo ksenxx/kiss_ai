@@ -19,6 +19,8 @@ from kiss.agents.coding_agents.chatbot import (
     _ChatbotPrinter,
     _find_free_port,
     _load_history,
+    _load_proposals,
+    _save_proposals,
     _scan_files,
     _StopRequested,
 )
@@ -47,6 +49,7 @@ def _refresh_proposed_tasks() -> None:
     if not history:
         with _proposed_lock:
             _proposed_tasks = []
+        _printer.broadcast({"type": "proposed_updated"})
         return
     task_list = "\n".join(f"- {t}" for t in history[:20])
     agent = KISSAgent("Task Proposer")
@@ -72,12 +75,15 @@ def _refresh_proposed_tasks() -> None:
         proposals = []
     with _proposed_lock:
         _proposed_tasks = proposals
+    _save_proposals(proposals)
+    _printer.broadcast({"type": "proposed_updated"})
 
 
 def _run_agent_thread(task: str) -> None:
     global _running, _agent_thread
     try:
         _add_task(task)
+        _printer.broadcast({"type": "tasks_updated"})
         _printer.broadcast({"type": "clear"})
         agent = AssistantAgent("Assistant Chatbot")
         agent.run(
@@ -228,6 +234,9 @@ def main() -> None:
         Route("/tasks", tasks),
         Route("/proposed_tasks", proposed_tasks),
     ])
+
+    with _proposed_lock:
+        _proposed_tasks[:] = _load_proposals()
 
     threading.Thread(target=_refresh_proposed_tasks, daemon=True).start()
 

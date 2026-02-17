@@ -20,8 +20,10 @@ from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAg
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.printer import Printer, extract_extras, extract_path_and_lang, truncate_result
 
-HISTORY_FILE = Path.home() / ".kiss_task_history.json"
-MAX_HISTORY = 100
+_KISS_DIR = Path.home() / ".kiss"
+HISTORY_FILE = _KISS_DIR / "task_history.json"
+PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
+MAX_HISTORY = 1000
 
 
 def _find_free_port() -> int:
@@ -35,7 +37,14 @@ def _load_history() -> list[str]:
         try:
             data = json.loads(HISTORY_FILE.read_text())
             if isinstance(data, list):
-                return [str(t) for t in data[:MAX_HISTORY]]
+                seen: set[str] = set()
+                result: list[str] = []
+                for t in data[:MAX_HISTORY]:
+                    s = str(t)
+                    if s not in seen:
+                        seen.add(s)
+                        result.append(s)
+                return result
         except (json.JSONDecodeError, OSError):
             pass
     return []
@@ -43,7 +52,27 @@ def _load_history() -> list[str]:
 
 def _save_history(tasks: list[str]) -> None:
     try:
+        _KISS_DIR.mkdir(parents=True, exist_ok=True)
         HISTORY_FILE.write_text(json.dumps(tasks[:MAX_HISTORY]))
+    except OSError:
+        pass
+
+
+def _load_proposals() -> list[str]:
+    if PROPOSALS_FILE.exists():
+        try:
+            data = json.loads(PROPOSALS_FILE.read_text())
+            if isinstance(data, list):
+                return [str(t) for t in data if isinstance(t, str) and t.strip()][:5]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
+
+
+def _save_proposals(proposals: list[str]) -> None:
+    try:
+        _KISS_DIR.mkdir(parents=True, exist_ok=True)
+        PROPOSALS_FILE.write_text(json.dumps(proposals))
     except OSError:
         pass
 
@@ -327,6 +356,7 @@ def _refresh_proposed_tasks() -> None:
     if not history:
         with _proposed_lock:
             _proposed_tasks = []
+        _printer.broadcast({"type": "proposed_updated"})
         return
     task_list = "\n".join(f"- {t}" for t in history[:20])
     agent = KISSAgent("Task Proposer")
@@ -352,12 +382,15 @@ def _refresh_proposed_tasks() -> None:
         proposals = []
     with _proposed_lock:
         _proposed_tasks = proposals
+    _save_proposals(proposals)
+    _printer.broadcast({"type": "proposed_updated"})
 
 
 def _run_agent_thread(task: str) -> None:
     global _running, _agent_thread
     try:
         _add_task(task)
+        _printer.broadcast({"type": "tasks_updated"})
         _printer.broadcast({"type": "clear"})
         agent = RelentlessCodingAgent("Chatbot")
         agent.run(
@@ -870,6 +903,8 @@ function handleEvent(ev){
     ||t==='task_error'||t==='task_stopped')
     removeSpinner();
   switch(t){
+  case'tasks_updated':loadTasks();break;
+  case'proposed_updated':loadProposed();break;
   case'clear':
     O.innerHTML='';thinkEl=null;
     txtEl=null;autoScroll=true;
@@ -1277,6 +1312,9 @@ def main() -> None:
         Route("/tasks", tasks),
         Route("/proposed_tasks", proposed_tasks),
     ])
+
+    with _proposed_lock:
+        _proposed_tasks[:] = _load_proposals()
 
     threading.Thread(target=_refresh_proposed_tasks, daemon=True).start()
 
