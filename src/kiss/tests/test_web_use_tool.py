@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.web_use_tool import KISS_PROFILE_DIR, WebUseTool
+from kiss.core.web_use_tool import (
+    KISS_PROFILE_DIR,
+    WebUseTool,
+    _number_interactive_elements,
+)
 
 FORM_PAGE = b"""<!DOCTYPE html>
 <html><head><title>Test Form</title></head>
@@ -16,19 +20,23 @@ FORM_PAGE = b"""<!DOCTYPE html>
   <h1>Test Form Page</h1>
   <a href="/second">Go to second page</a>
   <form>
-    <input type="text" name="username" placeholder="Enter username">
-    <input type="password" name="password" placeholder="Enter password">
-    <select name="color">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" placeholder="Enter username">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" placeholder="Enter password">
+    <label for="color">Color</label>
+    <select id="color" name="color">
       <option value="red">Red</option>
       <option value="green">Green</option>
       <option value="blue">Blue</option>
     </select>
-    <textarea name="bio" placeholder="Bio"></textarea>
+    <label for="bio">Bio</label>
+    <textarea id="bio" name="bio" placeholder="Bio"></textarea>
     <button type="submit">Submit</button>
   </form>
   <button id="action-btn" onclick="document.title='Clicked!'">Action</button>
   <div id="hover-target" onmouseover="this.textContent='Hovered!'"
-       style="padding:20px;background:#eee;">Hover me</div>
+       style="padding:20px;background:#eee;" role="button" tabindex="0">Hover me</div>
 </body></html>"""
 
 SECOND_PAGE = b"""<!DOCTYPE html>
@@ -53,7 +61,7 @@ ROLE_PAGE = b"""<!DOCTYPE html>
 <body>
   <div role="button" tabindex="0">Role Button</div>
   <div role="link" tabindex="0">Role Link</div>
-  <div contenteditable="true">Editable div</div>
+  <div contenteditable="true" role="textbox" aria-label="Editable div">Editable div</div>
 </body></html>"""
 
 EMPTY_PAGE = b"""<!DOCTYPE html>
@@ -122,23 +130,14 @@ class TestNavigation:
 
     def test_go_to_url_returns_interactive_elements(self, http_server, web_tool):
         result = web_tool.go_to_url(http_server + "/")
-        assert "<a" in result
-        assert "<input" in result
-        assert "<button" in result
-        assert "<select" in result
-        assert "<textarea" in result
-        assert "placeholder=" in result
+        assert "link" in result
+        assert "textbox" in result
+        assert "button" in result
 
     def test_go_to_second_page(self, http_server, web_tool):
         result = web_tool.go_to_url(http_server + "/second")
         assert "Page: Second Page" in result
         assert "Second Page" in result
-
-    def test_go_back_via_execute_js(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        web_tool.go_to_url(http_server + "/second")
-        result = web_tool.execute_js("history.back()")
-        assert "Page: Test Form" in result
 
     def test_go_to_invalid_url(self, web_tool):
         result = web_tool.go_to_url("http://localhost:99999/nonexistent")
@@ -149,27 +148,18 @@ class TestNavigation:
         assert "Page: Empty" in result
 
 
-class TestDOMTree:
-    def test_dom_tree_has_element_ids(self, http_server, web_tool):
+class TestAccessibilityTree:
+    def test_tree_has_element_ids(self, http_server, web_tool):
         result = web_tool.go_to_url(http_server + "/")
         ids = re.findall(r"\[(\d+)\]", result)
-        assert len(ids) >= 5
+        assert len(ids) >= 4
 
-    def test_dom_tree_shows_attributes(self, http_server, web_tool):
+    def test_tree_shows_roles(self, http_server, web_tool):
         result = web_tool.go_to_url(http_server + "/")
-        assert 'type="text"' in result
-        assert 'type="password"' in result
-        assert 'name="username"' in result
-        assert 'placeholder="Enter username"' in result
+        assert "textbox" in result
+        assert "button" in result
 
-    def test_dom_tree_shows_select_options(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/")
-        assert "<option>" in result
-        assert "Red" in result
-        assert "Green" in result
-        assert "Blue" in result
-
-    def test_get_page_content_dom(self, http_server, web_tool):
+    def test_get_page_content_tree(self, http_server, web_tool):
         web_tool.go_to_url(http_server + "/")
         result = web_tool.get_page_content()
         assert "Page: Test Form" in result
@@ -180,33 +170,31 @@ class TestDOMTree:
         result = web_tool.get_page_content(text_only=True)
         assert "Page: Test Form" in result
         assert "Test Form Page" in result
-        assert "[" not in result
 
-    def test_dom_tree_roles(self, http_server, web_tool):
+    def test_tree_roles_page(self, http_server, web_tool):
         result = web_tool.go_to_url(http_server + "/roles")
-        assert 'role="button"' in result
-        assert 'role="link"' in result
+        assert "button" in result
+        assert "link" in result
         assert "Role Button" in result
 
-    def test_dom_tree_contenteditable(self, http_server, web_tool):
+    def test_tree_contenteditable(self, http_server, web_tool):
         result = web_tool.go_to_url(http_server + "/roles")
         assert "Editable div" in result
 
 
 class TestClick:
     def test_click_button(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        dom = web_tool.get_page_content()
-        match = re.search(r"\[(\d+)\] <button>Action</button>", dom)
-        assert match, f"No Action button found in DOM:\n{dom}"
+        dom = web_tool.go_to_url(http_server + "/")
+        match = re.search(r"\[(\d+)\].*button.*Action", dom)
+        assert match, f"No Action button found:\n{dom}"
         btn_id = int(match.group(1))
         result = web_tool.click(btn_id)
         assert "Clicked!" in result
 
     def test_click_link(self, http_server, web_tool):
         dom = web_tool.go_to_url(http_server + "/")
-        match = re.search(r'\[(\d+)\] <a href="/second"', dom)
-        assert match, f"No link found in DOM:\n{dom}"
+        match = re.search(r"\[(\d+)\].*link.*Go to second page", dom)
+        assert match, f"No link found:\n{dom}"
         link_id = int(match.group(1))
         result = web_tool.click(link_id)
         assert "Second Page" in result
@@ -235,15 +223,15 @@ class TestClick:
 class TestTypeText:
     def test_type_into_input(self, http_server, web_tool):
         dom = web_tool.go_to_url(http_server + "/")
-        match = re.search(r'\[(\d+)\] <input type="text"', dom)
-        assert match, f"No text input found in DOM:\n{dom}"
+        match = re.search(r"\[(\d+)\].*textbox.*[Uu]sername", dom)
+        assert match, f"No username input found:\n{dom}"
         input_id = int(match.group(1))
         result = web_tool.type_text(input_id, "testuser")
-        assert 'value="testuser"' in result
+        assert "testuser" in result
 
     def test_type_with_enter(self, http_server, web_tool):
         dom = web_tool.go_to_url(http_server + "/")
-        match = re.search(r'\[(\d+)\] <input type="text"', dom)
+        match = re.search(r"\[(\d+)\].*textbox.*[Uu]sername", dom)
         assert match
         input_id = int(match.group(1))
         result = web_tool.type_text(input_id, "hello", press_enter=True)
@@ -278,48 +266,21 @@ class TestPressKey:
         assert "Error" in result
 
 
-class TestExecuteJs:
-    def test_execute_js_returns_result(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        result = web_tool.execute_js("document.title")
-        assert "Result: Test Form" in result
-
-    def test_execute_js_scroll(self, http_server, web_tool):
+class TestScroll:
+    def test_scroll_down(self, http_server, web_tool):
         web_tool.go_to_url(http_server + "/long")
-        result = web_tool.execute_js("window.scrollBy(0, 1000)")
+        result = web_tool.scroll("down", 3)
         assert "Page:" in result
 
-    def test_execute_js_select_option(self, http_server, web_tool):
-        dom = web_tool.go_to_url(http_server + "/")
-        match = re.search(r"\[(\d+)\] <select", dom)
-        assert match
-        select_id = int(match.group(1))
-        result = web_tool.execute_js(
-            f"""(() => {{
-                const el = window.__kiss_elements[{select_id}];
-                el.value = 'green';
-                el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                return el.value;
-            }})()"""
-        )
-        assert "Result: green" in result
-
-    def test_execute_js_extract_text(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        result = web_tool.execute_js("document.body.innerText")
-        assert "Result:" in result
-        assert "Test Form Page" in result
-
-    def test_execute_js_null_result(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        result = web_tool.execute_js("void 0")
+    def test_scroll_up(self, http_server, web_tool):
+        web_tool.go_to_url(http_server + "/long")
+        result = web_tool.scroll("up", 2)
         assert "Page:" in result
-        assert "Result:" not in result
 
-    def test_execute_js_error(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        result = web_tool.execute_js("nonExistentFunction()")
-        assert "Error" in result
+    def test_scroll_default(self, http_server, web_tool):
+        web_tool.go_to_url(http_server + "/long")
+        result = web_tool.scroll()
+        assert "Page:" in result
 
 
 class TestTabManagement:
@@ -380,7 +341,7 @@ class TestBrowserLifecycle:
             "click",
             "type_text",
             "press_key",
-            "execute_js",
+            "scroll",
             "screenshot",
             "get_page_content",
         }
@@ -392,10 +353,10 @@ class TestBrowserLifecycle:
             assert tool._page is None
 
 
-class TestDOMTreeTruncation:
+class TestAxTreeTruncation:
     def test_truncation(self, http_server, web_tool):
         web_tool.go_to_url(http_server + "/")
-        result = web_tool._get_dom_tree(max_chars=50)
+        result = web_tool._get_ax_tree(max_chars=50)
         assert "... [truncated]" in result
 
 
@@ -429,6 +390,34 @@ class TestKissProfile:
             assert tool.user_data_dir == tmpdir
             assert tool._browser is None
             assert tool._context is None
+
+
+class TestNumberInteractiveElements:
+    def test_numbers_buttons(self):
+        snapshot = '- button "OK"\n- button "Cancel"'
+        result, elements = _number_interactive_elements(snapshot)
+        assert '[1] button "OK"' in result
+        assert '[2] button "Cancel"' in result
+        assert len(elements) == 2
+        assert elements[0] == {"id": "1", "role": "button", "name": "OK"}
+
+    def test_skips_non_interactive(self):
+        snapshot = '- heading "Title" [level=1]\n- button "Submit"'
+        result, elements = _number_interactive_elements(snapshot)
+        assert "[1]" not in result.split("\n")[0]
+        assert '[1] button "Submit"' in result
+        assert len(elements) == 1
+
+    def test_handles_nameless_elements(self):
+        snapshot = "- combobox"
+        result, elements = _number_interactive_elements(snapshot)
+        assert "[1] combobox" in result
+        assert elements[0]["name"] == ""
+
+    def test_preserves_indentation(self):
+        snapshot = '  - link "Home"'
+        result, elements = _number_interactive_elements(snapshot)
+        assert '  - [1] link "Home"' in result
 
 
 if __name__ == "__main__":

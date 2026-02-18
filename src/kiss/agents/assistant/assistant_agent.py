@@ -33,12 +33,12 @@ TASK_PROMPT = """# Task
 - go_to_url(url): Navigate. Also "tab:list" to list tabs, "tab:N" to switch tab.
 - click(element_id, action="click"): Click or hover (action="hover") on element [N].
 - type_text(element_id, text, press_enter=False): Type into input [N].
-- press_key(key): Press key, e.g. "Escape", "Tab", "PageDown", "Control+a".
-- execute_js(code): Run JavaScript. Use for select options, scroll, go back, extract data.
+- press_key(key): Press key, e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a".
+- scroll(direction="down", amount=3): Scroll page. direction: "down"/"up"/"left"/"right".
 - screenshot(file_path): Save screenshot.
-- get_page_content(text_only=False): Get DOM tree, or full text if text_only=True.
+- get_page_content(text_only=False): Get accessibility tree, or full text if text_only=True.
 
-DOM tree shows interactive elements as [N] <tag>. Use N with click/type_text.
+Accessibility tree shows interactive elements as [N] role "name". Use N with click/type_text.
 
 # Rules
 - Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
@@ -301,7 +301,8 @@ def main() -> None:
 
     agent = AssistantAgent("Assistant Agent Test")
     task_description = """
-can you login to gmail using the username 'kissagent1@gmail.com' and password 'For AI Assistant.' and read the messages.
+can you login to gmail using the username 'kissagent1@gmail.com' and
+password 'For AI Assistant.' and read the messages.
 """
 
     work_dir = tempfile.mkdtemp()
