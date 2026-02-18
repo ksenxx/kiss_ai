@@ -7,7 +7,7 @@ from kiss.core.config_builder import add_config
 
 class IMOAgentConfig(BaseModel):
     solver_model: str = Field(
-        default="gemini-3-pro-preview",
+        default="o3",
         description="Model for solving IMO problems (should be a powerful reasoning model)",
     )
     verifier_model: str = Field(
@@ -15,7 +15,7 @@ class IMOAgentConfig(BaseModel):
         description="Model for verifying solutions",
     )
     validator_model: str = Field(
-        default="gemini-2.5-pro",
+        default="gemini-3-pro-preview",
         description="Model for independent validation against known answers",
     )
     max_refinement_rounds: int = Field(

@@ -20,7 +20,6 @@ from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,
-    requires_minimax_api_key,
     requires_openai_api_key,
 )
 

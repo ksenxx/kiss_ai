@@ -204,7 +204,7 @@ class AssistantAgent(Base):
                     printer=self.printer,
                 )
             except Exception:
-                last_msgs = executor.messages[-2:] if hasattr(executor, "messages") else []
+                last_msgs = executor.messages[-4:] if hasattr(executor, "messages") else []
                 context = " ".join(
                     str(m.get("content", ""))
                     for m in last_msgs
