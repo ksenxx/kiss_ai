@@ -301,34 +301,7 @@ def main() -> None:
 
     agent = AssistantAgent("Assistant Agent Test")
     task_description = """
-**Task:** Search for the cheapest round-trip flights from San Francisco (SFO) to New York (JFK)
-for travel dates March 15-22, 2026 and save a summary report.
-
-**Requirements:**
-
-1. Use the browser to go to Google Flights (https://www.google.com/travel/flights)
-2. Search for round-trip flights from SFO to JFK
-3. Set departure date to March 15, 2026 and return date to March 22, 2026
-4. Browse the results and identify the top 5 cheapest options
-5. For each flight option, note:
-   - Airline name
-   - Departure and arrival times
-   - Number of stops
-   - Total price
-   - Flight duration
-6. Use Bash to create a summary report file called "flight_report.txt" in the work directory
-7. The report should include:
-   - Search parameters (origin, destination, dates)
-   - A table of the top 5 cheapest flights
-   - The timestamp of when the search was performed
-8. Take a screenshot of the search results page and save it as "flight_results.png"
-
-**Important:**
-- If Google Flights is difficult to interact with, try alternative sites like
-  https://www.kayak.com or https://www.skyscanner.com
-- Use the browser tools (go_to_url, click, type_text, etc.) for web interaction
-- Use Bash/Write tools for file operations
-- Be patient with page loads - use scroll() and get_dom_tree() to explore pages
+can you login to gmail using the username 'kissagent1@gmail.com' and password 'For AI Assistant.' and read the messages.
 """
 
     work_dir = tempfile.mkdtemp()

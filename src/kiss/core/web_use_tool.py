@@ -179,6 +179,61 @@ DOM_EXTRACTION_JS = """
 })()
 """
 
+CLEANUP_ELEMENTS_JS = "delete window.__kiss_elements;"
+
+_FIND_ELEMENT_JS_UNUSED = """
+(targetId) => {
+    const INTERACTIVE_TAGS = new Set([
+        'a', 'button', 'input', 'select', 'textarea', 'details', 'summary'
+    ]);
+    const INTERACTIVE_ROLES = new Set([
+        'button', 'link', 'tab', 'menuitem', 'checkbox', 'radio',
+        'switch', 'option', 'combobox', 'textbox', 'searchbox',
+        'slider', 'spinbutton', 'treeitem'
+    ]);
+    const SKIP_TAGS = new Set([
+        'script', 'style', 'noscript', 'svg', 'path', 'meta',
+        'link', 'br', 'hr', 'wbr', 'template'
+    ]);
+
+    function isVisible(el) {
+        if (el.offsetWidth === 0 && el.offsetHeight === 0 &&
+            el.getClientRects().length === 0) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden';
+    }
+
+    function isInteractive(el) {
+        const tag = el.tagName.toLowerCase();
+        if (INTERACTIVE_TAGS.has(tag)) return true;
+        const role = el.getAttribute('role');
+        if (role && INTERACTIVE_ROLES.has(role)) return true;
+        if (el.hasAttribute('onclick') || el.hasAttribute('contenteditable'))
+            return true;
+        const ti = el.getAttribute('tabindex');
+        if (ti !== null && ti !== '-1') return true;
+        return false;
+    }
+
+    let count = 0;
+    function walk(el) {
+        if (!el || el.nodeType !== 1) return null;
+        const tag = el.tagName.toLowerCase();
+        if (SKIP_TAGS.has(tag)) return null;
+        if (!isVisible(el)) return null;
+        if (isInteractive(el)) {
+            count++;
+            if (count === targetId) return el;
+        }
+        for (const child of el.children) {
+            const found = walk(child);
+            if (found) return found;
+        }
+        return null;
+    }
+    return walk(document.body);
+}
+"""
 
 CHROME_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -187,10 +242,12 @@ CHROME_USER_AGENT = (
 )
 
 STEALTH_JS = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'webdriver', {get: () => false});
 Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-window.chrome = {runtime: {}, loadTimes: () => {}, csi: () => {}};
+if (!window.chrome) {
+    window.chrome = {runtime: {}, loadTimes: () => {}, csi: () => {}};
+}
 Object.defineProperty(navigator, 'permissions', {get: () => ({
     query: (p) => Promise.resolve({state: p.name === 'notifications'
         ? 'denied' : 'prompt'})
@@ -231,29 +288,13 @@ class WebUseTool:
             "has_touch": False,
             "is_mobile": False,
             "device_scale_factor": 2,
-            "extra_http_headers": {
-                "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;"
-                    "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
-                ),
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"macOS"',
-            },
         }
 
     def _chromium_args(self) -> list[str]:
         return [
             "--disable-blink-features=AutomationControlled",
             "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-infobars",
             "--no-first-run",
             "--no-default-browser-check",
         ]
@@ -302,6 +343,7 @@ class WebUseTool:
         title = self._page.title()
         url = self._page.url
         tree: str = self._page.evaluate(DOM_EXTRACTION_JS)
+        self._page.evaluate(CLEANUP_ELEMENTS_JS)
         header = f"Page: {title}\nURL: {url}\n\n"
         if len(tree) > max_chars:
             tree = tree[:max_chars] + "\n... [truncated]"
@@ -363,36 +405,28 @@ class WebUseTool:
         """
         self._ensure_browser()
         try:
+            self._page.evaluate(DOM_EXTRACTION_JS)
+            exists = self._page.evaluate(
+                "(id) => !!window.__kiss_elements[id]", element_id
+            )
+            if not exists:
+                self._page.evaluate(CLEANUP_ELEMENTS_JS)
+                return f"Error: Element with ID {element_id} not found."
+            handle = self._page.evaluate_handle(
+                "(id) => window.__kiss_elements[id]", element_id
+            )
+            self._page.evaluate(CLEANUP_ELEMENTS_JS)
+            elem = handle.as_element()
+
             if action == "hover":
-                bbox = self._page.evaluate(
-                    """(id) => {
-                        const el = window.__kiss_elements[id];
-                        if (!el) return null;
-                        el.scrollIntoView({block: 'center'});
-                        const rect = el.getBoundingClientRect();
-                        return {x: rect.x + rect.width/2, y: rect.y + rect.height/2};
-                    }""",
-                    element_id,
-                )
-                if bbox is None:
-                    return f"Error: Element with ID {element_id} not found."
-                self._page.mouse.move(bbox["x"], bbox["y"])
+                elem.hover()
+                handle.dispose()
                 self._page.wait_for_timeout(300)
                 return self._get_dom_tree()
 
             pages_before = len(self._context.pages)
-            clicked = self._page.evaluate(
-                """(id) => {
-                    const el = window.__kiss_elements[id];
-                    if (!el) return false;
-                    el.scrollIntoView({block: 'center'});
-                    el.click();
-                    return true;
-                }""",
-                element_id,
-            )
-            if not clicked:
-                return f"Error: Element with ID {element_id} not found."
+            elem.click()
+            handle.dispose()
             self._page.wait_for_timeout(500)
             self._wait_for_stable()
             if len(self._context.pages) > pages_before:
@@ -412,28 +446,24 @@ class WebUseTool:
         """
         self._ensure_browser()
         try:
-            found = self._page.evaluate(
-                """(args) => {
-                    const el = window.__kiss_elements[args.id];
-                    if (!el) return false;
-                    el.scrollIntoView({block: 'center'});
-                    el.focus();
-                    el.value = '';
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    return true;
-                }""",
-                {"id": element_id},
+            import sys
+            self._page.evaluate(DOM_EXTRACTION_JS)
+            exists = self._page.evaluate(
+                "(id) => !!window.__kiss_elements[id]", element_id
             )
-            if not found:
+            if not exists:
+                self._page.evaluate(CLEANUP_ELEMENTS_JS)
                 return f"Error: Element with ID {element_id} not found."
-            self._page.evaluate(
-                """(id) => {
-                    const el = window.__kiss_elements[id];
-                    if (el) el.focus();
-                }""",
-                element_id,
+            handle = self._page.evaluate_handle(
+                "(id) => window.__kiss_elements[id]", element_id
             )
-            self._page.keyboard.type(text, delay=20)
+            self._page.evaluate(CLEANUP_ELEMENTS_JS)
+            select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
+            handle.as_element().click()
+            handle.dispose()
+            self._page.keyboard.press(select_all)
+            self._page.keyboard.press("Backspace")
+            self._page.keyboard.type(text, delay=50)
             if press_enter:
                 self._page.keyboard.press("Enter")
                 self._page.wait_for_timeout(500)
@@ -465,7 +495,12 @@ class WebUseTool:
         """
         self._ensure_browser()
         try:
+            self._page.evaluate(DOM_EXTRACTION_JS)
             result = self._page.evaluate(code)
+            try:
+                self._page.evaluate(CLEANUP_ELEMENTS_JS)
+            except Exception:
+                pass
             self._page.wait_for_timeout(300)
             dom = self._get_dom_tree()
             if result is not None:
