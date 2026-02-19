@@ -399,7 +399,7 @@ class TestNumberInteractiveElements:
         assert '[1] button "OK"' in result
         assert '[2] button "Cancel"' in result
         assert len(elements) == 2
-        assert elements[0] == {"id": "1", "role": "button", "name": "OK"}
+        assert elements[0] == {"role": "button", "name": "OK"}
 
     def test_skips_non_interactive(self):
         snapshot = '- heading "Title" [level=1]\n- button "Submit"'

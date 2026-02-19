@@ -24,26 +24,26 @@ INTERACTIVE_ROLES = {
 
 _ROLE_LINE_RE = re.compile(r"^(\s*)-\s+([\w]+)\s*(.*)")
 
+_SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
+
 
 def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str]]]:
-    lines = snapshot.splitlines()
     result_lines: list[str] = []
     elements: list[dict[str, str]] = []
     counter = 0
-
-    for line in lines:
+    for line in snapshot.splitlines():
         m = _ROLE_LINE_RE.match(line)
-        if m:
-            indent, role, rest = m.group(1), m.group(2), m.group(3)
-            if role in INTERACTIVE_ROLES:
-                counter += 1
-                name_match = re.match(r'"([^"]*)"', rest)
-                name = name_match.group(1) if name_match else ""
-                elements.append({"id": str(counter), "role": role, "name": name})
-                result_lines.append(f"{indent}- [{counter}] {role} {rest}".rstrip())
-                continue
-        result_lines.append(line)
-
+        if not m:
+            result_lines.append(line)
+            continue
+        indent, role, rest = m.group(1), m.group(2), m.group(3)
+        if role not in INTERACTIVE_ROLES:
+            result_lines.append(line)
+            continue
+        counter += 1
+        name_match = re.match(r'"([^"]*)"', rest)
+        elements.append({"role": role, "name": name_match.group(1) if name_match else ""})
+        result_lines.append(f"{indent}- [{counter}] {role} {rest}".rstrip())
     return "\n".join(result_lines), elements
 
 
@@ -82,14 +82,19 @@ class WebUseTool:
             "device_scale_factor": 2,
         }
 
-    def _chromium_args(self) -> list[str]:
-        return [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-infobars",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ]
+    def _launch_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"headless": self.headless}
+        if self.browser_type == "chromium":
+            kwargs["args"] = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-infobars",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
+            if not self.headless:
+                kwargs["channel"] = "chrome"
+        return kwargs
 
     def _ensure_browser(self) -> None:
         if self._page is not None:
@@ -98,46 +103,27 @@ class WebUseTool:
 
         self._playwright = sync_playwright().start()
         launcher = getattr(self._playwright, self.browser_type)
-        is_chromium = self.browser_type == "chromium"
-        chromium_args = self._chromium_args() if is_chromium else []
-        channel = "chrome" if is_chromium and not self.headless else None
+        kwargs = self._launch_kwargs()
 
         if self.user_data_dir:
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
-            launch_kwargs: dict[str, Any] = {
-                "headless": self.headless,
-                "args": chromium_args or None,
-                **self._context_args(),
-            }
-            if channel:
-                launch_kwargs["channel"] = channel
             self._context = launcher.launch_persistent_context(
-                self.user_data_dir,
-                **launch_kwargs,
+                self.user_data_dir, **kwargs, **self._context_args()
             )
-            pages = self._context.pages
-            self._page = pages[0] if pages else self._context.new_page()
+            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         else:
-            launch_kwargs = {
-                "headless": self.headless,
-                "args": chromium_args or None,
-            }
-            if channel:
-                launch_kwargs["channel"] = channel
-            self._browser = launcher.launch(**launch_kwargs)
+            self._browser = launcher.launch(**kwargs)
             self._context = self._browser.new_context(**self._context_args())
             self._page = self._context.new_page()
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
-        title = self._page.title()
-        url = self._page.url
+        header = f"Page: {self._page.title()}\nURL: {self._page.url}\n\n"
         snapshot = self._page.locator("body").aria_snapshot()
         if not snapshot:
             self._elements = []
-            return f"Page: {title}\nURL: {url}\n\n(empty page)"
+            return header + "(empty page)"
         numbered, self._elements = _number_interactive_elements(snapshot)
-        header = f"Page: {title}\nURL: {url}\n\n"
         if len(numbered) > max_chars:
             numbered = numbered[:max_chars] + "\n... [truncated]"
         return header + numbered
@@ -166,44 +152,44 @@ class WebUseTool:
                 _, self._elements = _number_interactive_elements(snapshot)
             if element_id < 1 or element_id > len(self._elements):
                 raise ValueError(f"Element with ID {element_id} not found.")
-        elem = self._elements[element_id - 1]
-        role, name = elem["role"], elem["name"]
-        if name:
-            locator = self._page.get_by_role(role, name=name, exact=True)
-        else:
-            locator = self._page.get_by_role(role)
-        if locator.count() == 0:
+        role = self._elements[element_id - 1]["role"]
+        name = self._elements[element_id - 1]["name"]
+        locator = self._page.get_by_role(role, name=name, exact=True) if name else self._page.get_by_role(role)
+        n = locator.count()
+        if n == 0:
             raise ValueError(f"Element with ID {element_id} not found on page.")
-        if locator.count() == 1:
+        if n == 1:
             return locator
-        for i in range(locator.count()):
-            nth = locator.nth(i)
+        for i in range(n):
             try:
-                if nth.is_visible():
-                    return nth
+                if locator.nth(i).is_visible():
+                    return locator.nth(i)
             except Exception:
                 continue
         return locator.first
 
     def go_to_url(self, url: str) -> str:
-        """Navigate to a URL. Use "tab:list" to list open tabs, "tab:N" to switch to tab N.
+        """Navigate the browser to a URL and return the page accessibility tree.
+        Use when you need to open a new page or switch pages. Special values: "tab:list"
+        returns a list of open tabs; "tab:N" switches to tab N (0-based).
 
         Args:
-            url: URL to navigate to, "tab:list" to list tabs, or "tab:N" to switch to tab N.
-        """
+            url: Full URL to open, or "tab:list" for tab list, or "tab:N" to switch to tab N.
+
+        Returns:
+            On success: page title, URL, and accessibility tree with [N] IDs. For "tab:list":
+            list of open tabs with indices. On error: "Error navigating to <url>: <message>"."""
         self._ensure_browser()
         try:
+            pages = self._context.pages
             if url == "tab:list":
-                pages = self._context.pages
                 lines = [f"Open tabs ({len(pages)}):"]
                 for i, page in enumerate(pages):
-                    marker = " (active)" if page == self._page else ""
-                    lines.append(f"  [{i}] {page.title()} - {page.url}{marker}")
+                    suffix = " (active)" if page == self._page else ""
+                    lines.append(f"  [{i}] {page.title()} - {page.url}{suffix}")
                 return "\n".join(lines)
-
             if url.startswith("tab:"):
                 idx = int(url[4:])
-                pages = self._context.pages
                 if 0 <= idx < len(pages):
                     self._page = pages[idx]
                     return self._get_ax_tree()
@@ -216,12 +202,16 @@ class WebUseTool:
             return f"Error navigating to {url}: {e}"
 
     def click(self, element_id: int, action: str = "click") -> str:
-        """Click or hover on an element by its numeric ID from the accessibility tree.
+        """Click or hover on an interactive element by its [N] ID from the accessibility tree.
+        Use after get_page_content or go_to_url to interact with links, buttons, tabs, etc.
 
         Args:
-            element_id: The numeric ID shown in brackets [N] in the accessibility tree.
-            action: "click" (default) or "hover" to hover without clicking.
-        """
+            element_id: Numeric ID shown in brackets [N] next to the element in the tree.
+            action: "click" (default) to click the element, "hover" to only move focus.
+
+        Returns:
+            Updated accessibility tree (title, URL, numbered elements), or on error
+            "Error clicking element <id>: <message>"."""
         self._ensure_browser()
         try:
             locator = self._resolve_locator(element_id)
@@ -243,13 +233,16 @@ class WebUseTool:
             return f"Error clicking element {element_id}: {e}"
 
     def type_text(self, element_id: int, text: str, press_enter: bool = False) -> str:
-        """Type text into an input or textarea element.
+        """Type text into a textbox, searchbox, or other editable element by its [N] ID.
+        Clears existing content then types the given text. Use for forms, search boxes, etc.
 
         Args:
-            element_id: The numeric ID shown in brackets [N] in the accessibility tree.
-            text: The text to type into the element.
-            press_enter: Whether to press Enter after typing.
-        """
+            element_id: Numeric ID from the accessibility tree (brackets [N]).
+            text: String to type into the element.
+            press_enter: If True, press Enter after typing (e.g. to submit a search).
+
+        Returns:
+            Updated accessibility tree, or "Error typing into element <id>: <message>" on error."""
         self._ensure_browser()
         try:
             locator = self._resolve_locator(element_id)
@@ -267,12 +260,14 @@ class WebUseTool:
             return f"Error typing into element {element_id}: {e}"
 
     def press_key(self, key: str) -> str:
-        """Press a keyboard key or key combination.
+        """Press a single key or key combination. Use for navigation, closing dialogs, shortcuts.
 
         Args:
-            key: Key name, e.g. "Enter", "Escape", "Tab", "ArrowDown", "PageDown",
-                 "Backspace", or combo like "Control+a", "Shift+Tab".
-        """
+            key: Key name, e.g. "Enter", "Escape", "Tab", "ArrowDown", "PageDown", "Backspace",
+                 or combination like "Control+a", "Shift+Tab".
+
+        Returns:
+            Updated accessibility tree, or "Error pressing key '<key>': <message>" on error."""
         self._ensure_browser()
         try:
             self._page.keyboard.press(key)
@@ -282,23 +277,18 @@ class WebUseTool:
             return f"Error pressing key '{key}': {e}"
 
     def scroll(self, direction: str = "down", amount: int = 3) -> str:
-        """Scroll the page in a direction.
+        """Scroll the current page to reveal more content. Use when needed elements are off-screen.
 
         Args:
             direction: "down", "up", "left", or "right".
-            amount: Number of scroll clicks (default 3).
-        """
+            amount: Number of scroll steps (default 3).
+
+        Returns:
+            Updated accessibility tree after scrolling, or "Error scrolling <direction>: <message>" on error."""
         self._ensure_browser()
         try:
-            delta_map = {
-                "down": (0, 300),
-                "up": (0, -300),
-                "right": (300, 0),
-                "left": (-300, 0),
-            }
-            dx, dy = delta_map.get(direction, (0, 300))
-            vw = self.viewport[0] // 2
-            vh = self.viewport[1] // 2
+            dx, dy = _SCROLL_DELTA.get(direction, (0, 300))
+            vw, vh = self.viewport[0] // 2, self.viewport[1] // 2
             self._page.mouse.move(vw, vh)
             for _ in range(amount):
                 self._page.mouse.wheel(dx, dy)
@@ -309,11 +299,14 @@ class WebUseTool:
             return f"Error scrolling {direction}: {e}"
 
     def screenshot(self, file_path: str = "screenshot.png") -> str:
-        """Take a screenshot of the current page and save it to a file.
+        """Capture the visible viewport as an image. Use to verify layout, captchas, or visual state.
 
         Args:
-            file_path: Path where the screenshot will be saved.
-        """
+            file_path: Path where the PNG will be saved (default "screenshot.png"). Parent
+                directories are created if needed.
+
+        Returns:
+            "Screenshot saved to <resolved_path>", or "Error taking screenshot: <message>" on error."""
         self._ensure_browser()
         try:
             path = Path(file_path).resolve()
@@ -324,24 +317,27 @@ class WebUseTool:
             return f"Error taking screenshot: {e}"
 
     def get_page_content(self, text_only: bool = False) -> str:
-        """Get current page content: accessibility tree with interactive element IDs, or plain text.
+        """Get the current page content. Use to decide what to click or type next.
 
         Args:
-            text_only: If True, return full plain text instead of the accessibility tree.
-        """
+            text_only: If False (default), return accessibility tree with [N] IDs for interactive
+                elements. If True, return plain text only (title, URL, body text).
+
+        Returns:
+            Accessibility tree or plain text as described above, or "Error getting page content: <message>" on error."""
         self._ensure_browser()
         try:
             if text_only:
-                title = self._page.title()
-                url = self._page.url
-                text: str = self._page.inner_text("body")
-                return f"Page: {title}\nURL: {url}\n\n{text}"
+                return f"Page: {self._page.title()}\nURL: {self._page.url}\n\n{self._page.inner_text('body')}"
             return self._get_ax_tree()
         except Exception as e:
             return f"Error getting page content: {e}"
 
     def close(self) -> str:
-        """Close the browser and release all resources."""
+        """Close the browser and release resources. Call when done with the session or before exit.
+
+        Returns:
+            "Browser closed." (always, even if nothing was open)."""
         try:
             if self.user_data_dir and self._context:
                 self._context.close()
@@ -359,7 +355,11 @@ class WebUseTool:
         return "Browser closed."
 
     def get_tools(self) -> list[Callable[..., str]]:
-        """Return all tool methods for passing to KISSAgent."""
+        """Return callable web tools for registration with an agent.
+
+        Returns:
+            List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
+            get_page_content. Does not include close."""
         return [
             self.go_to_url,
             self.click,
