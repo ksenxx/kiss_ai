@@ -1,255 +1,100 @@
-"""Browser automation tool for LLM agents using Playwright."""
+"""Browser automation tool for LLM agents using Playwright.
+
+Uses Playwright's native APIs (aria_snapshot, locators, keyboard/mouse)
+with zero JavaScript injection to avoid bot detection.
+"""
 
 from __future__ import annotations
 
+import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-DOM_EXTRACTION_JS = """
-(() => {
-    const INTERACTIVE_TAGS = new Set([
-        'a', 'button', 'input', 'select', 'textarea', 'details', 'summary'
-    ]);
-    const INTERACTIVE_ROLES = new Set([
-        'button', 'link', 'tab', 'menuitem', 'checkbox', 'radio',
-        'switch', 'option', 'combobox', 'textbox', 'searchbox',
-        'slider', 'spinbutton', 'treeitem'
-    ]);
-    const SKIP_TAGS = new Set([
-        'script', 'style', 'noscript', 'svg', 'path', 'meta',
-        'link', 'br', 'hr', 'wbr', 'template'
-    ]);
-    const STRUCTURAL_TAGS = new Set([
-        'div', 'span', 'section', 'article', 'main', 'aside',
-        'header', 'footer', 'nav', 'form', 'fieldset', 'ul', 'ol',
-        'li', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
-        'dl', 'dt', 'dd', 'figure', 'figcaption', 'dialog', 'body'
-    ]);
-    const MAX_TEXT_LEN = 80;
+_AUTO_DETECT = "auto"
+KISS_PROFILE_DIR = str(Path.home() / ".kiss" / "browser_profile")
 
-    let nextId = 1;
-    window.__kiss_elements = {};
+INTERACTIVE_ROLES = {
+    "link", "button", "textbox", "searchbox", "combobox",
+    "checkbox", "radio", "switch", "slider", "spinbutton",
+    "tab", "menuitem", "menuitemcheckbox", "menuitemradio",
+    "option", "treeitem",
+}
 
-    function isVisible(el) {
-        if (el.offsetWidth === 0 && el.offsetHeight === 0 &&
-            el.getClientRects().length === 0) return false;
-        const style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden';
-    }
+_ROLE_LINE_RE = re.compile(r"^(\s*)-\s+([\w]+)\s*(.*)")
 
-    function isInteractive(el) {
-        const tag = el.tagName.toLowerCase();
-        if (INTERACTIVE_TAGS.has(tag)) return true;
-        const role = el.getAttribute('role');
-        if (role && INTERACTIVE_ROLES.has(role)) return true;
-        if (el.hasAttribute('onclick') || el.hasAttribute('contenteditable'))
-            return true;
-        const tabindex = el.getAttribute('tabindex');
-        if (tabindex !== null && tabindex !== '-1') return true;
-        return false;
-    }
-
-    function getDirectText(el) {
-        let text = '';
-        for (const child of el.childNodes) {
-            if (child.nodeType === 3) {
-                text += child.textContent;
-            }
-        }
-        return text.trim();
-    }
-
-    function truncate(s) {
-        s = s.replace(/\\s+/g, ' ').trim();
-        if (s.length > MAX_TEXT_LEN) return s.substring(0, MAX_TEXT_LEN) + '...';
-        return s;
-    }
-
-    function getAttrs(el) {
-        const tag = el.tagName.toLowerCase();
-        let attrs = '';
-        if (tag === 'a') {
-            const href = el.getAttribute('href');
-            if (href) attrs += ' href="' + href + '"';
-        }
-        if (tag === 'input') {
-            attrs += ' type="' + (el.getAttribute('type') || 'text') + '"';
-            if (el.value) attrs += ' value="' + truncate(el.value) + '"';
-            if (el.placeholder) attrs += ' placeholder="' + truncate(el.placeholder) + '"';
-            if (el.name) attrs += ' name="' + el.name + '"';
-        }
-        if (tag === 'textarea') {
-            if (el.placeholder) attrs += ' placeholder="' + truncate(el.placeholder) + '"';
-            if (el.name) attrs += ' name="' + el.name + '"';
-        }
-        if (tag === 'select' && el.name) {
-            attrs += ' name="' + el.name + '"';
-        }
-        if (tag === 'img') {
-            const alt = el.getAttribute('alt');
-            if (alt) attrs += ' alt="' + truncate(alt) + '"';
-        }
-        const role = el.getAttribute('role');
-        if (role) attrs += ' role="' + role + '"';
-        const ariaLabel = el.getAttribute('aria-label');
-        if (ariaLabel) attrs += ' aria-label="' + truncate(ariaLabel) + '"';
-        return attrs;
-    }
-
-    function buildTree(el, depth) {
-        if (!el || el.nodeType !== 1) return '';
-        const tag = el.tagName.toLowerCase();
-        if (SKIP_TAGS.has(tag)) return '';
-        if (!isVisible(el)) return '';
-
-        const indent = '  '.repeat(depth);
-        const interactive = isInteractive(el);
-        const attrs = getAttrs(el);
-        const children = el.children;
-        const directText = getDirectText(el);
-
-        let childOutput = '';
-        for (const child of children) {
-            childOutput += buildTree(child, depth + 1);
-        }
-
-        const hasChildren = childOutput.length > 0;
-        const hasText = directText.length > 0;
-
-        function open(pfx) {
-            return indent + pfx + '<' + tag + attrs + '>';
-        }
-        function close() { return '</' + tag + '>\\n'; }
-
-        if (interactive) {
-            const elemId = nextId++;
-            window.__kiss_elements[elemId] = el;
-            const pfx = '[' + elemId + '] ';
-            const text = truncate(el.textContent || '');
-            if (tag === 'select') {
-                let opts = '';
-                for (const opt of el.options) {
-                    const sel = opt.selected ? ' (selected)' : '';
-                    const t = truncate(opt.textContent || '');
-                    opts += indent + '    <option>' + t + sel +
-                        '</option>\\n';
-                }
-                return open(pfx) + '\\n' + opts +
-                    indent + close();
-            }
-            if (tag === 'input' || tag === 'textarea') {
-                return open(pfx) + '\\n';
-            }
-            if (hasChildren) {
-                return open(pfx) + '\\n' + childOutput +
-                    indent + close();
-            }
-            return open(pfx) + text + close();
-        }
-
-        if (!hasChildren && !hasText) return '';
-
-        if (STRUCTURAL_TAGS.has(tag)) {
-            if (hasChildren && hasText) {
-                const t = truncate(directText);
-                return open('') + '\\n' + indent + '  ' + t +
-                    '\\n' + childOutput + indent + close();
-            }
-            if (hasChildren) {
-                return childOutput;
-            }
-            return open('') + truncate(directText) + close();
-        }
-
-        if (hasChildren) {
-            const text = hasText ? truncate(directText) : '';
-            return open('') + text + '\\n' + childOutput +
-                indent + close();
-        }
-        return open('') + truncate(directText) + close();
-    }
-
-    const body = document.body;
-    if (!body) return 'Page has no body element.';
-    return buildTree(body, 0);
-})()
-"""
+_SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
 
 
-CHROME_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-STEALTH_JS = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-window.chrome = {runtime: {}, loadTimes: () => {}, csi: () => {}};
-Object.defineProperty(navigator, 'permissions', {get: () => ({
-    query: (p) => Promise.resolve({state: p.name === 'notifications'
-        ? 'denied' : 'prompt'})
-})});
-"""
+def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str]]]:
+    result_lines: list[str] = []
+    elements: list[dict[str, str]] = []
+    counter = 0
+    for line in snapshot.splitlines():
+        m = _ROLE_LINE_RE.match(line)
+        if not m:
+            result_lines.append(line)
+            continue
+        indent, role, rest = m.group(1), m.group(2), m.group(3)
+        if role not in INTERACTIVE_ROLES:
+            result_lines.append(line)
+            continue
+        counter += 1
+        name_match = re.match(r'"([^"]*)"', rest)
+        elements.append({"role": role, "name": name_match.group(1) if name_match else ""})
+        result_lines.append(f"{indent}- [{counter}] {role} {rest}".rstrip())
+    return "\n".join(result_lines), elements
 
 
 class WebUseTool:
-    """Browser automation tool using Playwright for web interaction."""
+    """Browser automation tool using Playwright with zero JS injection."""
 
     def __init__(
         self,
         browser_type: str = "chromium",
         headless: bool = False,
         viewport: tuple[int, int] = (1280, 900),
-        user_data_dir: str | None = None,
+        user_data_dir: str | None = _AUTO_DETECT,
     ) -> None:
         self.browser_type = browser_type
         self.headless = headless
         self.viewport = viewport
-        self.user_data_dir = user_data_dir
+        self.user_data_dir: str | None
+        if user_data_dir == _AUTO_DETECT:
+            self.user_data_dir = KISS_PROFILE_DIR
+        else:
+            self.user_data_dir = user_data_dir
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
+        self._elements: list[dict[str, str]] = []
 
     def _context_args(self) -> dict[str, Any]:
         return {
             "viewport": {"width": self.viewport[0], "height": self.viewport[1]},
-            "user_agent": CHROME_USER_AGENT,
             "locale": "en-US",
             "timezone_id": "America/Los_Angeles",
             "java_script_enabled": True,
             "has_touch": False,
             "is_mobile": False,
             "device_scale_factor": 2,
-            "extra_http_headers": {
-                "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;"
-                    "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
-                ),
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"macOS"',
-            },
         }
 
-    def _chromium_args(self) -> list[str]:
-        return [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ]
+    def _launch_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"headless": self.headless}
+        if self.browser_type == "chromium":
+            kwargs["args"] = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-infobars",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
+            if not self.headless:
+                kwargs["channel"] = "chrome"
+        return kwargs
 
     def _ensure_browser(self) -> None:
         if self._page is not None:
@@ -258,47 +103,30 @@ class WebUseTool:
 
         self._playwright = sync_playwright().start()
         launcher = getattr(self._playwright, self.browser_type)
-        is_chromium = self.browser_type == "chromium"
-        chromium_args = self._chromium_args() if is_chromium else []
-        channel = "chrome" if is_chromium and not self.headless else None
+        kwargs = self._launch_kwargs()
 
         if self.user_data_dir:
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
-            launch_kwargs: dict[str, Any] = {
-                "headless": self.headless,
-                "args": chromium_args or None,
-                **self._context_args(),
-            }
-            if channel:
-                launch_kwargs["channel"] = channel
             self._context = launcher.launch_persistent_context(
-                self.user_data_dir,
-                **launch_kwargs,
+                self.user_data_dir, **kwargs, **self._context_args()
             )
-            self._context.add_init_script(STEALTH_JS)
-            pages = self._context.pages
-            self._page = pages[0] if pages else self._context.new_page()
+            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         else:
-            launch_kwargs = {
-                "headless": self.headless,
-                "args": chromium_args or None,
-            }
-            if channel:
-                launch_kwargs["channel"] = channel
-            self._browser = launcher.launch(**launch_kwargs)
+            self._browser = launcher.launch(**kwargs)
             self._context = self._browser.new_context(**self._context_args())
-            self._context.add_init_script(STEALTH_JS)
             self._page = self._context.new_page()
 
-    def _get_dom_tree(self, max_chars: int = 50000) -> str:
+    def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
-        title = self._page.title()
-        url = self._page.url
-        tree: str = self._page.evaluate(DOM_EXTRACTION_JS)
-        header = f"Page: {title}\nURL: {url}\n\n"
-        if len(tree) > max_chars:
-            tree = tree[:max_chars] + "\n... [truncated]"
-        return header + tree
+        header = f"Page: {self._page.title()}\nURL: {self._page.url}\n\n"
+        snapshot = self._page.locator("body").aria_snapshot()
+        if not snapshot:
+            self._elements = []
+            return header + "(empty page)"
+        numbered, self._elements = _number_interactive_elements(snapshot)
+        if len(numbered) > max_chars:
+            numbered = numbered[:max_chars] + "\n... [truncated]"
+        return header + numbered
 
     def _wait_for_stable(self) -> None:
         try:
@@ -317,162 +145,174 @@ class WebUseTool:
         if len(pages) > 1 and pages[-1] != self._page:
             self._page = pages[-1]
 
-    def go_to_url(self, url: str) -> str:  # noqa: N802
-        """Navigate to a URL. Use "tab:list" to list open tabs, "tab:N" to switch to tab N.
+    def _resolve_locator(self, element_id: int) -> Any:
+        if element_id < 1 or element_id > len(self._elements):
+            snapshot = self._page.locator("body").aria_snapshot()
+            if snapshot:
+                _, self._elements = _number_interactive_elements(snapshot)
+            if element_id < 1 or element_id > len(self._elements):
+                raise ValueError(f"Element with ID {element_id} not found.")
+        role = self._elements[element_id - 1]["role"]
+        name = self._elements[element_id - 1]["name"]
+        if name:
+            locator = self._page.get_by_role(role, name=name, exact=True)
+        else:
+            locator = self._page.get_by_role(role)
+        n = locator.count()
+        if n == 0:
+            raise ValueError(f"Element with ID {element_id} not found on page.")
+        if n == 1:
+            return locator
+        for i in range(n):
+            try:
+                if locator.nth(i).is_visible():
+                    return locator.nth(i)
+            except Exception:
+                continue
+        return locator.first
+
+    def go_to_url(self, url: str) -> str:
+        """Navigate the browser to a URL and return the page accessibility tree.
+        Use when you need to open a new page or switch pages. Special values: "tab:list"
+        returns a list of open tabs; "tab:N" switches to tab N (0-based).
 
         Args:
-            url: URL to navigate to, "tab:list" to list tabs, or "tab:N" to switch to tab N.
-        """
+            url: Full URL to open, or "tab:list" for tab list, or "tab:N" to switch to tab N.
+
+        Returns:
+            On success: page title, URL, and accessibility tree with [N] IDs. For "tab:list":
+            list of open tabs with indices. On error: "Error navigating to <url>: <message>"."""
         self._ensure_browser()
         try:
+            pages = self._context.pages
             if url == "tab:list":
-                pages = self._context.pages
                 lines = [f"Open tabs ({len(pages)}):"]
                 for i, page in enumerate(pages):
-                    marker = " (active)" if page == self._page else ""
-                    lines.append(f"  [{i}] {page.title()} - {page.url}{marker}")
+                    suffix = " (active)" if page == self._page else ""
+                    lines.append(f"  [{i}] {page.title()} - {page.url}{suffix}")
                 return "\n".join(lines)
-
             if url.startswith("tab:"):
                 idx = int(url[4:])
-                pages = self._context.pages
                 if 0 <= idx < len(pages):
                     self._page = pages[idx]
-                    return self._get_dom_tree()
+                    return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
             self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             self._wait_for_stable()
-            return self._get_dom_tree()
+            return self._get_ax_tree()
         except Exception as e:
             return f"Error navigating to {url}: {e}"
 
     def click(self, element_id: int, action: str = "click") -> str:
-        """Click or hover on an element by its numeric ID from the DOM tree.
+        """Click or hover on an interactive element by its [N] ID from the accessibility tree.
+        Use after get_page_content or go_to_url to interact with links, buttons, tabs, etc.
 
         Args:
-            element_id: The numeric ID shown in brackets [N] in the DOM tree.
-            action: "click" (default) or "hover" to hover without clicking.
-        """
+            element_id: Numeric ID shown in brackets [N] next to the element in the tree.
+            action: "click" (default) to click the element, "hover" to only move focus.
+
+        Returns:
+            Updated accessibility tree (title, URL, numbered elements), or on error
+            "Error clicking element <id>: <message>"."""
         self._ensure_browser()
         try:
+            locator = self._resolve_locator(element_id)
+
             if action == "hover":
-                bbox = self._page.evaluate(
-                    """(id) => {
-                        const el = window.__kiss_elements[id];
-                        if (!el) return null;
-                        el.scrollIntoView({block: 'center'});
-                        const rect = el.getBoundingClientRect();
-                        return {x: rect.x + rect.width/2, y: rect.y + rect.height/2};
-                    }""",
-                    element_id,
-                )
-                if bbox is None:
-                    return f"Error: Element with ID {element_id} not found."
-                self._page.mouse.move(bbox["x"], bbox["y"])
+                locator.hover()
                 self._page.wait_for_timeout(300)
-                return self._get_dom_tree()
+                return self._get_ax_tree()
 
             pages_before = len(self._context.pages)
-            clicked = self._page.evaluate(
-                """(id) => {
-                    const el = window.__kiss_elements[id];
-                    if (!el) return false;
-                    el.scrollIntoView({block: 'center'});
-                    el.click();
-                    return true;
-                }""",
-                element_id,
-            )
-            if not clicked:
-                return f"Error: Element with ID {element_id} not found."
+            locator.click()
             self._page.wait_for_timeout(500)
             self._wait_for_stable()
             if len(self._context.pages) > pages_before:
                 self._check_for_new_tab()
                 self._wait_for_stable()
-            return self._get_dom_tree()
+            return self._get_ax_tree()
         except Exception as e:
             return f"Error clicking element {element_id}: {e}"
 
     def type_text(self, element_id: int, text: str, press_enter: bool = False) -> str:
-        """Type text into an input or textarea element.
+        """Type text into a textbox, searchbox, or other editable element by its [N] ID.
+        Clears existing content then types the given text. Use for forms, search boxes, etc.
 
         Args:
-            element_id: The numeric ID shown in brackets [N] in the DOM tree.
-            text: The text to type into the element.
-            press_enter: Whether to press Enter after typing.
-        """
+            element_id: Numeric ID from the accessibility tree (brackets [N]).
+            text: String to type into the element.
+            press_enter: If True, press Enter after typing (e.g. to submit a search).
+
+        Returns:
+            Updated accessibility tree, or "Error typing into element <id>: <message>" on error."""
         self._ensure_browser()
         try:
-            found = self._page.evaluate(
-                """(args) => {
-                    const el = window.__kiss_elements[args.id];
-                    if (!el) return false;
-                    el.scrollIntoView({block: 'center'});
-                    el.focus();
-                    el.value = '';
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    return true;
-                }""",
-                {"id": element_id},
-            )
-            if not found:
-                return f"Error: Element with ID {element_id} not found."
-            self._page.evaluate(
-                """(id) => {
-                    const el = window.__kiss_elements[id];
-                    if (el) el.focus();
-                }""",
-                element_id,
-            )
-            self._page.keyboard.type(text, delay=20)
+            locator = self._resolve_locator(element_id)
+            select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
+            locator.click()
+            self._page.keyboard.press(select_all)
+            self._page.keyboard.press("Backspace")
+            self._page.keyboard.type(text, delay=50)
             if press_enter:
                 self._page.keyboard.press("Enter")
                 self._page.wait_for_timeout(500)
                 self._wait_for_stable()
-            return self._get_dom_tree()
+            return self._get_ax_tree()
         except Exception as e:
             return f"Error typing into element {element_id}: {e}"
 
     def press_key(self, key: str) -> str:
-        """Press a keyboard key or key combination.
+        """Press a single key or key combination. Use for navigation, closing dialogs, shortcuts.
 
         Args:
-            key: Key name, e.g. "Enter", "Escape", "Tab", "ArrowDown", "PageDown",
-                 "Backspace", or combo like "Control+a", "Shift+Tab".
-        """
+            key: Key name, e.g. "Enter", "Escape", "Tab", "ArrowDown", "PageDown", "Backspace",
+                 or combination like "Control+a", "Shift+Tab".
+
+        Returns:
+            Updated accessibility tree, or "Error pressing key '<key>': <message>" on error."""
         self._ensure_browser()
         try:
             self._page.keyboard.press(key)
             self._page.wait_for_timeout(300)
-            return self._get_dom_tree()
+            return self._get_ax_tree()
         except Exception as e:
             return f"Error pressing key '{key}': {e}"
 
-    def execute_js(self, code: str) -> str:
-        """Execute JavaScript in the browser. Access elements via window.__kiss_elements[id].
+    def scroll(self, direction: str = "down", amount: int = 3) -> str:
+        """Scroll the current page to reveal more content. Use when needed elements are off-screen.
 
         Args:
-            code: JavaScript code to execute. Return a value to see it in the output.
-        """
+            direction: "down", "up", "left", or "right".
+            amount: Number of scroll steps (default 3).
+
+        Returns:
+            Updated accessibility tree after scrolling, or
+            "Error scrolling <direction>: <message>" on error."""
         self._ensure_browser()
         try:
-            result = self._page.evaluate(code)
+            dx, dy = _SCROLL_DELTA.get(direction, (0, 300))
+            vw, vh = self.viewport[0] // 2, self.viewport[1] // 2
+            self._page.mouse.move(vw, vh)
+            for _ in range(amount):
+                self._page.mouse.wheel(dx, dy)
+                self._page.wait_for_timeout(100)
             self._page.wait_for_timeout(300)
-            dom = self._get_dom_tree()
-            if result is not None:
-                return f"Result: {result}\n\n{dom}"
-            return dom
+            return self._get_ax_tree()
         except Exception as e:
-            return f"Error executing JS: {e}"
+            return f"Error scrolling {direction}: {e}"
 
     def screenshot(self, file_path: str = "screenshot.png") -> str:
-        """Take a screenshot of the current page and save it to a file.
+        """Capture the visible viewport as an image. Use to verify layout, captchas, or
+        visual state.
 
         Args:
-            file_path: Path where the screenshot will be saved.
-        """
+            file_path: Path where the PNG will be saved (default "screenshot.png"). Parent
+                directories are created if needed.
+
+        Returns:
+            "Screenshot saved to <resolved_path>", or
+            "Error taking screenshot: <message>" on error."""
         self._ensure_browser()
         try:
             path = Path(file_path).resolve()
@@ -483,24 +323,31 @@ class WebUseTool:
             return f"Error taking screenshot: {e}"
 
     def get_page_content(self, text_only: bool = False) -> str:
-        """Get current page content: DOM tree with interactive element IDs, or plain text.
+        """Get the current page content. Use to decide what to click or type next.
 
         Args:
-            text_only: If True, return full plain text instead of the DOM tree.
-        """
+            text_only: If False (default), return accessibility tree with [N] IDs for interactive
+                elements. If True, return plain text only (title, URL, body text).
+
+        Returns:
+            Accessibility tree or plain text as described above, or
+            "Error getting page content: <message>" on error."""
         self._ensure_browser()
         try:
             if text_only:
                 title = self._page.title()
                 url = self._page.url
-                text: str = self._page.evaluate("document.body.innerText")
-                return f"Page: {title}\nURL: {url}\n\n{text}"
-            return self._get_dom_tree()
+                body = self._page.inner_text("body")
+                return f"Page: {title}\nURL: {url}\n\n{body}"
+            return self._get_ax_tree()
         except Exception as e:
             return f"Error getting page content: {e}"
 
     def close(self) -> str:
-        """Close the browser and release all resources."""
+        """Close the browser and release resources. Call when done with the session or before exit.
+
+        Returns:
+            "Browser closed." (always, even if nothing was open)."""
         try:
             if self.user_data_dir and self._context:
                 self._context.close()
@@ -514,16 +361,21 @@ class WebUseTool:
         self._context = None
         self._browser = None
         self._playwright = None
+        self._elements = []
         return "Browser closed."
 
     def get_tools(self) -> list[Callable[..., str]]:
-        """Return all tool methods for passing to KISSAgent."""
+        """Return callable web tools for registration with an agent.
+
+        Returns:
+            List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
+            get_page_content. Does not include close."""
         return [
             self.go_to_url,
             self.click,
             self.type_text,
             self.press_key,
-            self.execute_js,
+            self.scroll,
             self.screenshot,
             self.get_page_content,
         ]

@@ -15,7 +15,7 @@ class IMOAgentConfig(BaseModel):
         description="Model for verifying solutions",
     )
     validator_model: str = Field(
-        default="gemini-2.5-pro",
+        default="gemini-3-pro-preview",
         description="Model for independent validation against known answers",
     )
     max_refinement_rounds: int = Field(

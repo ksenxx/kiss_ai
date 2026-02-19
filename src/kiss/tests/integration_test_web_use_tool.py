@@ -5,9 +5,9 @@ import re
 from kiss.core.web_use_tool import WebUseTool
 
 
-def find_id(dom: str, pattern: str) -> int:
-    match = re.search(pattern, dom)
-    assert match, f"Pattern not found: {pattern}\nDOM:\n{dom}"
+def find_id(tree: str, pattern: str) -> int:
+    match = re.search(pattern, tree)
+    assert match, f"Pattern not found: {pattern}\nTree:\n{tree}"
     return int(match.group(1))
 
 
@@ -18,58 +18,59 @@ def main() -> None:
         print("=" * 70)
         print("Step 1: Navigate to httpbin.org/forms/post")
         print("=" * 70)
-        dom = web.go_to_url("https://httpbin.org/forms/post")
-        print(dom)
+        tree = web.go_to_url("https://httpbin.org/forms/post")
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 2: Fill in 'Customer name'")
         print("=" * 70)
-        dom = web.type_text(find_id(dom, r'\[(\d+)\].*name="custname"'), "Alice Smith")
-        print(dom)
+        tree = web.type_text(find_id(tree, r"\[(\d+)\].*textbox.*[Cc]ustomer"), "Alice Smith")
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 3: Fill in 'Telephone'")
         print("=" * 70)
-        dom = web.type_text(find_id(dom, r'\[(\d+)\].*type="tel"'), "555-1234")
-        print(dom)
+        tree = web.type_text(find_id(tree, r"\[(\d+)\].*textbox.*[Tt]el"), "555-1234")
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 4: Fill in 'E-mail address'")
         print("=" * 70)
-        dom = web.type_text(find_id(dom, r'\[(\d+)\].*type="email"'), "alice@example.com")
-        print(dom)
+        tree = web.type_text(find_id(tree, r"\[(\d+)\].*textbox.*[Ee].?mail"), "alice@example.com")
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 5: Select pizza size 'Large' (radio button)")
         print("=" * 70)
-        dom = web.click(find_id(dom, r'\[(\d+)\].*value="large"'))
-        print(dom)
+        tree = web.click(find_id(tree, r"\[(\d+)\].*radio.*[Ll]arge"))
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 6: Check topping 'Bacon'")
         print("=" * 70)
-        dom = web.click(find_id(dom, r'\[(\d+)\].*value="bacon"'))
-        print(dom)
+        tree = web.click(find_id(tree, r"\[(\d+)\].*checkbox.*[Bb]acon"))
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 7: Check topping 'Mushroom'")
         print("=" * 70)
-        dom = web.click(find_id(dom, r'\[(\d+)\].*value="mushroom"'))
-        print(dom)
+        tree = web.click(find_id(tree, r"\[(\d+)\].*checkbox.*[Mm]ushroom"))
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 8: Fill in delivery instructions")
         print("=" * 70)
-        dom = web.type_text(
-            find_id(dom, r"\[(\d+)\] <textarea"), "Ring the doorbell twice please"
+        tree = web.type_text(
+            find_id(tree, r"\[(\d+)\].*textbox.*[Dd]elivery"),
+            "Ring the doorbell twice please",
         )
-        print(dom)
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 9: Submit the form")
         print("=" * 70)
-        dom = web.click(find_id(dom, r"\[(\d+)\] <button"))
-        print(dom)
+        tree = web.click(find_id(tree, r"\[(\d+)\].*button.*[Ss]ubmit"))
+        print(tree)
 
         print("\n" + "=" * 70)
         print("Step 10: Screenshot of submission result")

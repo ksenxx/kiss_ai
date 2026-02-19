@@ -1,6 +1,6 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.16
+**Version:** 0.1.17
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
@@ -9,6 +9,14 @@
 ______________________________________________________________________
 
 KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
+
+## Installation
+
+Install from PyPI with pip:
+
+```bash
+pip install kiss-agent-framework
+```
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
@@ -155,19 +163,19 @@ print(f"Result: {result}")
 - **Safer Bash Execution**: `Bash()` validates file paths inside inline interpreter flags (e.g., `python -c`, `node -e`) against path access controls, and disallows shell control commands like `env`, `eval`, and `exec`
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
-## 💬 Browser-Based Chatbot
+## 💬 Browser-Based Assistant
 
-KISS includes a browser-based chatbot UI for interacting with the `RelentlessCodingAgent`. It provides a rich web interface with real-time streaming output, task history with autocomplete, and a file browser for the working directory.
+KISS includes a browser-based assistant UI for interacting with agents. It provides a rich web interface with real-time streaming output, task history with autocomplete, and a file browser for the working directory.
 
 ```bash
-# Launch the chatbot (opens browser automatically)
-uv run chatbot
+# Launch the assistant (opens browser automatically)
+uv run assistant
 
 # Or with a custom working directory
-uv run chatbot --work-dir ./my-project
+uv run assistant --work-dir ./my-project
 ```
 
-The chatbot features:
+The assistant features:
 
 - **Real-time streaming**: See agent thinking, tool calls, and results as they happen
 - **Structured result display**: Results with success/failure status are rendered with markdown formatting
@@ -295,7 +303,7 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
 - **Multi-Tool Execution**: Agents can execute multiple tool calls in a single step for faster task completion
 - **Relentless Coding Agent**: Single-agent coding system with smart auto-continuation for long-running tasks
-- **Browser-Based Chatbot**: Interactive web UI for the RelentlessCodingAgent with real-time streaming and task history
+- **Browser-Based Assistant**: Interactive web UI for agents with real-time streaming and task history
 - **Repo Optimizer**: Uses RelentlessCodingAgent to iteratively optimize code in your project for speed and cost (💡 new idea)
 - **IMO Agent**: Verification-and-refinement pipeline for solving competition math problems (based on [arXiv:2507.15855](https://arxiv.org/abs/2507.15855))
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
@@ -513,6 +521,11 @@ The Docker manager automatically handles image pulling, container lifecycle, and
 kiss/
 ├── src/kiss/
 │   ├── agents/          # Agent implementations
+│   │   ├── assistant/              # Assistant agent with coding + browser tools
+│   │   │   ├── assistant_agent.py      # AssistantAgent with coding and browser automation
+│   │   │   ├── assistant.py            # Browser-based assistant UI
+│   │   │   ├── relentless_agent.py     # RelentlessAgent base class
+│   │   │   └── config.py               # Assistant agent configuration
 │   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
 │   │   │   ├── improver_agent.py       # Agent improvement through generations
@@ -536,7 +549,6 @@ kiss/
 │   │   │   └── README.md           # KISSEvolve documentation
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
-│   │   │   ├── chatbot.py                # Browser-based chatbot UI for RelentlessCodingAgent
 │   │   │   ├── claude_coding_agent.py     # Claude-based coding agent
 │   │   │   ├── repo_optimizer.py          # Iterative code optimizer using RelentlessCodingAgent
 │   │   │   ├── repo_agent.py              # Repo-level task agent using RelentlessCodingAgent
@@ -554,11 +566,13 @@ kiss/
 │   │   ├── printer.py         # Abstract Printer base class and MultiPrinter
 │   │   ├── print_to_console.py # ConsolePrinter: Rich-formatted terminal output
 │   │   ├── print_to_browser.py # BrowserPrinter: SSE streaming to browser UI
+│   │   ├── browser_ui.py      # Browser UI base components and utilities
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
 │   │   ├── useful_tools.py    # UsefulTools class with path-restricted Read, Write, Bash, Edit, search_web, fetch_url
+│   │   ├── web_use_tool.py    # WebUseTool class with Playwright-based browser automation
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface with TokenCallback streaming support
 │   │       ├── gemini_model.py    # Gemini model implementation
@@ -590,8 +604,7 @@ kiss/
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
-│   │   ├── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
-│   │   └── release.sh                  # Release automation script
+│   │   └── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
 │   ├── tests/           # Test suite
 │   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py
@@ -617,7 +630,12 @@ kiss/
 │   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
 │   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter browser output
 │   │   ├── test_search_web.py
-│   │   └── test_useful_tools.py
+│   │   ├── test_useful_tools.py
+│   │   ├── test_web_use_tool.py             # Tests for WebUseTool browser automation
+│   │   ├── test_chatbot_tasks.py            # Tests for assistant task handling
+│   │   ├── integration_test_assistant_agent.py  # Integration tests for AssistantAgent
+│   │   ├── integration_test_google_search.py    # Integration tests for Google search
+│   │   └── integration_test_web_use_tool.py     # Integration tests for WebUseTool
 │   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
@@ -660,7 +678,7 @@ __version__ = "0.2.0"  # Update to new version
 
 Configuration is managed through environment variables and the `DEFAULT_CONFIG` object:
 
-- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, and/or `OPENROUTER_API_KEY` environment variables
+- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, and/or `MINIMAX_API_KEY` environment variables
 - **Agent Settings**: Modify `DEFAULT_CONFIG.agent` in `src/kiss/core/config.py`:
   - `max_steps`: Maximum iterations in the ReAct loop (default: 100)
   - `verbose`: Enable verbose output (default: True)
@@ -674,15 +692,15 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
   - `model_name`: Model for task execution (default: "claude-opus-4-6")
   - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 200)
-  - `max_steps`: Maximum steps per sub-session (default: 200)
+  - `max_steps`: Maximum steps per sub-session (default: 25)
   - `max_budget`: Maximum budget in USD (default: 200.0)
 - **IMO Agent Settings**: Modify `DEFAULT_CONFIG.imo_agent` in `src/kiss/agents/imo_agent/config.py`:
-  - `solver_model`: Model for solving IMO problems (default: "o3")
+  - `solver_model`: Model for solving IMO problems (default: "gemini-3-pro-preview")
   - `verifier_model`: Model for verifying solutions (default: "gemini-2.5-pro")
   - `validator_model`: Model for independent validation against known answers (default: "gemini-2.5-pro")
-  - `max_refinement_rounds`: Max verification-refinement iterations per attempt (default: 5)
-  - `num_verify_passes`: Number of verification passes required to accept a solution (default: 3)
-  - `max_attempts`: Max independent attempts per problem (default: 3)
+  - `max_refinement_rounds`: Max verification-refinement iterations per attempt (default: 2)
+  - `num_verify_passes`: Number of verification passes required to accept a solution (default: 1)
+  - `max_attempts`: Max independent attempts per problem (default: 1)
   - `max_budget`: Maximum budget in USD per problem (default: 50.0)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
@@ -753,10 +771,14 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run notebook --execute` - Execute notebook cells and update outputs in place
 - `uv run notebook --convert` - Convert notebook to Python script
 
-### Chatbot
+### Assistant
 
-- `uv run chatbot` - Launch the browser-based chatbot UI
-- `uv run chatbot --work-dir ./my-project` - Launch with custom working directory
+- `uv run assistant` - Launch the browser-based assistant UI (coding + browser automation)
+- `uv run assistant --work-dir ./my-project` - Launch with custom working directory
+
+### AlgoTune
+
+- `uv run algotune` - Run the AlgoTune benchmark
 
 ### Cleanup
 

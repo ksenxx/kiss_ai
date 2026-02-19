@@ -22,18 +22,18 @@ def main() -> None:
         print("Step 1: Navigate directly to Google search results")
         print("=" * 70)
         url = f"https://www.google.com/search?q={quote_plus(query)}"
-        dom = web.go_to_url(url)
-        print(dom[:4000])
+        tree = web.go_to_url(url)
+        print(tree[:4000])
         print("... (truncated)\n")
 
-        if "/sorry/" in dom:
+        if "/sorry/" in tree:
             import time
 
             print("Google CAPTCHA detected.")
             print("Waiting 30s -- solve the CAPTCHA in the browser window...")
             time.sleep(30)
-            dom = web.get_page_content()
-            print(dom[:4000])
+            tree = web.get_page_content()
+            print(tree[:4000])
             print("... (truncated)\n")
 
         print("=" * 70)
@@ -42,43 +42,38 @@ def main() -> None:
         print(web.screenshot("google_search_results.png"))
 
         print("\n" + "=" * 70)
-        print("Step 3: Extract and summarize non-sponsored links")
+        print("Step 3: Extract links from accessibility tree")
         print("=" * 70)
 
-        links = re.findall(
-            r'\[(\d+)\] <a href="(https?://[^"]+)"[^>]*>([^<]{5,})', dom
-        )
+        links = re.findall(r"\[(\d+)\] link \"([^\"]+)\"", tree)
 
-        skip_domains = {
-            "google.com", "google.", "gstatic.com", "googleapis.com",
+        skip_patterns = {
+            "google.com", "gstatic.com", "googleapis.com",
             "youtube.com", "accounts.google", "support.google",
-            "maps.google", "play.google",
+            "maps.google", "play.google", "Sign in", "More options",
+            "Settings", "Tools", "Images", "Videos", "News", "Shopping",
+            "All", "Maps", "Books", "Flights", "Finance",
         }
 
-        seen: set[str] = set()
-        results: list[tuple[str, str, str]] = []
-
-        for elem_id, link_url, title in links:
-            title = title.strip()
-            if any(d in link_url for d in skip_domains):
+        results: list[tuple[str, str]] = []
+        for elem_id, title in links:
+            if any(p in title for p in skip_patterns):
                 continue
-            if link_url in seen:
+            if len(title) < 5:
                 continue
-            seen.add(link_url)
-            results.append((elem_id, link_url, title))
+            results.append((elem_id, title))
 
-        print(f"\nFound {len(results)} non-sponsored result links:\n")
-        for i, (elem_id, link_url, title) in enumerate(results[:10], 1):
-            print(f"  {i}. [{elem_id}] {title}")
-            print(f"     {link_url}\n")
+        print(f"\nFound {len(results)} result links:\n")
+        for i, (elem_id, title) in enumerate(results[:10], 1):
+            print(f"  {i}. [{elem_id}] {title}\n")
 
         if results:
             print("=" * 70)
-            print(f"Step 4: Click first result: '{results[0][2]}'")
+            print(f"Step 4: Click first result: '{results[0][1]}'")
             print("=" * 70)
             first_id = int(results[0][0])
-            dom = web.click(first_id)
-            print(dom[:3000])
+            tree = web.click(first_id)
+            print(tree[:3000])
             print("... (truncated)\n")
             print(web.screenshot("first_result_page.png"))
 

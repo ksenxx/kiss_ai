@@ -127,7 +127,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-4o-2024-05-13": _mi(128000, 5.00, 15.00),
     "gpt-4o-mini": _mi(128000, 0.15, 0.60),
     "gpt-4o-mini-realtime-preview": _mi(128000, 0.60, 2.40, fc=False),
-    "gpt-4o-realtime-preview": _mi(128000, 4.00, 16.00, fc=False),
+    "gpt-4o-mini-audio-preview": _mi(128000, 0.15, 0.60, fc=False),
+    "gpt-4o-realtime-preview": _mi(128000, 5.00, 20.00, fc=False),
     "gpt-4o-transcribe-diarize": _mi(128000, 2.50, 10.00, fc=False),
     "gpt-4-turbo": _mi(128000, 10.00, 30.00),
     "gpt-4.5-preview": _mi(128000, 2.50, 10.00),  # Deprecated
@@ -168,6 +169,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "claude-opus-4-1-20250805": _mi(200000, 15.00, 75.00),  # Snapshot version
     "claude-opus-4": _mi(200000, 15.00, 75.00),
     "claude-opus-4-20250514": _mi(200000, 15.00, 75.00),  # Snapshot version
+    "claude-sonnet-4-6": _mi(200000, 3.00, 15.00),  # 1M beta via header
     "claude-sonnet-4-5": _mi(200000, 3.00, 15.00),  # 1M beta via header
     "claude-sonnet-4-5-20250929": _mi(200000, 3.00, 15.00),  # Snapshot version
     "claude-sonnet-4": _mi(200000, 3.00, 15.00),  # 1M beta via header
@@ -192,7 +194,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-2.5-flash-lite-preview-09-2025": _mi(1048576, 0.10, 0.40, fc=False),
     # Gemini 2.0 models
     "gemini-2.0-flash": _mi(1048576, 0.10, 0.40),
-    "gemini-2.0-flash-lite": _mi(1048576, 0.08, 0.30),
+    "gemini-2.0-flash-lite": _mi(1048576, 0.075, 0.30),
     # Gemini 1.5 models (legacy but still available)
     "gemini-1.5-pro": _mi(2097152, 1.25, 5.00),  # 2M context window
     "gemini-1.5-flash": _mi(1048576, 0.075, 0.30),
@@ -201,6 +203,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     "gemini-embedding-001": _emb(8192, 0.15),  # Newest embedding model
     "text-embedding-004": _emb(2048, 0.00),  # 768 dimensions, free tier
+    # ==========================================================================
+    # MiniMax models (direct API - pricing from api.minimax.chat)
+    # ==========================================================================
+    # M2.5 series (230B MoE, 10B active params, 1M context window)
+    "minimax-m2.5": _mi(1000000, 0.15, 1.20),  # Standard: 50 TPS
+    "minimax-m2.5-lightning": _mi(1000000, 0.30, 2.40),  # Lightning: 100 TPS
     # ==========================================================================
     # Together AI models - Llama series (pricing from together.ai/pricing)
     # ==========================================================================
@@ -251,7 +259,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # SLOW: thinking model
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
     # Z.AI GLM models
-    "zai-org/GLM-5.0": _mi(200000, 1.00, 3.20),  # 744B MoE (GLM-5-FP4 pricing from together.ai)
+    "zai-org/GLM-5.0": _mi(200000, 1.00, 3.20),  # 744B MoE - FC via OpenRouter verified
     "zai-org/GLM-4.5-Air-FP8": _mi(131072, 0.20, 1.10),
     "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),  # Enhanced agentic coding
     # OpenAI GPT-OSS models
@@ -316,6 +324,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-3-haiku": _mi(200000, 0.25, 1.25),
     "openrouter/anthropic/claude-3.5-haiku": _mi(200000, 0.80, 4.00),  # Deprecated
     "openrouter/anthropic/claude-sonnet-4": _mi(200000, 3.00, 15.00),
+    "openrouter/anthropic/claude-sonnet-4.6": _mi(200000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.5": _mi(200000, 3.00, 15.00),
     "openrouter/anthropic/claude-haiku-4.5": _mi(200000, 1.00, 5.00),
     "openrouter/anthropic/claude-opus-4": _mi(200000, 15.00, 75.00),
@@ -586,7 +595,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Z.AI GLM
     # ==========================================================================
-    "openrouter/z-ai/glm-5": _mi(203000, 1.00, 3.20),  # 744B MoE (GLM-5-FP4 pricing)
+    "openrouter/z-ai/glm-5": _mi(203000, 1.00, 3.20),  # 744B MoE - FC verified
     "openrouter/z-ai/glm-4-32b": _mi(128000, 0.10, 0.10),
     "openrouter/z-ai/glm-4.5": _mi(131072, 0.35, 1.55),
     "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.05, 0.22),
@@ -899,6 +908,8 @@ def model(
     Args:
         model_name: The name of the model (with provider prefix if applicable).
         model_config: Optional dictionary of model configuration parameters.
+            If it contains "base_url", routing is bypassed and an OpenAICompatibleModel
+            is built with that base_url and optional "api_key".
         token_callback: Optional async callback invoked with each streamed text token.
 
     Returns:
@@ -907,6 +918,21 @@ def model(
     Raises:
         KISSError: If the model name is not recognized.
     """
+    if model_config and "base_url" in model_config:
+        if OpenAICompatibleModel is None:
+            raise KISSError(
+                "OpenAI SDK not installed. Install 'openai' to use custom base_url."
+            )
+        base_url = model_config["base_url"]
+        api_key = model_config.get("api_key", "")
+        filtered = {k: v for k, v in model_config.items() if k not in ("base_url", "api_key")}
+        return OpenAICompatibleModel(
+            model_name=model_name,
+            base_url=base_url,
+            api_key=api_key,
+            model_config=filtered if filtered else None,
+            token_callback=token_callback,
+        )
     # OpenRouter models (strip "openrouter/" prefix for API calls)
     if model_name.startswith("openrouter/"):
         if OpenAICompatibleModel is None:
@@ -1004,8 +1030,55 @@ def model(
             model_config=model_config,
             token_callback=token_callback,
         )
+    # MiniMax models (direct MiniMax API, OpenAI-compatible)
+    elif model_name.startswith("minimax-"):
+        if OpenAICompatibleModel is None:
+            raise KISSError(
+                "OpenAI SDK not installed. Install 'openai' to use MiniMax models."
+            )
+        return OpenAICompatibleModel(
+            model_name=model_name,
+            base_url="https://api.minimax.chat/v1",
+            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.MINIMAX_API_KEY,
+            model_config=model_config,
+            token_callback=token_callback,
+        )
     else:
         raise KISSError(f"Unknown model name: {model_name}")
+
+
+def get_available_models() -> list[str]:
+    """Return model names for which an API key is configured, generation is supported."""
+    keys = config_module.DEFAULT_CONFIG.agent.api_keys
+    provider_keys = {
+        "openrouter/": keys.OPENROUTER_API_KEY,
+        "claude-": keys.ANTHROPIC_API_KEY,
+        "gemini-": keys.GEMINI_API_KEY,
+        "minimax-": keys.MINIMAX_API_KEY,
+    }
+    openai_prefixes = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
+    together_prefixes = (
+        "meta-llama/", "Qwen/", "mistralai/", "deepseek-ai/", "deepcogito/",
+        "google/gemma", "moonshotai/", "nvidia/", "zai-org/", "openai/gpt-oss",
+        "arcee-ai/", "marin-community/", "essentialai/", "BAAI/", "intfloat/", "Alibaba-NLP/",
+    )
+    result = []
+    for name, info in MODEL_INFO.items():
+        if not info.is_generation_supported:
+            continue
+        api_key = ""
+        for prefix, key in provider_keys.items():
+            if name.startswith(prefix):
+                api_key = key
+                break
+        if not api_key:
+            if name.startswith(openai_prefixes) and not name.startswith("openai/gpt-oss"):
+                api_key = keys.OPENAI_API_KEY
+            elif name.startswith(together_prefixes):
+                api_key = keys.TOGETHER_API_KEY
+        if api_key:
+            result.append(name)
+    return sorted(result)
 
 
 def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int) -> float:

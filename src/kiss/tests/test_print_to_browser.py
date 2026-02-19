@@ -16,8 +16,7 @@ from kiss.core.printer import MAX_RESULT_LEN as _MAX_RESULT_LEN
 
 def _subscribe(printer: BrowserPrinter) -> queue.Queue:
     q: queue.Queue = queue.Queue()
-    with printer._clients_lock:
-        printer._clients.append(q)
+    printer._clients.append(q)
     return q
 
 
@@ -118,7 +117,7 @@ class TestPrintToolResult(unittest.TestCase):
         p = BrowserPrinter()
         q = _subscribe(p)
         long = "x" * (_MAX_RESULT_LEN * 2)
-        p._print_tool_result(long, is_error=False)
+        p.print(long, type="tool_result", is_error=False)
         events = _drain(q)
         assert "... (truncated) ..." in events[0]["content"]
 
@@ -272,37 +271,6 @@ class TestStreamingFlow(unittest.TestCase):
         events = _drain(q)
         assert any(e["type"] == "thinking_end" for e in events)
 
-    def test_text_block_flow(self):
-        import asyncio
-        p = BrowserPrinter()
-        q = _subscribe(p)
-        p.print(
-            self._event({
-                "type": "content_block_start",
-                "content_block": {"type": "text"},
-            }),
-            type="stream_event",
-        )
-        assert p._current_block_type == "text"
-
-        text = p.print(
-            self._event({
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "hello"},
-            }),
-            type="stream_event",
-        )
-        assert text == "hello"
-        assert _drain(q) == []
-
-        asyncio.run(p.token_callback("hello"))
-        events = _drain(q)
-        assert len(events) == 1
-        assert events[0] == {"type": "text_delta", "text": "hello"}
-
-        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
-        assert p._current_block_type == ""
-
     def test_no_double_broadcast(self):
         import asyncio
         p = BrowserPrinter()
@@ -326,6 +294,10 @@ class TestStreamingFlow(unittest.TestCase):
         events = _drain(q)
         text_events = [e for e in events if e.get("text") == "unique_token"]
         assert len(text_events) == 1
+
+        # Also verify block_stop resets state for text blocks
+        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
+        assert p._current_block_type == ""
 
 
 if __name__ == "__main__":
