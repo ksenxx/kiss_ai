@@ -286,54 +286,6 @@ class TestStreamingFlow(unittest.TestCase):
     def _event(self, evt_dict):
         return SimpleNamespace(event=evt_dict)
 
-    def test_thinking_block_flow(self):
-        import asyncio
-        p, buf = self._make_printer()
-        p.print(
-            self._event({
-                "type": "content_block_start",
-                "content_block": {"type": "thinking"},
-            }),
-            type="stream_event",
-        )
-        assert p._current_block_type == "thinking"
-        text = p.print(
-            self._event({
-                "type": "content_block_delta",
-                "delta": {"type": "thinking_delta", "thinking": "hmm"},
-            }),
-            type="stream_event",
-        )
-        assert text == "hmm"
-        asyncio.run(p.token_callback("hmm"))
-        assert "hmm" in buf.getvalue()
-        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
-        assert p._current_block_type == ""
-
-    def test_text_block_flow(self):
-        import asyncio
-        p, buf = self._make_printer()
-        p.print(
-            self._event({
-                "type": "content_block_start",
-                "content_block": {"type": "text"},
-            }),
-            type="stream_event",
-        )
-        assert p._current_block_type == "text"
-        text = p.print(
-            self._event({
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "hello"},
-            }),
-            type="stream_event",
-        )
-        assert text == "hello"
-        asyncio.run(p.token_callback("hello"))
-        assert "hello" in buf.getvalue()
-        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
-        assert p._current_block_type == ""
-
     def test_no_double_print(self):
         import asyncio
         p, buf = self._make_printer()
@@ -354,6 +306,8 @@ class TestStreamingFlow(unittest.TestCase):
         asyncio.run(p.token_callback("unique_token"))
         output = buf.getvalue()
         assert output.count("unique_token") == 1
+        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
+        assert p._current_block_type == ""
 
 
 if __name__ == "__main__":

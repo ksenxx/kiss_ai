@@ -7,6 +7,7 @@
 
 import asyncio
 import inspect
+import threading
 import types as types_module
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
@@ -14,6 +15,33 @@ from typing import Any, Union, get_args, get_origin
 
 # Type alias for the async token streaming callback.
 TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
+
+
+_callback_helper_loop: asyncio.AbstractEventLoop | None = None
+_callback_helper_ready = threading.Event()
+_callback_helper_lock = threading.Lock()
+
+
+def _get_callback_loop() -> asyncio.AbstractEventLoop:
+    global _callback_helper_loop
+    with _callback_helper_lock:
+        if _callback_helper_loop is not None and not _callback_helper_loop.is_closed():
+            return _callback_helper_loop
+
+        def run_loop() -> None:
+            global _callback_helper_loop
+            _callback_helper_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(_callback_helper_loop)
+            _callback_helper_ready.set()
+            _callback_helper_loop.run_forever()
+
+        _callback_helper_ready.clear()
+        t = threading.Thread(target=run_loop, daemon=True)
+        t.start()
+    _callback_helper_ready.wait(timeout=5)
+    if _callback_helper_loop is None or _callback_helper_loop.is_closed():
+        raise RuntimeError("Callback helper loop failed to start")
+    return _callback_helper_loop
 
 
 class Model(ABC):
@@ -41,15 +69,10 @@ class Model(ABC):
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
-        # Reusable event loop for invoking the async callback from sync code.
         self._callback_loop: asyncio.AbstractEventLoop | None = None
 
     def _invoke_token_callback(self, token: str) -> None:
-        """Invoke the async token_callback synchronously.
-
-        Args:
-            token: The text token to pass to the callback.
-        """
+        """Invoke the async token_callback synchronously, preserving order."""
         if self.token_callback is None:
             return
         try:
@@ -57,7 +80,11 @@ class Model(ABC):
         except RuntimeError:
             running_loop = None
         if running_loop and running_loop.is_running():
-            running_loop.create_task(self.token_callback(token))
+            helper_loop = _get_callback_loop()
+            future = asyncio.run_coroutine_threadsafe(
+                self.token_callback(token), helper_loop
+            )
+            future.result(timeout=30)
             return
         if self._callback_loop is None or self._callback_loop.is_closed():
             self._callback_loop = asyncio.new_event_loop()

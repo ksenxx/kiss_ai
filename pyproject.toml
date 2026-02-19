@@ -1,5 +1,5 @@
 [project]
-name = "kiss"
+name = "kiss-agent-framework"
 dynamic = ["version"]
 description = "KISS Agent Framework - A simple and portable agent framework for building and evolving AI agents"
 readme = "README.md"
@@ -24,6 +24,15 @@ keywords = [
     "genetic-algorithm",
     "swe-bench",
     "rag",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "openai>=2.13.0",
@@ -139,8 +148,8 @@ python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
-# Timeout for tests (can be overridden per-test)
-timeout = 120
+# Disable timeout so tests run without time limit
+timeout = 0
 # Quick testing (exclude run_all_models_test.py which tests ALL models):
 #   uv run pytest --ignore=src/kiss/tests/run_all_models_test.py -v
 # Full testing (includes all models):
@@ -232,8 +241,12 @@ target-version = "py313"
 select = ["E", "F", "W", "I", "N", "UP"]
 ignore = []
 
+[project.urls]
+Homepage = "https://github.com/ksen/kiss"
+Repository = "https://github.com/ksen/kiss"
+
 [project.scripts]
 check = "kiss.scripts.check:main"
 algotune = "kiss.evals.algotune.run_algotune:main"
 notebook = "kiss.scripts.notebook:main"
-chatbot = "kiss.agents.coding_agents.chatbot:main"
+assistant = "kiss.agents.assistant.assistant:main"

@@ -1901,6 +1901,7 @@ DEFAULT_CONFIG.agent.print_to_browser = False
 - `GEMINI_API_KEY` (str): Google Gemini API key
 - `TOGETHER_API_KEY` (str): Together AI API key
 - `OPENROUTER_API_KEY` (str): OpenRouter API key
+- `MINIMAX_API_KEY` (str): MiniMax API key
 
 #### `agent`
 
@@ -1917,7 +1918,7 @@ DEFAULT_CONFIG.agent.print_to_browser = False
 #### `coding_agent.relentless_coding_agent`
 
 - `model_name` (str): Model for task execution (default: "claude-opus-4-6")
-- `max_steps` (int): Maximum steps per sub-session for the Relentless Coding Agent (default: 200)
+- `max_steps` (int): Maximum steps per sub-session for the Relentless Coding Agent (default: 25)
 - `max_budget` (float): Maximum budget in USD for the Relentless Coding Agent (default: 200.0)
 - `max_sub_sessions` (int): Maximum number of sub-sessions for auto-continuation (default: 200)
 

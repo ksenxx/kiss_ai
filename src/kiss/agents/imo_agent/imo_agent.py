@@ -150,6 +150,55 @@ The correct answer exists — use a radically different approach.
 **Solution:** Complete rigorous proof.
 """
 
+VERIFIER_PROMPT = """\
+You are a rigorous mathematical proof verifier. Your job is to independently check a \
+proposed solution to an IMO problem for correctness. You do NOT know the correct answer — \
+you must judge the solution purely on its own merits.
+
+### Problem ###
+{problem}
+
+### Computed Small Cases (independent ground truth) ###
+{exploration}
+
+### Proposed Solution ###
+{solution}
+
+### Verification Checklist ###
+Go through each item carefully:
+
+1. **Answer–Data Consistency**: Does the claimed answer match EVERY computed small case \
+from the exploration above? Check each data point explicitly. If ANY small case contradicts \
+the claimed answer, verdict is FAIL.
+
+2. **Logical Correctness**: Trace through every logical step of the proof. Flag any:
+   - Non-sequiturs or unjustified leaps ("clearly", "obviously" without proof)
+   - Circular reasoning
+   - Incorrect algebraic/arithmetic manipulations (re-do key calculations yourself)
+   - Misapplied theorems or wrong prerequisites
+
+3. **Completeness of Proof**:
+   - For "determine all" problems: Is there BOTH a proof that claimed values work (sufficiency) \
+AND a proof that no other values work (necessity)? Missing either direction is FAIL.
+   - For "prove" problems: Is the proof complete from hypotheses to conclusion?
+   - For "find minimum/maximum": Is there both a construction achieving the bound AND a proof \
+of optimality?
+
+4. **Edge Cases and Boundary Conditions**: Does the proof handle all edge/boundary cases? \
+Are base cases for induction correct? Are degenerate configurations addressed?
+
+5. **Computation Accuracy**: Re-derive at least 2-3 key computational steps independently. \
+Do they match what the solution claims?
+
+### Output ###
+For each checklist item, write a brief assessment (1-2 sentences).
+
+Then give EXACTLY one verdict line:
+VERDICT: PASS — the solution is mathematically correct and complete
+VERDICT: FAIL — there is a concrete error, gap, or inconsistency
+Then state the specific reason.
+"""
+
 VALIDATION_PROMPT = """\
 Check if the solution correctly solves the problem with valid reasoning.
 
@@ -258,20 +307,20 @@ class IMOAgent(Base):
                 " — compute small cases yourself before attempting a proof.)"
             )
 
-    def _validate(self, problem_number: int, solution: str) -> tuple[bool, str]:
-        problem = get_problem_statement(problem_number)
-        criteria, answer = get_validation_info(problem_number)
-        result = self._call_model(
-            "IMO-Validator", self.validator_model, VALIDATION_PROMPT,
-            {
-                "problem": problem,
-                "solution": solution[:8000],
-                "known_answer": answer,
-                "validation_criteria": criteria,
-            },
-        )
-        passed = extract_verdict(result)
-        return passed, result
+    def _verify(self, problem: str, exploration: str, solution: str) -> bool:
+        print(f"\n  🔍 Verifying solution with {self.verifier_model}...")
+        try:
+            result = self._call_model(
+                "IMO-Verifier", self.verifier_model, VERIFIER_PROMPT,
+                {"problem": problem, "exploration": exploration, "solution": solution},
+            )
+            passed = extract_verdict(result)
+            status = "✓ PASS" if passed else "✗ FAIL"
+            print(f"  Verification {status}")
+            return passed
+        except Exception as e:
+            print(f"  ⚠ Verification failed: {e}. Treating as not verified.")
+            return False
 
     def solve_problem(self, problem_number: int) -> str:
         problem = get_problem_statement(problem_number)
@@ -312,18 +361,12 @@ class IMOAgent(Base):
 
                 best_solution = solution
 
-                # Validate
-                print(f"\n  Validating attempt {attempt}...")
-                passed, explanation = self._validate(problem_number, solution)
-                self._validation_cache[problem_number] = (passed, explanation)
+                if self._verify(problem, exploration, solution):
+                    print(f"  ✓ Solution verified on attempt {attempt}")
+                    break
+                elif attempt < max_attempts:
+                    print("  Verification failed, will retry...")
 
-                if passed:
-                    print(f"  ✓ Attempt {attempt} PASSED!")
-                    return solution
-                else:
-                    print(f"  ✗ Attempt {attempt} failed validation.")
-                    if attempt < max_attempts:
-                        print("  Retrying with different approach...")
             except Exception as e:
                 print(f"\n  ✗ Attempt {attempt} crashed: {type(e).__name__}: {e}")
                 traceback.print_exc()
