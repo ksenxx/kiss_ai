@@ -1,5 +1,5 @@
 [project]
-name = "kiss"
+name = "kiss-agent-framework"
 dynamic = ["version"]
 description = "KISS Agent Framework - A simple and portable agent framework for building and evolving AI agents"
 readme = "README.md"
@@ -24,6 +24,15 @@ keywords = [
     "genetic-algorithm",
     "swe-bench",
     "rag",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "openai>=2.13.0",
@@ -231,6 +240,10 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
 ignore = []
+
+[project.urls]
+Homepage = "https://github.com/ksen/kiss"
+Repository = "https://github.com/ksen/kiss"
 
 [project.scripts]
 check = "kiss.scripts.check:main"

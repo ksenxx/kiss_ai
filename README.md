@@ -10,6 +10,14 @@ ______________________________________________________________________
 
 KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
 
+## Installation
+
+Install from PyPI with pip:
+
+```bash
+pip install kiss-agent-framework
+```
+
 ## 🎯 The Problem with AI Agent Frameworks Today
 
 Let's be honest. The AI agent ecosystem has become a jungle. Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, bloated with techniques that are unnecessary. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm.
