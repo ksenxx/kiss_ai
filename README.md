@@ -1,6 +1,6 @@
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-**Version:** 0.1.17
+**Version:** 0.1.18
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
@@ -16,6 +16,7 @@ Install from PyPI with pip:
 
 ```bash
 pip install kiss-agent-framework
+uv run python -m kiss.agents.assistant.assistant
 ```
 
 ## 🎯 The Problem with AI Agent Frameworks Today
@@ -29,8 +30,6 @@ What if building AI agents could be as straightforward as the name suggests?
 Enter **KISS** — the *Keep It Simple, Stupid* Agent Framework.
 
 ## 🚀 Your First Agent in 30 Seconds.
-
-Try the interactive Jupyter notebook by running `uv run notebook --lab`.
 
 Let me show you something beautiful:
 

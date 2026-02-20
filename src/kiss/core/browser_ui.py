@@ -227,7 +227,8 @@ function handleOutputEvent(ev,O,state){
     c.innerHTML='<div class="tc-h" onclick="toggleTC(this)">'+h+'</div>'
       +'<div class="tc-b'+(b?'':' hide')+'">'+body+'</div>';
     O.appendChild(c);
-    c.querySelectorAll('pre code').forEach(function(bl){hljs.highlightElement(bl)});
+    if(typeof hljs!=='undefined')c.querySelectorAll('pre code').forEach(
+      function(bl){hljs.highlightElement(bl)});
     break}
   case'tool_result':{
     var r=mkEl('div','ev tr'+(ev.is_error?' err':''));
@@ -248,17 +249,18 @@ function handleOutputEvent(ev,O,state){
       rb+='<div style="'+sl+';font-size:16px;margin-bottom:12px">Status: '+stLabel+'</div>';
     }
     if(ev.summary){
-      var sum=(ev.summary||'').replace(/\n\n+/g,'\n');
+      var sum=(ev.summary||'').replace(/\n{3,}/g,'\n\n').trim();
       rb+=typeof marked!=='undefined'?marked.parse(sum):esc(sum);
     }else{
-      rb+=esc((ev.text||'(no result)').replace(/\n\n+/g,'\n'));
+      rb+=esc((ev.text||'(no result)').replace(/\n{3,}/g,'\n\n').trim());
     }
     rc.innerHTML='<div class="rc-h"><h3>Result</h3><div class="rs">'
       +'Steps: <b>'+(ev.step_count||0)+'</b>'
       +' &nbsp; Tokens: <b>'+(ev.total_tokens||0)+'</b>'
       +' &nbsp; Cost: <b>'+(ev.cost||'N/A')+'</b>'
       +'</div></div><div class="rc-body">'+rb+'</div>';
-    rc.querySelectorAll('pre code').forEach(function(bl){hljs.highlightElement(bl)});
+    if(typeof hljs!=='undefined')rc.querySelectorAll('pre code').forEach(
+      function(bl){hljs.highlightElement(bl)});
     O.appendChild(rc);break}
   case'prompt':{
     var p=mkEl('div','ev prompt');
@@ -314,11 +316,16 @@ footer{
 var O=document.getElementById('out'),D=document.getElementById('dot'),
   ST=document.getElementById('stxt'),EC=document.getElementById('evcnt'),
   EL=document.getElementById('elapsed');
-var ec=0,auto=true,scrollRaf=0,state={{thinkEl:null,txtEl:null}};
+var ec=0,auto=true,userScrolled=false,scrollRaf=0,state={{thinkEl:null,txtEl:null}};
 var t0=Date.now();
-O.addEventListener('scroll',function(){{auto=O.scrollTop+O.clientHeight>=O.scrollHeight-60}});
-function sb(){{if(!scrollRaf){{scrollRaf=requestAnimationFrame(function(){{
-  if(auto)O.scrollTop=O.scrollHeight;scrollRaf=0}})}}}}
+O.addEventListener('scroll',function(){{
+  var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
+  if(!atBottom)userScrolled=true;
+  if(atBottom)userScrolled=false;
+  auto=!userScrolled;
+}});
+function sb(){{if(auto&&!scrollRaf){{scrollRaf=requestAnimationFrame(function(){{
+  O.scrollTop=O.scrollHeight;scrollRaf=0}})}}}}
 setInterval(function(){{
   var s=Math.floor((Date.now()-t0)/1000),m=Math.floor(s/60);
   EL.textContent='Elapsed: '+(m>0?m+'m ':'')+s%60+'s';

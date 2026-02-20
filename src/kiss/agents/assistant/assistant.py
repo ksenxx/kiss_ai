@@ -90,46 +90,12 @@ def _save_proposals(proposals: list[str]) -> None:
         pass
 
 
-def _find_semantic_duplicates(new_task: str, existing_tasks: list[str]) -> list[int]:
-    if not existing_tasks:
-        return []
-    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(existing_tasks))
-    agent = KISSAgent("Task Deduplicator")
-    result = agent.run(
-        model_name="gemini-2.0-flash",
-        prompt_template=(
-            "Which existing tasks are semantically the same as the new task? "
-            '"Same" means they ask for essentially the same work, just worded differently.\n\n'
-            "New task: {new_task}\n\n"
-            "Existing tasks:\n{existing_tasks}\n\n"
-            "Return ONLY a JSON array of indices of duplicate tasks. "
-            "If none are duplicates, return []. Examples: [2, 5] or []"
-        ),
-        arguments={"new_task": new_task, "existing_tasks": numbered},
-        is_agentic=False,
-    )
-    try:
-        start = result.index("[")
-        end = result.index("]", start) + 1
-        indices = json.loads(result[start:end])
-        return [i for i in indices if isinstance(i, int) and 0 <= i < len(existing_tasks)]
-    except (ValueError, json.JSONDecodeError):
-        return []
-
-
 def _add_task(task: str) -> None:
     history = _load_history()
     task_strings = [e["task"] for e in history]
     if task in task_strings:
         idx = next(i for i, e in enumerate(history) if e["task"] == task)
         history.pop(idx)
-    else:
-        try:
-            duplicates = _find_semantic_duplicates(task, task_strings)
-            for idx in sorted(duplicates, reverse=True):
-                history.pop(idx)
-        except Exception:
-            pass
     history.insert(0, {"task": task, "result": ""})
     _save_history(history[:MAX_HISTORY])
 
@@ -250,15 +216,18 @@ var ac=document.getElementById('autocomplete');
 var rl=document.getElementById('recent-list');
 var pl=document.getElementById('proposed-list');
 var modelSel=document.getElementById('model-select');
-var running=false,autoScroll=true;
+var running=false,autoScroll=true,userScrolled=false;
 var scrollRaf=0,state={thinkEl:null,txtEl:null};
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
 O.addEventListener('scroll',function(){
-  autoScroll=O.scrollTop+O.clientHeight>=O.scrollHeight-60;
+  var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
+  if(!atBottom&&running)userScrolled=true;
+  if(atBottom)userScrolled=false;
+  autoScroll=!userScrolled;
 });
 function sb(){
-  if(!scrollRaf){scrollRaf=requestAnimationFrame(function(){
-    if(autoScroll)O.scrollTop=O.scrollHeight;scrollRaf=0;
+  if(autoScroll&&!scrollRaf){scrollRaf=requestAnimationFrame(function(){
+    O.scrollTop=O.scrollHeight;scrollRaf=0;
   });}
 }
 function startTimer(){
@@ -275,11 +244,11 @@ function removeSpinner(){
   var sp=document.getElementById('wait-spinner');
   if(sp)sp.remove();
 }
-function showSpinner(){
+function showSpinner(msg){
   removeSpinner();
   var sp=mkEl('div','spinner');
   sp.id='wait-spinner';
-  sp.textContent='Waiting for agent output\u2026';
+  sp.textContent=msg||'Waiting for agent output\u2026';
   O.appendChild(sp);sb();
 }
 function setReady(label){
@@ -294,11 +263,12 @@ function setReady(label){
 function connectSSE(){
   if(evtSrc)evtSrc.close();
   evtSrc=new EventSource('/events');
+  evtSrc.onopen=function(){console.log('SSE connected');};
   evtSrc.onmessage=function(e){
-    var ev;try{ev=JSON.parse(e.data);}catch(x){return;}
-    handleEvent(ev);
+    var ev;try{ev=JSON.parse(e.data);}catch(x){console.error('Parse error:',x);return;}
+    try{handleEvent(ev);}catch(err){console.error('Event error:',err,ev);}
   };
-  evtSrc.onerror=function(){};
+  evtSrc.onerror=function(e){console.error('SSE error:',e);};
 }
 function handleEvent(ev){
   var t=ev.type;
@@ -309,7 +279,7 @@ function handleEvent(ev){
   case'proposed_updated':loadProposed();break;
   case'clear':
     O.innerHTML='';state.thinkEl=null;state.txtEl=null;
-    autoScroll=true;showSpinner();break;
+    autoScroll=true;userScrolled=false;showSpinner();break;
   case'task_done':{
     var el=t0?Math.floor((Date.now()-t0)/1000):0;
     var em=Math.floor(el/60);
@@ -327,6 +297,7 @@ function handleEvent(ev){
     setReady('Stopped');loadTasks();loadProposed();break}
   default:
     handleOutputEvent(ev,O,state);
+    if(t==='tool_call'&&running)showSpinner('Waiting for tool\u2026');
     if(t==='tool_result'&&running)showSpinner();
     if(t==='thinking_end'&&running)showSpinner();
   }
