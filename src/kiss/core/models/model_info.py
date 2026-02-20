@@ -183,19 +183,21 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Google Gemini models (Paid tier pricing from ai.google.dev/pricing)
     # ==========================================================================
-    # Gemini 3 models (preview)
-    "gemini-3-pro-preview": _mi(1048576, 2.00, 12.00, fc=False),  # Preview - unreliable FC
-    "gemini-3-flash-preview": _mi(1048576, 0.50, 3.00, fc=False),  # Preview - unreliable FC
-    # Gemini 2.5 models
+    # Gemini 3.1 models (latest - Feb 2026)
+    "gemini-3.1-pro-preview": _mi(1048576, 2.50, 15.00),  # 1M context, 64k output
+    # Gemini 3 models
+    "gemini-3-pro-preview": _mi(1048576, 2.00, 12.00),
+    "gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
+    # Gemini 2.5 models (deprecating March 31, 2026)
     "gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
     "gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "gemini-2.5-flash-preview-09-2025": _mi(1048576, 0.30, 2.50),
     "gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),  # Poor tool use
     "gemini-2.5-flash-lite-preview-09-2025": _mi(1048576, 0.10, 0.40, fc=False),
-    # Gemini 2.0 models
+    # Gemini 2.0 models (deprecating March 31, 2026)
     "gemini-2.0-flash": _mi(1048576, 0.10, 0.40),
     "gemini-2.0-flash-lite": _mi(1048576, 0.075, 0.30),
-    # Gemini 1.5 models (legacy but still available)
+    # Gemini 1.5 models (legacy)
     "gemini-1.5-pro": _mi(2097152, 1.25, 5.00),  # 2M context window
     "gemini-1.5-flash": _mi(1048576, 0.075, 0.30),
     # ==========================================================================
@@ -389,14 +391,15 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Google (pricing from ai.google.dev/pricing)
     # ==========================================================================
-    "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
-    "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.08, 0.30),
-    "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
-    "openrouter/google/gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),  # Unreliable FC
+    "openrouter/google/gemini-3.1-pro-preview": _mi(1048576, 2.50, 15.00),  # Latest Feb 2026
+    "openrouter/google/gemini-3-pro-preview": _mi(1048576, 2.00, 12.00),
+    "openrouter/google/gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
     "openrouter/google/gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
     "openrouter/google/gemini-2.5-pro-preview": _mi(1048576, 1.25, 10.00),
-    "openrouter/google/gemini-3-flash-preview": _mi(1048576, 0.50, 3.00, fc=False),  # Preview
-    "openrouter/google/gemini-3-pro-preview": _mi(1048576, 2.00, 12.00, fc=False),  # Preview
+    "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
+    "openrouter/google/gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),  # Unreliable FC
+    "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
+    "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.08, 0.30),
     "openrouter/google/gemma-3-27b-it": _mi(131072, 0.04, 0.06, fc=False),
     "openrouter/google/gemma-3-12b-it": _mi(131072, 0.03, 0.10, fc=False),
     "openrouter/google/gemma-3-4b-it": _mi(96000, 0.02, 0.07, fc=False),
