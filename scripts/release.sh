@@ -1,23 +1,18 @@
 #!/bin/bash
 
-# Script to release to public GitHub repository with file filtering and version tagging,
-# and publish to PyPI.
+# Script to release to public GitHub repository and publish to PyPI.
 # Repository: https://github.com/ksenxx/kiss_ai
 # PyPI: https://pypi.org/project/kiss-agent-framework/
+#
+# Workflow:
+# 1. Check if origin is ahead of kiss_ai repo
+# 2. If ahead, bump version in _version.py and README.md
+# 3. Commit changes with "Version bumped"
+# 4. Push to origin
+# 5. Push to kiss_ai repo and tag with version
+# 6. Publish to PyPI
 
 set -e  # Exit on error
-
-# =============================================================================
-# CONFIGURATION: Files and directories to EXCLUDE from public release
-# =============================================================================
-# Add paths relative to repo root that should NOT be pushed to public repo
-PRIVATE_FILES=(
-    # Add private files/directories here, one per line
-    # Example:
-    # "private_config.yaml"
-    # "internal_docs/"
-    # "secrets/"
-)
 
 # =============================================================================
 # Constants
@@ -27,7 +22,6 @@ PUBLIC_REPO_URL="https://github.com/ksenxx/kiss_ai.git"
 PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/_version.py"
 README_FILE="README.md"
-RELEASE_BRANCH="release-staging"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
 
 # Colors for output
@@ -56,13 +50,11 @@ print_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
 
-# Get version from _version.py
 get_version() {
     if [[ ! -f "$VERSION_FILE" ]]; then
         print_error "Version file not found: $VERSION_FILE"
         exit 1
     fi
-    # Extract version string from __version__ = "x.y.z"
     VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' "$VERSION_FILE" 2>/dev/null || \
               grep '__version__' "$VERSION_FILE" | sed 's/.*"\(.*\)".*/\1/')
     if [[ -z "$VERSION" ]]; then
@@ -72,81 +64,54 @@ get_version() {
     echo "$VERSION"
 }
 
-# Bump the patch version (x.y.z -> x.y.(z+1))
 bump_version() {
     local current_version="$1"
-    
-    # Split version into parts
     local major minor patch
     IFS='.' read -r major minor patch <<< "$current_version"
-    
-    # Increment patch version
     patch=$((patch + 1))
-    
-    local new_version="${major}.${minor}.${patch}"
-    echo "$new_version"
+    echo "${major}.${minor}.${patch}"
 }
 
-# Update version in _version.py
 update_version_file() {
     local new_version="$1"
-    
-    if [[ ! -f "$VERSION_FILE" ]]; then
-        print_error "Version file not found: $VERSION_FILE"
-        return 1
-    fi
-    
-    # Update the version in the file
     sed -i.bak "s/__version__ = \".*\"/__version__ = \"${new_version}\"/" "$VERSION_FILE"
     rm -f "${VERSION_FILE}.bak"
-    
     print_info "Updated $VERSION_FILE to version $new_version"
 }
 
-# Check if remote exists, add if not
-ensure_remote() {
-    if ! git remote get-url "$PUBLIC_REMOTE" &>/dev/null; then
-        print_info "Adding remote '$PUBLIC_REMOTE'..."
-        git remote add "$PUBLIC_REMOTE" "$PUBLIC_REPO_SSH"
-    else
-        print_info "Remote '$PUBLIC_REMOTE' exists"
-    fi
-}
-
-# Update version in README.md
 update_readme_version() {
     local version="$1"
     if [[ ! -f "$README_FILE" ]]; then
-        print_warn "README file not found: $README_FILE - skipping version update"
+        print_warn "README file not found: $README_FILE - skipping"
         return
     fi
-    
-    # Update the **Version:** line in README.md
     if grep -q '^\*\*Version:\*\*' "$README_FILE"; then
         sed -i.bak "s/^\*\*Version:\*\* .*/\*\*Version:\*\* $version/" "$README_FILE"
         rm -f "${README_FILE}.bak"
         print_info "Updated version in $README_FILE to $version"
     else
-        print_warn "Version line not found in $README_FILE - skipping update"
+        print_warn "Version line not found in $README_FILE - skipping"
     fi
 }
 
-# Build and publish to PyPI
+ensure_remote() {
+    if ! git remote get-url "$PUBLIC_REMOTE" &>/dev/null; then
+        print_info "Adding remote '$PUBLIC_REMOTE'..."
+        git remote add "$PUBLIC_REMOTE" "$PUBLIC_REPO_SSH"
+    fi
+}
+
 publish_to_pypi() {
     local version="$1"
     
     print_step "Building package for PyPI..."
-    
-    # Clean previous builds
     rm -rf dist/ build/
     
-    # Check if build and twine are available
     if ! uv run python -c "import build" &>/dev/null; then
         print_info "Installing build package..."
         uv pip install build twine
     fi
     
-    # Build the package
     uv run python -m build
     
     if [[ ! -d "dist" ]] || [[ -z "$(ls -A dist/)" ]]; then
@@ -157,14 +122,10 @@ publish_to_pypi() {
     print_info "Built packages:"
     ls -la dist/
     
-    # Check the package
     print_step "Checking package..."
     uv run python -m twine check dist/*
     
-    # Upload to PyPI
     print_step "Uploading to PyPI..."
-    
-    # Check for PyPI token
     if [[ -z "$UV_PUBLISH_TOKEN" ]]; then
         print_error "UV_PUBLISH_TOKEN environment variable is not set"
         print_info "Please set it with: export UV_PUBLISH_TOKEN='pypi-your-token-here'"
@@ -181,8 +142,8 @@ publish_to_pypi() {
 # Main Release Process
 # =============================================================================
 main() {
-    print_step "Starting release to public repository"
-    echo "Repository: $PUBLIC_REPO_URL"
+    print_step "Starting release process"
+    echo "Public repo: $PUBLIC_REPO_URL"
     echo
 
     # Check if we're in a git repository
@@ -195,13 +156,30 @@ main() {
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
     print_info "Current branch: $CURRENT_BRANCH"
 
-    # Check for uncommitted changes (allow version file and README to be modified by this script)
-    if ! git diff-index --quiet HEAD -- ':!'"$VERSION_FILE" ':!'"$README_FILE"; then
-        print_error "You have uncommitted changes. Please commit or stash them first."
+    # Ensure public remote exists
+    ensure_remote
+
+    # Step 1: Check if origin is ahead of kiss_ai repo
+    print_step "Checking if origin is ahead of kiss_ai repo..."
+    git fetch origin
+    git fetch "$PUBLIC_REMOTE"
+
+    ORIGIN_HEAD=$(git rev-parse "origin/$CURRENT_BRANCH")
+    PUBLIC_HEAD=$(git rev-parse "$PUBLIC_REMOTE/main" 2>/dev/null || echo "")
+
+    if [[ -z "$PUBLIC_HEAD" ]]; then
+        print_info "Public repo has no main branch yet - will create it"
+    elif [[ "$ORIGIN_HEAD" == "$PUBLIC_HEAD" ]]; then
+        print_info "Origin and kiss_ai are in sync - nothing to release"
+        exit 0
+    elif git merge-base --is-ancestor "$PUBLIC_HEAD" "$ORIGIN_HEAD"; then
+        print_info "Origin is ahead of kiss_ai - proceeding with release"
+    else
+        print_error "Origin and kiss_ai have diverged - please resolve manually"
         exit 1
     fi
 
-    # Get current version and bump it
+    # Step 2: Bump version in _version.py and README.md
     CURRENT_VERSION=$(get_version)
     VERSION=$(bump_version "$CURRENT_VERSION")
     TAG_NAME="v$VERSION"
@@ -209,118 +187,32 @@ main() {
     print_info "Current version: $CURRENT_VERSION"
     print_info "New version: $VERSION (tag: $TAG_NAME)"
     
-    # Update version file
     print_step "Bumping version..."
     update_version_file "$VERSION"
-    
-    # Commit the version bump
-    git add "$VERSION_FILE"
-    git commit -m "Bump version to $VERSION"
-    print_info "Committed version bump"
-    
-    # Push version bump to origin
-    print_step "Pushing version bump to origin..."
-    git push origin "$CURRENT_BRANCH"
-    print_info "Pushed version bump to origin"
-
-    # Ensure remote exists
-    ensure_remote
-
-    # Check if there are private files to exclude
-    if [[ ${#PRIVATE_FILES[@]} -eq 0 ]]; then
-        print_info "No private files configured - pushing entire repo"
-        
-        # Simple push without filtering
-        print_step "Pushing to public remote..."
-        git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force-with-lease
-        
-    else
-        print_info "Private files to exclude:"
-        for file in "${PRIVATE_FILES[@]}"; do
-            echo "  - $file"
-        done
-        echo
-
-        # Create a temporary branch for the filtered release
-        print_step "Creating filtered release branch..."
-        
-        # Delete release branch if it exists
-        git branch -D "$RELEASE_BRANCH" 2>/dev/null || true
-        
-        # Create new branch from current HEAD
-        git checkout -b "$RELEASE_BRANCH"
-
-        # Remove private files from the release branch
-        print_step "Removing private files from release..."
-        for file in "${PRIVATE_FILES[@]}"; do
-            if [[ -e "$file" ]]; then
-                git rm -rf --cached "$file" 2>/dev/null || true
-                print_info "Removed: $file"
-            else
-                print_warn "File not found (skipping): $file"
-            fi
-        done
-
-        # Check if there are changes to commit
-        if ! git diff-index --quiet HEAD --; then
-            git commit -m "Release $VERSION - remove private files"
-        fi
-
-        # Push the filtered branch to public remote
-        print_step "Pushing filtered branch to public remote..."
-        git push "$PUBLIC_REMOTE" "$RELEASE_BRANCH:main" --force-with-lease
-
-        # Return to original branch
-        print_step "Cleaning up..."
-        git checkout "$CURRENT_BRANCH"
-        git branch -D "$RELEASE_BRANCH"
-    fi
-
-    # Handle version tagging
-    print_step "Creating version tag..."
-    
-    # Update version in README.md
     update_readme_version "$VERSION"
-    
-    # Commit README version update if there are changes
-    if ! git diff --quiet "$README_FILE" 2>/dev/null; then
-        git add "$README_FILE"
-        git commit -m "Update version to $VERSION in README.md"
-        print_info "Committed README version update"
-        
-        # Push README update to origin
-        git push origin "$CURRENT_BRANCH"
-        print_info "Pushed README update to origin"
-        
-        # Re-push the branch with the version update
-        print_step "Re-pushing branch with version update..."
-        if [[ ${#PRIVATE_FILES[@]} -eq 0 ]]; then
-            git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force-with-lease
-        else
-            # Need to recreate the filtered branch with the new commit
-            git branch -D "$RELEASE_BRANCH" 2>/dev/null || true
-            git checkout -b "$RELEASE_BRANCH"
-            for file in "${PRIVATE_FILES[@]}"; do
-                if [[ -e "$file" ]]; then
-                    git rm -rf --cached "$file" 2>/dev/null || true
-                fi
-            done
-            if ! git diff-index --quiet HEAD --; then
-                git commit -m "Release $VERSION - remove private files"
-            fi
-            git push "$PUBLIC_REMOTE" "$RELEASE_BRANCH:main" --force-with-lease
-            git checkout "$CURRENT_BRANCH"
-            git branch -D "$RELEASE_BRANCH"
-        fi
-    fi
-    
-    # Create and push tag
-    git tag -a "$TAG_NAME" -m "Release $VERSION"
-    print_info "Created local tag: $TAG_NAME"
-    git push "$PUBLIC_REMOTE" "$TAG_NAME"
-    print_info "Pushed tag '$TAG_NAME' to public remote"
 
-    # Publish to PyPI
+    # Step 3: Commit changes
+    print_step "Committing version bump..."
+    git add "$VERSION_FILE" "$README_FILE"
+    git commit -m "Version bumped to $VERSION"
+    print_info "Committed version bump"
+
+    # Step 4: Push to origin
+    print_step "Pushing to origin..."
+    git push origin "$CURRENT_BRANCH"
+    print_info "Pushed to origin"
+
+    # Step 5: Push to kiss_ai repo and tag
+    print_step "Pushing to kiss_ai repo..."
+    git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force-with-lease
+    print_info "Pushed to kiss_ai repo"
+
+    print_step "Creating and pushing tag..."
+    git tag -a "$TAG_NAME" -m "Release $VERSION"
+    git push "$PUBLIC_REMOTE" "$TAG_NAME"
+    print_info "Created and pushed tag: $TAG_NAME"
+
+    # Step 6: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
@@ -335,5 +227,4 @@ main() {
     echo
 }
 
-# Run main function
 main "$@"
