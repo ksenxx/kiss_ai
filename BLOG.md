@@ -423,7 +423,8 @@ kiss/
 │   └── models/            # OpenAI, Anthropic, Gemini, Together, OpenRouter
 ├── agents/         # Pre-built agents and optimization frameworks
 │   ├── gepa/              # Genetic-Pareto prompt evolution
-│   ├── kiss_evolve/       # Evolutionary algorithm discovery
+│   └── kiss_evolve/       # Evolutionary algorithm discovery
+├── evals/          # Benchmark integrations
 │   └── swe_agent_verified/# SWE-bench benchmark integration
 ├── docker/         # Container management
 ├── rag/            # Simple retrieval-augmented generation

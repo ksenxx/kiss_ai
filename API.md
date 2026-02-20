@@ -203,7 +203,7 @@ Run the single-agent coding system with auto-continuation.
 - `model_name` (str | None): Model for task execution. Default is None (uses config default: "claude-opus-4-6").
 - `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution. Default is "".
 - `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps per sub-session. Default is None (uses config default: 200).
+- `max_steps` (int | None): Maximum number of steps per sub-session. Default is None (uses config default: 25).
 - `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses config default: 200.0).
 - `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
 - `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
@@ -1909,7 +1909,7 @@ DEFAULT_CONFIG.agent.print_to_browser = False
 - `max_agent_budget` (float): Maximum budget per agent in USD (default: 10.0)
 - `global_max_budget` (float): Global budget limit in USD (default: 200.0)
 - `verbose` (bool): Enable verbose output (default: True)
-- `use_web` (bool): Enable web search tool (default: True)
+- `use_web` (bool): Enable web search tool (default: False)
 - `debug` (bool): Enable debug mode (default: False)
 - `print_to_console` (bool): Enable ConsolePrinter for Rich terminal output (default: True). Can be overridden per-call via the `print_to_console` parameter on `run()`.
 - `print_to_browser` (bool): Enable BrowserPrinter for live browser UI output (default: False). Can be overridden per-call via the `print_to_browser` parameter on `run()`.

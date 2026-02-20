@@ -16,7 +16,7 @@ Install from PyPI with pip:
 
 ```bash
 pip install kiss-agent-framework
-uv run python -m kiss.agents.assistant.assistant
+python -m kiss.agents.assistant.assistant
 ```
 
 ## 🎯 The Problem with AI Agent Frameworks Today
@@ -53,7 +53,7 @@ print(result)  # 127.05
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 Well you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well established agent frameworks?**" Here is my response:
 
-- **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) that will not only enable you write or create agents, but also automatically optimize the agents for efficiency and cost.**
+- **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) and [Agent Optimizer](src/kiss/agents/coding_agents/agent_optimizer.py) which enables you to optimize a repository of code (and AI agents) for your metric of choice (e.g., cost and running time or test coverage or code quality/readability).**
 - **It has the GEPA prompt optimizer builtin with a simple API.**
 - **It has a [RelentlessCodingAgent](src/kiss/agents/coding_agents/relentless_coding_agent.py), which is pretty straightforward in terms of implementation, but it can work for very very long tasks. It was self evolved over time and is still evolving.**
 - **No bloat and simple codebase.**
@@ -151,20 +151,16 @@ print(f"Result: {result}")
 
 - **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking
 - **Structured Progress Tracking**: Each sub-session reports completed and remaining tasks in JSON format (done/next items), which is deduplicated and passed to subsequent sub-sessions
-- **Compressed Prompts**: Minimal, high-signal task prompts with critical rules (use Write() for new files, bounded poll loops, immediate finish on success)
-- **Multi-Tool Execution**: The agent can execute multiple tool calls in a single step for faster task completion
-- **Efficiency Rules**: Built-in prompt instructions enforce immediate completion when tests pass, timeout guidance for bash, and bounded loops for background jobs
 - **Retry with Context**: Failed sub-sessions automatically pass structured progress summaries to the next sub-session
 - **Configurable Sub-Sessions**: Set high sub-session counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
 - **Path Access Control**: Enforces read/write permissions on file system paths
 - **Built-in Tools**: Bash, Read, Edit, Write, search_web, and fetch_url tools for file and web operations
-- **Safer Bash Execution**: `Bash()` validates file paths inside inline interpreter flags (e.g., `python -c`, `node -e`) against path access controls, and disallows shell control commands like `env`, `eval`, and `exec`
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
 ## 💬 Browser-Based Assistant
 
-KISS includes a browser-based assistant UI for interacting with agents. It provides a rich web interface with real-time streaming output, task history with autocomplete, and a file browser for the working directory.
+KISS includes a browser-based assistant UI for interacting with agents. It provides a rich web interface with real-time streaming output, task history with autocomplete.
 
 ```bash
 # Launch the assistant (opens browser automatically)
@@ -177,48 +173,35 @@ uv run assistant --work-dir ./my-project
 The assistant features:
 
 - **Real-time streaming**: See agent thinking, tool calls, and results as they happen
-- **Structured result display**: Results with success/failure status are rendered with markdown formatting
 - **Task history**: Previously submitted tasks are saved and available via autocomplete
-- **File browser**: Browse files in the working directory from the sidebar
 - **Modern UI**: Dark theme with collapsible sections for tool calls and thinking
 
 ## 🔧 Using Repo Optimizer
 
-**This is the most important and useful feature of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `RelentlessCodingAgent` to optimize code within your own project repository. It runs the target program, monitors output in real time, fixes errors, and iteratively optimizes for speed and cost — all without changing the agent's interface. The code can be found [here.](src/kiss/agents/coding_agents/repo_optimizer.py). It has less than 100 lines of code consisting of a detailed short prompt. Modify the prompt in `repo_optimizer` to provide the agent path that you want to optimize. You can run it using the following command.
+**This is one of the most important and useful feature of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `RelentlessCodingAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here.](src/kiss/agents/coding_agents/repo_optimizer.py).
 
 ```bash
-# Default: optimize the RelentlessCodingAgent
-uv run python -m kiss.agents.coding_agents.repo_optimizer
-
-# Optimize a specific agent file with a different model
+# Optimize a program for speed and cost
 uv run python -m kiss.agents.coding_agents.repo_optimizer \
-    --agent-code src/kiss/agents/imo_agent/imo_agent.py \
-    --model gemini-2.5-pro \
-    --project-root /path/to/project
+    --command "uv run python src/kiss/agents/coding_agents/relentless_coding_agent.py" \
+    --metrics "running time and cost" \
+    --work-dir .
 ```
 
 **CLI Options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--project-root` | Auto-detected project root | Project root directory |
-| `--agent-code` | `src/kiss/agents/coding_agents/relentless_coding_agent.py` | Path to agent code to optimize |
-| `--model` | `claude-opus-4-6` | Model name to use |
+| `--command` | (required) | Command to run and monitor |
+| `--metrics` | (required) | Metrics to minimize (e.g., "running time and cost") |
+| `--work-dir` | `.` | Working directory for the agent |
 
 **How It Works:**
 
-1. Runs the target program (e.g., `relentless_coding_agent.py`) and monitors output in real time
-1. If repeated errors are observed, fixes them and reruns
-1. Once the program succeeds, analyzes output and optimizes the source for speed and cost
-1. Repeats until running time and cost are reduced significantly
-
-**Optimization Strategies:**
-
-- Shorter system prompts preserving meaning
-- Removing redundant instructions and minimizing conversation turns
-- Batching operations and using early termination
-- Applying latest agentic patterns for long-horizon tasks
-- Inventing and implementing new agent architectures for efficiency and reliability
+1. Runs the specified command and monitors output in real time
+1. If repeated errors are observed, fixes the code and reruns
+1. Once the command succeeds, analyzes output and optimizes the source to minimize the specified metrics
+1. Repeats until the metrics are reduced significantly
 
 📖 **For the full story of how the repo optimizer self-optimized the RelentlessCodingAgent, see [BLOG.md](src/kiss/agents/coding_agents/BLOG.md)**
 
@@ -551,6 +534,7 @@ kiss/
 │   │   │   ├── claude_coding_agent.py     # Claude-based coding agent
 │   │   │   ├── repo_optimizer.py          # Iterative code optimizer using RelentlessCodingAgent
 │   │   │   ├── repo_agent.py              # Repo-level task agent using RelentlessCodingAgent
+│   │   │   ├── agent_optimizer.py         # Meta-optimizer that optimizes agent source code
 │   │   │   ├── config.py                  # Coding agent configuration (RelentlessCodingAgent)
 │   │   │   └── BLOG.md                    # Blog post about self-optimization
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
@@ -633,6 +617,7 @@ kiss/
 │   │   ├── test_web_use_tool.py             # Tests for WebUseTool browser automation
 │   │   ├── test_chatbot_tasks.py            # Tests for assistant task handling
 │   │   ├── integration_test_assistant_agent.py  # Integration tests for AssistantAgent
+│   │   ├── integration_test_gmail_login.py      # Integration tests for Gmail login
 │   │   ├── integration_test_google_search.py    # Integration tests for Google search
 │   │   └── integration_test_web_use_tool.py     # Integration tests for WebUseTool
 │   ├── py.typed          # PEP 561 marker for type checking
@@ -684,7 +669,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `debug`: Enable debug mode (default: False)
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
-  - `use_web`: Automatically add web browsing and search tool if enabled (default: True)
+  - `use_web`: Automatically add web browsing and search tool if enabled (default: False)
   - `print_to_console`: Enable ConsolePrinter for Rich terminal output (default: True). Can be overridden per-call via the `print_to_console` parameter on `run()`.
   - `print_to_browser`: Enable BrowserPrinter for live browser UI output (default: False). Can be overridden per-call via the `print_to_browser` parameter on `run()`.
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
@@ -694,9 +679,9 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `max_steps`: Maximum steps per sub-session (default: 25)
   - `max_budget`: Maximum budget in USD (default: 200.0)
 - **IMO Agent Settings**: Modify `DEFAULT_CONFIG.imo_agent` in `src/kiss/agents/imo_agent/config.py`:
-  - `solver_model`: Model for solving IMO problems (default: "gemini-3-pro-preview")
+  - `solver_model`: Model for solving IMO problems (default: "o3")
   - `verifier_model`: Model for verifying solutions (default: "gemini-2.5-pro")
-  - `validator_model`: Model for independent validation against known answers (default: "gemini-2.5-pro")
+  - `validator_model`: Model for independent validation against known answers (default: "gemini-3-pro-preview")
   - `max_refinement_rounds`: Max verification-refinement iterations per attempt (default: 2)
   - `num_verify_passes`: Number of verification passes required to accept a solution (default: 1)
   - `max_attempts`: Max independent attempts per problem (default: 1)
