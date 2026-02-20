@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from kiss.agents.gepa.gepa import GEPA
 
@@ -21,7 +22,7 @@ def optimize_agent(
     output_file: str = "optimized_agent.json",
 ) -> dict[str, str]:
     """Optimize agent prompts using GEPA.
-    
+
     Args:
         agent_runner: Function that takes prompts dict and returns results dict
         train_data: Training dataset (split into dev/val)
@@ -33,11 +34,11 @@ def optimize_agent(
         population_size: Size of prompt population
         dev_batch_size: Batch size for dev evaluation
         output_file: File to save optimized prompts
-        
+
     Returns:
         Dictionary of optimized prompts
     """
-    
+
     def system_runner(prompts: dict[str, str], examples: list[dict]) -> list[dict[str, Any]]:
         """Wrapper to run agent on examples."""
         results = []
@@ -49,7 +50,7 @@ def optimize_agent(
                 print(f"Error running agent: {e}")
                 results.append({"error": str(e), metric_name: 0.0})
         return results
-    
+
     # Initialize GEPA
     gepa = GEPA(
         train_data=train_data,
@@ -59,7 +60,7 @@ def optimize_agent(
         metric_names=[metric_name],
         minimize_metrics=[minimize_metric],
     )
-    
+
     # Run optimization
     print(f"Starting GEPA optimization for {num_generations} generations...")
     optimized_prompts, stats = gepa.optimize(
@@ -68,7 +69,7 @@ def optimize_agent(
         dev_batch_size=dev_batch_size,
         verbose=True,
     )
-    
+
     # Save results
     output = {
         "optimized_prompts": optimized_prompts,
@@ -81,14 +82,14 @@ def optimize_agent(
             "minimize_metric": minimize_metric,
         }
     }
-    
+
     with open(output_file, 'w') as f:
         json.dump(output, f, indent=2)
-    
-    print(f"\nOptimization complete!")
+
+    print("\nOptimization complete!")
     print(f"Results saved to {output_file}")
     print(f"Best {metric_name}: {stats.get('best_val_' + metric_name, 'N/A')}")
-    
+
     return optimized_prompts
 
 
