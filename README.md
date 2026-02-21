@@ -91,7 +91,7 @@ Well you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, Crew
 
 - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) and [Agent Optimizer](src/kiss/agents/coding_agents/agent_optimizer.py) which enables you to optimize a repository of code (and AI agents) for your metric of choice (e.g., cost and running time or test coverage or code quality/readability).**
 - **It has the GEPA prompt optimizer builtin with a simple API.**
-- **It has a [RelentlessCodingAgent](src/kiss/agents/coding_agents/relentless_coding_agent.py), which is pretty straightforward in terms of implementation, but it can work for very very long tasks. It was self evolved over time and is still evolving.**
+- **It has a [RelentlessCodingAgent](src/kiss/agents/coding_agents/relentless_coding_agent.py), which is pretty straightforward in terms of implementation, but it can work for very very long tasks. It was self evolved over time to save cost and running time.**
 - **No bloat and simple codebase.**
 - **Optimization strategies can be written in plain English.**
 - **New techniques will be incorporated to the framework as I research them.**
