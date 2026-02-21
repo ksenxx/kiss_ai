@@ -51,7 +51,28 @@ class AssistantAgent(RelentlessAgent):
         print_to_console: bool | None = None,
         print_to_browser: bool | None = None,
     ) -> str:
-        """Run the assistant agent."""
+        """Run the assistant agent with coding tools and browser automation.
+
+        Args:
+            model_name: LLM model to use. Defaults to config value.
+            prompt_template: Task prompt template with format placeholders.
+            arguments: Dictionary of values to fill prompt_template placeholders.
+            max_steps: Maximum steps per sub-session. Defaults to config value.
+            max_budget: Maximum budget in USD. Defaults to config value.
+            work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
+            base_dir: Base directory for path resolution. Defaults to work_dir.
+            readable_paths: Additional paths the agent can read from.
+            writable_paths: Additional paths the agent can write to.
+            printer: Printer instance for output display.
+            max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
+            docker_image: Docker image name to run tools inside a container.
+            headless: Whether to run the browser in headless mode. Defaults to config value.
+            print_to_console: Whether to print output to console.
+            print_to_browser: Whether to print output to browser UI.
+
+        Returns:
+            YAML string with 'success' and 'summary' keys.
+        """
         from kiss.core import config as config_module
 
         cfg = config_module.DEFAULT_CONFIG.assistant.assistant_agent
@@ -83,6 +104,7 @@ class AssistantAgent(RelentlessAgent):
 
 
 def main() -> None:
+    """Run a demo of the AssistantAgent with a sample Gmail task."""
     import time as time_mod
 
     agent = AssistantAgent("Assistant Agent Test")

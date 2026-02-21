@@ -1,1529 +1,555 @@
 # KISS Framework API Reference
 
-**Keep It Simple, Stupid** - Comprehensive API documentation for the KISS AI agent framework.
+> **Auto-generated** from source code by `generate_api_docs.py`.
+> Run `uv run generate-api-docs` to regenerate.
 
-## Introduction
-
-The KISS framework provides a clean, simple API for building AI agents with native function calling, multi-agent orchestration, and evolutionary optimization. This document covers all public classes, methods, and utilities available in the framework.
-
-For a high-level overview and quick start guide, see [README.md](README.md).
+______________________________________________________________________
 
 ## Table of Contents
 
-- [KISSAgent](#kissagent) - Core agent class with function calling
-- [RelentlessCodingAgent](#relentlesscodingagent) - Single-agent coding system with auto-continuation
-- [DockerManager](#dockermanager) - Docker container management
-- [Multiprocessing](#multiprocessing) - Parallel execution utilities
-- [SimpleRAG](#simplerag) - Simple RAG system for document retrieval
-- [AgentEvolver](#agentevolver) - Evolutionary agent optimization
-- [GEPA](#gepa) - Genetic-Pareto prompt optimizer
-- [KISSEvolve](#kissevolve) - Evolutionary algorithm discovery
-- [UsefulTools](#usefultools) - File operations and bash execution with path-based access control
-- [Utility Functions](#utility-functions) - Helper functions
-- [Printer](#printer) - Abstract printer base class and MultiPrinter
-- [BrowserPrinter](#browserprinter) - Browser SSE streaming output
-- [ConsolePrinter](#consoleprinter) - Rich terminal output
-- [Pre-built Agents](#pre-built-agents) - Ready-to-use agents
-- [Configuration System](#configuration-system) - Config management
+- [`kiss`](#kiss)
+  - [`kiss.core`](#kisscore)
+    - [`kiss.core.kiss_agent`](#kisscorekiss-agent)
+    - [`kiss.core.config`](#kisscoreconfig)
+    - [`kiss.core.config_builder`](#kisscoreconfig-builder)
+    - [`kiss.core.models`](#kisscoremodels)
+      - [`kiss.core.models.model_info`](#kisscoremodelsmodel-info)
+      - [`kiss.core.models.openai_compatible_model`](#kisscoremodelsopenai-compatible-model)
+      - [`kiss.core.models.anthropic_model`](#kisscoremodelsanthropic-model)
+      - [`kiss.core.models.gemini_model`](#kisscoremodelsgemini-model)
+    - [`kiss.core.printer`](#kisscoreprinter)
+    - [`kiss.core.print_to_console`](#kisscoreprint-to-console)
+    - [`kiss.core.print_to_browser`](#kisscoreprint-to-browser)
+    - [`kiss.core.browser_ui`](#kisscorebrowser-ui)
+    - [`kiss.core.useful_tools`](#kisscoreuseful-tools)
+    - [`kiss.core.web_use_tool`](#kisscoreweb-use-tool)
+    - [`kiss.core.utils`](#kisscoreutils)
+  - [`kiss.agents`](#kissagents)
+    - [`kiss.agents.coding_agents`](#kissagentscoding-agents)
+      - [`kiss.agents.coding_agents.claude_coding_agent`](#kissagentscoding-agentsclaude-coding-agent)
+      - [`kiss.agents.coding_agents.relentless_coding_agent`](#kissagentscoding-agentsrelentless-coding-agent)
+      - [`kiss.agents.coding_agents.config`](#kissagentscoding-agentsconfig)
+    - [`kiss.agents.assistant`](#kissagentsassistant)
+      - [`kiss.agents.assistant.relentless_agent`](#kissagentsassistantrelentless-agent)
+      - [`kiss.agents.assistant.assistant_agent`](#kissagentsassistantassistant-agent)
+      - [`kiss.agents.assistant.assistant`](#kissagentsassistantassistant)
+      - [`kiss.agents.assistant.config`](#kissagentsassistantconfig)
+    - [`kiss.agents.gepa`](#kissagentsgepa)
+      - [`kiss.agents.gepa.config`](#kissagentsgepaconfig)
+    - [`kiss.agents.kiss_evolve`](#kissagentskiss-evolve)
+      - [`kiss.agents.kiss_evolve.config`](#kissagentskiss-evolveconfig)
+  - [`kiss.docker`](#kissdocker)
+  - [`kiss.multiprocessing`](#kissmultiprocessing)
+  - [`kiss.rag`](#kissrag)
 
 ______________________________________________________________________
 
-## KISSAgent
+## `kiss`
 
-The core agent class implementing a ReAct agent using native function calling of LLMs.
-
-### Constructor
+*Top-level Kiss module for the project.*
 
 ```python
-KISSAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): The name of the agent. Used for identification and artifact naming.
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    model_name: str,
-    prompt_template: str,
-    arguments: dict[str, str] | None = None,
-    tools: list[Callable[..., Any]] | None = None,
-    is_agentic: bool = True,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    model_config: dict[str, Any] | None = None,
-    printer: Printer | None = None,
-    print_to_console: bool | None = None,
-    print_to_browser: bool | None = None,
-) -> str
-```
-
-Runs the agent's main ReAct loop to solve the task.
-
-**Parameters:**
-
-- `model_name` (str): The name of the model to use (e.g., "gpt-4o", "claude-sonnet-4-5", "gemini-2.5-flash", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "openrouter/anthropic/claude-3.5-sonnet")
-- `prompt_template` (str): The prompt template for the agent. Can include `{placeholder}` syntax for variable substitution.
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `tools` (list\[Callable[..., Any]\] | None): List of callable functions the agent can use. The `finish` tool is automatically added if it is not provided in `tools`. If `use_web` is enabled in config, `search_web` and `fetch_url` is also automatically added. Default is None.
-- `is_agentic` (bool): If True, runs in agentic mode with tools. If False, returns raw LLM response. Default is True.
-- `max_steps` (int | None): Maximum number of ReAct loop iterations. Default is None (uses `DEFAULT_CONFIG.agent.max_steps`, which is 100).
-- `max_budget` (float | None): Maximum budget in USD for this agent run. Default is None (uses `DEFAULT_CONFIG.agent.max_agent_budget`, which is 10.0).
-- `model_config` (dict[str, Any] | None): Optional model configuration to pass to the model. Default is None.
-- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a `MultiPrinter` is created automatically based on config flags (or the `print_to_console`/`print_to_browser` parameters below). The printer's `token_callback` is used for real-time token streaming. Default is None.
-- `print_to_console` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_console` to enable/disable `ConsolePrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to True).
-- `print_to_browser` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_browser` to enable/disable `BrowserPrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to False).
-
-**Returns:**
-
-- `str`: The result returned by the agent's `finish()` call, or the raw LLM response in non-agentic mode.
-
-**Raises:**
-
-- `KISSError`: If budget exceeded, max steps exceeded, or tools provided in non-agentic mode.
-
-#### `get_trajectory()`
-
-```python
-def get_trajectory(self) -> str
-```
-
-Returns the agent's conversation trajectory as a JSON string.
-
-**Returns:**
-
-- `str`: JSON-formatted string containing the list of messages with roles and content.
-
-#### `finish()`
-
-```python
-def finish(self, result: str) -> str
-```
-
-Built-in method that serves as the default finish tool for the agent. This method is automatically added as a tool for all KISSAgent instances.
-
-**Parameters:**
-
-- `result` (str): The final result/answer from the agent.
-
-**Returns:**
-
-- `str`: The same result string passed in.
-
-**Note:** This is a simpler version than the utility function `kiss.core.utils.finish()`. If you want structured output with status and analysis, you can provide the utility version as a custom tool instead.
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model_name` (str): The name of the model being used.
-- `model`: The model instance being used.
-- `function_map` (dict[str, Callable]): Dictionary mapping tool names to callable functions.
-- `messages` (list\[dict[str, Any]\]): List of messages in the trajectory.
-- `step_count` (int): Current step number.
-- `total_tokens_used` (int): Total tokens used in this run.
-- `budget_used` (float): Budget used in this run.
-- `run_start_timestamp` (int): Unix timestamp when the run started.
-- `is_agentic` (bool): Whether the agent is running in agentic mode.
-- `max_steps` (int): Maximum number of steps allowed.
-- `max_budget` (float): Maximum budget allowed for this run.
-
-### Tool Definition
-
-Tools are defined as regular Python functions with type hints and docstrings:
-
-```python
-def my_tool(param1: str, param2: int = 10) -> str:
-    """Description of what the tool does.
-    
-    Args:
-        param1: Description of param1
-        param2: Description of param2
-    
-    Returns:
-        Description of return value
-    """
-    # Tool implementation
-    return f"Result: {param1}, {param2}"
-```
-
-The framework automatically extracts the function signature, type hints, and docstring to generate the tool schema for the LLM.
-
-______________________________________________________________________
-
-## RelentlessCodingAgent
-
-A single-agent coding system with smart auto-continuation for long-running tasks. It uses a single agent that executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking (done/next items) and work directory scanning.
-
-The agent continues attempting tasks through multiple sub-sessions until success or exhaustion of retry attempts.
-
-### Constructor
-
-```python
-RelentlessCodingAgent(name: str)
-```
-
-**Parameters:**
-
-- `name` (str): Name of the agent. Used for identification and artifact naming.
-
-### Methods
-
-#### `run()`
-
-```python
-def run(
-    self,
-    model_name: str | None = None,
-    prompt_template: str = "",
-    arguments: dict[str, str] | None = None,
-    max_steps: int | None = None,
-    max_budget: float | None = None,
-    work_dir: str | None = None,
-    base_dir: str | None = None,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-    printer: Printer | None = None,
-    max_sub_sessions: int | None = None,
-    docker_image: str | None = None,
-    print_to_console: bool | None = None,
-    print_to_browser: bool | None = None,
-) -> str
-```
-
-Run the single-agent coding system with auto-continuation.
-
-**Parameters:**
-
-- `model_name` (str | None): Model for task execution. Default is None (uses config default: "claude-opus-4-6").
-- `prompt_template` (str): The prompt template for the task. Can include `{placeholder}` syntax for variable substitution. Default is "".
-- `arguments` (dict[str, str] | None): Arguments to substitute into the prompt template. Default is None.
-- `max_steps` (int | None): Maximum number of steps per sub-session. Default is None (uses config default: 25).
-- `max_budget` (float | None): Maximum budget in USD for this run. Default is None (uses config default: 200.0).
-- `work_dir` (str | None): The working directory for the agent's operations. Default is None (uses `{artifact_dir}/kiss_workdir`).
-- `base_dir` (str | None): The base directory relative to which readable and writable paths are resolved if they are not absolute. Default is None (uses `{artifact_dir}/kiss_workdir`).
-- `readable_paths` (list[str] | None): The paths from which the agent is allowed to read. If None, no paths are allowed for read access (except work_dir which is always added).
-- `writable_paths` (list[str] | None): The paths to which the agent is allowed to write. If None, no paths are allowed for write access (except work_dir which is always added).
-- `printer` (Printer | None): Optional printer for output formatting and streaming. When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags (or the `print_to_console`/`print_to_browser` parameters below). Default is None.
-- `max_sub_sessions` (int | None): Maximum number of sub-sessions for auto-continuation. Default is None (uses config default: 200).
-- `docker_image` (str | None): Optional Docker image name to run bash commands in a container. If provided, all bash commands will run inside the Docker container instead of on the host. Example: "ubuntu:latest", "python:3.11-slim". Default is None (local execution).
-- `print_to_console` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_console` to enable/disable `ConsolePrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to True).
-- `print_to_browser` (bool | None): Override `DEFAULT_CONFIG.agent.print_to_browser` to enable/disable `BrowserPrinter` for this run. Only used when no explicit `printer` is provided. Default is None (uses config value, which defaults to False).
-
-**Returns:**
-
-- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
-
-#### `perform_task()`
-
-```python
-def perform_task(self) -> str
-```
-
-Execute the main task using multiple sub-sessions with auto-continuation. Each sub-session runs a KISSAgent; on failure, structured progress (done/next items) and a scan of existing files are passed to the next sub-session.
-
-**Returns:**
-
-- `str`: A YAML-encoded dictionary with keys 'success' (boolean) and 'summary' (string).
-
-**Raises:**
-
-- `KISSError`: If the task fails after all continuation sub-sessions.
-
-### Instance Attributes (after `run()`)
-
-- `id` (int): Unique identifier for this agent instance.
-- `name` (str): The agent's name.
-- `model_name` (str): Model name for task execution.
-- `task_description` (str): The formatted task description.
-- `total_tokens_used` (int): Total tokens used across all sub-sessions in this run.
-- `budget_used` (float): Total budget used across all sub-sessions in this run.
-- `work_dir` (str): The working directory for the agent's operations.
-- `base_dir` (str): The base directory for the agent's working files.
-- `readable_paths` (list[Path]): List of paths the agent can read from.
-- `writable_paths` (list[Path]): List of paths the agent can write to.
-- `max_steps` (int): Maximum number of steps per sub-session.
-- `max_budget` (float): Maximum total budget allowed for this run.
-- `max_sub_sessions` (int): Maximum number of sub-sessions for auto-continuation.
-- `max_tokens` (int): Maximum context length for the model used.
-- `docker_image` (str | None): The Docker image name if Docker execution is enabled.
-- `docker_manager` (DockerManager | None): The active Docker manager instance during execution (None when not using Docker or outside of `run()`).
-- `useful_tools` (UsefulTools): The UsefulTools instance used for bash/read/edit/write operations.
-
-### Key Features
-
-- **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking (done/next items)
-- **Structured Progress Tracking**: Each sub-session reports completed and remaining tasks in JSON format, which is deduplicated, validated, and passed to subsequent sub-sessions along with a scan of existing files in the work directory
-- **Compressed Prompts**: Minimal, high-signal task prompts with critical rules (use Write() for new files, bounded poll loops, immediate finish on success)
-- **Efficiency Rules**: Built-in prompt instructions enforce immediate completion when tests pass, timeout guidance for bash, and bounded loops for background jobs
-- **Relentless Retries**: Continues attempting tasks through multiple continuation sub-sessions until success
-- **Bash Command Parsing**: Automatically extracts readable/writable paths from commands using `parse_bash_command_paths()`
-- **Path Access Control**: Enforces read/write permissions on file system paths before command execution
-- **Docker Support**: Optional Docker container execution for bash commands via the `docker_image` parameter. When enabled, all bash commands run inside an isolated Docker container.
-- **Built-in Tools**: Each sub-session agent has access to `finish()`, `Bash` (or Docker bash when `docker_image` is set), `Read`, `Edit`, and `Write`
-
-### Example
-
-```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
-
-agent = RelentlessCodingAgent("My Relentless Agent")
-
-result = agent.run(
-    prompt_template="""
-        Write, test, and optimize a fibonacci function in Python
-        that is efficient and correct. Save it to fibonacci.py.
-    """,
-    model_name="claude-sonnet-4-5",
-    readable_paths=["src/"],
-    writable_paths=["output/"],
-    base_dir="workdir",
-    max_steps=50,
-    max_sub_sessions=3
-)
-print(f"Result: {result}")
-
-# Result is YAML with 'success' and 'summary' keys
-import yaml
-result_dict = yaml.safe_load(result)
-print(f"Success: {result_dict['success']}")
-print(f"Summary: {result_dict['summary']}")
-```
-
-### Example with Docker
-
-```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
-
-agent = RelentlessCodingAgent("Docker Relentless Agent")
-
-# Run with Docker - bash commands execute inside the container
-result = agent.run(
-    prompt_template="""
-        Install numpy and write a Python script that creates 
-        a random matrix and computes its eigenvalues.
-    """,
-    docker_image="python:3.11-slim",  # Commands run in Docker
-    max_steps=50,
-    max_sub_sessions=2
-)
-print(f"Result: {result}")
+from kiss import __version__
 ```
 
 ______________________________________________________________________
 
-## Printer
+### `kiss.core`
 
-Abstract base class for KISS agent output and the `MultiPrinter` composite.
-
-**Location:** `kiss.core.printer`
-
-### Printer (ABC)
+*Core module for the KISS agent framework.*
 
 ```python
-class Printer(ABC):
-    @abstractmethod
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str: ...
-
-    @abstractmethod
-    async def token_callback(self, token: str) -> None: ...
-
-    @abstractmethod
-    def reset(self) -> None: ...
+from kiss.core import AgentConfig, AnthropicModel, Config, DEFAULT_CONFIG, GeminiModel, KISSError, Model, OpenAICompatibleModel
 ```
 
-All concrete printers (`ConsolePrinter`, `BrowserPrinter`) implement this interface.
-
-### MultiPrinter
+#### `AgentConfig`
 
 ```python
-class MultiPrinter(Printer):
-    def __init__(self, printers: list[Printer]) -> None: ...
+class AgentConfig(BaseModel)
 ```
 
-A composite printer that delegates to multiple printers. Used by `KISSAgent` to stream output to both the terminal and browser simultaneously.
+#### `Config`
+
+```python
+class Config(BaseModel)
+```
+
+#### `KISSError`
+
+```python
+class KISSError(ValueError)
+```
+
+Custom exception class for KISS framework errors.
 
 ______________________________________________________________________
 
-## BrowserPrinter
+#### `kiss.core.kiss_agent`
 
-> **Requires:** `uvicorn` and `starlette` packages. Included in `uv sync --group claude-coding-agent`.
+*Core KISS agent implementation with native function calling support.*
 
-**Location:** `kiss.core.print_to_browser`
-
-Browser output streaming handler. Starts a local uvicorn server with SSE (Server-Sent Events) and opens a browser window to display agent output in real-time with a modern dark-themed UI.
-
-### Constructor
+##### `KISSAgent`
 
 ```python
-BrowserPrinter()
+class KISSAgent(Base)
 ```
 
-### Methods
+A KISS agent using native function calling.
 
-#### `start()`
+**Constructor:**
 
 ```python
-def start(self, open_browser: bool = True) -> None
+KISSAgent(name: str) -> None
 ```
 
-Start the uvicorn server on a random free port and optionally open the browser.
+**Methods:**
 
-**Parameters:**
-
-- `open_browser` (bool): If True (default), opens the browser automatically.
-
-#### `stop()`
-
-```python
-def stop(self) -> None
-```
-
-Send a "done" event to all connected browsers and shut down the server.
-
-#### `reset()`
-
-```python
-def reset(self) -> None
-```
-
-Reset internal state (block type, tool name, JSON buffer).
-
-#### `print()`
-
-```python
-def print(self, content: Any, type: str = "text", **kwargs: Any) -> str
-```
-
-Unified output method that handles all content types and sends to browser via SSE.
-
-**Parameters:**
-
-- `content` (Any): The content to display.
-- `type` (str): The content type. Supported types:
-  - `"text"`: General text output
-  - `"prompt"`: Agent prompt display
-  - `"stream_event"`: Streaming event from Claude Agent SDK (handles `content_block_start`, `content_block_delta`, `content_block_stop`)
-  - `"message"`: Complete message (SystemMessage, ResultMessage, UserMessage)
-  - `"usage_info"`: Usage information (step count, token counts, etc.)
-  - `"tool_call"`: Tool call display (pass `tool_input` dict in kwargs)
-  - `"tool_result"`: Tool result display (pass `is_error` bool in kwargs)
-  - `"result"`: Final result display (pass `step_count`, `total_tokens`, `cost` in kwargs)
-- `**kwargs`: Additional keyword arguments specific to the content type.
-
-**Returns:**
-
-- `str`: Extracted text content (for `stream_event` type), empty string otherwise.
-
-### Browser UI Features
-
-- **Dark theme** with modern, professional design
-- **Scrollable panels** for thinking blocks, tool call details, tool results, and final results
-- **Syntax highlighting** via Highlight.js for code in tool calls
-- **Collapsible thinking blocks** that auto-collapse after completion
-- **Expandable tool cards** with file paths, commands, diffs, and extra parameters
-- **Auto-scroll** with smart detection (pauses when user scrolls up)
-- **Live status indicator** with event count and elapsed time
-- **SSE-based streaming** for instant updates without polling
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `run` | `run(model_name: str, prompt_template: str, arguments: dict[str, str] \| None = None, tools: list[Callable[..., Any]] \| None = None, is_agentic: bool = True, max_steps: int \| None = None, max_budget: float \| None = None, model_config: dict[str, Any] \| None = None, printer: Printer \| None = None, print_to_console: bool \| None = None, print_to_browser: bool \| None = None) -> str` | Runs the agent's main ReAct loop to solve the task. |
+| `finish` | `finish(result: str) -> str` | The agent must call this function with the final answer to the task. |
 
 ______________________________________________________________________
 
-## ConsolePrinter
+#### `kiss.core.config`
 
-**Location:** `kiss.core.print_to_console`
+*Configuration Pydantic models for KISS agent settings with CLI support.*
 
-Rich terminal output handler. Provides formatted console output with syntax-highlighted tool calls, thinking block delimiters, streaming text deltas, and result summaries.
-
-### Constructor
+##### `APIKeysConfig`
 
 ```python
-ConsolePrinter(file: Any = None)
+class APIKeysConfig(BaseModel)
 ```
 
-**Parameters:**
-
-- `file` (Any): Optional file object for output. Default is None (uses `sys.stdout`).
-
-### Methods
-
-#### `reset()`
+##### `DockerConfig`
 
 ```python
-def reset(self) -> None
-```
-
-Reset internal state (block type, tool name, JSON buffer, mid-line flag).
-
-#### `print()`
-
-```python
-def print(self, content: Any, type: str = "text", **kwargs: Any) -> str
-```
-
-Unified output method that handles all content types and prints to terminal with Rich formatting.
-
-**Parameters:**
-
-- `content` (Any): The content to display.
-- `type` (str): The content type. Supported types:
-  - `"text"`: General text output
-  - `"prompt"`: Agent prompt display (Rich Panel)
-  - `"stream_event"`: Streaming event from Claude Agent SDK (handles `content_block_start`, `content_block_delta`, `content_block_stop`)
-  - `"message"`: Complete message (SystemMessage, ResultMessage, UserMessage)
-  - `"usage_info"`: Usage information as a Rich Panel
-  - `"tool_call"`: Tool call display with syntax highlighting (pass `tool_input` dict in kwargs)
-  - `"tool_result"`: Tool result display (pass `is_error` bool in kwargs)
-  - `"result"`: Final result display as a Rich Panel with stats (pass `step_count`, `total_tokens`, `cost` in kwargs)
-- `**kwargs`: Additional keyword arguments specific to the content type.
-
-**Returns:**
-
-- `str`: Extracted text content (for `stream_event` type), empty string otherwise.
-
-______________________________________________________________________
-
-## DockerManager
-
-Manages Docker container lifecycle and command execution.
-
-### Constructor
-
-```python
-DockerManager(
-    image_name: str,
-    tag: str = "latest",
-    workdir: str = "/",
-    mount_shared_volume: bool = True,
-    ports: dict[int, int] | None = None,
-)
-```
-
-**Parameters:**
-
-- `image_name` (str): The name of the Docker image (e.g., 'ubuntu', 'python'). Can include tag like 'ubuntu:22.04'.
-- `tag` (str): The tag/version of the image. Default is 'latest'.
-- `workdir` (str): The working directory inside the container. Default is '/'.
-- `mount_shared_volume` (bool): Whether to mount a shared volume. Set to False for images that already have content in the workdir (e.g., SWE-bench). Default is True.
-- `ports` (dict[int, int] | None): Port mapping from container port to host port. Example: `{8080: 8080}` maps container port 8080 to host port 8080. Default is None.
-
-### Methods
-
-#### `open()`
-
-```python
-def open(self) -> None
-```
-
-Pull and load a Docker image, then create and start a container.
-
-#### `run_bash_command()`
-
-```python
-def run_bash_command(self, command: str, description: str) -> str
-```
-
-Execute a bash command in the running Docker container.
-
-**Parameters:**
-
-- `command` (str): The bash command to execute.
-- `description` (str): A short description of the command in natural language.
-
-**Returns:**
-
-- `str`: The output of the command, including stdout, stderr, and exit code.
-
-**Raises:**
-
-- `KISSError`: If no container is open.
-
-#### `get_host_port()`
-
-```python
-def get_host_port(self, container_port: int) -> int | None
-```
-
-Get the host port mapped to a container port.
-
-**Parameters:**
-
-- `container_port` (int): The container port to look up.
-
-**Returns:**
-
-- `int | None`: The host port mapped to the container port, or None if not mapped.
-
-**Raises:**
-
-- `KISSError`: If no container is open.
-
-#### `close()`
-
-```python
-def close(self) -> None
-```
-
-Stop and remove the Docker container. Also cleans up temporary directories.
-
-### Context Manager
-
-DockerManager supports the context manager protocol:
-
-```python
-with DockerManager("ubuntu:latest", ports={80: 8080}) as env:
-    output = env.run_bash_command("echo 'Hello'", "Echo test")
-    host_port = env.get_host_port(80)
-```
-
-### Instance Attributes
-
-- `container`: The Docker container instance (after `open()`).
-- `host_shared_path` (str | None): Path to the host-side shared directory (auto-generated temp directory).
-- `client_shared_path` (str): Path to the container-side shared directory (from config, default: `/testbed`).
-- `image` (str): The Docker image name.
-- `tag` (str): The Docker image tag.
-- `workdir` (str): The working directory inside the container.
-- `ports` (dict[int, int] | None): The port mappings.
-
-______________________________________________________________________
-
-## Multiprocessing
-
-Parallel execution utilities using Python's `multiprocessing` module.
-
-### `run_functions_in_parallel()`
-
-```python
-def run_functions_in_parallel(
-    tasks: list[tuple[Callable[..., Any], list[Any]]],
-) -> list[Any]
-```
-
-Run a list of functions in parallel using multiprocessing.
-
-**Parameters:**
-
-- `tasks` (list\[tuple[Callable, list]\]): List of tuples, where each tuple contains (function, arguments). Each function is a callable, and arguments is a list that can be unpacked with \*args.
-
-**Returns:**
-
-- `list[Any]`: List of results from each function, in the same order as the input tasks.
-
-**Raises:**
-
-- `Exception`: Any exception raised by the functions will be propagated with context.
-
-**Example:**
-
-```python
-def add(a, b):
-    return a + b
-
-def multiply(x, y):
-    return x * y
-
-tasks = [(add, [1, 2]), (multiply, [3, 4])]
-results = run_functions_in_parallel(tasks)
-print(results)  # [3, 12]
-```
-
-### `run_functions_in_parallel_with_kwargs()`
-
-```python
-def run_functions_in_parallel_with_kwargs(
-    functions: list[Callable[..., Any]],
-    args_list: list[list[Any]] | None = None,
-    kwargs_list: list[dict[str, Any]] | None = None,
-) -> list[Any]
-```
-
-Run a list of functions in parallel with support for keyword arguments.
-
-**Parameters:**
-
-- `functions` (list[Callable]): List of callable functions to execute.
-- `args_list` (list[list] | None): Optional list of argument lists for positional arguments. If None, an empty list is used for each function.
-- `kwargs_list` (list[dict] | None): Optional list of keyword argument dictionaries. If None, an empty dict is used for each function.
-
-**Returns:**
-
-- `list[Any]`: List of results from each function, in the same order as the input functions.
-
-**Raises:**
-
-- `ValueError`: If the number of functions doesn't match the number of argument lists.
-- `Exception`: Any exception raised by the functions will be propagated.
-
-**Example:**
-
-```python
-def greet(name, title="Mr."):
-    return f"Hello, {title} {name}!"
-
-functions = [greet, greet]
-args_list = [["Alice"], ["Bob"]]
-kwargs_list = [{"title": "Dr."}, {}]
-results = run_functions_in_parallel_with_kwargs(functions, args_list, kwargs_list)
-print(results)  # ["Hello, Dr. Alice!", "Hello, Mr. Bob!"]
-```
-
-### `get_available_cores()`
-
-```python
-def get_available_cores() -> int
-```
-
-Get the number of available CPU cores.
-
-**Returns:**
-
-- `int`: Number of CPU cores available on the system.
-
-______________________________________________________________________
-
-## SimpleRAG
-
-Simple and elegant RAG (Retrieval-Augmented Generation) system for document storage and retrieval using an in-memory vector store.
-
-### Constructor
-
-```python
-SimpleRAG(
-    model_name: str,
-    metric: str = "cosine",
-    embedding_model_name: str | None = None,
-)
-```
-
-**Parameters:**
-
-- `model_name` (str): Model name to use for the LLM provider.
-- `metric` (str): Distance metric to use - "cosine" or "l2". Default is "cosine".
-- `embedding_model_name` (str | None): Optional specific model name for embeddings. If None, uses model_name or provider default.
-
-### Methods
-
-#### `add_documents()`
-
-```python
-def add_documents(
-    self,
-    documents: list[dict[str, Any]],
-    batch_size: int = 100
-) -> None
-```
-
-Add documents to the vector store.
-
-**Parameters:**
-
-- `documents` (list[dict]): List of document dictionaries. Each document should have:
-  - `"id"` (str): Unique identifier
-  - `"text"` (str): Document text content
-  - `"metadata"` (dict, optional): Optional metadata dictionary
-- `batch_size` (int): Number of documents to process in each batch. Default is 100.
-
-#### `query()`
-
-```python
-def query(
-    self,
-    query_text: str,
-    top_k: int = 5,
-    filter_fn: Callable[[dict[str, Any]], bool] | None = None,
-) -> list[dict[str, Any]]
-```
-
-Query similar documents from the collection.
-
-**Parameters:**
-
-- `query_text` (str): Query text to search for.
-- `top_k` (int): Number of top results to return. Default is 5.
-- `filter_fn` (Callable | None): Optional filter function that takes a document dict and returns bool.
-
-**Returns:**
-
-- `list[dict]`: List of dictionaries containing:
-  - `"id"`: Document ID
-  - `"text"`: Document text
-  - `"metadata"`: Document metadata
-  - `"score"`: Similarity score (higher is better for cosine, lower for L2)
-
-#### `delete_documents()`
-
-```python
-def delete_documents(self, document_ids: list[str]) -> None
-```
-
-Delete documents from the collection by their IDs.
-
-**Parameters:**
-
-- `document_ids` (list[str]): List of document IDs to delete.
-
-#### `get_document()`
-
-```python
-def get_document(self, document_id: str) -> dict[str, Any] | None
-```
-
-Get a document by its ID.
-
-**Parameters:**
-
-- `document_id` (str): Document ID to retrieve.
-
-**Returns:**
-
-- `dict | None`: Document dictionary or None if not found.
-
-#### `get_collection_stats()`
-
-```python
-def get_collection_stats(self) -> dict[str, Any]
-```
-
-Get statistics about the collection.
-
-**Returns:**
-
-- `dict`: Dictionary containing:
-  - `"num_documents"`: Number of documents
-  - `"embedding_dimension"`: Dimension of embeddings
-  - `"metric"`: Distance metric used
-
-#### `clear_collection()`
-
-```python
-def clear_collection(self) -> None
-```
-
-Clear all documents from the collection.
-
-### Example
-
-```python
-from kiss.rag import SimpleRAG
-
-rag = SimpleRAG(model_name="gpt-4o")
-
-documents = [
-    {"id": "1", "text": "Python is a programming language", "metadata": {"topic": "programming"}},
-    {"id": "2", "text": "Machine learning uses algorithms", "metadata": {"topic": "ML"}},
-]
-rag.add_documents(documents)
-
-results = rag.query("What is Python?", top_k=2)
-for result in results:
-    print(f"Text: {result['text']}, Score: {result['score']}")
+class DockerConfig(BaseModel)
 ```
 
 ______________________________________________________________________
 
-## AgentEvolver
+#### `kiss.core.config_builder`
 
-AgentEvolver evolves AI agents using a Pareto frontier approach, optimizing for both token efficiency and execution time. It uses mutation and crossover operations to create new agent variants.
+*Configuration builder for KISS agent settings with CLI support.*
 
-### Constructor
-
-```python
-AgentEvolver()
-```
-
-AgentEvolver is instantiated without parameters. All configuration is passed to the `evolve()` method.
-
-**Note:** AgentEvolver uses RelentlessCodingAgent (a single-agent coding system with auto-continuation) internally for agent improvement. Evaluation is done internally by loading and running the generated `agent.py` which must implement `agent_run(task: str) -> dict[str, Any]`.
-
-### Methods
-
-#### `evolve()`
+**`add_config`**
 
 ```python
-def evolve(
-    self,
-    task_description: str,
-    max_generations: int | None = None,
-    initial_frontier_size: int | None = None,
-    max_frontier_size: int | None = None,
-    mutation_probability: float | None = None,
-    progress_callback: Callable[[EvolverProgress], None] | None = None,
-) -> AgentVariant
+def add_config(name: str, config_class: type[BaseModel]) -> None
 ```
 
-Run the evolutionary optimization process.
-
-**Parameters:**
-
-- `task_description` (str): Description of the task the agent should perform.
-- `max_generations` (int | None): Maximum number of improvement generations. Uses config default if None.
-- `initial_frontier_size` (int | None): Number of initial agents to create. Uses config default if None.
-- `max_frontier_size` (int | None): Maximum size of the Pareto frontier. Uses config default if None.
-- `mutation_probability` (float | None): Probability of mutation vs crossover (1.0 = always mutate). Uses config default if None.
-- `progress_callback` (Callable\[[EvolverProgress], None\] | None): Optional callback function called with `EvolverProgress` during optimization. Use this to track progress, display progress bars, or log intermediate results.
-
-**Returns:**
-
-- `AgentVariant`: The best agent variant found during evolution.
-
-#### `get_best_variant()`
-
-```python
-def get_best_variant(self) -> AgentVariant
-```
-
-Get the best variant from the Pareto frontier by combined score.
-
-**Returns:**
-
-- `AgentVariant`: The best agent variant (lowest combined score of tokens + time).
-
-**Raises:**
-
-- `RuntimeError`: If no variants are available.
-
-#### `get_pareto_frontier()`
-
-```python
-def get_pareto_frontier(self) -> list[AgentVariant]
-```
-
-Get all variants in the Pareto frontier.
-
-**Returns:**
-
-- `list[AgentVariant]`: Copy of the current Pareto frontier.
-
-#### `save_state()`
-
-```python
-def save_state(self, path: str) -> None
-```
-
-Save the evolver state to a JSON file.
-
-**Parameters:**
-
-- `path` (str): Path where to save the state JSON file.
-
-### AgentVariant
-
-```python
-@dataclass
-class AgentVariant:
-    folder_path: str
-    report_path: str
-    report: ImprovementReport
-    metrics: dict[str, float]
-    parent_ids: list[int]
-    id: int = 0
-    generation: int = 0
-```
-
-**Attributes:**
-
-- `folder_path` (str): Directory containing agent code.
-- `report_path` (str): Path to improvement report JSON file.
-- `report` (ImprovementReport): Improvement report tracking implemented/failed ideas.
-- `metrics` (dict[str, float]): Metrics dictionary with keys like `success`, `tokens_used`, `execution_time`.
-- `parent_ids` (list[int]): List of parent variant IDs (for lineage tracking).
-- `id` (int): Unique identifier for this variant.
-- `generation` (int): Generation number when this variant was created.
-
-### ImprovementReport
-
-```python
-class ImprovementReport:
-    def __init__(
-        self,
-        metrics: dict[str, float],
-        implemented_ideas: list[dict[str, str]],
-        failed_ideas: list[dict[str, str]],
-        generation: int = 0,
-        summary: str = "",
-    )
-```
-
-**Attributes:**
-
-- `metrics` (dict[str, float]): Metrics from the improvement run (e.g., `tokens_used`, `cost`, `execution_time`).
-- `implemented_ideas` (list\[dict[str, str]\]): List of successfully implemented optimization ideas.
-- `failed_ideas` (list\[dict[str, str]\]): List of failed optimization attempts.
-- `generation` (int): Generation number.
-- `summary` (str): Summary of the improvement.
-
-### EvolverPhase
-
-```python
-class EvolverPhase(Enum):
-    INITIALIZING = "initializing"    # Creating initial agent variants
-    EVALUATING = "evaluating"        # Evaluating a variant
-    MUTATION = "mutation"            # Mutating a variant
-    CROSSOVER = "crossover"          # Crossing over two variants
-    PARETO_UPDATE = "pareto_update"  # Updating the Pareto frontier
-    COMPLETE = "complete"            # Evolution complete
-```
-
-Enum representing the current phase of AgentEvolver optimization, similar to `GEPAPhase` for GEPA.
-
-### EvolverProgress
-
-```python
-@dataclass
-class EvolverProgress:
-    generation: int                           # Current generation (0 = init, 1+ = evolution)
-    max_generations: int                      # Total generations to run
-    phase: EvolverPhase                       # Current optimization phase
-    variant_id: int | None = None             # ID of current variant (if applicable)
-    parent_ids: list[int] = field(default_factory=list)  # Parent variant IDs
-    frontier_size: int = 0                    # Current Pareto frontier size
-    best_score: float | None = None           # Best combined score (lower is better)
-    current_metrics: dict[str, float] = field(default_factory=dict)  # Current variant metrics
-    added_to_frontier: bool | None = None     # Whether variant was added to frontier
-    message: str = ""                         # Descriptive activity message
-```
-
-Progress information passed to the callback during optimization.
-
-**Attributes:**
-
-- `generation` (int): Current generation number (0 during initialization, 1-indexed during evolution).
-- `max_generations` (int): Total number of generations to run.
-- `phase` (EvolverPhase): Current phase of the optimization.
-- `variant_id` (int | None): ID of the variant currently being processed.
-- `parent_ids` (list[int]): Parent variant IDs for the current operation.
-- `frontier_size` (int): Current size of the Pareto frontier.
-- `best_score` (float | None): Best combined score seen so far (lower is better).
-- `current_metrics` (dict[str, float]): Metrics of the current variant.
-- `added_to_frontier` (bool | None): Whether the current variant was added to the Pareto frontier.
-- `message` (str): Descriptive message about the current activity.
-
-### create_progress_callback()
-
-```python
-def create_progress_callback(verbose: bool = False) -> Callable[[EvolverProgress], None]
-```
-
-Create a standard progress callback for console output.
-
-**Parameters:**
-
-- `verbose` (bool): If True, prints all phases. If False (default), only prints evaluation completions, Pareto updates, and completion messages.
-
-**Returns:**
-
-- `Callable[[EvolverProgress], None]`: A callback function for use with `evolve()`.
-
-### Example
-
-```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver, EvolverProgress, create_progress_callback
-
-evolver = AgentEvolver()
-
-# Using the built-in progress callback
-best = evolver.evolve(
-    task_description="Build a code analysis assistant that reviews Python files",
-    max_generations=5,
-    initial_frontier_size=2,
-    max_frontier_size=4,
-    mutation_probability=0.8,
-    progress_callback=create_progress_callback(verbose=True),
-)
-
-print(f"Best variant: {best.folder_path}")
-print(f"Metrics: {best.metrics}")
-print(f"Generation: {best.generation}")
-
-# Or use a custom callback
-def my_callback(progress: EvolverProgress) -> None:
-    if progress.phase.value == "complete":
-        print(f"Done! Best score: {progress.best_score}")
-
-best = evolver.evolve(
-    task_description="Build a code analysis assistant",
-    progress_callback=my_callback,
-)
-
-# Save state for later analysis
-evolver.save_state("evolver_state.json")
-```
+Build the KISS config, optionally overriding with command-line arguments.
 
 ______________________________________________________________________
 
-## GEPA
+#### `kiss.core.models`
 
-GEPA (Genetic-Pareto) is a reflective prompt evolution optimizer based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning".
-
-### Constructor
+*Model implementations for different LLM providers.*
 
 ```python
-GEPA(
-    agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list]],
-    initial_prompt_template: str,
-    evaluation_fn: Callable[[str], dict[str, float]] | None = None,
-    max_generations: int | None = None,
-    population_size: int | None = None,
-    pareto_size: int | None = None,
-    mutation_rate: float | None = None,
-    reflection_model: str | None = None,
-    dev_val_split: float | None = None,
-    perfect_score: float = 1.0,
-    use_merge: bool = True,
-    max_merge_invocations: int = 5,
-    merge_val_overlap_floor: int = 2,
-    progress_callback: Callable[[GEPAProgress], None] | None = None,
-    batched_agent_wrapper: Callable[
-        [str, list[dict[str, str]]], list[tuple[str, list]]
-    ] | None = None,
-)
+from kiss.core.models import Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
 ```
 
-**Parameters:**
-
-- `agent_wrapper` (Callable): Function `(prompt_template, arguments) -> (result, trajectory)` that runs the agent.
-- `initial_prompt_template` (str): The initial prompt template to optimize.
-- `evaluation_fn` (Callable | None): Function to evaluate result -> `{metric: score}`. Default checks for "success" in result.
-- `max_generations` (int | None): Maximum evolutionary generations. Uses config default (10) if None.
-- `population_size` (int | None): Number of candidates per generation. Uses config default (8) if None.
-- `pareto_size` (int | None): Maximum Pareto frontier size. Uses config default (4) if None.
-- `mutation_rate` (float | None): Probability of mutation. Uses config default (0.5) if None.
-- `reflection_model` (str | None): Model for reflection. Uses config default ("gemini-3-flash-preview") if None.
-- `dev_val_split` (float | None): Fraction for dev set. Default is 0.5.
-- `perfect_score` (float): Score threshold to skip mutation. Default is 1.0.
-- `use_merge` (bool): Whether to use structural merge. Default is True.
-- `max_merge_invocations` (int): Maximum merge attempts. Default is 5.
-- `merge_val_overlap_floor` (int): Minimum validation overlap for merge. Default is 2.
-- `progress_callback` (Callable | None): Optional callback function called with `GEPAProgress` during optimization.
-- `batched_agent_wrapper` (Callable | None): Optional batched evaluator with signature `(prompt_template, examples) -> [(result, trajectory)]`. When provided, GEPA evaluates minibatches via this function instead of calling `agent_wrapper` once per example.
-
-### GEPAPhase
-
-Enum representing the current phase of GEPA optimization:
+##### `Model`
 
 ```python
-class GEPAPhase(Enum):
-    DEV_EVALUATION = "dev_evaluation"    # Evaluating on dev set
-    VAL_EVALUATION = "val_evaluation"    # Evaluating on validation set
-    REFLECTION = "reflection"            # LLM reflecting to generate mutations
-    MUTATION_GATING = "mutation_gating"  # Testing if mutation should be accepted
-    MERGE = "merge"                      # Structural merge from Pareto frontier
-    PARETO_UPDATE = "pareto_update"      # New candidate added to Pareto frontier
+class Model(ABC)
 ```
 
-### GEPAProgress
+Abstract base class for LLM provider implementations.
 
-Progress information passed to the callback during optimization:
+**Constructor:**
 
 ```python
-@dataclass
-class GEPAProgress:
-    generation: int              # Current generation number (0-indexed)
-    max_generations: int         # Total number of generations
-    phase: GEPAPhase             # Current optimization phase
-    candidate_id: int | None     # ID of current candidate (if applicable)
-    candidate_index: int | None  # Index in population (if applicable)
-    population_size: int         # Current population size
-    best_val_accuracy: float | None     # Best validation accuracy so far
-    current_val_accuracy: float | None  # Current candidate's validation accuracy
-    pareto_frontier_size: int    # Size of Pareto frontier
-    num_candidates_evaluated: int  # Candidates evaluated this generation
-    message: str                 # Description of current activity
+Model(model_name: str, model_description: str = '', model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
 ```
 
-### create_progress_callback
+**Methods:**
 
-```python
-def create_progress_callback(verbose: bool = False) -> Callable[[GEPAProgress], None]
-```
-
-Create a standard progress callback for GEPA optimization.
-
-**Parameters:**
-
-- `verbose` (bool): If True, prints all phases. If False, only prints val evaluation completion messages and Pareto frontier updates.
-
-**Returns:**
-
-- A callback function that prints progress updates during optimization.
-
-**Note:** The `pareto_update` phase is always printed (even when `verbose=False`) to show when new candidates join the Pareto frontier, including the full prompt template.
-
-### Methods
-
-#### `optimize()`
-
-```python
-def optimize(
-    self,
-    train_examples: list[dict[str, str]],
-    dev_minibatch_size: int | None = None,
-) -> PromptCandidate
-```
-
-Run GEPA optimization.
-
-**Parameters:**
-
-- `train_examples` (list[dict]): Training examples (will be split into dev/val).
-- `dev_minibatch_size` (int | None): Dev examples per evaluation. Default uses all.
-
-**Returns:**
-
-- `PromptCandidate`: Best PromptCandidate found.
-
-#### `get_best_prompt()`
-
-```python
-def get_best_prompt(self) -> str
-```
-
-Get the best prompt template found.
-
-**Returns:**
-
-- `str`: The best prompt template.
-
-#### `get_pareto_frontier()`
-
-```python
-def get_pareto_frontier(self) -> list[PromptCandidate]
-```
-
-Get current Pareto frontier.
-
-**Returns:**
-
-- `list[PromptCandidate]`: Copy of the Pareto frontier.
-
-### PromptCandidate
-
-```python
-@dataclass
-class PromptCandidate:
-    prompt_template: str
-    dev_scores: dict[str, float] = field(default_factory=dict)
-    val_scores: dict[str, float] = field(default_factory=dict)
-    per_item_val_scores: list[dict[str, float]] = field(default_factory=list)
-    val_instance_wins: set[int] = field(default_factory=set)
-    evaluated_val_ids: set[int] = field(default_factory=set)
-    parents: list[int] = field(default_factory=list)
-    id: int = 0
-```
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `close_callback_loop` | `close_callback_loop() -> None` | Close the per-instance event loop used for synchronous token callback invocation. |
+| `initialize` | `initialize(prompt: str) -> None` | Initializes the conversation with an initial user prompt. |
+| `generate` | `generate() -> tuple[str, Any]` | Generates content from prompt. |
+| `generate_and_process_with_tools` | `generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]` | Generates content with tools, processes the response, and adds it to conversation. |
+| `add_function_results_to_conversation_and_return` | `add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None` | Adds function results to the conversation state. |
+| `add_message_to_conversation` | `add_message_to_conversation(role: str, content: str) -> None` | Adds a message to the conversation state. |
+| `extract_input_output_token_counts_from_response` | `extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]` | Extracts input and output token counts from an API response. |
+| `get_embedding` | `get_embedding(text: str, embedding_model: str \| None = None) -> list[float]` | Generates an embedding vector for the given text. |
+| `set_usage_info_for_messages` | `set_usage_info_for_messages(usage_info: str) -> None` | Sets token information to append to messages sent to the LLM. |
 
 ______________________________________________________________________
 
-## KISSEvolve
+#### `kiss.core.models.model_info`
 
-Evolutionary algorithm discovery using LLMs. Evolves code variants through selection, mutation, and crossover.
+*Model information: pricing and context lengths for supported LLM providers.*
 
-### Constructor
-
-```python
-KISSEvolve(
-    code_agent_wrapper: Callable[..., str],
-    initial_code: str,
-    evaluation_fn: Callable[[str], dict[str, Any]],
-    model_names: list[tuple[str, float]],
-    extra_coding_instructions: str = "",
-    population_size: int | None = None,
-    max_generations: int | None = None,
-    mutation_rate: float | None = None,
-    elite_size: int | None = None,
-    num_islands: int | None = None,
-    migration_frequency: int | None = None,
-    migration_size: int | None = None,
-    migration_topology: str | None = None,
-    enable_novelty_rejection: bool | None = None,
-    novelty_threshold: float | None = None,
-    max_rejection_attempts: int | None = None,
-    novelty_rag_model: Model | None = None,
-    parent_sampling_method: str | None = None,
-    power_law_alpha: float | None = None,
-    performance_novelty_lambda: float | None = None,
-)
-```
-
-**Parameters:**
-
-- `code_agent_wrapper` (Callable): The code generation agent wrapper. Should accept keyword arguments: `model_name` (str), `prompt_template` (str), and `arguments` (dict[str, str]).
-- `initial_code` (str): The initial code to evolve.
-- `evaluation_fn` (Callable): Function that takes code string and returns dict with:
-  - `'fitness'`: float (higher is better)
-  - `'metrics'`: dict[str, float] (optional)
-  - `'artifacts'`: dict[str, Any] (optional)
-  - `'error'`: str (optional error message)
-- `model_names` (list\[tuple[str, float]\]): List of (model_name, probability) tuples. Probabilities are normalized.
-- `extra_coding_instructions` (str): Extra instructions to add to the code generation prompt.
-- `population_size` (int | None): Number of variants per generation.
-- `max_generations` (int | None): Maximum number of evolutionary generations.
-- `mutation_rate` (float | None): Probability of mutating a variant (0.0-1.0).
-- `elite_size` (int | None): Number of best variants to preserve each generation.
-- `num_islands` (int | None): Number of islands for island-based evolution.
-- `migration_frequency` (int | None): Generations between migrations.
-- `migration_size` (int | None): Number of individuals to migrate.
-- `migration_topology` (str | None): Migration pattern ('ring', 'fully_connected', 'random').
-- `enable_novelty_rejection` (bool | None): Enable code novelty rejection sampling.
-- `novelty_threshold` (float | None): Cosine similarity threshold for rejecting code (0.0-1.0).
-- `max_rejection_attempts` (int | None): Maximum rejection attempts before accepting.
-- `novelty_rag_model` (Model | None): Model for generating code embeddings.
-- `parent_sampling_method` (str | None): Parent sampling method ('tournament', 'power_law', 'performance_novelty').
-- `power_law_alpha` (float | None): Power-law sampling parameter (α).
-- `performance_novelty_lambda` (float | None): Performance-novelty sampling parameter (λ).
-
-### Methods
-
-#### `evolve()`
+##### `ModelInfo`
 
 ```python
-def evolve(self) -> CodeVariant
+class ModelInfo
 ```
 
-Run the evolutionary algorithm.
+Container for model metadata including pricing and capabilities.
 
-**Returns:**
-
-- `CodeVariant`: The best code variant found during evolution.
-
-#### `get_best_variant()`
+**Constructor:**
 
 ```python
-def get_best_variant(self) -> CodeVariant
+ModelInfo(context_length: int, input_price_per_million: float, output_price_per_million: float, is_function_calling_supported: bool, is_embedding_supported: bool, is_generation_supported: bool)
 ```
 
-Get the best variant from the current population or islands.
-
-**Returns:**
-
-- `CodeVariant`: The best code variant.
-
-#### `get_population_stats()`
+**`is_model_flaky`**
 
 ```python
-def get_population_stats(self) -> dict[str, Any]
+def is_model_flaky(model_name: str) -> bool
 ```
 
-Get statistics about the current population.
+Check if a model is known to be flaky.
 
-**Returns:**
-
-- `dict`: Dictionary with keys: `size`, `avg_fitness`, `best_fitness`, `worst_fitness`.
-
-### CodeVariant
+**`get_flaky_reason`**
 
 ```python
-@dataclass
-class CodeVariant:
-    code: str
-    fitness: float = 0.0
-    metrics: dict[str, float] = field(default_factory=dict)
-    parent_id: int | None = None
-    generation: int = 0
-    id: int = 0
-    artifacts: dict[str, Any] = field(default_factory=dict)
-    evaluation_error: str | None = None
-    offspring_count: int = 0
+def get_flaky_reason(model_name: str) -> str
 ```
+
+Get the reason why a model is flaky.
+
+**`model`**
+
+```python
+def model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None) -> Model
+```
+
+Get a model instance based on model name prefix.
+
+**`get_available_models`**
+
+```python
+def get_available_models() -> list[str]
+```
+
+Return model names for which an API key is configured and generation is supported.
+
+**`calculate_cost`**
+
+```python
+def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int) -> float
+```
+
+Calculates the cost in USD for the given token counts.
+
+**`get_max_context_length`**
+
+```python
+def get_max_context_length(model_name: str) -> int
+```
+
+Returns the maximum context length supported by the model.
 
 ______________________________________________________________________
 
-## UsefulTools
+#### `kiss.core.models.openai_compatible_model`
 
-A class that provides file operations and bash command execution with path-based access control and security checks.
+*OpenAI-compatible model implementation for custom endpoints.*
 
-### Constructor
+##### `OpenAICompatibleModel`
 
 ```python
-UsefulTools(
-    base_dir: str,
-    readable_paths: list[str] | None = None,
-    writable_paths: list[str] | None = None,
-)
+class OpenAICompatibleModel(Model)
 ```
 
-**Parameters:**
+A model that uses an OpenAI-compatible API with a custom base URL.
 
-- `base_dir` (str): The base directory for operations (created if it doesn't exist).
-- `readable_paths` (list[str] | None): List of paths the tools can read from. Default is None (empty allowlist; no file reads are allowed unless paths are provided).
-- `writable_paths` (list[str] | None): List of paths the tools can write to. Default is None (empty allowlist; no file writes are allowed unless paths are provided).
-
-### Methods
-
-#### `Read()`
+**Constructor:**
 
 ```python
-def Read(self, file_path: str, max_lines: int = 2000) -> str
+OpenAICompatibleModel(model_name: str, base_url: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
 ```
 
-Read file contents with path access control.
+**Methods:**
 
-**Parameters:**
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `initialize` | `initialize(prompt: str) -> None` | Initialize the conversation with an initial user prompt. |
+| `generate` | `generate() -> tuple[str, Any]` | Generate content from prompt without tools. |
+| `generate_and_process_with_tools` | `generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]` | Generate content with tools, process the response, and add it to conversation. |
+| `add_function_results_to_conversation_and_return` | `add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None` | Add function results to the conversation state. |
+| `add_message_to_conversation` | `add_message_to_conversation(role: str, content: str) -> None` | Add a message to the conversation state. |
+| `extract_input_output_token_counts_from_response` | `extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]` | Extract input and output token counts from an API response. |
+| `get_embedding` | `get_embedding(text: str, embedding_model: str \| None = None) -> list[float]` | Generate an embedding vector for the given text. |
 
-- `file_path` (str): Absolute path to the file to read.
-- `max_lines` (int): Maximum number of lines to return. Default is 2000.
+______________________________________________________________________
 
-**Returns:**
+#### `kiss.core.models.anthropic_model`
 
-- `str`: The file contents, or an error message if access is denied or reading fails.
+*Anthropic model implementation for Claude models.*
 
-#### `Write()`
+##### `AnthropicModel`
 
 ```python
-def Write(self, file_path: str, content: str) -> str
+class AnthropicModel(Model)
 ```
 
-Write content to a file, creating it if it doesn't exist or overwriting if it does. Respects writable_paths access control.
+A model that uses Anthropic's Messages API (Claude).
 
-**Parameters:**
-
-- `file_path` (str): Path to the file to write.
-- `content` (str): The full content to write to the file.
-
-**Returns:**
-
-- `str`: A success message with bytes written, or an error message if access is denied or writing fails.
-
-#### `Bash()`
+**Constructor:**
 
 ```python
-def Bash(
-    self,
-    command: str,
-    description: str,
-    timeout_seconds: float = 30,
-    max_output_chars: int = 50000,
-) -> str
+AnthropicModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
 ```
 
-Execute a bash command with automatic path permission checks and security validation.
+**Methods:**
 
-**Parameters:**
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `initialize` | `initialize(prompt: str) -> None` | Initializes the conversation with an initial user prompt. |
+| `generate` | `generate() -> tuple[str, Any]` | Generates content from the current conversation. |
+| `generate_and_process_with_tools` | `generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]` | Generates content with tools and processes the response. |
+| `add_function_results_to_conversation_and_return` | `add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None` | Add tool results to the conversation. |
+| `add_message_to_conversation` | `add_message_to_conversation(role: str, content: str) -> None` | Adds a message to the conversation state. |
+| `extract_input_output_token_counts_from_response` | `extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]` | Extracts input and output token counts from an API response. |
+| `get_embedding` | `get_embedding(text: str, embedding_model: str \| None = None) -> list[float]` | Generates an embedding vector for the given text. |
 
-- `command` (str): The bash command to execute.
-- `description` (str): A brief description of what the command does.
-- `timeout_seconds` (float): Timeout in seconds for the command. Default is 30.
-- `max_output_chars` (int): Maximum output length before truncation. Default is 50000.
+______________________________________________________________________
 
-**Returns:**
+#### `kiss.core.models.gemini_model`
 
-- `str`: The command output (stdout), or an error message if permission denied, security violation, or execution failed. Very large outputs are truncated from the middle with a truncation marker.
+*Gemini model implementation for Google's GenAI models.*
 
-**Security Features:**
-
-- Automatically parses commands to detect file operations
-- Enforces readable_paths and writable_paths restrictions
-- Blocks unsafe shell control commands: `.`, `cd`, `env`, `eval`, `exec`
-- Blocks inline interpreter execution flags (`python -c`, `node -e/--eval`, `bash -c`, etc.)
-- Treats `/proc/self/root/...` as unsafe (not a safe special path)
-- Returns descriptive error messages for violations
-
-#### `Edit()`
+##### `GeminiModel`
 
 ```python
-def Edit(
-    self,
-    file_path: str,
-    old_string: str,
-    new_string: str,
-    replace_all: bool = False,
-    timeout_seconds: float = 30,
-) -> str
+class GeminiModel(Model)
 ```
 
-Performs precise string replacements in files with exact matching.
+A model that uses Google's GenAI API (Gemini).
 
-**Parameters:**
-
-- `file_path` (str): Absolute path to the file to modify.
-- `old_string` (str): Exact text to find and replace.
-- `new_string` (str): Replacement text, must differ from old_string.
-- `replace_all` (bool): If True, replace all occurrences. Default is False.
-- `timeout_seconds` (float): Timeout in seconds for the edit command. Default is 30.
-
-**Returns:**
-
-- `str`: The output of the edit operation.
-
-#### `MultiEdit()`
+**Constructor:**
 
 ```python
-def MultiEdit(
-    self,
-    file_path: str,
-    old_string: str,
-    new_string: str,
-    replace_all: bool = False,
-    timeout_seconds: float = 30,
-) -> str
+GeminiModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
 ```
 
-Performs precise string replacements in files with exact matching. Has the same functionality as `Edit()` - both methods use the same underlying implementation for string replacement.
+**Methods:**
 
-**Parameters:**
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `initialize` | `initialize(prompt: str) -> None` | Initializes the conversation with an initial user prompt. |
+| `generate` | `generate() -> tuple[str, Any]` | Generates content from prompt without tools. |
+| `generate_and_process_with_tools` | `generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]` | Generates content with tools, processes the response, and adds it to conversation. |
+| `add_function_results_to_conversation_and_return` | `add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None` | Adds function results to the conversation state. |
+| `add_message_to_conversation` | `add_message_to_conversation(role: str, content: str) -> None` | Adds a message to the conversation state. |
+| `extract_input_output_token_counts_from_response` | `extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]` | Extracts input and output token counts from an API response. |
+| `get_embedding` | `get_embedding(text: str, embedding_model: str \| None = None) -> list[float]` | Generates an embedding vector for the given text. |
 
-- `file_path` (str): Absolute path to the file to modify.
-- `old_string` (str): Exact text to find and replace.
-- `new_string` (str): Replacement text, must differ from old_string.
-- `replace_all` (bool): If True, replace all occurrences. Default is False.
-- `timeout_seconds` (float): Timeout in seconds for the edit command. Default is 30.
+______________________________________________________________________
 
-**Returns:**
+#### `kiss.core.printer`
 
-- `str`: The output of the edit operation.
+*Abstract base class and shared utilities for KISS agent printers.*
 
-**Example:**
+##### `Printer`
 
 ```python
-from kiss.core.useful_tools import UsefulTools
-
-tools = UsefulTools(
-    base_dir="/workdir",
-    readable_paths=["/workdir/src"],
-    writable_paths=["/workdir/output"],
-)
-
-# This will work
-output = tools.Bash("cat src/file.txt > output/result.txt", "Copy file")
-
-# This will be denied
-output = tools.Bash("cat /etc/passwd", "Read system file")
-# Returns: "Error: Access denied for reading /etc/passwd"
+class Printer(ABC)
 ```
 
-### Module-level Functions
+**Methods:**
 
-The `kiss.core.useful_tools` module also provides these standalone functions:
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `print` | `print(content: Any, type: str = 'text', **kwargs: Any) -> str` | Render content to the output destination. |
+| `token_callback` | `async token_callback(token: str) -> None` | Handle a single streamed token from the LLM. |
+| `reset` | `reset() -> None` | Reset the printer's internal streaming state between messages. |
 
-#### `fetch_url()`
+##### `MultiPrinter`
 
 ```python
-def fetch_url(
-    url: str,
-    headers: dict[str, str],
-    max_characters: int = 10000,
-    timeout_seconds: float = 10.0,
-) -> str
+class MultiPrinter(Printer)
+```
+
+**Constructor:**
+
+```python
+MultiPrinter(printers: list[Printer]) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `print` | `print(content: Any, type: str = 'text', **kwargs: Any) -> str` | Dispatch a print call to all child printers. |
+| `token_callback` | `async token_callback(token: str) -> None` | Forward a streamed token to all child printers. |
+| `reset` | `reset() -> None` | Reset streaming state on all child printers. |
+
+**`lang_for_path`**
+
+```python
+def lang_for_path(path: str) -> str
+```
+
+Map a file path to its syntax-highlighting language name.
+
+**`truncate_result`**
+
+```python
+def truncate_result(content: str) -> str
+```
+
+Truncate long content to MAX_RESULT_LEN, keeping the first and last halves.
+
+**`extract_path_and_lang`**
+
+```python
+def extract_path_and_lang(tool_input: dict) -> tuple[str, str]
+```
+
+Extract the file path and inferred language from a tool input dict.
+
+**`extract_extras`**
+
+```python
+def extract_extras(tool_input: dict) -> dict[str, str]
+```
+
+Extract non-standard keys from a tool input dict for display.
+
+______________________________________________________________________
+
+#### `kiss.core.print_to_console`
+
+*Console output formatting for KISS agents.*
+
+##### `ConsolePrinter`
+
+```python
+class ConsolePrinter(Printer)
+```
+
+**Constructor:**
+
+```python
+ConsolePrinter(file: Any = None) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `reset` | `reset() -> None` | Reset internal streaming and tool-parsing state for a new turn. |
+| `print` | `print(content: Any, type: str = 'text', **kwargs: Any) -> str` | Render content to the console using Rich formatting. |
+| `token_callback` | `async token_callback(token: str) -> None` | Stream a single token to the console, styled by current block type. |
+
+______________________________________________________________________
+
+#### `kiss.core.print_to_browser`
+
+*Browser output streaming for KISS agents via SSE.*
+
+##### `BrowserPrinter`
+
+```python
+class BrowserPrinter(BaseBrowserPrinter)
+```
+
+**Constructor:**
+
+```python
+BrowserPrinter() -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `start` | `start(open_browser: bool = True) -> None` | Launch a local SSE server and optionally open the browser viewer. |
+| `stop` | `stop() -> None` | Broadcast a done event to all clients and shut down the SSE server. |
+
+______________________________________________________________________
+
+#### `kiss.core.browser_ui`
+
+*Shared browser UI components for KISS agent viewers.*
+
+##### `BaseBrowserPrinter`
+
+```python
+class BaseBrowserPrinter(Printer)
+```
+
+**Constructor:**
+
+```python
+BaseBrowserPrinter() -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `reset` | `reset() -> None` | Reset internal streaming and tool-parsing state for a new turn. |
+| `broadcast` | `broadcast(event: dict[str, Any]) -> None` | Send an SSE event dict to all connected clients. |
+| `add_client` | `add_client() -> queue.Queue[dict[str, Any]]` | Register a new SSE client and return its event queue. |
+| `remove_client` | `remove_client(cq: queue.Queue[dict[str, Any]]) -> None` | Unregister an SSE client's event queue. |
+| `print` | `print(content: Any, type: str = 'text', **kwargs: Any) -> str` | Render content by broadcasting SSE events to connected browser clients. |
+| `token_callback` | `async token_callback(token: str) -> None` | Broadcast a streamed token as an SSE delta event to browser clients. |
+
+**`find_free_port`**
+
+```python
+def find_free_port() -> int
+```
+
+Find and return an available TCP port on localhost.
+
+**`build_stream_viewer_html`**
+
+```python
+def build_stream_viewer_html(title: str = 'KISS Agent', subtitle: str = 'Live Stream') -> str
+```
+
+Build a self-contained HTML page for the SSE-based stream viewer.
+
+______________________________________________________________________
+
+#### `kiss.core.useful_tools`
+
+*Useful tools for agents: file editing, bash execution, web search, and URL fetching.*
+
+##### `UsefulTools`
+
+```python
+class UsefulTools
+```
+
+A hardened collection of useful tools with improved security.
+
+**Constructor:**
+
+```python
+UsefulTools(base_dir: str, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Read` | `Read(file_path: str, max_lines: int = 2000) -> str` | Read file contents. |
+| `Write` | `Write(file_path: str, content: str) -> str` | Write content to a file, creating it if it doesn't exist or overwriting if it does. |
+| `Edit` | `Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str` | Performs precise string replacements in files with exact matching. |
+| `MultiEdit` | `MultiEdit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str` | Performs precise string replacements in files with exact matching. |
+| `Bash` | `Bash(command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str` | Runs a bash command and returns its output. |
+
+**`fetch_url`**
+
+```python
+def fetch_url(url: str, headers: dict[str, str], max_characters: int = 10000, timeout_seconds: float = 10.0) -> str
 ```
 
 Fetch and extract text content from a URL using BeautifulSoup.
 
-**Parameters:**
-
-- `url` (str): The URL to fetch.
-- `headers` (dict[str, str]): HTTP headers to use for the request.
-- `max_characters` (int): Maximum number of characters to return. Default is 10000.
-- `timeout_seconds` (float): Request timeout in seconds. Default is 10.0.
-
-**Returns:**
-
-- `str`: Extracted text content from the page, or an error message if fetch failed.
-
-#### `search_web()`
+**`search_web`**
 
 ```python
 def search_web(query: str, max_results: int = 10) -> str
@@ -1531,18 +557,7 @@ def search_web(query: str, max_results: int = 10) -> str
 
 Perform a web search and return the top search results with page contents.
 
-Tries DuckDuckGo first (more reliable for automated access), then falls back to Startpage if needed. Uses Playwright headless browser with Safari/WebKit to render JavaScript and avoid bot detection.
-
-**Parameters:**
-
-- `query` (str): The search query.
-- `max_results` (int): Maximum number of results to fetch content for. Default is 10.
-
-**Returns:**
-
-- `str`: A string containing titles, links, and page contents of the top search results.
-
-#### `parse_bash_command_paths()`
+**`parse_bash_command_paths`**
 
 ```python
 def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
@@ -1550,98 +565,63 @@ def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
 
 Parse a bash command to extract readable and writable directory paths.
 
-This function analyzes bash commands to intelligently determine which directories are being read from and which are being written to. It handles:
+______________________________________________________________________
 
-- Common read commands: cat, grep, find, ls, python, gcc, rsync, etc.
-- Common write commands: touch, mkdir, rm, mv, cp, rsync, etc.
-- Output redirection: >, >>, &>, 2>, etc.
-- Additional output redirection operators: `>|`, `>>|`, `1>>`, `2>>`, `&>>`, `&>|`
-- Input redirection: \<, \<<, \<<\<
-- Heredoc stripping: heredoc body text (between `<< DELIM` and `DELIM`) is stripped before parsing so that heredoc content is not misinterpreted as command arguments
-- Command separators: `&&`, `||`, `;` chains
-- Pipe chains with multiple commands
-- Environment-variable-prefixed commands (e.g., `FOO=bar cat file.txt`)
-- Flags and arguments parsing
-- Special commands like tee (reads stdin and writes to file)
-- Path cleaning: trailing punctuation characters (e.g., `)`, `'`, `"`, `;`, `}`, `]`) are stripped from paths before safety checks
+#### `kiss.core.web_use_tool`
 
-**Parameters:**
+*Browser automation tool for LLM agents using Playwright.*
 
-- `command` (str): The bash command to parse.
-
-**Returns:**
-
-- `tuple[list[str], list[str]]`: A tuple of (readable_dirs, writable_dirs) where each is a sorted list of directory paths.
-
-**Example:**
+##### `WebUseTool`
 
 ```python
-from kiss.core.useful_tools import parse_bash_command_paths
-
-# Reading and writing
-readable, writable = parse_bash_command_paths("cat input.txt > output.txt")
-# readable: ['input.txt'], writable: ['output.txt']
-
-# Complex command with pipes
-readable, writable = parse_bash_command_paths("grep 'pattern' src/*.py | tee results.txt")
-# readable: ['src/'], writable: ['results.txt']
-
-# Copy operations
-readable, writable = parse_bash_command_paths("cp -r src/ dest/")
-# readable: ['src/'], writable: ['dest/']
+class WebUseTool
 ```
 
-**Note:**
+Browser automation tool using Playwright with zero JS injection.
 
-This function is used internally by `UsefulTools.Bash()` to automatically determine which paths need read/write permissions before executing bash commands.
+**Constructor:**
+
+```python
+WebUseTool(browser_type: str = 'chromium', headless: bool = False, viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _AUTO_DETECT) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `go_to_url` | `go_to_url(url: str) -> str` | Navigate the browser to a URL and return the page accessibility tree. |
+| `click` | `click(element_id: int, action: str = 'click') -> str` | Click or hover on an interactive element by its [N] ID from the accessibility tree. |
+| `type_text` | `type_text(element_id: int, text: str, press_enter: bool = False) -> str` | Type text into a textbox, searchbox, or other editable element by its [N] ID. |
+| `press_key` | `press_key(key: str) -> str` | Press a single key or key combination. Use for navigation, closing dialogs, shortcuts. |
+| `scroll` | `scroll(direction: str = 'down', amount: int = 3) -> str` | Scroll the current page to reveal more content. Use when needed elements are off-screen. |
+| `screenshot` | `screenshot(file_path: str = 'screenshot.png') -> str` | Capture the visible viewport as an image. Use to verify layout, captchas, or |
+| `get_page_content` | `get_page_content(text_only: bool = False) -> str` | Get the current page content. Use to decide what to click or type next. |
+| `close` | `close() -> str` | Close the browser and release resources. Call when done with the session or before exit. |
+| `get_tools` | `get_tools() -> list[Callable[..., str]]` | Return callable web tools for registration with an agent. |
 
 ______________________________________________________________________
 
-## Utility Functions
+#### `kiss.core.utils`
 
-Helper functions from `kiss.core.utils`.
+*Utility functions for the KISS core module.*
 
-### `get_config_value()`
+**`get_config_value`**
 
 ```python
-def get_config_value(
-    value: T | None,
-    config_obj: Any,
-    attr_name: str,
-    default: T | None = None
-) -> T
+def get_config_value(value: T | None, config_obj: Any, attr_name: str, default: T | None = None) -> T
 ```
 
 Get a config value, preferring explicit value over config default.
 
-**Parameters:**
-
-- `value`: The explicitly provided value (may be None).
-- `config_obj`: The config object to read from if value is None.
-- `attr_name` (str): The attribute name to read from config_obj.
-- `default`: Fallback default if both value and config attribute are None.
-
-**Returns:**
-
-- The resolved value (explicit value > config value > default).
-
-### `get_template_field_names()`
+**`get_template_field_names`**
 
 ```python
 def get_template_field_names(text: str) -> list[str]
 ```
 
-Get the field names from the text template.
+Get the field names from the text.
 
-**Parameters:**
-
-- `text` (str): The text containing template field placeholders.
-
-**Returns:**
-
-- `list[str]`: A list of field names found in the text.
-
-### `add_prefix_to_each_line()`
+**`add_prefix_to_each_line`**
 
 ```python
 def add_prefix_to_each_line(text: str, prefix: str) -> str
@@ -1649,28 +629,15 @@ def add_prefix_to_each_line(text: str, prefix: str) -> str
 
 Adds a prefix to each line of the text.
 
-**Parameters:**
-
-- `text` (str): The text to add prefix to.
-- `prefix` (str): The prefix to add to each line.
-
-**Returns:**
-
-- `str`: The text with prefix added to each line.
-
-### `config_to_dict()`
+**`config_to_dict`**
 
 ```python
 def config_to_dict() -> dict[Any, Any]
 ```
 
-Convert the default config to a dictionary (excludes API keys).
+Convert the config to a dictionary.
 
-**Returns:**
-
-- `dict`: A dictionary representation of the default config.
-
-### `fc()`
+**`fc`**
 
 ```python
 def fc(file_path: str) -> str
@@ -1678,15 +645,31 @@ def fc(file_path: str) -> str
 
 Reads a file and returns the content.
 
-**Parameters:**
+**`finish`**
 
-- `file_path` (str): The path to the file to read.
+```python
+def finish(status: str = 'success', analysis: str = '', result: str = '') -> str
+```
 
-**Returns:**
+The agent must call this function with the final status, analysis, and result
 
-- `str`: The content of the file.
+**`read_project_file`**
 
-### `resolve_path()`
+```python
+def read_project_file(file_path_relative_to_project_root: str) -> str
+```
+
+Read a file from the project root.
+
+**`read_project_file_from_package`**
+
+```python
+def read_project_file_from_package(file_name_as_python_package: str) -> str
+```
+
+Read a file from the project root.
+
+**`resolve_path`**
 
 ```python
 def resolve_path(p: str, base_dir: str) -> Path
@@ -1694,30 +677,7 @@ def resolve_path(p: str, base_dir: str) -> Path
 
 Resolve a path relative to base_dir if not absolute.
 
-**Parameters:**
-
-- `p` (str): The path to resolve.
-- `base_dir` (str): The base directory to resolve relative paths against.
-
-**Returns:**
-
-- `Path`: The resolved absolute path.
-
-**Example:**
-
-```python
-from kiss.core.utils import resolve_path
-
-# Relative path
-path = resolve_path("output/file.txt", "/workdir")
-# Returns: Path("/workdir/output/file.txt")
-
-# Absolute path (returned as-is)
-path = resolve_path("/tmp/file.txt", "/workdir")
-# Returns: Path("/tmp/file.txt")
-```
-
-### `is_subpath()`
+**`is_subpath`**
 
 ```python
 def is_subpath(target: Path, whitelist: list[Path]) -> bool
@@ -1725,265 +685,33 @@ def is_subpath(target: Path, whitelist: list[Path]) -> bool
 
 Check if target has any prefix in whitelist.
 
-**Parameters:**
-
-- `target` (Path): The target path to check.
-- `whitelist` (list[Path]): List of paths to check against.
-
-**Returns:**
-
-- `bool`: True if target is a subpath of any path in whitelist, False otherwise.
-
-**Example:**
-
-```python
-from pathlib import Path
-from kiss.core.utils import is_subpath
-
-target = Path("/workdir/output/file.txt")
-whitelist = [Path("/workdir/output"), Path("/workdir/tmp")]
-
-if is_subpath(target, whitelist):
-    print("Access allowed")
-else:
-    print("Access denied")
-```
-
-### `finish()` (for KISSAgent in utils.py)
-
-```python
-def finish(
-    status: str = "success",
-    analysis: str = "",
-    result: str = "",
-) -> str
-```
-
-A utility function from `kiss.core.utils` that can be used as a finish tool for KISSAgent instances. Returns a YAML-formatted result string.
-
-**Location:** `kiss.core.utils`
-
-**Parameters:**
-
-- `status` (str): The status of the agent's task ('success' or 'failure'). Default is 'success'.
-- `analysis` (str): The analysis of the agent's trajectory.
-- `result` (str): The result generated by the agent.
-
-**Returns:**
-
-- `str`: A YAML string containing the status, analysis, and result.
-
-**Note:** KISSAgent has its own built-in `finish(result: str) -> str` method that takes only a result parameter and returns it directly. The utility function version is optional and provides more structured output.
-
-### `finish()` (for RelentlessCodingAgent)
-
-```python
-def finish(success: bool, summary: str) -> str
-```
-
-Used by RelentlessCodingAgent and its sub-agents to complete task execution. This is defined separately in the coding agent module and has a different signature than the utility version.
-
-**Location:** `kiss.agents.coding_agents.relentless_coding_agent`
-
-**Parameters:**
-
-- `success` (bool): True if the task was successful, False otherwise.
-- `summary` (str): Summary message describing the task outcome.
-
-**Returns:**
-
-- `str`: A YAML string containing the 'success' (boolean) and 'summary' (string) keys.
-
-### `read_project_file()`
-
-```python
-def read_project_file(file_path_relative_to_project_root: str) -> str
-```
-
-Read a file from the project root. Compatible with installations packaged as .whl or source.
-
-**Parameters:**
-
-- `file_path_relative_to_project_root` (str): Path relative to the project root.
-
-**Returns:**
-
-- `str`: The file's contents.
-
-### `read_project_file_from_package()`
-
-```python
-def read_project_file_from_package(file_name_as_python_package: str) -> str
-```
-
-Read a file from the project root using Python package conventions.
-
-**Location:** `kiss.core.utils`
-
-**Parameters:**
-
-- `file_name_as_python_package` (str): File name as a Python package.
-
-**Returns:**
-
-- `str`: The file's contents.
-
 ______________________________________________________________________
 
-## Token Streaming via Printer
+### `kiss.agents`
 
-The KISS framework supports real-time token streaming through the `Printer` abstraction. Each `Printer` implements a `token_callback` method that receives streamed tokens. When a printer is provided to `KISSAgent.run()` (or when `verbose=True` creates one automatically), model responses are streamed token-by-token in real-time.
-
-### Streaming Behavior by Provider
-
-- **Anthropic (Claude)**: Uses `messages.stream()` with raw event iteration for both `generate()` and `generate_and_process_with_tools()`. Streams both `thinking_delta` and `text_delta` events, enabling real-time streaming of extended thinking content. Thinking is auto-enabled for Claude 4.x models (adaptive for Opus 4.6, extended for others).
-- **OpenAI / Together AI / OpenRouter**: Uses `chat.completions.create(stream=True)` with `stream_options={"include_usage": True}` to preserve token counts. Streams both `reasoning_content` (thinking tokens) and regular `content` deltas. For tool calls, streaming accumulates tool-call deltas and reconstructs the full call.
-- **Gemini**: Uses `generate_content_stream()` for `generate()` and `generate_content_stream()` with part-level parsing for `generate_and_process_with_tools()`. Thinking is auto-enabled via `ThinkingConfig(include_thoughts=True)`, streaming both thought summaries and regular text.
-
-When no printer is provided and `verbose=False`, all providers fall back to their original non-streaming code paths.
-
-### KISSAgent Integration
-
-When `verbose=True` (default), `KISSAgent` automatically creates a `MultiPrinter` based on config flags: `print_to_browser` (default: False) adds a `BrowserPrinter`, `print_to_console` (default: True) adds a `ConsolePrinter`. These defaults can be overridden per-call via the `print_to_console` and `print_to_browser` parameters on `run()`. You can also pass a custom printer. The printer receives:
-
-1. **Model response tokens** as they are generated.
-1. **Tool execution output** after each tool call completes.
-
-### Coding Agent Integration
-
-Coding agents support streaming output through the `printer` parameter:
-
-- **RelentlessCodingAgent**: Accepts `printer`, `print_to_console`, and `print_to_browser` parameters (all default: None). When `verbose=True` (default) and no printer is provided, a printer is auto-created based on config flags or the per-call `print_to_console`/`print_to_browser` overrides. The printer is passed through to the underlying `KISSAgent.run()` calls for each sub-session.
-
-### Example
+*KISS agents package with pre-built agent implementations.*
 
 ```python
-from kiss.core.kiss_agent import KISSAgent
-from kiss.core.print_to_console import ConsolePrinter
-
-agent = KISSAgent("streaming-agent")
-result = agent.run(
-    model_name="gpt-4o",
-    prompt_template="Write a haiku about programming.",
-    is_agentic=False,
-    printer=ConsolePrinter(),
-)
+from kiss.agents import ClaudeCodingAgent, prompt_refiner_agent, get_run_simple_coding_agent, run_bash_task_in_sandboxed_ubuntu_latest
 ```
 
-______________________________________________________________________
-
-## Configuration System
-
-The KISS framework uses a Pydantic-based configuration system accessible through `DEFAULT_CONFIG`. Configuration is extensible via `add_config()` for sub-systems like GEPA, KISSEvolve, etc.
-
-### Config Structure
+**`prompt_refiner_agent`**
 
 ```python
-from kiss.core.config import DEFAULT_CONFIG
-
-# Access configuration
-DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY = "your-key"
-DEFAULT_CONFIG.agent.max_steps = 100
-DEFAULT_CONFIG.agent.max_agent_budget = 10.0
-DEFAULT_CONFIG.agent.global_max_budget = 200.0
-DEFAULT_CONFIG.agent.verbose = True
-DEFAULT_CONFIG.agent.use_web = True
-DEFAULT_CONFIG.agent.print_to_console = True
-DEFAULT_CONFIG.agent.print_to_browser = False
-```
-
-### Configuration Sections
-
-#### `agent.api_keys`
-
-- `OPENAI_API_KEY` (str): OpenAI API key
-- `ANTHROPIC_API_KEY` (str): Anthropic API key
-- `GEMINI_API_KEY` (str): Google Gemini API key
-- `TOGETHER_API_KEY` (str): Together AI API key
-- `OPENROUTER_API_KEY` (str): OpenRouter API key
-- `MINIMAX_API_KEY` (str): MiniMax API key
-
-#### `agent`
-
-- `max_steps` (int): Maximum steps per agent run (default: 100)
-- `max_agent_budget` (float): Maximum budget per agent in USD (default: 10.0)
-- `global_max_budget` (float): Global budget limit in USD (default: 200.0)
-- `verbose` (bool): Enable verbose output (default: True)
-- `use_web` (bool): Enable web search tool (default: False)
-- `debug` (bool): Enable debug mode (default: False)
-- `print_to_console` (bool): Enable ConsolePrinter for Rich terminal output (default: True). Can be overridden per-call via the `print_to_console` parameter on `run()`.
-- `print_to_browser` (bool): Enable BrowserPrinter for live browser UI output (default: False). Can be overridden per-call via the `print_to_browser` parameter on `run()`.
-- `artifact_dir` (str): Directory for agent artifacts (default: auto-generated with timestamp)
-
-#### `coding_agent.relentless_coding_agent`
-
-- `model_name` (str): Model for task execution (default: "claude-opus-4-6")
-- `max_steps` (int): Maximum steps per sub-session for the Relentless Coding Agent (default: 25)
-- `max_budget` (float): Maximum budget in USD for the Relentless Coding Agent (default: 200.0)
-- `max_sub_sessions` (int): Maximum number of sub-sessions for auto-continuation (default: 200)
-
-#### `docker`
-
-- `client_shared_path` (str): Path inside Docker container for shared volume (default: "/testbed")
-
-#### `gepa`
-
-- `reflection_model` (str): Model to use for reflection (default: "gemini-3-flash-preview")
-- `max_generations` (int): Maximum number of evolutionary generations (default: 10)
-- `population_size` (int): Number of candidates to maintain in population (default: 8)
-- `pareto_size` (int): Maximum size of Pareto frontier (default: 4)
-- `mutation_rate` (float): Probability of mutating a prompt template in each generation (default: 0.5)
-
-#### `kiss_evolve`, `create_and_optimize_agent`
-
-Configuration sections for evolutionary optimization systems. See respective classes for details.
-
-### `add_config()`
-
-```python
-def add_config(name: str, config_class: type[BaseModel]) -> None
-```
-
-Extend the KISS configuration with a new config section. Each call adds a new config field while preserving existing fields from previous calls. Also parses command-line arguments matching the config fields.
-
-**Location:** `kiss.core.config_builder`
-
-**Parameters:**
-
-- `name` (str): Name of the new config section (e.g., "gepa", "kiss_evolve").
-- `config_class` (type[BaseModel]): A Pydantic BaseModel class defining the config fields.
-
-______________________________________________________________________
-
-## Pre-built Agents
-
-Ready-to-use agent functions from `kiss.agents.kiss`.
-
-### `prompt_refiner_agent()`
-
-```python
-def prompt_refiner_agent(
-    original_prompt_template: str,
-    previous_prompt_template: str,
-    agent_trajectory_summary: str,
-    model_name: str,
-) -> str
+def prompt_refiner_agent(original_prompt_template: str, previous_prompt_template: str, agent_trajectory_summary: str, model_name: str) -> str
 ```
 
 Refines the prompt template based on the agent's trajectory summary.
 
-**Parameters:**
+**`get_run_simple_coding_agent`**
 
-- `original_prompt_template` (str): The original prompt template.
-- `previous_prompt_template` (str): The previous version of the prompt template that led to the given trajectory.
-- `agent_trajectory_summary` (str): The agent's trajectory summary as a string.
-- `model_name` (str): The name of the model to use for the agent.
+```python
+def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]
+```
 
-**Returns:**
+Return a function that runs a simple coding agent with a test function.
 
-- `str`: The refined prompt template.
-
-### `run_bash_task_in_sandboxed_ubuntu_latest()`
+**`run_bash_task_in_sandboxed_ubuntu_latest`**
 
 ```python
 def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str
@@ -1991,29 +719,437 @@ def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str
 
 Run a bash task in a sandboxed Ubuntu latest container.
 
-**Parameters:**
+______________________________________________________________________
 
-- `task` (str): The task to run.
-- `model_name` (str): The name of the model to use for the agent.
+#### `kiss.agents.coding_agents`
 
-**Returns:**
-
-- `str`: The result of the task.
-
-### `get_run_simple_coding_agent()`
+*Coding agents for KISS framework.*
 
 ```python
-def get_run_simple_coding_agent(
-    test_fn: Callable[[str], bool]
-) -> Callable[..., str]
+from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS, ClaudeCodingAgent
 ```
 
-Return a function that runs a simple coding agent with a test function.
+##### `Base`
 
-**Parameters:**
+```python
+class Base
+```
 
-- `test_fn` (Callable\[[str], bool\]): The test function to use for the agent.
+Base class for all KISS agents with common state management and persistence.
 
-**Returns:**
+**Constructor:**
 
-- `Callable`: A function that runs a simple coding agent. Accepts keyword arguments: `model_name` (str), `prompt_template` (str), and `arguments` (dict[str, str]).
+```python
+Base(name: str) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `set_printer` | `set_printer(printer: Printer \| None = None, print_to_console: bool \| None = None, print_to_browser: bool \| None = None) -> None` | Configure the output printer(s) for this agent. |
+| `get_trajectory` | `get_trajectory() -> str` | Return the trajectory as JSON for visualization. |
+
+______________________________________________________________________
+
+#### `kiss.agents.coding_agents.claude_coding_agent`
+
+*Claude Coding Agent using the Claude Agent SDK.*
+
+##### `ClaudeCodingAgent`
+
+```python
+class ClaudeCodingAgent(Base)
+```
+
+**Constructor:**
+
+```python
+ClaudeCodingAgent(name: str) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `permission_handler` | `async permission_handler(tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> PermissionResultAllow \| PermissionResultDeny` | Check whether a tool call is allowed based on path permissions. |
+| `run` | `run(model_name: str \| None = None, prompt_template: str = '', arguments: dict[str, str] \| None = None, max_steps: int \| None = None, max_budget: float \| None = None, work_dir: str \| None = None, base_dir: str \| None = None, readable_paths: list[str] \| None = None, writable_paths: list[str] \| None = None, printer: Printer \| None = None, max_thinking_tokens: int = 1024, print_to_console: bool \| None = None, print_to_browser: bool \| None = None) -> str` | Run the Claude Coding Agent on a task using the Claude Agent SDK. |
+
+______________________________________________________________________
+
+#### `kiss.agents.coding_agents.relentless_coding_agent`
+
+*Single-agent coding system with smart continuation for long tasks.*
+
+##### `RelentlessCodingAgent`
+
+```python
+class RelentlessCodingAgent(RelentlessAgent)
+```
+
+Single-agent coding system with auto-continuation for infinite tasks.
+
+**Constructor:**
+
+```python
+RelentlessCodingAgent(name: str) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `run` | `run(model_name: str \| None = None, prompt_template: str = '', arguments: dict[str, str] \| None = None, max_steps: int \| None = None, max_budget: float \| None = None, work_dir: str \| None = None, base_dir: str \| None = None, readable_paths: list[str] \| None = None, writable_paths: list[str] \| None = None, printer: Printer \| None = None, max_sub_sessions: int \| None = None, docker_image: str \| None = None, print_to_console: bool \| None = None, print_to_browser: bool \| None = None) -> str` | Run the coding agent with file and bash tools. |
+
+______________________________________________________________________
+
+#### `kiss.agents.coding_agents.config`
+
+*Configuration Pydantic models for coding agent settings.*
+
+##### `RelentlessCodingAgentConfig`
+
+```python
+class RelentlessCodingAgentConfig(BaseModel)
+```
+
+##### `CodingAgentConfig`
+
+```python
+class CodingAgentConfig(BaseModel)
+```
+
+______________________________________________________________________
+
+#### `kiss.agents.assistant`
+
+*Assistant agent with coding tools and browser automation.*
+
+______________________________________________________________________
+
+#### `kiss.agents.assistant.relentless_agent`
+
+*Base relentless agent with smart continuation for long tasks.*
+
+##### `RelentlessAgent`
+
+```python
+class RelentlessAgent(Base)
+```
+
+Base agent with auto-continuation for long tasks.
+
+**Constructor:**
+
+```python
+RelentlessAgent(name: str) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `perform_task` | `perform_task(tools: list[Callable[..., Any]]) -> str` | Execute the task with auto-continuation across multiple sub-sessions. |
+| `run` | `run(model_name: str \| None = None, prompt_template: str = '', arguments: dict[str, str] \| None = None, max_steps: int \| None = None, max_budget: float \| None = None, work_dir: str \| None = None, base_dir: str \| None = None, readable_paths: list[str] \| None = None, writable_paths: list[str] \| None = None, printer: Printer \| None = None, max_sub_sessions: int \| None = None, docker_image: str \| None = None, print_to_console: bool \| None = None, print_to_browser: bool \| None = None, tools_factory: Callable[[], list[Callable[..., Any]]] \| None = None, config_path: str = 'agent') -> str` | Run the agent with tools created by tools_factory (called after \_reset). |
+
+**`finish`**
+
+```python
+def finish(success: bool, summary: str) -> str
+```
+
+Finish execution with status and summary.
+
+______________________________________________________________________
+
+#### `kiss.agents.assistant.assistant_agent`
+
+*Assistant agent with both coding tools and browser automation.*
+
+##### `AssistantAgent`
+
+```python
+class AssistantAgent(RelentlessAgent)
+```
+
+Agent with both coding tools and browser automation for web + code tasks.
+
+**Constructor:**
+
+```python
+AssistantAgent(name: str) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `run` | `run(model_name: str \| None = None, prompt_template: str = '', arguments: dict[str, str] \| None = None, max_steps: int \| None = None, max_budget: float \| None = None, work_dir: str \| None = None, base_dir: str \| None = None, readable_paths: list[str] \| None = None, writable_paths: list[str] \| None = None, printer: Printer \| None = None, max_sub_sessions: int \| None = None, docker_image: str \| None = None, headless: bool \| None = None, print_to_console: bool \| None = None, print_to_browser: bool \| None = None) -> str` | Run the assistant agent with coding tools and browser automation. |
+
+______________________________________________________________________
+
+#### `kiss.agents.assistant.assistant`
+
+*Browser-based chatbot for RelentlessAgent-based agents.*
+
+**`run_chatbot`**
+
+```python
+def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', subtitle: str = 'Interactive Agent', work_dir: str | None = None, default_model: str = 'claude-sonnet-4-5', agent_kwargs: dict[str, Any] | None = None) -> None
+```
+
+Run a browser-based chatbot UI for any RelentlessAgent-based agent.
+
+______________________________________________________________________
+
+#### `kiss.agents.assistant.config`
+
+*Configuration for the Assistant Agent.*
+
+##### `AssistantAgentConfig`
+
+```python
+class AssistantAgentConfig(BaseModel)
+```
+
+##### `AssistantConfig`
+
+```python
+class AssistantConfig(BaseModel)
+```
+
+______________________________________________________________________
+
+#### `kiss.agents.gepa`
+
+*GEPA (Genetic-Pareto) prompt optimization package.*
+
+```python
+from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, create_progress_callback
+```
+
+##### `GEPA`
+
+```python
+class GEPA
+```
+
+GEPA (Genetic-Pareto) prompt optimizer.
+
+**Constructor:**
+
+```python
+GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int | None = None, population_size: int | None = None, pareto_size: int | None = None, mutation_rate: float | None = None, reflection_model: str | None = None, dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `optimize` | `optimize(train_examples: list[dict[str, str]], dev_minibatch_size: int \| None = None) -> PromptCandidate` | Run GEPA optimization. |
+| `get_pareto_frontier` | `get_pareto_frontier() -> list[PromptCandidate]` | Get a copy of the current Pareto frontier. |
+| `get_best_prompt` | `get_best_prompt() -> str` | Get the best prompt template found during optimization. |
+
+##### `GEPAPhase`
+
+```python
+class GEPAPhase(Enum)
+```
+
+Enum representing the current phase of GEPA optimization.
+
+##### `GEPAProgress`
+
+```python
+class GEPAProgress
+```
+
+Progress information for GEPA optimization callbacks.
+
+##### `PromptCandidate`
+
+```python
+class PromptCandidate
+```
+
+Represents a prompt candidate with its performance metrics.
+
+**`create_progress_callback`**
+
+```python
+def create_progress_callback(verbose: bool = False) -> 'Callable[[GEPAProgress], None]'
+```
+
+Create a standard progress callback for GEPA optimization.
+
+______________________________________________________________________
+
+#### `kiss.agents.gepa.config`
+
+*GEPA-specific configuration that extends the main KISS config.*
+
+##### `GEPAConfig`
+
+```python
+class GEPAConfig(BaseModel)
+```
+
+GEPA-specific configuration settings.
+
+______________________________________________________________________
+
+#### `kiss.agents.kiss_evolve`
+
+*KISSEvolve: Evolutionary Algorithm Discovery using LLMs.*
+
+```python
+from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve
+```
+
+##### `CodeVariant`
+
+```python
+class CodeVariant
+```
+
+Represents a code variant in the evolutionary population.
+
+##### `KISSEvolve`
+
+```python
+class KISSEvolve
+```
+
+KISSEvolve: Evolutionary algorithm discovery using LLMs.
+
+**Constructor:**
+
+```python
+KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int | None = None, max_generations: int | None = None, mutation_rate: float | None = None, elite_size: int | None = None, num_islands: int | None = None, migration_frequency: int | None = None, migration_size: int | None = None, migration_topology: str | None = None, enable_novelty_rejection: bool | None = None, novelty_threshold: float | None = None, max_rejection_attempts: int | None = None, novelty_rag_model: Model | None = None, parent_sampling_method: str | None = None, power_law_alpha: float | None = None, performance_novelty_lambda: float | None = None)
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `evolve` | `evolve() -> CodeVariant` | Run the evolutionary algorithm. |
+| `get_best_variant` | `get_best_variant() -> CodeVariant` | Get the best variant from the current population or islands. |
+| `get_population_stats` | `get_population_stats() -> dict[str, Any]` | Get statistics about the current population. |
+
+______________________________________________________________________
+
+#### `kiss.agents.kiss_evolve.config`
+
+*KISSEvolve-specific configuration that extends the main KISS config.*
+
+##### `KISSEvolveConfig`
+
+```python
+class KISSEvolveConfig(BaseModel)
+```
+
+KISSEvolve-specific configuration settings.
+
+______________________________________________________________________
+
+### `kiss.docker`
+
+*Docker wrapper module for the KISS agent framework.*
+
+```python
+from kiss.docker import DockerManager
+```
+
+#### `DockerManager`
+
+```python
+class DockerManager
+```
+
+Manages Docker container lifecycle and command execution.
+
+**Constructor:**
+
+```python
+DockerManager(image_name: str, tag: str = 'latest', workdir: str = '/', mount_shared_volume: bool = True, ports: dict[int, int] | None = None) -> None
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `open` | `open() -> None` | Pull and load a Docker image, then create and start a container. |
+| `run_bash_command` | `run_bash_command(command: str, description: str) -> str` | Execute a bash command in the running Docker container. |
+| `get_host_port` | `get_host_port(container_port: int) -> int \| None` | Get the host port mapped to a container port. |
+| `close` | `close() -> None` | Stop and remove the Docker container. |
+
+______________________________________________________________________
+
+### `kiss.multiprocessing`
+
+*Parallel execution utilities using multiprocessing.*
+
+```python
+from kiss.multiprocessing import get_available_cores, run_functions_in_parallel, run_functions_in_parallel_with_kwargs
+```
+
+**`get_available_cores`**
+
+```python
+def get_available_cores() -> int
+```
+
+Get the number of available CPU cores.
+
+**`run_functions_in_parallel`**
+
+```python
+def run_functions_in_parallel(tasks: list[tuple[Callable[..., Any], list[Any]]]) -> list[Any]
+```
+
+Run a list of functions in parallel using multiprocessing.
+
+**`run_functions_in_parallel_with_kwargs`**
+
+```python
+def run_functions_in_parallel_with_kwargs(functions: list[Callable[..., Any]], args_list: list[list[Any]] | None = None, kwargs_list: list[dict[str, Any]] | None = None) -> list[Any]
+```
+
+Run a list of functions in parallel using multiprocessing with support for kwargs.
+
+______________________________________________________________________
+
+### `kiss.rag`
+
+*Simple RAG system for retrieval-augmented generation.*
+
+```python
+from kiss.rag import SimpleRAG
+```
+
+#### `SimpleRAG`
+
+```python
+class SimpleRAG
+```
+
+Simple and elegant RAG system for document storage and retrieval.
+
+**Constructor:**
+
+```python
+SimpleRAG(model_name: str, metric: str = 'cosine', embedding_model_name: str | None = None)
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `add_documents` | `add_documents(documents: list[dict[str, Any]], batch_size: int = 100) -> None` | Add documents to the vector store. |
+| `query` | `query(query_text: str, top_k: int = 5, filter_fn: Callable[[dict[str, Any]], bool] \| None = None) -> list[dict[str, Any]]` | Query similar documents from the collection. |
+| `delete_documents` | `delete_documents(document_ids: list[str]) -> None` | Delete documents from the collection by their IDs. |
+| `get_collection_stats` | `get_collection_stats() -> dict[str, Any]` | Get statistics about the collection. |
+| `clear_collection` | `clear_collection() -> None` | Clear all documents from the collection. |
+| `get_document` | `get_document(document_id: str) -> dict[str, Any] \| None` | Get a document by its ID. |
+
+______________________________________________________________________

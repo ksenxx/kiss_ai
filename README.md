@@ -12,7 +12,7 @@
 
 </div>
 
----
+______________________________________________________________________
 
 KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
 
@@ -46,12 +46,17 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 </details>
 
-## Installation
+## Installation and Launching KISS Assistant
 
-Install from PyPI with pip:
+Install from PyPI with pip and launch the web based interface to interact with KISS.  You must provide at least one key.:
 
 ```bash
 pip install kiss-agent-framework
+export GEMINI_API_KEY="your-key-here" # Optional
+export OPENAI_API_KEY="your-key-here" # Optional
+export ANTHROPIC_API_KEY="your-key-here" # Recommended
+export TOGETHER_API_KEY="your-key-here" # Optional
+export OPENROUTER_API_KEY="your-key-here" # Optional
 python -m kiss.agents.assistant.assistant
 ```
 
@@ -341,7 +346,7 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Multiprocessing Support**: Utilities for parallel execution of functions using multiprocessing
 - **Trajectory Visualization**: Web-based visualizer for viewing agent execution trajectories with modern UI
 
-## 📦 Installation
+## 📦 Developer Installation
 
 ```bash
 # Install uv if you haven't already

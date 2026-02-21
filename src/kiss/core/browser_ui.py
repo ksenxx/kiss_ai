@@ -12,6 +12,11 @@ from kiss.core.printer import Printer, extract_extras, extract_path_and_lang, tr
 
 
 def find_free_port() -> int:
+    """Find and return an available TCP port on localhost.
+
+    Returns:
+        int: A free port number.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return int(s.getsockname()[1])
@@ -293,6 +298,15 @@ HTML_HEAD = r"""<!DOCTYPE html>
 
 
 def build_stream_viewer_html(title: str = "KISS Agent", subtitle: str = "Live Stream") -> str:
+    """Build a self-contained HTML page for the SSE-based stream viewer.
+
+    Args:
+        title: Page title and header text.
+        subtitle: Subtitle shown next to the title in the header.
+
+    Returns:
+        str: Complete HTML document string with embedded CSS and JavaScript.
+    """
     css = BASE_CSS + OUTPUT_CSS + """
 main{flex:1;overflow-y:auto;padding:20px 28px;scroll-behavior:smooth}
 footer{
@@ -353,6 +367,7 @@ class BaseBrowserPrinter(Printer):
         self._tool_json_buffer = ""
 
     def reset(self) -> None:
+        """Reset internal streaming and tool-parsing state for a new turn."""
         self._current_block_type = ""
         self._tool_name = ""
         self._tool_json_buffer = ""
@@ -368,22 +383,49 @@ class BaseBrowserPrinter(Printer):
         return None
 
     def broadcast(self, event: dict[str, Any]) -> None:
+        """Send an SSE event dict to all connected clients.
+
+        Args:
+            event: The event dictionary to broadcast.
+        """
         with self._lock:
             for cq in self._clients:
                 cq.put(event)
 
     def add_client(self) -> queue.Queue[dict[str, Any]]:
+        """Register a new SSE client and return its event queue.
+
+        Returns:
+            queue.Queue[dict[str, Any]]: A queue that will receive broadcast events.
+        """
         cq: queue.Queue[dict[str, Any]] = queue.Queue()
         with self._lock:
             self._clients.append(cq)
         return cq
 
     def remove_client(self, cq: queue.Queue[dict[str, Any]]) -> None:
+        """Unregister an SSE client's event queue.
+
+        Args:
+            cq: The client queue to remove.
+        """
         with self._lock:
             if cq in self._clients:
                 self._clients.remove(cq)
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+        """Render content by broadcasting SSE events to connected browser clients.
+
+        Args:
+            content: The content to display.
+            type: Content type (e.g. "text", "prompt", "stream_event",
+                "tool_call", "tool_result", "result", "usage_info", "message").
+            **kwargs: Additional options such as tool_input, is_error, cost,
+                step_count, total_tokens.
+
+        Returns:
+            str: Extracted text from stream events, or empty string.
+        """
         if type == "text":
             from io import StringIO
 
@@ -435,6 +477,11 @@ class BaseBrowserPrinter(Printer):
         return ""
 
     async def token_callback(self, token: str) -> None:
+        """Broadcast a streamed token as an SSE delta event to browser clients.
+
+        Args:
+            token: The text token to broadcast.
+        """
         if token:
             delta_type = (
                 "thinking_delta"
