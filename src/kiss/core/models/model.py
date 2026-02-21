@@ -91,7 +91,10 @@ class Model(ABC):
         self._callback_loop.run_until_complete(self.token_callback(token))
 
     def close_callback_loop(self) -> None:
-        """Close the reusable event loop if it exists."""
+        """Close the per-instance event loop used for synchronous token callback invocation.
+
+        Safe to call multiple times; subsequent calls are no-ops.
+        """
         if self._callback_loop is not None and not self._callback_loop.is_closed():
             self._callback_loop.close()
         self._callback_loop = None

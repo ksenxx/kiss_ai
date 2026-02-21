@@ -18,6 +18,12 @@ class BrowserPrinter(BaseBrowserPrinter):
         self._server: Any = None
 
     def start(self, open_browser: bool = True) -> None:
+        """Launch a local SSE server and optionally open the browser viewer.
+
+        Args:
+            open_browser: If True, automatically opens the stream viewer in the
+                default web browser.
+        """
         import uvicorn
         from starlette.applications import Starlette
         from starlette.requests import Request
@@ -71,6 +77,7 @@ class BrowserPrinter(BaseBrowserPrinter):
             webbrowser.open(f"http://127.0.0.1:{self._port}")
 
     def stop(self) -> None:
+        """Broadcast a done event to all clients and shut down the SSE server."""
         self.broadcast({"type": "done"})
         time.sleep(0.3)
         if self._server:

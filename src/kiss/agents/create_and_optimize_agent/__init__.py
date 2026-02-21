@@ -11,13 +11,6 @@ Please migrate to kiss.agents.coding_agents.agent_optimizer.
 
 import warnings
 
-warnings.warn(
-    "kiss.agents.create_and_optimize_agent is deprecated. "
-    "Use kiss.agents.coding_agents.agent_optimizer instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
 from kiss.agents.create_and_optimize_agent.agent_evolver import (
     AgentEvolver,
     AgentVariant,
@@ -31,6 +24,13 @@ from kiss.agents.create_and_optimize_agent.config import (
     ImproverConfig,
 )
 from kiss.agents.create_and_optimize_agent.improver_agent import ImprovementReport, ImproverAgent
+
+warnings.warn(
+    "kiss.agents.create_and_optimize_agent is deprecated. "
+    "Use kiss.agents.coding_agents.agent_optimizer instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 __all__ = [
     "AgentEvolver",
