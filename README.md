@@ -1,14 +1,50 @@
-![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
+<div align="center">
 
-**Version:** 0.1.22
+![KISS Framework](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
+[![Version](https://img.shields.io/badge/version-0.1.22-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
+
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-______________________________________________________________________
+</div>
+
+---
 
 KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle) which is a well known software engineering principle.
+
+<details>
+<summary><strong>Table of Contents</strong></summary>
+
+- [Installation](#installation)
+- [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
+- [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
+- [Multi-Agent Orchestration](#-multi-agent-orchestration-is-function-composition)
+- [Relentless Coding Agent](#-using-relentless-coding-agent)
+- [Browser-Based Assistant](#-browser-based-assistant)
+- [Repo Optimizer](#-using-repo-optimizer)
+- [Output Formatting](#-output-formatting)
+- [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
+- [Features of The KISS Framework](#-features-of-the-kiss-framework)
+- [Full Installation & Dependency Groups](#-installation-1)
+- [KISSAgent API Reference](#-kissagent-api-reference)
+- [GEPA Prompt Optimization](#-using-gepa-for-prompt-optimization)
+- [KISSEvolve Algorithm Discovery](#-using-kissevolve-for-algorithm-discovery)
+- [Multiprocessing](#-multiprocessing)
+- [Docker Manager](#-docker-manager)
+- [Project Structure](#-project-structure)
+- [Versioning](#%EF%B8%8F-versioning)
+- [Configuration](#%EF%B8%8F-configuration)
+- [Available Commands](#%EF%B8%8F-available-commands)
+- [Models Supported](#-models-supported)
+- [Contributing](#-contributing)
+- [License](#-license)
+- [Authors](#%EF%B8%8F-authors)
+
+</details>
 
 ## Installation
 
@@ -21,7 +57,7 @@ python -m kiss.agents.assistant.assistant
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
-Let's be honest. The AI agent ecosystem has become a jungle. Every week brings a new framework promising to revolutionize how we build AI agents. They come loaded with abstractions on top of abstractions, bloated with techniques that are unnecessary. By the time you've figured out how to make your first tool call, you've already burned through half your patience and all your enthusiasm.
+The AI agent ecosystem has grown increasingly complex. Many frameworks introduce excessive layers of abstraction and unnecessary techniques, resulting in a steep learning curve that can significantly hinder developer productivity from the outset.
 
 **What if there was another way?**
 
