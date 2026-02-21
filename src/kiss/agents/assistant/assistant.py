@@ -678,20 +678,20 @@ def main() -> None:
 
     work_dir = str(Path(sys.argv[1]).resolve()) if len(sys.argv) > 1 else os.getcwd()
 
-    mode = os.environ.get("KISS_MODE", "coding").lower()
+    mode = os.environ.get("KISS_MODE", "assistant").lower()
     if mode == "assistant":
         run_chatbot(
             agent_factory=AssistantAgent,
-            title="KISS Assistant",
-            subtitle="Code + Browser Agent",
+            title="KISS General Assistant: SWE, browsing, agent creation, optimization and more",
+            subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
             agent_kwargs={"headless": False},
         )
     else:
         run_chatbot(
             agent_factory=RelentlessCodingAgent,
-            title="KISS Coding Agent",
-            subtitle="Relentless Coder",
+            title="KISS Relentless Coding Assistant",
+            subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
         )
 

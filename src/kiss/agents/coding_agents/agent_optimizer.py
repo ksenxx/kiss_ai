@@ -10,76 +10,62 @@ from kiss.agents.gepa.gepa import GEPA
 
 
 def optimize_agent(
-    agent_runner: Callable[[dict[str, str]], dict[str, Any]],
-    train_data: list[dict],
-    val_data: list[dict],
-    initial_prompts: dict[str, str],
+    agent_runner: Callable[[str, dict[str, str]], tuple[str, list[Any]]],
+    train_data: list[dict[str, str]],
+    initial_prompt_template: str,
     metric_name: str = "accuracy",
-    minimize_metric: bool = False,
     num_generations: int = 5,
     population_size: int = 4,
-    dev_batch_size: int = 2,
+    dev_minibatch_size: int | None = None,
     output_file: str = "optimized_agent.json",
-) -> dict[str, str]:
+) -> str:
     """Optimize agent prompts using GEPA.
 
     Args:
-        agent_runner: Function that takes prompts dict and returns results dict
-        train_data: Training dataset (split into dev/val)
-        val_data: Validation dataset
-        initial_prompts: Dictionary of initial prompt templates
-        metric_name: Name of metric to optimize
-        minimize_metric: Whether to minimize (True) or maximize (False) the metric
+        agent_runner: Function (prompt_template, arguments) -> (result, trajectory)
+        train_data: Training dataset (will be split into dev/val by GEPA)
+        initial_prompt_template: The initial prompt template to optimize
+        metric_name: Name of metric to optimize (default: "accuracy")
         num_generations: Number of GEPA generations
         population_size: Size of prompt population
-        dev_batch_size: Batch size for dev evaluation
+        dev_minibatch_size: Dev examples per evaluation (default: all)
         output_file: File to save optimized prompts
 
     Returns:
-        Dictionary of optimized prompts
+        Optimized prompt template as a string
     """
 
-    def system_runner(prompts: dict[str, str], examples: list[dict]) -> list[dict[str, Any]]:
-        """Wrapper to run agent on examples."""
-        results = []
-        for example in examples:
-            try:
-                result = agent_runner(prompts, example)
-                results.append(result)
-            except Exception as e:
-                print(f"Error running agent: {e}")
-                results.append({"error": str(e), metric_name: 0.0})
-        return results
+    def evaluation_fn(result: str) -> dict[str, float]:
+        """Evaluate a result string."""
+        # Simple default: check for "success" keyword
+        return {metric_name: 1.0 if "success" in result.lower() else 0.0}
 
-    # Initialize GEPA
+    # Initialize GEPA with the new API
     gepa = GEPA(
-        train_data=train_data,
-        val_data=val_data,
-        system_runner=system_runner,
-        initial_prompts=initial_prompts,
-        metric_names=[metric_name],
-        minimize_metrics=[minimize_metric],
+        agent_wrapper=agent_runner,
+        initial_prompt_template=initial_prompt_template,
+        evaluation_fn=evaluation_fn,
+        max_generations=num_generations,
+        population_size=population_size,
     )
 
     # Run optimization
     print(f"Starting GEPA optimization for {num_generations} generations...")
-    optimized_prompts, stats = gepa.optimize(
-        num_generations=num_generations,
-        population_size=population_size,
-        dev_batch_size=dev_batch_size,
-        verbose=True,
+    best_candidate = gepa.optimize(
+        train_examples=train_data,
+        dev_minibatch_size=dev_minibatch_size,
     )
 
     # Save results
     output = {
-        "optimized_prompts": optimized_prompts,
-        "stats": stats,
+        "optimized_prompt_template": best_candidate.prompt_template,
+        "dev_scores": best_candidate.dev_scores,
+        "val_scores": best_candidate.val_scores,
         "config": {
             "num_generations": num_generations,
             "population_size": population_size,
-            "dev_batch_size": dev_batch_size,
+            "dev_minibatch_size": dev_minibatch_size,
             "metric_name": metric_name,
-            "minimize_metric": minimize_metric,
         }
     }
 
@@ -88,12 +74,12 @@ def optimize_agent(
 
     print("\nOptimization complete!")
     print(f"Results saved to {output_file}")
-    print(f"Best {metric_name}: {stats.get('best_val_' + metric_name, 'N/A')}")
+    print(f"Best validation scores: {best_candidate.val_scores}")
 
-    return optimized_prompts
+    return best_candidate.prompt_template
 
 
-def main():
+def main() -> None:
     """Example usage."""
     print("agent_optimizer.py - Use this module to optimize agent prompts with GEPA")
     print("Import and call optimize_agent() with your agent runner and data")
