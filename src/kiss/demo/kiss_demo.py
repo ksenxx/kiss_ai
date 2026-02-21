@@ -17,6 +17,7 @@ def simple_calculator(expression: str) -> str:
 
 
 def main() -> None:
+    """Run an interactive arithmetic demo using KISSAgent with a calculator tool."""
     agent = KISSAgent("Arithmetic Demo Agent")
     prompt = (
         "You are a helpful math assistant. Use the simple_calculator tool to solve the "

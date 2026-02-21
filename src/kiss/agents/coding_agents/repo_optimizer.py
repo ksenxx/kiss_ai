@@ -35,6 +35,7 @@ code after the optimization is complete.
 """
 
 def main() -> None:
+    """Run the repo optimizer that iteratively runs a command and optimizes code."""
     parser = argparse.ArgumentParser(
         description="Optimize a repository using RelentlessCodingAgent"
     )

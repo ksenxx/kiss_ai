@@ -138,6 +138,17 @@ class RelentlessAgent(Base):
         )
 
     def perform_task(self, tools: list[Callable[..., Any]]) -> str:
+        """Execute the task with auto-continuation across multiple sub-sessions.
+
+        Args:
+            tools: List of callable tools available to the agent during execution.
+
+        Returns:
+            YAML string with 'success' and 'summary' keys on successful completion.
+
+        Raises:
+            KISSError: If the task fails after exhausting all sub-sessions.
+        """
         print(f"Executing task: {self.task_description}")
 
         done_items: list[str] = []
@@ -229,7 +240,29 @@ class RelentlessAgent(Base):
         tools_factory: Callable[[], list[Callable[..., Any]]] | None = None,
         config_path: str = "agent",
     ) -> str:
-        """Run the agent with tools created by tools_factory (called after _reset)."""
+        """Run the agent with tools created by tools_factory (called after _reset).
+
+        Args:
+            model_name: LLM model to use. Defaults to config value.
+            prompt_template: Task prompt template with format placeholders.
+            arguments: Dictionary of values to fill prompt_template placeholders.
+            max_steps: Maximum steps per sub-session. Defaults to config value.
+            max_budget: Maximum budget in USD. Defaults to config value.
+            work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
+            base_dir: Base directory for path resolution. Defaults to work_dir.
+            readable_paths: Additional paths the agent can read from.
+            writable_paths: Additional paths the agent can write to.
+            printer: Printer instance for output display.
+            max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
+            docker_image: Docker image name to run tools inside a container.
+            print_to_console: Whether to print output to console.
+            print_to_browser: Whether to print output to browser UI.
+            tools_factory: Callable that returns the list of tools for the agent.
+            config_path: Dot-separated path to config section (e.g. "agent").
+
+        Returns:
+            YAML string with 'success' and 'summary' keys.
+        """
         self._reset(
             model_name,
             max_sub_sessions,

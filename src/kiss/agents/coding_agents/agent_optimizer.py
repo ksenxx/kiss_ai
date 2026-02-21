@@ -78,6 +78,7 @@ to the problems in any possible way.
 
 
 def main() -> None:
+    """Run the agent optimizer that iteratively improves agent code for speed and cost."""
     parser = argparse.ArgumentParser(description="Optimize an agent using RelentlessCodingAgent")
     parser.add_argument("--project-root", default=DEFAULT_PROJECT_ROOT,
                         help=f"Project root directory (default: {DEFAULT_PROJECT_ROOT})")

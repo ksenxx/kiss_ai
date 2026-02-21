@@ -110,6 +110,16 @@ class Base:
         print_to_console: bool | None = None,
         print_to_browser: bool | None = None,
     ) -> None:
+        """Configure the output printer(s) for this agent.
+
+        Args:
+            printer: An existing Printer instance to use directly. If provided,
+                print_to_console and print_to_browser are ignored.
+            print_to_console: Whether to print to the console. Defaults to the
+                agent config value if None.
+            print_to_browser: Whether to stream output to a browser viewer.
+                Defaults to the agent config value if None.
+        """
         self.printer: Printer | None = None
         self.browser_printer: BrowserPrinter | None = None
         if config_module.DEFAULT_CONFIG.agent.verbose:

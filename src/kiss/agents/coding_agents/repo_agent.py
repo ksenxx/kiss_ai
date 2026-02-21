@@ -11,6 +11,7 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 
 
 def main() -> None:
+    """Run a RelentlessCodingAgent on the project root with a task from CLI args or stdin."""
     task = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("Enter task: ")
     if not task.strip():
         raise ValueError("No task provided")

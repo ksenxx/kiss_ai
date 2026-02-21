@@ -86,6 +86,16 @@ class ClaudeCodingAgent(Base):
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
+        """Check whether a tool call is allowed based on path permissions.
+
+        Args:
+            tool_name: Name of the tool being invoked (e.g. "Read", "Write").
+            tool_input: Dictionary of tool input parameters.
+            context: Permission context provided by the Claude Agent SDK.
+
+        Returns:
+            PermissionResultAllow if access is permitted, PermissionResultDeny otherwise.
+        """
         path_str = tool_input.get("file_path") or tool_input.get("path")
         if not path_str:
             return PermissionResultAllow(behavior="allow")
@@ -205,6 +215,26 @@ class ClaudeCodingAgent(Base):
         print_to_console: bool | None = None,
         print_to_browser: bool | None = None,
     ) -> str:
+        """Run the Claude Coding Agent on a task using the Claude Agent SDK.
+
+        Args:
+            model_name: LLM model to use. Defaults to "claude-sonnet-4-5".
+            prompt_template: Task prompt template with format placeholders.
+            arguments: Dictionary of values to fill prompt_template placeholders.
+            max_steps: Maximum agent steps. Defaults to config value.
+            max_budget: Maximum budget in USD. Defaults to config value.
+            work_dir: Working directory for the agent. Defaults to artifact_dir/claude_workdir.
+            base_dir: Base directory for path resolution. Defaults to ".".
+            readable_paths: Paths the agent can read from.
+            writable_paths: Paths the agent can write to.
+            printer: Printer instance for output display.
+            max_thinking_tokens: Maximum tokens for extended thinking.
+            print_to_console: Whether to print output to console.
+            print_to_browser: Whether to print output to browser UI.
+
+        Returns:
+            The agent's final result text, or empty string if no result.
+        """
         self.set_printer(
             printer,
             print_to_console=print_to_console,
@@ -302,6 +332,7 @@ class ClaudeCodingAgent(Base):
 
 
 def main() -> None:
+    """Run a demo of the ClaudeCodingAgent with a sample database engine task."""
     import os
     import tempfile
 

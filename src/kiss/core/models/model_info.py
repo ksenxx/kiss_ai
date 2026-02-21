@@ -1051,7 +1051,12 @@ def model(
 
 
 def get_available_models() -> list[str]:
-    """Return model names for which an API key is configured, generation is supported."""
+    """Return model names for which an API key is configured and generation is supported.
+
+    Returns:
+        list[str]: Sorted list of model name strings that have a configured API key
+            and support text generation.
+    """
     keys = config_module.DEFAULT_CONFIG.agent.api_keys
     provider_keys = {
         "openrouter/": keys.OPENROUTER_API_KEY,

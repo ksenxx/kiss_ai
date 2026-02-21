@@ -247,6 +247,7 @@ Repository = "https://github.com/ksen/kiss"
 
 [project.scripts]
 check = "kiss.scripts.check:main"
+generate-api-docs = "kiss.scripts.generate_api_docs:main"
 algotune = "kiss.evals.algotune.run_algotune:main"
 notebook = "kiss.scripts.notebook:main"
 assistant = "kiss.agents.assistant.assistant:main"

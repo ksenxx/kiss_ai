@@ -29,6 +29,7 @@ class ConsolePrinter(Printer):
         self._tool_json_buffer = ""
 
     def reset(self) -> None:
+        """Reset internal streaming and tool-parsing state for a new turn."""
         self._mid_line = False
         self._current_block_type = ""
         self._tool_name = ""
@@ -63,6 +64,18 @@ class ConsolePrinter(Printer):
             self._mid_line = not text.endswith("\n")
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+        """Render content to the console using Rich formatting.
+
+        Args:
+            content: The content to display.
+            type: Content type (e.g. "text", "prompt", "stream_event",
+                "tool_call", "tool_result", "result", "usage_info", "message").
+            **kwargs: Additional options such as tool_input, is_error, cost,
+                step_count, total_tokens.
+
+        Returns:
+            str: Extracted text from stream events, or empty string.
+        """
         if type == "text":
             self._flush_newline()
             self._console.print(content, **kwargs)
@@ -121,6 +134,11 @@ class ConsolePrinter(Printer):
         return ""
 
     async def token_callback(self, token: str) -> None:
+        """Stream a single token to the console, styled by current block type.
+
+        Args:
+            token: The text token to display.
+        """
         if self._current_block_type == "thinking":
             self._stream_delta(token, style="dim cyan italic")
         else:

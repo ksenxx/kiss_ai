@@ -454,7 +454,19 @@ def run_chatbot(
     default_model: str = "claude-sonnet-4-5",
     agent_kwargs: dict[str, Any] | None = None,
 ) -> None:
-    """Run a browser-based chatbot for any RelentlessAgent-based agent."""
+    """Run a browser-based chatbot UI for any RelentlessAgent-based agent.
+
+    Starts a Starlette web server with SSE streaming, task history, autocomplete,
+    model selection, and proposed task suggestions.
+
+    Args:
+        agent_factory: Callable that takes a name string and returns a RelentlessAgent instance.
+        title: Title displayed in the browser UI header.
+        subtitle: Subtitle displayed in the browser UI header.
+        work_dir: Working directory for the agent. Defaults to current directory.
+        default_model: Default LLM model name for the model selector.
+        agent_kwargs: Additional keyword arguments passed to agent.run().
+    """
     import uvicorn
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -673,6 +685,7 @@ def run_chatbot(
 
 
 def main() -> None:
+    """Launch the KISS chatbot UI in assistant or coding mode based on KISS_MODE env var."""
     from kiss.agents.assistant.assistant_agent import AssistantAgent
     from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 

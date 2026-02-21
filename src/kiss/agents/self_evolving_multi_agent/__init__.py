@@ -10,16 +10,16 @@
 
 import warnings
 
+from kiss.agents.self_evolving_multi_agent.multi_agent import (
+    SelfEvolvingMultiAgent,
+    run_task,
+)
+
 warnings.warn(
     "kiss.agents.self_evolving_multi_agent is deprecated. "
     "Use kiss.agents.coding_agents.agent_optimizer instead.",
     DeprecationWarning,
     stacklevel=2,
-)
-
-from kiss.agents.self_evolving_multi_agent.multi_agent import (
-    SelfEvolvingMultiAgent,
-    run_task,
 )
 
 __all__ = ["SelfEvolvingMultiAgent", "run_task"]

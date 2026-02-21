@@ -1,5 +1,3 @@
-
-
 ![Image description](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fua0wd1uhu227x18ohpz.jpeg)
 
 **Can AI agents be systematically optimized for cost and latency using evolutionary methods?**
@@ -51,6 +49,7 @@ Each generation, Agent Evolver applies two evolutionary operations:
 Agent Evolver optimizes for multiple objectives simultaneously using a **Pareto frontier** of non-dominated solutions.
 
 Consider two agents:
+
 - Agent A: 5,000 tokens, 10 seconds
 - Agent B: 3,000 tokens, 15 seconds
 
@@ -64,15 +63,9 @@ The system uses crowding distance to maintain diversity, ensuring that when the 
 
 Prompt optimization tools tune prompt text while leaving agent code unchanged. Agent Evolver operates on both prompts and code:
 
--------------------------------------------------------------------
-| Traditional Prompt Optimization | Agent Evolver                 |
-|--------------------------------|--------------------------------|
-| Tunes prompt text              | Optimizes prompts AND code     |
-| Single objective (accuracy)    | Multi-objective (cost + speed) |
-| Static architecture            | Evolves architecture           |
-| Manual iteration               | Automated generations          |
-| Local improvements             | Global search via genetics     |
--------------------------------------------------------------------
+______________________________________________________________________
+
+## | Traditional Prompt Optimization | Agent Evolver | |--------------------------------|--------------------------------| | Tunes prompt text | Optimizes prompts AND code | | Single objective (accuracy) | Multi-objective (cost + speed) | | Static architecture | Evolves architecture | | Manual iteration | Automated generations | | Local improvements | Global search via genetics |
 
 The improver agent analyzes control flow, identifies redundant API calls, finds opportunities for parallelization, and restructures agent delegation hierarchies.
 
@@ -114,11 +107,12 @@ The system follows this structure:
 ```
 
 Each generation, the system:
+
 1. Samples from the Pareto frontier
-2. Applies mutation or crossover
-3. Evaluates the offspring
-4. Updates the frontier with any non-dominated variants
-5. Copies the current best to an `optimal_agent` directory
+1. Applies mutation or crossover
+1. Evaluates the offspring
+1. Updates the frontier with any non-dominated variants
+1. Copies the current best to an `optimal_agent` directory
 
 The best agent is always available, even while evolution continues.
 
@@ -156,6 +150,6 @@ Agent Evolver automates the optimization of AI agent systems by treating agent c
 
 Each generation of evolution incorporates current publicly available knowledge about building efficient agents, so improvements from the broader community can be absorbed automatically.
 
----
+______________________________________________________________________
 
 *Agent Evolver is part of the [KISS](https://github.com/ksenxx/kiss_ai/) (Keep It Simple, Stupid) agent framework. It is open-source and available on GitHub.*
