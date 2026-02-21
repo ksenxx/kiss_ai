@@ -3,31 +3,20 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Agent Creator module for evolving and improving AI agents.
+"""DEPRECATED: Use kiss.agents.coding_agents.agent_optimizer instead.
 
-This module provides tools for:
-1. ImproverAgent: Optimizes existing agent code for token efficiency and speed
-2. AgentEvolver: Maintains a Pareto frontier of agent implementations
-
-Example usage:
-
-    from kiss.agents.create_and_optimize_agent import AgentEvolver, ImproverAgent
-
-    # Create and evolve an agent for a task
-    evolver = AgentEvolver()
-    best = evolver.evolve(
-        task_description="Build a code analysis assistant",
-        max_generations=10,
-    )
-
-    # Or improve an existing agent
-    improver = ImproverAgent()
-    success, report = improver.improve(
-        source_folder="/path/to/agent",
-        work_dir="/path/to/improved",
-        task_description="Build a code analysis assistant",
-    )
+This module is deprecated and will be removed in a future release.
+Please migrate to kiss.agents.coding_agents.agent_optimizer.
 """
+
+import warnings
+
+warnings.warn(
+    "kiss.agents.create_and_optimize_agent is deprecated. "
+    "Use kiss.agents.coding_agents.agent_optimizer instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from kiss.agents.create_and_optimize_agent.agent_evolver import (
     AgentEvolver,
