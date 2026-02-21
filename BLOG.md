@@ -35,7 +35,7 @@ Every KISS agent is a ReAct agent by default:
 4. That's it. That's the framework.
 ```
 
-No workflow graphs. No state machines. No PhD required.
+No workflow graphs. No state machines.
 
 ______________________________________________________________________
 
@@ -75,20 +75,14 @@ import json
 from kiss.core.kiss_agent import KISSAgent
 from kiss.agents.kiss import prompt_refiner_agent, get_run_simple_coding_agent
 
-# Step 1: Define a test function for our coding task
-def test_fibonacci(code: str) -> bool:
-    """Test if the generated fibonacci code is correct."""
-    try:
-        namespace = {}
-        exec(code, namespace)
-        fib = namespace.get('fibonacci')
-        if not fib:
-            return False
-        # Test cases
-        return (fib(0) == 0 and fib(1) == 1 and 
-                fib(10) == 55 and fib(20) == 6765)
-    except Exception:
-        return False
+# Agent 1: Research a topic
+researcher = KISSAgent(name="Researcher")
+research = researcher.run(
+    model_name="gpt-4o",
+    prompt_template="List 3 key facts about {topic}. Be concise.",
+    arguments={"topic": "Python asyncio"},
+    is_agentic=False  # Simple generation, no tools
+)
 
 # Step 2: Create the coding agent
 coding_agent_fn = get_run_simple_coding_agent(test_fibonacci)
@@ -157,16 +151,21 @@ research_result = research_agent.run(model_name="gpt-4o", more_args)
 # Agent 2: Write (uses research)
 draft = writer_agent.run(
     model_name="claude-sonnet-4-5",
-    arguments={"research": research_result},
-    # ...
+    prompt_template="Write a 2-paragraph intro based on:\n{research}",
+    arguments={"research": research},
+    is_agentic=False
 )
 
-# Agent 3: Edit (uses draft)
-final = editor_agent.run(
-    model_name="gemini-3-pro-preview", 
+# Agent 3: Polish the draft
+editor = KISSAgent(name="Editor")
+final = editor.run(
+    model_name="gemini-2.5-flash",
+    prompt_template="Improve clarity and fix any errors:\n{draft}",
     arguments={"draft": draft},
-    # ...
+    is_agentic=False
 )
+
+print(final)
 ```
 
 Each agent can use a different model. Each agent has its own budget. Each agent saves its own trajectory. And you compose them with the most powerful orchestration tool ever invented: **regular Python code**.
@@ -495,7 +494,6 @@ ______________________________________________________________________
 
 - **GitHub**: [KISS Agent Framework](https://github.com/ksenxx/kiss_ai)
 - **GEPA Paper**: [arXiv:2507.19457](https://arxiv.org/pdf/2507.19457)
-- **SWE-bench**: [swebench.com](https://www.swebench.com/)
 
 ______________________________________________________________________
 
