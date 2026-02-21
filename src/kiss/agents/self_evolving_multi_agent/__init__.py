@@ -3,7 +3,19 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Self Evolving Multi Agent - A long-horizon coding agent with planning and error recovery."""
+"""
+.. deprecated::
+    This module is deprecated. Use ``kiss.agents.coding_agents.agent_optimizer`` instead.
+"""
+
+import warnings
+
+warnings.warn(
+    "kiss.agents.self_evolving_multi_agent is deprecated. "
+    "Use kiss.agents.coding_agents.agent_optimizer instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from kiss.agents.self_evolving_multi_agent.multi_agent import (
     SelfEvolvingMultiAgent,

@@ -1,4 +1,4 @@
-# Create and Optimize Agent
+# Create and Optimize Agent (Deprecated.  Use use [agent_optimizer.py](../coding_agents/agent_optimizer.py)))
 
 A module for evolving and improving AI agents through multi-objective optimization. It provides tools to automatically optimize existing agent code for **token efficiency** and **execution speed** using evolutionary algorithms with Pareto frontier maintenance.
 

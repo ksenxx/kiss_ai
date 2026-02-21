@@ -1,4 +1,4 @@
-# Self-Evolving Multi-Agent
+# Self-Evolving Multi-Agent. (Deprecated. use [agent_optimizer.py](../coding_agents/agent_optimizer.py))
 
 An advanced coding agent with planning, error recovery, dynamic tool creation, and the ability to evolve itself for better efficiency and accuracy.
 
