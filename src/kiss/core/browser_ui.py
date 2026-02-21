@@ -410,8 +410,26 @@ class BaseBrowserPrinter(Printer):
             cq: The client queue to remove.
         """
         with self._lock:
-            if cq in self._clients:
+            try:
                 self._clients.remove(cq)
+            except ValueError:
+                pass
+
+    def _broadcast_result(
+        self, text: str, step_count: int = 0, total_tokens: int = 0, cost: str = "N/A",
+    ) -> None:
+        event: dict[str, Any] = {
+            "type": "result",
+            "text": text or "(no result)",
+            "step_count": step_count,
+            "total_tokens": total_tokens,
+            "cost": cost,
+        }
+        parsed = self._parse_result_yaml(text) if text else None
+        if parsed:
+            event["success"] = parsed.get("success")
+            event["summary"] = str(parsed["summary"])
+        self.broadcast(event)
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
         """Render content by broadcasting SSE events to connected browser clients.
@@ -461,18 +479,10 @@ class BaseBrowserPrinter(Printer):
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})
-            event: dict[str, Any] = {
-                "type": "result",
-                "text": str(content) or "(no result)",
-                "step_count": kwargs.get("step_count", 0),
-                "total_tokens": kwargs.get("total_tokens", 0),
-                "cost": kwargs.get("cost", "N/A"),
-            }
-            parsed = self._parse_result_yaml(str(content)) if content else None
-            if parsed:
-                event["success"] = parsed.get("success")
-                event["summary"] = str(parsed["summary"])
-            self.broadcast(event)
+            self._broadcast_result(
+                str(content), kwargs.get("step_count", 0),
+                kwargs.get("total_tokens", 0), kwargs.get("cost", "N/A"),
+            )
             return ""
         return ""
 
@@ -561,29 +571,18 @@ class BaseBrowserPrinter(Printer):
                 if text:
                     self.broadcast({"type": "system_output", "text": text})
         elif hasattr(message, "result"):
-            step_count = kwargs.get("step_count", 0)
             budget_used = kwargs.get("budget_used", 0.0)
-            total_tokens_used = kwargs.get("total_tokens_used", 0)
-            event: dict[str, Any] = {
-                "type": "result",
-                "text": message.result or "(no result)",
-                "step_count": step_count,
-                "total_tokens": total_tokens_used,
-                "cost": f"${budget_used:.4f}" if budget_used else "N/A",
-            }
-            parsed = self._parse_result_yaml(message.result) if message.result else None
-            if parsed:
-                event["success"] = parsed.get("success")
-                event["summary"] = str(parsed["summary"])
-            self.broadcast(event)
+            self._broadcast_result(
+                message.result,
+                kwargs.get("step_count", 0),
+                kwargs.get("total_tokens_used", 0),
+                f"${budget_used:.4f}" if budget_used else "N/A",
+            )
         elif hasattr(message, "content"):
             for block in message.content:
                 if hasattr(block, "is_error") and hasattr(block, "content"):
-                    content = (
-                        block.content if isinstance(block.content, str) else str(block.content)
-                    )
                     self.broadcast({
                         "type": "tool_result",
-                        "content": truncate_result(content),
+                        "content": truncate_result(str(block.content)),
                         "is_error": bool(block.is_error),
                     })

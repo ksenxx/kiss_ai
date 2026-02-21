@@ -23,7 +23,7 @@ from kiss.core.browser_ui import (
     find_free_port,
 )
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.models.model_info import MODEL_INFO, get_available_models
+from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_most_expensive_model
 
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.json"
@@ -91,11 +91,7 @@ def _save_proposals(proposals: list[str]) -> None:
 
 
 def _add_task(task: str) -> None:
-    history = _load_history()
-    task_strings = [e["task"] for e in history]
-    if task in task_strings:
-        idx = next(i for i, e in enumerate(history) if e["task"] == task)
-        history.pop(idx)
+    history = [e for e in _load_history() if e["task"] != task]
     history.insert(0, {"task": task, "result": ""})
     _save_history(history[:MAX_HISTORY])
 
@@ -126,6 +122,23 @@ def _scan_files(work_dir: str) -> list[str]:
 
 class _StopRequested(BaseException):
     pass
+
+
+_OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "codex", "computer-use")
+
+
+def _model_vendor_order(name: str) -> int:
+    if name.startswith("claude-"):
+        return 0
+    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
+        return 1
+    if name.startswith("gemini-"):
+        return 2
+    if name.startswith("minimax-"):
+        return 3
+    if name.startswith("openrouter/"):
+        return 4
+    return 5
 
 
 CHATBOT_CSS = r"""
@@ -231,16 +244,51 @@ header{
   margin-top:10px;padding-top:10px;
   border-top:1px solid rgba(255,255,255,0.04);
 }
-#model-select{
+#model-picker{position:relative}
+#model-btn{
   background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
   border:1px solid rgba(255,255,255,0.08);border-radius:8px;
   padding:6px 12px;font-size:12px;font-family:inherit;
-  outline:none;cursor:pointer;max-width:240px;transition:border-color 0.2s;
+  outline:none;cursor:pointer;max-width:300px;transition:border-color 0.2s;
+  display:flex;align-items:center;gap:6px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;
 }
-#model-select:hover{border-color:rgba(255,255,255,0.16);color:rgba(255,255,255,0.65)}
-#model-select:focus{border-color:rgba(88,166,255,0.4)}
-#model-select option{background:#141416;color:rgba(255,255,255,0.75)}
-#model-select option.no-fc{color:var(--yellow)}
+#model-btn:hover{border-color:rgba(255,255,255,0.16);color:rgba(255,255,255,0.65)}
+#model-btn svg{flex-shrink:0;opacity:0.4}
+#model-dropdown{
+  position:absolute;bottom:100%;left:0;min-width:320px;max-width:420px;
+  background:rgba(18,18,20,0.97);backdrop-filter:blur(20px);
+  border:1px solid rgba(255,255,255,0.08);border-radius:12px;
+  max-height:360px;display:none;z-index:15;
+  box-shadow:0 -8px 32px rgba(0,0,0,0.5);overflow:hidden;
+  flex-direction:column;
+}
+#model-dropdown.open{display:flex}
+#model-search{
+  width:100%;background:transparent;border:none;
+  border-bottom:1px solid rgba(255,255,255,0.06);
+  color:rgba(255,255,255,0.8);font-size:12px;font-family:inherit;
+  padding:10px 14px;outline:none;
+}
+#model-search::placeholder{color:rgba(255,255,255,0.25)}
+#model-list{overflow-y:auto;flex:1}
+.model-item{
+  padding:7px 14px;cursor:pointer;font-size:12px;
+  display:flex;justify-content:space-between;align-items:center;
+  border-bottom:1px solid rgba(255,255,255,0.02);transition:background 0.08s;
+  color:rgba(255,255,255,0.6);
+}
+.model-item:hover,.model-item.sel{background:rgba(88,166,255,0.08)}
+.model-item.active{color:rgba(88,166,255,0.9);font-weight:500}
+.model-cost{font-size:10px;color:rgba(255,255,255,0.2);flex-shrink:0;margin-left:12px}
+.model-group-hdr{
+  padding:6px 14px 4px;font-size:10px;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.05em;
+  color:rgba(255,255,255,0.25);
+  background:rgba(18,18,20,0.97);
+  border-bottom:1px solid rgba(255,255,255,0.04);
+  position:sticky;top:0;z-index:1;
+}
 #input-actions{display:flex;gap:8px;align-items:center}
 #send-btn{
   background:rgba(88,166,255,0.15);color:rgba(88,166,255,0.9);border:none;
@@ -394,7 +442,12 @@ var stopBtn=document.getElementById('stop-btn');
 var ac=document.getElementById('autocomplete');
 var rl=document.getElementById('recent-list');
 var pl=document.getElementById('proposed-list');
-var modelSel=document.getElementById('model-select');
+var modelBtn=document.getElementById('model-btn');
+var modelLabel=document.getElementById('model-label');
+var modelDD=document.getElementById('model-dropdown');
+var modelSearch=document.getElementById('model-search');
+var modelList=document.getElementById('model-list');
+var allModels=[],selectedModel='',modelDDIdx=-1;
 var sidebar=document.getElementById('sidebar');
 var sidebarOverlay=document.getElementById('sidebar-overlay');
 var suggestionsEl=document.getElementById('suggestions');
@@ -422,15 +475,10 @@ inp.addEventListener('input',function(){
 var sidebarHistSec=document.getElementById('sidebar-history-sec');
 var sidebarPropSec=document.getElementById('sidebar-proposals-sec');
 function toggleSidebar(mode){
-  var isOpen=sidebar.classList.contains('open');
-  if(isOpen&&mode){
+  if(mode){
     sidebarHistSec.style.display=mode==='proposals'?'none':'';
     sidebarPropSec.style.display=mode==='history'?'none':'';
-    return;
-  }
-  if(!isOpen&&mode){
-    sidebarHistSec.style.display=mode==='proposals'?'none':'';
-    sidebarPropSec.style.display=mode==='history'?'none':'';
+    if(sidebar.classList.contains('open'))return;
   }
   sidebar.classList.toggle('open');
   sidebarOverlay.classList.toggle('open');
@@ -522,17 +570,73 @@ function handleEvent(ev){
 function loadModels(){
   fetch('/models').then(function(r){return r.json();})
   .then(function(d){
-    modelSel.innerHTML='';
-    d.models.forEach(function(m){
-      var o=document.createElement('option');
-      o.value=m.name;
-      o.textContent=m.name+(m.fc?'':' [no FC]');
-      if(!m.fc)o.className='no-fc';
-      if(m.name===d.selected)o.selected=true;
-      modelSel.appendChild(o);
-    });
+    allModels=d.models;
+    selectedModel=d.selected;
+    modelLabel.textContent=selectedModel;
+    renderModelList('');
   }).catch(function(){});
 }
+function modelVendor(name){
+  if(name.startsWith('claude-'))return'Anthropic';
+  if(/^(gpt|o[134]|codex|computer-use)/.test(name)&&!name.startsWith('openai/'))return'OpenAI';
+  if(name.startsWith('gemini-'))return'Gemini';
+  if(name.startsWith('minimax-'))return'MiniMax';
+  if(name.startsWith('openrouter/'))return'OpenRouter';
+  return'Together AI';
+}
+function renderModelList(q){
+  modelList.innerHTML='';modelDDIdx=-1;
+  var ql=q.toLowerCase(),lastVendor='';
+  allModels.forEach(function(m){
+    if(ql&&m.name.toLowerCase().indexOf(ql)<0)return;
+    var v=modelVendor(m.name);
+    if(v!==lastVendor){
+      var hdr=mkEl('div','model-group-hdr');
+      hdr.textContent=v;
+      modelList.appendChild(hdr);
+      lastVendor=v;
+    }
+    var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
+    var price='$'+m.inp.toFixed(2)+' / $'+m.out.toFixed(2);
+    d.innerHTML='<span>'+esc(m.name)+'</span><span class="model-cost">'+price+'</span>';
+    d.addEventListener('click',function(){selectModel(m.name)});
+    modelList.appendChild(d);
+  });
+}
+function selectModel(name){
+  selectedModel=name;
+  modelLabel.textContent=name;
+  closeModelDD();
+  renderModelList('');
+}
+function toggleModelDD(){
+  if(modelDD.classList.contains('open')){closeModelDD();return}
+  modelDD.classList.add('open');
+  modelSearch.value='';
+  renderModelList('');
+  modelSearch.focus();
+}
+function closeModelDD(){
+  modelDD.classList.remove('open');
+  modelSearch.value='';
+  modelDDIdx=-1;
+}
+modelSearch.addEventListener('input',function(){renderModelList(this.value)});
+modelSearch.addEventListener('keydown',function(e){
+  var items=modelList.querySelectorAll('.model-item');
+  if(e.key==='ArrowDown'){e.preventDefault();modelDDIdx=Math.min(modelDDIdx+1,items.length-1);updateModelSel(items);return}
+  if(e.key==='ArrowUp'){e.preventDefault();modelDDIdx=Math.max(modelDDIdx-1,-1);updateModelSel(items);return}
+  if(e.key==='Enter'){e.preventDefault();var ti=modelDDIdx>=0?modelDDIdx:0;if(items[ti])items[ti].click();return}
+  if(e.key==='Escape'){e.preventDefault();closeModelDD();return}
+});
+function updateModelSel(items){
+  items.forEach(function(it,i){it.classList.toggle('sel',i===modelDDIdx)});
+  if(modelDDIdx>=0)items[modelDDIdx].scrollIntoView({block:'nearest'});
+}
+document.addEventListener('click',function(e){
+  if(!document.getElementById('model-picker').contains(e.target))closeModelDD();
+  if(!ac.contains(e.target)&&e.target!==inp)hideAC();
+});
 function submitTask(){
   var task=inp.value.trim();
   if(!task||running)return;
@@ -544,7 +648,7 @@ function submitTask(){
   fetch('/run',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({task:task,model:modelSel.value})
+    body:JSON.stringify({task:task,model:selectedModel})
   }).then(function(r){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
     inp.value='';
@@ -645,7 +749,6 @@ function updateACSel(items){
   items.forEach(function(it,i){it.classList.toggle('sel',i===acIdx)});
   if(acIdx>=0)items[acIdx].scrollIntoView({block:'nearest'});
 }
-document.addEventListener('click',function(e){if(!ac.contains(e.target)&&e.target!==inp)hideAC()});
 function clearGhost(){ghostSuggest='';ghostEl.innerHTML=''}
 function updateGhost(){
   if(!ghostSuggest){ghostEl.innerHTML='';return}
@@ -798,7 +901,17 @@ def _build_html(title: str, subtitle: str) -> str:
         autocomplete="off"></textarea>
     </div>
     <div id="input-footer">
-      <select id="model-select"></select>
+      <div id="model-picker">
+        <button type="button" id="model-btn" onclick="toggleModelDD()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+          <span id="model-label">Loading…</span>
+        </button>
+        <div id="model-dropdown">
+          <input type="text" id="model-search" placeholder="Search models…" autocomplete="off"/>
+          <div id="model-list"></div>
+        </div>
+      </div>
       <div id="input-actions">
         <button id="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
@@ -823,13 +936,10 @@ def run_chatbot(
     title: str = "KISS Assistant",
     subtitle: str = "Interactive Agent",
     work_dir: str | None = None,
-    default_model: str = "claude-sonnet-4-5",
+    default_model: str = "",
     agent_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Run a browser-based chatbot UI for any RelentlessAgent-based agent.
-
-    Starts a Starlette web server with SSE streaming, task history, autocomplete,
-    model selection, and proposed task suggestions.
 
     Args:
         agent_factory: Callable that takes a name string and returns a RelentlessAgent instance.
@@ -853,8 +963,7 @@ def run_chatbot(
     agent_thread: threading.Thread | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
-    selected_model = default_model
-    extra_kwargs = agent_kwargs or {}
+    selected_model = default_model or get_most_expensive_model() or "claude-sonnet-4-5"
     html_page = _build_html(title, subtitle)
 
     def refresh_file_cache() -> None:
@@ -908,7 +1017,7 @@ def run_chatbot(
                 work_dir=actual_work_dir,
                 printer=printer,
                 model_name=model_name,
-                **extra_kwargs,
+                **(agent_kwargs or {}),
             )
             _set_latest_result(result or "")
             printer.broadcast({"type": "task_done"})
@@ -1023,7 +1132,8 @@ def run_chatbot(
             for t in proposed_tasks:
                 if q_lower in t.lower():
                     results.append({"type": "suggested", "text": t})
-        last_word = query.split()[-1].lower() if query.split() else q_lower
+        words = query.split()
+        last_word = words[-1].lower() if words else q_lower
         if last_word and len(last_word) >= 2:
             count = 0
             for path in file_cache:
@@ -1081,12 +1191,19 @@ def run_chatbot(
         return JSONResponse({"suggestion": suggestion})
 
     async def models_endpoint(request: Request) -> JSONResponse:
-        available = get_available_models()
-        models_list = []
-        for name in available:
+        models_list: list[dict[str, Any]] = []
+        for name in get_available_models():
             info = MODEL_INFO.get(name)
-            if info:
-                models_list.append({"name": name, "fc": info.is_function_calling_supported})
+            if info and info.is_function_calling_supported:
+                models_list.append({
+                    "name": name,
+                    "inp": info.input_price_per_1M,
+                    "out": info.output_price_per_1M,
+                })
+        models_list.sort(key=lambda m: (
+            _model_vendor_order(str(m["name"])),
+            -(float(m["inp"]) + float(m["out"])),
+        ))
         return JSONResponse({"models": models_list, "selected": selected_model})
 
     app = Starlette(routes=[

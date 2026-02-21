@@ -97,6 +97,32 @@ def _emb(ctx: int, inp: float) -> ModelInfo:
     return ModelInfo(ctx, inp, 0.0, False, True, False)
 
 
+_OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
+_TOGETHER_PREFIXES = (
+    "meta-llama/", "Qwen/", "MiniMaxAI/", "mistralai/", "deepseek-ai/", "deepcogito/",
+    "google/gemma", "moonshotai/", "nvidia/", "zai-org/", "openai/gpt-oss",
+    "arcee-ai/", "essentialai/", "BAAI/", "intfloat/",
+)
+
+
+def _openai_compatible(
+    model_name: str,
+    base_url: str,
+    api_key: str,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+) -> "OpenAICompatibleModel":
+    if OpenAICompatibleModel is None:
+        raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
+    return OpenAICompatibleModel(
+        model_name=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        model_config=model_config,
+        token_callback=token_callback,
+    )
+
+
 MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenAI models - GPT-5.x series (Standard tier pricing from platform.openai.com/docs/pricing)
@@ -215,25 +241,21 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # Together AI models - Llama series (pricing from together.ai/pricing)
     # ==========================================================================
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": _mi(1048576, 0.27, 0.85),
-    "meta-llama/Llama-4-Scout-17B-16E-Instruct": _mi(327680, 0.18, 0.59),
     "meta-llama/Llama-3.3-70B-Instruct-Turbo": _mi(131072, 0.88, 0.88, fc=False),
-    "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),
-    "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),
+    "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),  # Dep 2026-03
+    "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),  # Dep 2026-03
     "meta-llama/Meta-Llama-3-8B-Instruct-Lite": _mi(8192, 0.10, 0.10, fc=False),
     "meta-llama/Llama-3-70b-chat-hf": _mi(8192, 0.88, 0.88, fc=False),
     # ==========================================================================
     # Together AI models - Qwen series (pricing from together.ai/pricing)
     # ==========================================================================
-    # Qwen3 series (from together.ai/pricing)
+    "Qwen/Qwen3.5-397B-A17B": _mi(262144, 0.60, 3.60, fc=False),
     "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": _mi(256000, 2.00, 2.00),
     "Qwen/Qwen3-Coder-Next-FP8": _mi(262144, 0.50, 1.20),
-    "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),
+    "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),  # Dep 2026-03
     "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.20, 0.60, fc=False),
     "Qwen/Qwen3-Next-80B-A3B-Instruct": _mi(262144, 0.15, 1.50),
-    "Qwen/Qwen3-Next-80B-A3B-Thinking": _mi(262144, 0.15, 1.50, fc=False),
-    "Qwen/Qwen3-VL-32B-Instruct": _mi(256000, 0.50, 1.50, fc=False),  # Vision model
     "Qwen/Qwen3-VL-8B-Instruct": _mi(262100, 0.30, 0.90, fc=False),  # Vision model
-    # Qwen2.5 series
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
     # ==========================================================================
     # Together AI models - Mistral series (most have unreliable function calling)
@@ -244,46 +266,39 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Together AI models - DeepSeek series (pricing from together.ai/pricing)
     # ==========================================================================
-    # DeepSeek R1 reasoning models (R1-0528 served as deepseek-ai/DeepSeek-R1)
-    "deepseek-ai/DeepSeek-R1": _mi(163839, 3.00, 7.00, fc=False),  # Reasoning model
-    # DeepSeek V3 series
-    "deepseek-ai/DeepSeek-V3-0324": _mi(163839, 1.25, 1.25, fc=False),
+    "deepseek-ai/DeepSeek-R1": _mi(163839, 3.00, 7.00, fc=False),  # Serves R1-0528
     "deepseek-ai/DeepSeek-V3.1": _mi(128000, 0.60, 1.70, fc=False),
     # ==========================================================================
     # Together AI models - Other providers (pricing from together.ai/pricing)
     # ==========================================================================
+    # MiniMax (via Together AI)
+    "MiniMaxAI/MiniMax-M2.5": _mi(228700, 0.30, 1.20),
     # Google Gemma
     "google/gemma-3n-E4B-it": _mi(32768, 0.02, 0.04, fc=False),
-    "google/gemma-2b-it": _mi(8192, 0.10, 0.10, fc=False),  # Deprecated
-    # MoonshotAI Kimi (pricing from together.ai/pricing)
+    # MoonshotAI Kimi
     "moonshotai/Kimi-K2-Instruct": _mi(128000, 1.00, 3.00, fc=False),
-    "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),
-    "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # SLOW: thinking model
+    "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),  # Dep 2026-03
+    "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
     # Z.AI GLM models
-    "zai-org/GLM-5.0": _mi(200000, 1.00, 3.20),  # 744B MoE - FC via OpenRouter verified
+    "zai-org/GLM-5": _mi(202752, 1.00, 3.20),
     "zai-org/GLM-4.5-Air-FP8": _mi(131072, 0.20, 1.10),
-    "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),  # Enhanced agentic coding
+    "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),
     # OpenAI GPT-OSS models
     "openai/gpt-oss-120b": _mi(128000, 0.15, 0.60, fc=False),
     "openai/gpt-oss-20b": _mi(128000, 0.05, 0.20, fc=False),
-    # NVIDIA models
-    "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.10, 0.10, fc=False),
     # Arcee AI models
     "arcee-ai/trinity-mini": _mi(32768, 0.04, 0.15, fc=False),
-    # Marin Community
-    "marin-community/marin-8b-instruct": _mi(4096, 0.10, 0.10, fc=False),
     # Essential AI
     "essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
     # ==========================================================================
     # Together AI models - Deep Cogito (pricing from together.ai/pricing)
     # ==========================================================================
-    "deepcogito/cogito-v2-1-671b": _mi(32768, 1.25, 1.25, fc=False),  # Hybrid reasoning
+    "deepcogito/cogito-v2-1-671b": _mi(32768, 1.25, 1.25, fc=False),
     # ==========================================================================
     # Together AI Embedding models (pricing from together.ai/pricing)
     # ==========================================================================
     "BAAI/bge-base-en-v1.5": _emb(512, 0.01),  # 768 dimensions
-    "Alibaba-NLP/gte-modernbert-base": _emb(8192, 0.08),  # 768 dimensions
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),  # 1024 dimensions
     # ==========================================================================
     # OpenRouter models - Aurora (free cloaked reasoning model)
@@ -344,7 +359,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/bytedance-seed/seed-1.6": _mi(262144, 0.25, 2.00),
     "openrouter/bytedance-seed/seed-1.6-flash": _mi(262144, 0.075, 0.30),
     "openrouter/bytedance-seed/seed-2.0": _mi(262144, 0.30, 2.50),
-    "openrouter/bytedance-seed/seed-2.0-thinking": _mi(262144, 0.15, 0.60, fc=False),  # SLOW
     # ==========================================================================
     # OpenRouter models - Cohere (unreliable function calling)
     # ==========================================================================
@@ -861,19 +875,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
 # Models that have been tested and found to have reliability issues
 # ==========================================================================
 FLAKY_MODELS: dict[str, str] = {
-    # Models with 503 errors (service unavailable)
-    "openrouter/arcee-ai/virtuoso-large": "503 Service Unavailable errors",
-    # Models with unreliable function calling
-    "openrouter/baidu/ernie-4.5-21b-a3b": "Exceeds step limit in agentic mode",
-    # Models that timeout frequently
-    "openrouter/deepseek/deepseek-chat": "Can timeout on requests",
-    # Slow thinking/reasoning models (not flaky, just slow)
-    "openrouter/deepseek/deepseek-r1": "Slow: thinking model",
-    "openrouter/deepseek/deepseek-r1-0528": "Slow: thinking model",
-    "openrouter/openai/o1": "Slow: reasoning model",
-    "openrouter/openai/o3-pro": "Slow: reasoning model",
-    "openrouter/qwen/qwq-32b": "Slow: reasoning model",
-    "openrouter/moonshotai/kimi-k2-thinking": "Slow: thinking model",
+    "openrouter/baidu/ernie-4.5-21b-a3b": "Ignores function calling tools",
 }
 
 
@@ -922,132 +924,61 @@ def model(
         KISSError: If the model name is not recognized.
     """
     if model_config and "base_url" in model_config:
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use custom base_url."
-            )
         base_url = model_config["base_url"]
         api_key = model_config.get("api_key", "")
         filtered = {k: v for k, v in model_config.items() if k not in ("base_url", "api_key")}
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url=base_url,
-            api_key=api_key,
-            model_config=filtered if filtered else None,
-            token_callback=token_callback,
+        return _openai_compatible(
+            model_name, base_url, api_key, filtered or None, token_callback,
         )
-    # OpenRouter models (strip "openrouter/" prefix for API calls)
+    keys = config_module.DEFAULT_CONFIG.agent.api_keys
     if model_name.startswith("openrouter/"):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use OpenRouter models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://openrouter.ai/api/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENROUTER_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+        return _openai_compatible(
+            model_name, "https://openrouter.ai/api/v1",
+            keys.OPENROUTER_API_KEY, model_config, token_callback,
         )
-    # Google Gemini embedding models (text-embedding-004 is Gemini, not OpenAI)
-    elif model_name == "text-embedding-004":
+    if model_name == "text-embedding-004":
         if GeminiModel is None:
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
         return GeminiModel(
-            model_name=model_name,
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+            model_name=model_name, api_key=keys.GEMINI_API_KEY,
+            model_config=model_config, token_callback=token_callback,
         )
-    # OpenAI models (generation and embedding)
-    elif model_name.startswith(
-        ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-    ) and not model_name.startswith("openai/gpt-oss"):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use OpenAI models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://api.openai.com/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+    if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
+        return _openai_compatible(
+            model_name, "https://api.openai.com/v1",
+            keys.OPENAI_API_KEY, model_config, token_callback,
         )
-    # Together AI models (generation and embedding)
-    elif model_name.startswith(
-        (
-            "meta-llama/",
-            "Qwen/",
-            "mistralai/",
-            "deepseek-ai/",
-            "deepcogito/",
-            "google/gemma",
-            "moonshotai/",
-            "nvidia/",
-            "zai-org/",
-            "openai/gpt-oss",
-            "arcee-ai/",
-            "marin-community/",
-            "essentialai/",
-            # Together AI embedding models
-            "BAAI/",
-            "intfloat/",
-            "Alibaba-NLP/",
+    if model_name.startswith(_TOGETHER_PREFIXES):
+        return _openai_compatible(
+            model_name, "https://api.together.xyz/v1",
+            keys.TOGETHER_API_KEY, model_config, token_callback,
         )
-    ):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use Together AI models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://api.together.xyz/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.TOGETHER_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
-        )
-    # Anthropic Claude models (direct Anthropic API)
-    elif model_name.startswith("claude-"):
+    if model_name.startswith("claude-"):
         if AnthropicModel is None:
             raise KISSError(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
             )
         return AnthropicModel(
-            model_name=model_name,
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.ANTHROPIC_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+            model_name=model_name, api_key=keys.ANTHROPIC_API_KEY,
+            model_config=model_config, token_callback=token_callback,
         )
-    # Google Gemini models (direct Google API)
-    elif model_name.startswith("gemini-"):
+    if model_name.startswith("gemini-"):
         if GeminiModel is None:
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
         return GeminiModel(
-            model_name=model_name,
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+            model_name=model_name, api_key=keys.GEMINI_API_KEY,
+            model_config=model_config, token_callback=token_callback,
         )
-    # MiniMax models (direct MiniMax API, OpenAI-compatible)
-    elif model_name.startswith("minimax-"):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use MiniMax models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://api.minimax.chat/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.MINIMAX_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+    if model_name.startswith("minimax-"):
+        return _openai_compatible(
+            model_name, "https://api.minimax.chat/v1",
+            keys.MINIMAX_API_KEY, model_config, token_callback,
         )
-    else:
-        raise KISSError(f"Unknown model name: {model_name}")
+    raise KISSError(f"Unknown model name: {model_name}")
 
 
 def get_available_models() -> list[str]:
@@ -1058,35 +989,44 @@ def get_available_models() -> list[str]:
             and support text generation.
     """
     keys = config_module.DEFAULT_CONFIG.agent.api_keys
-    provider_keys = {
+    prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,
         "gemini-": keys.GEMINI_API_KEY,
         "minimax-": keys.MINIMAX_API_KEY,
     }
-    openai_prefixes = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-    together_prefixes = (
-        "meta-llama/", "Qwen/", "mistralai/", "deepseek-ai/", "deepcogito/",
-        "google/gemma", "moonshotai/", "nvidia/", "zai-org/", "openai/gpt-oss",
-        "arcee-ai/", "marin-community/", "essentialai/", "BAAI/", "intfloat/", "Alibaba-NLP/",
-    )
     result = []
     for name, info in MODEL_INFO.items():
         if not info.is_generation_supported:
             continue
         api_key = ""
-        for prefix, key in provider_keys.items():
+        for prefix, key in prefix_to_key.items():
             if name.startswith(prefix):
                 api_key = key
                 break
         if not api_key:
-            if name.startswith(openai_prefixes) and not name.startswith("openai/gpt-oss"):
+            if name == "text-embedding-004":
+                api_key = keys.GEMINI_API_KEY
+            elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
                 api_key = keys.OPENAI_API_KEY
-            elif name.startswith(together_prefixes):
+            elif name.startswith(_TOGETHER_PREFIXES):
                 api_key = keys.TOGETHER_API_KEY
         if api_key:
             result.append(name)
     return sorted(result)
+
+
+def get_most_expensive_model(fc_only: bool = True) -> str:
+    best_name, best_price = "", -1.0
+    for name in get_available_models():
+        info = MODEL_INFO[name]
+        if fc_only and not info.is_function_calling_supported:
+            continue
+        price = info.input_price_per_1M + info.output_price_per_1M
+        if price > best_price:
+            best_price = price
+            best_name = name
+    return best_name
 
 
 def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int) -> float:
@@ -1103,9 +1043,10 @@ def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: in
     info = MODEL_INFO.get(model_name)
     if info is None:
         return 0.0
-    input_cost: float = (num_input_tokens / 1_000_000) * info.input_price_per_1M
-    output_cost: float = (num_output_tokens / 1_000_000) * info.output_price_per_1M
-    return input_cost + output_cost
+    return (
+        num_input_tokens * info.input_price_per_1M
+        + num_output_tokens * info.output_price_per_1M
+    ) / 1_000_000
 
 
 def get_max_context_length(model_name: str) -> int:
