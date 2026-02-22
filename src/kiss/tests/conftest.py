@@ -7,7 +7,7 @@ import pytest
 
 from kiss.core.kiss_error import KISSError
 
-DEFAULT_MODEL = "gpt-5.2"
+DEFAULT_MODEL = "claude-opus-4-6"
 
 
 def pytest_addoption(parser):
