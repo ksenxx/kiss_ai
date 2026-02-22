@@ -1162,7 +1162,7 @@ A hardened collection of useful tools with improved security.
 **Constructor:**
 
 ```python
-UsefulTools(base_dir: str, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None) -> None
+UsefulTools(base_dir: str, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, stream_callback: Callable[[str], None] | None = None) -> None
 ```
 
 **Args:**
@@ -1170,6 +1170,7 @@ UsefulTools(base_dir: str, readable_paths: list[str] | None = None, writable_pat
 - `base_dir`: The base directory for tool operations.
 - `readable_paths`: Optional list of paths allowed for read operations.
 - `writable_paths`: Optional list of paths allowed for write operations.
+- `stream_callback`: Optional callback for streaming Bash output line-by-line.
 
 **Methods:**
 
@@ -2285,10 +2286,10 @@ Pull and load a Docker image, then create and start a container.
 - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
 - `tag`: The tag/version of the image (default: 'latest')
 
-**`run_bash_command`**
+**`Bash`**
 
 ```python
-run_bash_command(command: str, description: str) -> str
+Bash(command: str, description: str) -> str
 ```
 
 Execute a bash command in the running Docker container.

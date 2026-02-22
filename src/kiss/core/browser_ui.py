@@ -466,6 +466,9 @@ class BaseBrowserPrinter(Printer):
         if type == "usage_info":
             self.broadcast({"type": "usage_info", "text": str(content).strip()})
             return ""
+        if type == "bash_stream":
+            self.broadcast({"type": "system_output", "text": str(content)})
+            return ""
         if type == "tool_call":
             self.broadcast({"type": "text_end"})
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))

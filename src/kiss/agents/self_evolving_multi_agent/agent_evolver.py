@@ -791,8 +791,8 @@ def evaluate_agent_code(
                 "python:3.12-slim", workdir="/workspace", mount_shared_volume=True
             ) as docker:
                 script = f"cat > /tmp/test.py << 'EOF'\n{task.test_script}\nEOF"
-                docker.run_bash_command(script, "Test setup")
-                if "PASS" in docker.run_bash_command("python /tmp/test.py", "Test"):
+                docker.Bash(script, "Test setup")
+                if "PASS" in docker.Bash("python /tmp/test.py", "Test"):
                     task_passed = True
                     passed += 1
                     complexity_score += weight

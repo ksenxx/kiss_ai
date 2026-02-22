@@ -490,10 +490,10 @@ from kiss.docker import DockerManager
 # Create a Docker manager for an Ubuntu container
 with DockerManager(image_name="ubuntu", tag="22.04", workdir="/app") as docker:
     # Run commands inside the container
-    output = docker.run_bash_command("echo 'Hello from Docker!'", "Print greeting")
+    output = docker.Bash("echo 'Hello from Docker!'", "Print greeting")
     print(output)
-    
-    output = docker.run_bash_command("python3 --version", "Check Python version")
+
+    output = docker.Bash("python3 --version", "Check Python version")
     print(output)
 ```
 
@@ -506,8 +506,8 @@ docker = DockerManager(image_name="python", tag="3.11", workdir="/workspace")
 docker.open()  # Pull image and start container
 
 try:
-    output = docker.run_bash_command("pip install numpy", "Install numpy")
-    output = docker.run_bash_command("python -c 'import numpy; print(numpy.__version__)'", "Check numpy")
+    output = docker.Bash("pip install numpy", "Install numpy")
+    output = docker.Bash("python -c 'import numpy; print(numpy.__version__)'", "Check numpy")
     print(output)
 finally:
     docker.close()  # Stop and remove container
@@ -521,7 +521,7 @@ from kiss.docker import DockerManager
 # Map container port 8080 to host port 8080
 with DockerManager(image_name="nginx", ports={80: 8080}) as docker:
     # Start a web server
-    docker.run_bash_command("nginx", "Start nginx")
+    docker.Bash("nginx", "Start nginx")
     
     # Get the actual host port (useful when Docker assigns a random port)
     host_port = docker.get_host_port(80)

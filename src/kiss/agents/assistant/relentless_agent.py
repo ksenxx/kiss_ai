@@ -102,7 +102,7 @@ class RelentlessAgent(Base):
     def _docker_bash(self, command: str, description: str) -> str:
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
-        return self.docker_manager.run_bash_command(command, description)
+        return self.docker_manager.Bash(command, description)
 
     def _parse_progress(self, summary: str) -> tuple[list[str], list[str]]:
         try:
@@ -289,6 +289,13 @@ class RelentlessAgent(Base):
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
                 self.docker_manager = docker_mgr
+                if self.printer:
+                    _printer = self.printer
+
+                    def _docker_stream(text: str) -> None:
+                        _printer.print(text, type="bash_stream")
+
+                    docker_mgr.stream_callback = _docker_stream
                 try:
                     return self.perform_task(tools)
                 finally:

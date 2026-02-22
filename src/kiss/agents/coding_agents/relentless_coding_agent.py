@@ -25,10 +25,18 @@ class RelentlessCodingAgent(RelentlessAgent):
         super().__init__(name)
 
     def _get_tools(self) -> list:
+        printer = self.printer
+
+        def _stream(text: str) -> None:
+            if printer:
+                printer.print(text, type="bash_stream")
+
+        stream_cb = _stream if printer else None
         useful_tools = UsefulTools(
             base_dir=self.base_dir,
             readable_paths=[str(p) for p in self.readable_paths],
             writable_paths=[str(p) for p in self.writable_paths],
+            stream_callback=stream_cb,
         )
         bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
         return [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]

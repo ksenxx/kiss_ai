@@ -3,6 +3,8 @@
 import re
 import shlex
 import subprocess
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -854,6 +856,7 @@ class UsefulTools:
         base_dir: str,
         readable_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
+        stream_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize UsefulTools with security-restricted paths.
 
@@ -861,11 +864,13 @@ class UsefulTools:
             base_dir: The base directory for tool operations.
             readable_paths: Optional list of paths allowed for read operations.
             writable_paths: Optional list of paths allowed for write operations.
+            stream_callback: Optional callback for streaming Bash output line-by-line.
         """
         Path(base_dir).mkdir(parents=True, exist_ok=True)
         self.base_dir = str(Path(base_dir).resolve())
         self.readable_paths = [Path(p).resolve() for p in readable_paths or []]
         self.writable_paths = [Path(p).resolve() for p in writable_paths or []]
+        self.stream_callback = stream_callback
 
     def Read(  # noqa: N802
         self,
@@ -1049,6 +1054,9 @@ class UsefulTools:
             if not is_subpath(resolved, self.writable_paths):
                 return f"Error: Access denied for writing to {path_str}"
 
+        if self.stream_callback:
+            return self._bash_streaming(command, timeout_seconds, max_output_chars)
+
         try:
             result = subprocess.run(
                 command,
@@ -1073,3 +1081,50 @@ class UsefulTools:
             return f"Error: {e}"
         except Exception as e:  # pragma: no cover
             return f"Error: {e}"
+
+    def _bash_streaming(
+        self, command: str, timeout_seconds: float, max_output_chars: int
+    ) -> str:
+        assert self.stream_callback is not None
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        timed_out = False
+
+        def _kill() -> None:
+            nonlocal timed_out
+            timed_out = True
+            process.kill()
+
+        timer = threading.Timer(timeout_seconds, _kill)
+        timer.start()
+        try:
+            chunks: list[str] = []
+            assert process.stdout is not None
+            for line in process.stdout:
+                chunks.append(line)
+                self.stream_callback(line)
+            process.wait()
+        finally:
+            timer.cancel()
+
+        if timed_out:
+            return "Error: Command execution timeout"
+
+        output = "".join(chunks)
+
+        if process.returncode != 0:
+            return f"Error: {subprocess.CalledProcessError(process.returncode, command)}"
+
+        if len(output) > max_output_chars:
+            half = max_output_chars // 2
+            output = (
+                output[:half]
+                + f"\n\n... [truncated {len(output) - max_output_chars} chars] ...\n\n"
+                + output[-half:]
+            )
+        return output
