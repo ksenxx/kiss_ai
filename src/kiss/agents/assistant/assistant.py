@@ -626,7 +626,8 @@ modelSearch.addEventListener('keydown',function(e){
   var items=modelList.querySelectorAll('.model-item');
   if(e.key==='ArrowDown'){e.preventDefault();modelDDIdx=Math.min(modelDDIdx+1,items.length-1);updateModelSel(items);return}
   if(e.key==='ArrowUp'){e.preventDefault();modelDDIdx=Math.max(modelDDIdx-1,-1);updateModelSel(items);return}
-  if(e.key==='Enter'){e.preventDefault();var ti=modelDDIdx>=0?modelDDIdx:0;if(items[ti])items[ti].click();return}
+  if(e.key==='Enter'){e.preventDefault();var ti=modelDDIdx>=0?modelDDIdx:0;
+  if(items[ti])items[ti].click();return}
   if(e.key==='Escape'){e.preventDefault();closeModelDD();return}
 });
 function updateModelSel(items){
@@ -936,7 +937,7 @@ def run_chatbot(
     title: str = "KISS Assistant",
     subtitle: str = "Interactive Agent",
     work_dir: str | None = None,
-    default_model: str = "",
+    default_model: str = "claude-opus-4-6",
     agent_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Run a browser-based chatbot UI for any RelentlessAgent-based agent.
@@ -963,7 +964,7 @@ def run_chatbot(
     agent_thread: threading.Thread | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
-    selected_model = default_model or get_most_expensive_model() or "claude-sonnet-4-5"
+    selected_model = default_model or get_most_expensive_model() or "claude-opus-4-6"
     html_page = _build_html(title, subtitle)
 
     def refresh_file_cache() -> None:

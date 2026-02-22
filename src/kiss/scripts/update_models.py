@@ -22,6 +22,7 @@ import ssl
 import sys
 import time
 from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -36,7 +37,7 @@ _SSL_CTX = ssl.create_default_context()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def api_get(url: str, headers: dict[str, str] | None = None) -> dict | list:
+def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
     req = Request(url, headers=headers or {})
     for attempt in range(3):
         try:
@@ -46,6 +47,7 @@ def api_get(url: str, headers: dict[str, str] | None = None) -> dict | list:
             if attempt == 2:
                 raise
             time.sleep(2 ** attempt)
+    raise RuntimeError("unreachable")
 
 
 def fmt_price(p: float) -> str:
