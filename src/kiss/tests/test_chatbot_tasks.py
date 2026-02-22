@@ -33,7 +33,13 @@ class TestHistoryFileOps(unittest.TestCase):
         _restore_history(self.original, self.tmp)
 
     def test_load_empty_history(self) -> None:
-        assert assistant._load_history() == []
+        loaded = assistant._load_history()
+        expected = [
+            assistant._normalize_history_entry(t)
+            for t in assistant.SAMPLE_TASKS
+        ]
+        assert loaded == expected
+        assert self.tmp.exists()
 
     def test_save_and_load_history(self) -> None:
         assistant._save_history([_entry("task1"), _entry("task2")])
@@ -42,11 +48,21 @@ class TestHistoryFileOps(unittest.TestCase):
 
     def test_load_corrupted_file(self) -> None:
         self.tmp.write_text("not json")
-        assert assistant._load_history() == []
+        loaded = assistant._load_history()
+        expected = [
+            assistant._normalize_history_entry(t)
+            for t in assistant.SAMPLE_TASKS
+        ]
+        assert loaded == expected
 
     def test_load_non_list_json(self) -> None:
         self.tmp.write_text('{"key": "value"}')
-        assert assistant._load_history() == []
+        loaded = assistant._load_history()
+        expected = [
+            assistant._normalize_history_entry(t)
+            for t in assistant.SAMPLE_TASKS
+        ]
+        assert loaded == expected
 
     def test_save_truncates_to_max(self) -> None:
         tasks = [_entry(f"task{i}") for i in range(assistant.MAX_HISTORY + 200)]

@@ -30,6 +30,67 @@ HISTORY_FILE = _KISS_DIR / "task_history.json"
 PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
 MAX_HISTORY = 1000
 
+SAMPLE_TASKS = [
+    {"task": "run 'uv run check --clean' and fix", "result": ""},
+    {
+        "task": (
+            "plan a trip to Yosemite over the weekend based on"
+            " road closures, warnings, hotel availability"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "find the cheapest afternoon non-stop flight"
+            " from SFO to NYC around March 15"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "run a command in the background, monitor output,"
+            " fix errors, and optimize the code iteratively"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "implement and validate results from a research"
+            " paper using relentless_coding_agent and kiss_agent"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "develop an automated evaluation framework for"
+            " agent performance against benchmarks"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "launch a browser, research technical innovations,"
+            " and compile a document incrementally"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "read all *.md files, check consistency with"
+            " the code, and fix any inconsistencies"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "remove duplicate or redundant tests while"
+            " ensuring coverage doesn't decrease"
+        ),
+        "result": "",
+    },
+]
+
+
 
 def _normalize_history_entry(raw: Any) -> dict[str, str]:
     if isinstance(raw, dict) and "task" in raw:
@@ -41,7 +102,7 @@ def _load_history() -> list[dict[str, str]]:
     if HISTORY_FILE.exists():
         try:
             data = json.loads(HISTORY_FILE.read_text())
-            if isinstance(data, list):
+            if isinstance(data, list) and data:
                 seen: set[str] = set()
                 result: list[dict[str, str]] = []
                 for t in data[:MAX_HISTORY]:
@@ -53,7 +114,9 @@ def _load_history() -> list[dict[str, str]]:
                 return result
         except (json.JSONDecodeError, OSError):
             pass
-    return []
+    entries = [_normalize_history_entry(t) for t in SAMPLE_TASKS]
+    _save_history(entries)
+    return entries
 
 
 def _save_history(entries: list[dict[str, str]]) -> None:
@@ -423,6 +486,27 @@ header{
   color:rgba(255,255,255,0.8);
 }
 .sidebar-empty{color:rgba(255,255,255,0.2);font-size:13px;padding:8px 0}
+.followup-bar{
+  max-width:820px;margin:16px auto 8px;padding:12px 18px;
+  background:rgba(188,140,255,0.04);
+  border:1px solid rgba(188,140,255,0.15);border-radius:12px;
+  cursor:pointer;transition:all 0.2s;display:flex;align-items:center;gap:10px;
+}
+.followup-bar:hover{
+  background:rgba(188,140,255,0.08);
+  border-color:rgba(188,140,255,0.3);
+  transform:translateY(-1px);
+  box-shadow:0 4px 20px rgba(188,140,255,0.08);
+}
+.fu-label{
+  font-size:10px;font-weight:600;text-transform:uppercase;
+  letter-spacing:0.04em;color:rgba(188,140,255,0.7);
+  white-space:nowrap;flex-shrink:0;
+}
+.fu-text{
+  font-size:13.5px;color:rgba(255,255,255,0.7);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
 #history-btn,#proposals-btn{
   background:none;border:1px solid rgba(255,255,255,0.07);border-radius:8px;
   color:rgba(255,255,255,0.35);font-size:12px;cursor:pointer;
@@ -549,6 +633,14 @@ function handleEvent(ev){
     var em=Math.floor(el/60);
     setReady('Done ('+(em>0?em+'m ':'')+el%60+'s)');
     loadTasks();loadProposed();break}
+  case'followup_suggestion':{
+    var fu=mkEl('div','followup-bar');
+    fu.innerHTML='<span class="fu-label">Suggested next</span>'
+      +'<span class="fu-text">'+esc(ev.text)+'</span>';
+    fu.addEventListener('click',function(){
+      inp.value=ev.text;inp.focus();
+    });
+    O.appendChild(fu);sb();break}
   case'task_error':{
     var err=mkEl('div','ev tr err');
     err.innerHTML='<div class="rl fail">ERROR</div>'+esc(ev.text||'Unknown error');
@@ -1006,6 +1098,34 @@ def run_chatbot(
         _save_proposals(proposals)
         printer.broadcast({"type": "proposed_updated"})
 
+    def generate_followup(task: str, result: str) -> None:
+        try:
+            agent = KISSAgent("Followup Proposer")
+            raw = agent.run(
+                model_name="gemini-2.0-flash",
+                prompt_template=(
+                    "A developer just completed this task:\n"
+                    "Task: {task}\n"
+                    "Result summary: {result}\n\n"
+                    "Suggest ONE short, concrete follow-up task they "
+                    "might want to do next. Return ONLY the task "
+                    "description as a single plain-text sentence."
+                ),
+                arguments={
+                    "task": task,
+                    "result": result[:500],
+                },
+                is_agentic=False,
+            )
+            suggestion = raw.strip().strip('"').strip("'")
+            if suggestion:
+                printer.broadcast({
+                    "type": "followup_suggestion",
+                    "text": suggestion,
+                })
+        except Exception:
+            pass
+
     def run_agent_thread(task: str, model_name: str) -> None:
         nonlocal running, agent_thread
         try:
@@ -1022,6 +1142,11 @@ def run_chatbot(
             )
             _set_latest_result(result or "")
             printer.broadcast({"type": "task_done"})
+            threading.Thread(
+                target=generate_followup,
+                args=(task, result or ""),
+                daemon=True,
+            ).start()
         except _StopRequested:
             _set_latest_result("(stopped)")
             printer.broadcast({"type": "task_stopped"})
