@@ -535,7 +535,7 @@ var allModels=[],selectedModel='',modelDDIdx=-1;
 var sidebar=document.getElementById('sidebar');
 var sidebarOverlay=document.getElementById('sidebar-overlay');
 var suggestionsEl=document.getElementById('suggestions');
-var running=false,autoScroll=true,userScrolled=false;
+var running=false,_scrollLock=false;
 var scrollRaf=0,state={thinkEl:null,txtEl:null};
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
 var acTimer=null,histIdx=-1,histCache=[];
@@ -567,17 +567,21 @@ function toggleSidebar(mode){
   sidebar.classList.toggle('open');
   sidebarOverlay.classList.toggle('open');
 }
+O.addEventListener('wheel',function(e){
+  if(running&&e.deltaY<0)_scrollLock=true;
+});
 O.addEventListener('scroll',function(){
-  var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
-  if(!atBottom&&running)userScrolled=true;
-  if(atBottom)userScrolled=false;
-  autoScroll=!userScrolled;
+  if(_scrollLock){
+    var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-150;
+    if(atBottom)_scrollLock=false;
+  }
 });
 function sb(){
-  if(autoScroll&&!scrollRaf){scrollRaf=requestAnimationFrame(function(){
-    O.scrollTop=O.scrollHeight;scrollRaf=0;
+  if(!_scrollLock&&!scrollRaf){scrollRaf=requestAnimationFrame(function(){
+    O.scrollTo({top:O.scrollHeight,behavior:'instant'});scrollRaf=0;
   });}
 }
+new MutationObserver(function(){sb()}).observe(O,{childList:true,subtree:true,characterData:true});
 function startTimer(){
   t0=Date.now();
   if(timerIv)clearInterval(timerIv);
@@ -596,7 +600,7 @@ function showSpinner(msg){
   removeSpinner();
   var sp=mkEl('div','spinner');
   sp.id='wait-spinner';
-  sp.textContent=msg||'Working\u2026';
+  sp.textContent=msg||'Waiting ...';
   O.appendChild(sp);sb();
 }
 function setReady(label){
@@ -620,14 +624,15 @@ function connectSSE(){
 }
 function handleEvent(ev){
   var t=ev.type;
-  if(t==='thinking_start'||t==='text_delta'||t==='tool_call'
+  if(t==='thinking_start'||t==='thinking_delta'||t==='text_delta'
+    ||t==='tool_call'||t==='tool_result'||t==='system_output'
     ||t==='task_done'||t==='task_error'||t==='task_stopped')removeSpinner();
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
   case'proposed_updated':loadProposed();loadWelcome();break;
   case'clear':
     O.innerHTML='';state.thinkEl=null;state.txtEl=null;
-    autoScroll=true;userScrolled=false;showSpinner();break;
+    _scrollLock=false;showSpinner();break;
   case'task_done':{
     var el=t0?Math.floor((Date.now()-t0)/1000):0;
     var em=Math.floor(el/60);
@@ -653,9 +658,8 @@ function handleEvent(ev){
     setReady('Stopped');loadTasks();loadProposed();break}
   default:
     handleOutputEvent(ev,O,state);
-    if(t==='tool_call'&&running)showSpinner('Running tool\u2026');
-    if(t==='tool_result'&&running)showSpinner();
-    if(t==='thinking_end'&&running)showSpinner();
+    if(running&&(t==='tool_call'||t==='tool_result'||t==='thinking_end'
+      ||t==='text_end'||t==='system_output'))showSpinner();
   }
   sb();
 }
