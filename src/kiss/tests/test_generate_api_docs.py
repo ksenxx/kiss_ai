@@ -10,7 +10,7 @@ from kiss.scripts.generate_api_docs import (
     ClassInfo,
     FuncInfo,
     ModuleDoc,
-    _escape_pipe,
+    ParsedDoc,
     _extract_class,
     _extract_function,
     _extract_public_from_file,
@@ -19,7 +19,7 @@ from kiss.scripts.generate_api_docs import (
     _format_annotation,
     _format_arg,
     _format_func_sig,
-    _get_docstring,
+    _get_summary,
     _has_decorator,
     _heading_depth,
     _module_to_path,
@@ -112,26 +112,26 @@ class TestFormatFuncSig:
         assert _format_func_sig(func) == "() -> int"
 
 
-class TestGetDocstring:
+class TestGetSummary:
     def test_no_docstring(self) -> None:
         tree = ast.parse("x = 1")
-        assert _get_docstring(tree) == ""
+        assert _get_summary(tree) == ""
 
     def test_module_docstring(self) -> None:
         tree = ast.parse('"""Hello world."""\nx = 1')
-        assert _get_docstring(tree) == "Hello world."
+        assert _get_summary(tree) == "Hello world."
 
     def test_multiline_returns_first_line(self) -> None:
         tree = ast.parse('"""First line.\n\nMore details."""\nx = 1')
-        assert _get_docstring(tree) == "First line."
+        assert _get_summary(tree) == "First line."
 
     def test_class_docstring(self) -> None:
         tree = ast.parse('class Foo:\n    """My class."""\n    pass')
-        assert _get_docstring(tree.body[0]) == "My class."  # type: ignore[arg-type]
+        assert _get_summary(tree.body[0]) == "My class."  # type: ignore[arg-type]
 
     def test_empty_body(self) -> None:
         func = ast.parse("def f(): pass").body[0]
-        assert _get_docstring(func) == ""  # type: ignore[arg-type]
+        assert _get_summary(func) == ""  # type: ignore[arg-type]
 
 
 class TestHasDecorator:
@@ -171,7 +171,7 @@ class TestExtractClass:
         assert "(x: int) -> None" in cls.init_sig
         assert len(cls.methods) == 1
         assert cls.methods[0].name == "bar"
-        assert cls.methods[0].doc == "Do bar."
+        assert cls.methods[0].parsed_doc.summary == "Do bar."
 
     def test_class_with_bases(self) -> None:
         tree = ast.parse("class Foo(Bar, Baz): pass")
@@ -189,7 +189,7 @@ class TestExtractFunction:
         tree = ast.parse("def foo(x: int) -> str:\n    '''Do foo.'''\n    return ''")
         func = _extract_function(tree.body[0])  # type: ignore[arg-type]
         assert func.name == "foo"
-        assert func.doc == "Do foo."
+        assert func.parsed_doc.summary == "Do foo."
         assert not func.is_async
         assert "(x: int) -> str" in func.signature
 
@@ -307,18 +307,10 @@ class TestExtractPublicFromFile:
 
 class TestSlug:
     def test_basic(self) -> None:
-        assert _slug("kiss.core.kiss_agent") == "kisscorekiss-agent"
+        assert _slug("kiss.core.kiss_agent") == "kisscorekiss_agent"
 
     def test_spaces(self) -> None:
         assert _slug("hello world") == "hello-world"
-
-
-class TestEscapePipe:
-    def test_escape(self) -> None:
-        assert _escape_pipe("a|b") == "a\\|b"
-
-    def test_no_pipe(self) -> None:
-        assert _escape_pipe("abc") == "abc"
 
 
 class TestHeadingDepth:
@@ -353,7 +345,7 @@ class TestRenderClass:
         cls = ClassInfo(
             name="Foo", bases=["Bar"], doc="A foo.",
             init_sig="(x: int)", methods=[
-                FuncInfo(name="do_it", signature="() -> str", doc="Does it."),
+                FuncInfo(name="do_it", signature="() -> str", parsed_doc=ParsedDoc("Does it.")),
             ],
         )
         lines: list[str] = []
@@ -368,7 +360,7 @@ class TestRenderClass:
     def test_async_method(self) -> None:
         cls = ClassInfo(
             name="Foo", bases=[], doc="", init_sig="",
-            methods=[FuncInfo(name="bar", signature="()", doc="", is_async=True)],
+            methods=[FuncInfo(name="bar", signature="()", parsed_doc=ParsedDoc(""), is_async=True)],
         )
         lines: list[str] = []
         _render_class(lines, cls, 4)
@@ -386,7 +378,7 @@ class TestRenderClass:
 
 class TestRenderFunction:
     def test_renders_sync(self) -> None:
-        func = FuncInfo(name="foo", signature="(x: int) -> str", doc="Does foo.")
+        func = FuncInfo(name="foo", signature="(x: int) -> str", parsed_doc=ParsedDoc("Does foo."))
         lines: list[str] = []
         _render_function(lines, func)
         text = "\n".join(lines)
@@ -394,7 +386,7 @@ class TestRenderFunction:
         assert "Does foo." in text
 
     def test_renders_async(self) -> None:
-        func = FuncInfo(name="bar", signature="()", doc="", is_async=True)
+        func = FuncInfo(name="bar", signature="()", parsed_doc=ParsedDoc(""), is_async=True)
         lines: list[str] = []
         _render_function(lines, func)
         text = "\n".join(lines)

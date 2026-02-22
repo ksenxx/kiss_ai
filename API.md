@@ -1993,7 +1993,7 @@ ______________________________________________________________________
 **`run_chatbot`**
 
 ```python
-def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', subtitle: str = 'Interactive Agent', work_dir: str | None = None, default_model: str = '', agent_kwargs: dict[str, Any] | None = None) -> None
+def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', subtitle: str = 'Interactive Agent', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None
 ```
 
 Run a browser-based chatbot UI for any RelentlessAgent-based agent.
