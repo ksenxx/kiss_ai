@@ -284,16 +284,16 @@ Adds a message to the conversation state.
 **`extract_input_output_token_counts_from_response`**
 
 ```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]
+extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
 ```
 
-Extracts input and output token counts from an API response.
+Extracts token counts from an API response.
 
 **Args:**
 
 - `response`: The raw API response object.
 
-**Returns:** tuple\[int, int\]: A tuple of (input_tokens, output_tokens).
+**Returns:** tuple\[int, int, int, int\]: (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
 
 **`get_embedding`**
 
@@ -339,17 +339,8 @@ Container for model metadata including pricing and capabilities.
 **Constructor:**
 
 ```python
-ModelInfo(context_length: int, input_price_per_million: float, output_price_per_million: float, is_function_calling_supported: bool, is_embedding_supported: bool, is_generation_supported: bool)
+ModelInfo(context_length: int, input_price_per_million: float, output_price_per_million: float, is_function_calling_supported: bool, is_embedding_supported: bool, is_generation_supported: bool, cache_read_price_per_million: float | None = None, cache_write_price_per_million: float | None = None)
 ```
-
-**Args:**
-
-- `context_length`: Maximum context window size in tokens.
-- `input_price_per_million`: Cost per million input tokens in USD.
-- `output_price_per_million`: Cost per million output tokens in USD.
-- `is_function_calling_supported`: Whether the model supports function calling.
-- `is_embedding_supported`: Whether the model supports embedding generation.
-- `is_generation_supported`: Whether the model supports text generation.
 
 **`is_model_flaky`**
 
@@ -414,7 +405,7 @@ def get_most_expensive_model(fc_only: bool = True) -> str
 **`calculate_cost`**
 
 ```python
-def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int) -> float
+def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int, num_cache_read_tokens: int = 0, num_cache_write_tokens: int = 0) -> float
 ```
 
 Calculates the cost in USD for the given token counts.
@@ -422,8 +413,10 @@ Calculates the cost in USD for the given token counts.
 **Args:**
 
 - `model_name`: Name of the model (with or without provider prefix).
-- `num_input_tokens`: Number of input tokens.
+- `num_input_tokens`: Number of non-cached input tokens.
 - `num_output_tokens`: Number of output tokens.
+- `num_cache_read_tokens`: Number of tokens read from cache.
+- `num_cache_write_tokens`: Number of tokens written to cache.
 
 **Returns:** float: Cost in USD, or 0.0 if pricing is not available for the model.
 
@@ -535,16 +528,12 @@ Add a message to the conversation state.
 **`extract_input_output_token_counts_from_response`**
 
 ```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]
+extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
 ```
 
-Extract input and output token counts from an API response.
+Extract token counts from an API response.
 
-**Args:**
-
-- `response`: The raw API response object.
-
-**Returns:** A tuple of (input_tokens, output_tokens) counts. Returns (0, 0) if usage information is not available.
+**Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
 
 **`get_embedding`**
 
@@ -654,16 +643,12 @@ Adds a message to the conversation state.
 **`extract_input_output_token_counts_from_response`**
 
 ```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]
+extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
 ```
 
-Extracts input and output token counts from an API response.
+Extracts token counts from an Anthropic API response.
 
-**Args:**
-
-- `response`: The raw Anthropic API response object.
-
-**Returns:** tuple\[int, int\]: A tuple of (input_tokens, output_tokens).
+**Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
 
 **`get_embedding`**
 
@@ -771,16 +756,12 @@ Adds a message to the conversation state.
 **`extract_input_output_token_counts_from_response`**
 
 ```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int]
+extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
 ```
 
-Extracts input and output token counts from an API response.
+Extracts token counts from a Gemini API response.
 
-**Args:**
-
-- `response`: The raw Gemini API response object.
-
-**Returns:** tuple\[int, int\]: A tuple of (input_tokens, output_tokens).
+**Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
 
 **`get_embedding`**
 

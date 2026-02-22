@@ -584,19 +584,25 @@ class OpenAICompatibleModel(Model):
             content = f"{content}\n\n{self.usage_info_for_messages}"
         self.conversation.append({"role": role, "content": content})
 
-    def extract_input_output_token_counts_from_response(self, response: Any) -> tuple[int, int]:
-        """Extract input and output token counts from an API response.
-
-        Args:
-            response: The raw API response object.
+    def extract_input_output_token_counts_from_response(
+        self, response: Any
+    ) -> tuple[int, int, int, int]:
+        """Extract token counts from an API response.
 
         Returns:
-            A tuple of (input_tokens, output_tokens) counts. Returns (0, 0) if
-            usage information is not available.
+            (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
+            For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens
+            is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
         """
         if hasattr(response, "usage") and response.usage:
-            return response.usage.prompt_tokens or 0, response.usage.completion_tokens or 0
-        return 0, 0
+            prompt_tokens = response.usage.prompt_tokens or 0
+            completion_tokens = response.usage.completion_tokens or 0
+            cached_tokens = 0
+            details = getattr(response.usage, "prompt_tokens_details", None)
+            if details:
+                cached_tokens = getattr(details, "cached_tokens", 0) or 0
+            return prompt_tokens - cached_tokens, completion_tokens, cached_tokens, 0
+        return 0, 0, 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generate an embedding vector for the given text.

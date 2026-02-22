@@ -68,8 +68,12 @@ class ClaudeCodingAgent(Base):
         self.max_budget = max_budget or config_module.DEFAULT_CONFIG.agent.max_agent_budget
         self.input_tokens_used: int = 0
         self.output_tokens_used: int = 0
+        self.cache_read_tokens_used: int = 0
+        self.cache_write_tokens_used: int = 0
         self.last_step_input_tokens: int = 0
         self.last_step_output_tokens: int = 0
+        self.last_step_cache_read_tokens: int = 0
+        self.last_step_cache_write_tokens: int = 0
 
     def _check_path_permission(
         self, path_str: str, allowed_paths: list[Path]
@@ -109,18 +113,30 @@ class ClaudeCodingAgent(Base):
         evt = event.event
         evt_type = evt.get("type", "")
         if evt_type == "message_start":
-            self.input_tokens_used += evt.get("message", {}).get("usage", {}).get("input_tokens", 0)
+            usage = evt.get("message", {}).get("usage", {})
+            self.input_tokens_used += usage.get("input_tokens", 0)
+            self.cache_read_tokens_used += usage.get("cache_read_input_tokens", 0)
+            self.cache_write_tokens_used += usage.get("cache_creation_input_tokens", 0)
         elif evt_type == "message_delta":
             self.output_tokens_used += evt.get("usage", {}).get("output_tokens", 0)
-        self.total_tokens_used = self.input_tokens_used + self.output_tokens_used
+        self.total_tokens_used = (
+            self.input_tokens_used + self.output_tokens_used
+            + self.cache_read_tokens_used + self.cache_write_tokens_used
+        )
 
     def _update_step_cost(self) -> None:
         step_input = self.input_tokens_used - self.last_step_input_tokens
         step_output = self.output_tokens_used - self.last_step_output_tokens
+        step_cache_read = self.cache_read_tokens_used - self.last_step_cache_read_tokens
+        step_cache_write = self.cache_write_tokens_used - self.last_step_cache_write_tokens
         self.last_step_input_tokens = self.input_tokens_used
         self.last_step_output_tokens = self.output_tokens_used
-        if step_input > 0 or step_output > 0:
-            step_cost = calculate_cost(self.model_name, step_input, step_output)
+        self.last_step_cache_read_tokens = self.cache_read_tokens_used
+        self.last_step_cache_write_tokens = self.cache_write_tokens_used
+        if step_input > 0 or step_output > 0 or step_cache_read > 0 or step_cache_write > 0:
+            step_cost = calculate_cost(
+                self.model_name, step_input, step_output, step_cache_read, step_cache_write
+            )
             self.budget_used += step_cost
             Base.global_budget_used += step_cost
 

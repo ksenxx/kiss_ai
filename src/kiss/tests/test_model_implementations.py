@@ -12,6 +12,7 @@ from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model_info import (
     MODEL_INFO,
+    _mi,
     calculate_cost,
     get_flaky_reason,
     get_max_context_length,
@@ -262,6 +263,136 @@ class TestModelInfo:
 
         assert get_required_api_key_for_model("minimax-m2.5") == "MINIMAX_API_KEY"
         assert get_required_api_key_for_model("minimax-m2.5-lightning") == "MINIMAX_API_KEY"
+
+
+class TestCachePricing:
+    def test_anthropic_model_has_cache_pricing(self):
+        info = MODEL_INFO["claude-sonnet-4"]
+        assert info.cache_read_price_per_1M == pytest.approx(0.30)
+        assert info.cache_write_price_per_1M == pytest.approx(3.75)
+
+    def test_anthropic_cache_pricing_formula(self):
+        for name, info in MODEL_INFO.items():
+            if not name.startswith("claude-"):
+                continue
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
+            assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
+
+    def test_openai_model_has_cache_read_pricing(self):
+        info = MODEL_INFO["gpt-4.1-mini"]
+        assert info.cache_read_price_per_1M == pytest.approx(0.20)
+        assert info.cache_write_price_per_1M is None
+
+    def test_openai_cache_read_pricing_formula(self):
+        for name, info in MODEL_INFO.items():
+            if not name.startswith(("gpt-", "o1", "o3", "o4", "codex-", "computer-use")):
+                continue
+            if name.startswith(("text-embedding", "openai/")):
+                continue
+            if not info.is_generation_supported:
+                continue
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.5)
+
+    def test_embedding_models_no_cache_pricing(self):
+        for name in ("text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M is None
+            assert info.cache_write_price_per_1M is None
+
+    def test_openrouter_models_no_cache_pricing(self):
+        for name, info in MODEL_INFO.items():
+            if name.startswith("openrouter/"):
+                assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
+                assert info.cache_write_price_per_1M is None, (
+                    f"{name} should not have cache pricing"
+                )
+
+    def test_calculate_cost_with_cache_tokens(self):
+        cost = calculate_cost("claude-sonnet-4", 500_000, 100_000, 400_000, 100_000)
+        expected = (
+            500_000 * 3.00
+            + 100_000 * 15.00
+            + 400_000 * 0.30
+            + 100_000 * 3.75
+        ) / 1_000_000
+        assert cost == pytest.approx(expected)
+
+    def test_calculate_cost_cache_tokens_default_zero(self):
+        cost_no_cache = calculate_cost("claude-sonnet-4", 1_000_000, 0)
+        cost_explicit_zero = calculate_cost("claude-sonnet-4", 1_000_000, 0, 0, 0)
+        assert cost_no_cache == cost_explicit_zero
+
+    def test_calculate_cost_openai_cache_read_discount(self):
+        full_cost = calculate_cost("gpt-4.1-mini", 1_000_000, 0)
+        cached_cost = calculate_cost("gpt-4.1-mini", 0, 0, 1_000_000, 0)
+        assert cached_cost == pytest.approx(full_cost * 0.5)
+
+    def test_calculate_cost_unknown_model_with_cache_tokens(self):
+        assert calculate_cost("unknown-model-xyz", 1000, 1000, 500, 500) == 0.0
+
+    def test_model_info_explicit_cache_prices_override_loop(self):
+        info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
+        assert info.cache_read_price_per_1M == 1.0
+        assert info.cache_write_price_per_1M == 2.0
+
+
+@requires_anthropic_api_key
+class TestAnthropicCacheControl:
+    @pytest.mark.timeout(60)
+    def test_cache_control_added_to_tools(self):
+        m = model("claude-haiku-4-5")
+        assert isinstance(m, AnthropicModel)
+        m.initialize("test")
+
+        def dummy_tool(x: str) -> str:
+            """A dummy tool."""
+            return x
+
+        tools = m._build_anthropic_tools_schema({"dummy_tool": dummy_tool})
+        kwargs = m._build_create_kwargs(tools=tools)
+        assert kwargs["tools"][-1].get("cache_control") == {"type": "ephemeral"}
+
+    @pytest.mark.timeout(60)
+    def test_cache_control_added_to_last_user_message_string(self):
+        m = model("claude-haiku-4-5")
+        assert isinstance(m, AnthropicModel)
+        m.initialize("test prompt")
+        m._build_create_kwargs()
+        msg = m.conversation[0]
+        assert isinstance(msg["content"], list)
+        assert msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert msg["content"][0]["text"] == "test prompt"
+
+    @pytest.mark.timeout(60)
+    def test_cache_control_added_to_last_user_message_list(self):
+        m = model("claude-haiku-4-5")
+        assert isinstance(m, AnthropicModel)
+        m.initialize("test")
+        m._build_create_kwargs()
+        m.conversation.append({"role": "assistant", "content": "reply"})
+        m.conversation.append({
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+        })
+        m._build_create_kwargs()
+        last_user = m.conversation[-1]
+        assert last_user["content"][-1].get("cache_control") == {"type": "ephemeral"}
+
+    @pytest.mark.timeout(60)
+    def test_cache_control_disabled_via_model_config(self):
+        m = model("claude-haiku-4-5", model_config={"enable_cache": False})
+        assert isinstance(m, AnthropicModel)
+        m.initialize("test prompt")
+
+        def dummy_tool(x: str) -> str:
+            """A dummy tool."""
+            return x
+
+        tools = m._build_anthropic_tools_schema({"dummy_tool": dummy_tool})
+        kwargs = m._build_create_kwargs(tools=tools)
+        assert "cache_control" not in kwargs["tools"][-1]
+        msg = m.conversation[0]
+        assert isinstance(msg["content"], str)
 
 
 class TestModelConfigBaseUrlOverride:

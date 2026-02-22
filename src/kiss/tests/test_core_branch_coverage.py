@@ -89,7 +89,7 @@ class TestModelHelpers:
                 pass
 
             def extract_input_output_token_counts_from_response(self, response):
-                return 0, 0
+                return 0, 0, 0, 0
 
             def get_embedding(self, text, embedding_model=None):
                 return []
