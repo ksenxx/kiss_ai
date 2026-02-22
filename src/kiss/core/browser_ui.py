@@ -4,6 +4,7 @@ import json
 import queue
 import socket
 import threading
+import time
 from typing import Any
 
 import yaml
@@ -68,7 +69,7 @@ OUTPUT_CSS = r"""
   white-space:pre-wrap;word-break:break-word;
 }
 .think .cnt.hidden{display:none}
-.txt{font-size:14px;white-space:pre-wrap;word-break:break-word;padding:2px 0;line-height:1.7}
+.txt{font-size:8px;white-space:pre-wrap;word-break:break-word;padding:2px 0;line-height:1.4}
 .tc{
   border:1px solid var(--border);border-radius:8px;margin:10px 0;
   overflow:hidden;background:var(--surface);transition:box-shadow .2s;
@@ -144,6 +145,14 @@ OUTPUT_CSS = r"""
   font-size:13px;color:var(--dim);font-family:'SF Mono','Fira Code',monospace;
   white-space:pre-wrap;word-break:break-word;padding:2px 0;
 }
+.bash-panel{
+  background:#08080a;border:1px solid rgba(255,255,255,0.06);
+  border-radius:6px;margin:2px 0 8px;padding:10px 12px;
+  max-height:300px;overflow-y:auto;
+  font-family:'SF Mono','Fira Code','Cascadia Code',monospace;
+  font-size:10px;line-height:1.5;color:rgba(255,255,255,0.65);
+  white-space:pre-wrap;word-break:break-word;
+}
 .usage{
   border:1px solid var(--border);border-radius:4px;margin:6px 0;
   padding:4px 12px;background:var(--surface);font-size:11px;
@@ -214,6 +223,8 @@ function handleOutputEvent(ev,O,state){
     state.txtEl.textContent+=(ev.text||'').replace(/\n\n+/g,'\n');break;
   case'text_end':state.txtEl=null;break;
   case'tool_call':{
+    if(state.bashPanel&&state.bashBuf){state.bashPanel.textContent+=state.bashBuf;state.bashBuf=''}
+    state.bashPanel=null;state.bashRaf=0;
     var c=mkEl('div','ev tc');
     var h='<span class="chv open">\u25B6</span><span class="tn">'+esc(ev.name)+'</span>';
     if(ev.path)h+='<span class="tp"> '+esc(ev.path)+'</span>';
@@ -232,19 +243,34 @@ function handleOutputEvent(ev,O,state){
     c.innerHTML='<div class="tc-h" onclick="toggleTC(this)">'+h+'</div>'
       +'<div class="tc-b'+(b?'':' hide')+'">'+body+'</div>';
     O.appendChild(c);
+    if(ev.command){var bp=mkEl('div','bash-panel');O.appendChild(bp);state.bashPanel=bp}
     if(typeof hljs!=='undefined')c.querySelectorAll('pre code').forEach(
       function(bl){hljs.highlightElement(bl)});
     break}
   case'tool_result':{
+    if(state.bashPanel&&state.bashBuf){state.bashPanel.textContent+=state.bashBuf;state.bashBuf=''}
+    var hadBash=!!state.bashPanel;
+    state.bashPanel=null;state.bashRaf=0;
+    if(hadBash&&!ev.is_error)break;
     var r=mkEl('div','ev tr'+(ev.is_error?' err':''));
     var lb=ev.is_error?'FAILED':'OK';
     var lc2=ev.is_error?'fail':'ok';
     r.innerHTML='<div class="rl '+lc2+'">'+lb+'</div>'+esc(ev.content);
     O.appendChild(r);break}
   case'system_output':{
-    var s=mkEl('div','ev sys');
-    s.textContent=(ev.text||'').replace(/\n\n+/g,'\n');
-    O.appendChild(s);break}
+    if(state.bashPanel){
+      if(!state.bashBuf)state.bashBuf='';
+      state.bashBuf+=(ev.text||'');
+      if(!state.bashRaf){state.bashRaf=requestAnimationFrame(function(){
+        if(state.bashPanel)state.bashPanel.textContent+=state.bashBuf;
+        state.bashBuf='';state.bashRaf=0;
+        if(state.bashPanel)state.bashPanel.scrollTop=state.bashPanel.scrollHeight;
+      })}
+    }else{
+      var s=mkEl('div','ev sys');
+      s.textContent=(ev.text||'').replace(/\n\n+/g,'\n');
+      O.appendChild(s);
+    }break}
   case'result':{
     var rc=mkEl('div','ev rc');
     var rb='';
@@ -330,7 +356,7 @@ footer{
 var O=document.getElementById('out'),D=document.getElementById('dot'),
   ST=document.getElementById('stxt'),EC=document.getElementById('evcnt'),
   EL=document.getElementById('elapsed');
-var ec=0,auto=true,userScrolled=false,scrollRaf=0,state={{thinkEl:null,txtEl:null}};
+var ec=0,auto=true,userScrolled=false,scrollRaf=0,state={{thinkEl:null,txtEl:null,bashPanel:null}};
 var t0=Date.now();
 O.addEventListener('scroll',function(){{
   var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
@@ -365,12 +391,22 @@ class BaseBrowserPrinter(Printer):
         self._current_block_type = ""
         self._tool_name = ""
         self._tool_json_buffer = ""
+        self._bash_buffer: list[str] = []
+        self._bash_last_flush = 0.0
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
         self._current_block_type = ""
         self._tool_name = ""
         self._tool_json_buffer = ""
+        self._bash_buffer.clear()
+
+    def _flush_bash(self) -> None:
+        if self._bash_buffer:
+            text = "".join(self._bash_buffer)
+            self._bash_buffer.clear()
+            self._bash_last_flush = time.monotonic()
+            self.broadcast({"type": "system_output", "text": text})
 
     @staticmethod
     def _parse_result_yaml(raw: str) -> dict[str, Any] | None:
@@ -467,13 +503,17 @@ class BaseBrowserPrinter(Printer):
             self.broadcast({"type": "usage_info", "text": str(content).strip()})
             return ""
         if type == "bash_stream":
-            self.broadcast({"type": "system_output", "text": str(content)})
+            self._bash_buffer.append(str(content))
+            if time.monotonic() - self._bash_last_flush >= 0.1:
+                self._flush_bash()
             return ""
         if type == "tool_call":
+            self._flush_bash()
             self.broadcast({"type": "text_end"})
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
+            self._flush_bash()
             self.broadcast({
                 "type": "tool_result",
                 "content": truncate_result(str(content)),
