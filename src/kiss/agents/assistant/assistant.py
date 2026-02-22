@@ -28,6 +28,7 @@ from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_mo
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.json"
 PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
+MODEL_USAGE_FILE = _KISS_DIR / "model_usage.json"
 MAX_HISTORY = 1000
 
 SAMPLE_TASKS = [
@@ -149,6 +150,27 @@ def _save_proposals(proposals: list[str]) -> None:
     try:
         _KISS_DIR.mkdir(parents=True, exist_ok=True)
         PROPOSALS_FILE.write_text(json.dumps(proposals))
+    except OSError:
+        pass
+
+
+def _load_model_usage() -> dict[str, int]:
+    if MODEL_USAGE_FILE.exists():
+        try:
+            data = json.loads(MODEL_USAGE_FILE.read_text())
+            if isinstance(data, dict):
+                return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float))}
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _record_model_usage(model: str) -> None:
+    usage = _load_model_usage()
+    usage[model] = usage.get(model, 0) + 1
+    try:
+        _KISS_DIR.mkdir(parents=True, exist_ok=True)
+        MODEL_USAGE_FILE.write_text(json.dumps(usage))
     except OSError:
         pass
 
@@ -741,11 +763,30 @@ function modelVendor(name){
   if(name.startsWith('openrouter/'))return'OpenRouter';
   return'Together AI';
 }
+function renderModelItem(m){
+  var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
+  var price='$'+m.inp.toFixed(2)+' / $'+m.out.toFixed(2);
+  d.innerHTML='<span>'+esc(m.name)+'</span><span class="model-cost">'+price+'</span>';
+  d.addEventListener('click',function(){selectModel(m.name)});
+  return d;
+}
 function renderModelList(q){
   modelList.innerHTML='';modelDDIdx=-1;
-  var ql=q.toLowerCase(),lastVendor='';
+  var ql=q.toLowerCase();
+  var used=[],rest=[];
   allModels.forEach(function(m){
     if(ql&&m.name.toLowerCase().indexOf(ql)<0)return;
+    if(m.uses>0)used.push(m);else rest.push(m);
+  });
+  used.sort(function(a,b){return b.uses-a.uses});
+  if(used.length){
+    var hdr=mkEl('div','model-group-hdr');
+    hdr.textContent='Recently Used';
+    modelList.appendChild(hdr);
+    used.forEach(function(m){modelList.appendChild(renderModelItem(m))});
+  }
+  var lastVendor='';
+  rest.forEach(function(m){
     var v=modelVendor(m.name);
     if(v!==lastVendor){
       var hdr=mkEl('div','model-group-hdr');
@@ -753,11 +794,7 @@ function renderModelList(q){
       modelList.appendChild(hdr);
       lastVendor=v;
     }
-    var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
-    var price='$'+m.inp.toFixed(2)+' / $'+m.out.toFixed(2);
-    d.innerHTML='<span>'+esc(m.name)+'</span><span class="model-cost">'+price+'</span>';
-    d.addEventListener('click',function(){selectModel(m.name)});
-    modelList.appendChild(d);
+    modelList.appendChild(renderModelItem(m));
   });
 }
 function selectModel(name){
@@ -809,7 +846,7 @@ function submitTask(){
     body:JSON.stringify({task:task,model:selectedModel})
   }).then(function(r){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
-    inp.value='';
+    inp.value='';loadModels();
   }).catch(function(){setReady('Error');alert('Network error')});
 }
 btn.addEventListener('click',submitTask);
@@ -1291,6 +1328,7 @@ def run_chatbot(
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
         selected_model = model
+        _record_model_usage(model)
         if not task:
             with running_lock:
                 running = False
@@ -1392,6 +1430,7 @@ def run_chatbot(
         return JSONResponse({"suggestion": suggestion})
 
     async def models_endpoint(request: Request) -> JSONResponse:
+        usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
         for name in get_available_models():
             info = MODEL_INFO.get(name)
@@ -1400,6 +1439,7 @@ def run_chatbot(
                     "name": name,
                     "inp": info.input_price_per_1M,
                     "out": info.output_price_per_1M,
+                    "uses": usage.get(name, 0),
                 })
         models_list.sort(key=lambda m: (
             _model_vendor_order(str(m["name"])),
