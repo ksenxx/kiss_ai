@@ -48,7 +48,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Assistant
 
-Install from PyPI with pip and launch the web based interface to interact with KISS.  You must provide at least one of API keys.:
+Install from PyPI with pip and launch the web based interface to interact with KISS. You must provide at least one of API keys.:
 
 ```bash
 pip install kiss-agent-framework

@@ -97,6 +97,32 @@ def _emb(ctx: int, inp: float) -> ModelInfo:
     return ModelInfo(ctx, inp, 0.0, False, True, False)
 
 
+_OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
+_TOGETHER_PREFIXES = (
+    "meta-llama/", "Qwen/", "MiniMaxAI/", "mistralai/", "deepseek-ai/", "deepcogito/",
+    "google/gemma", "moonshotai/", "nvidia/", "zai-org/", "openai/gpt-oss",
+    "arcee-ai/", "essentialai/", "BAAI/", "intfloat/",
+)
+
+
+def _openai_compatible(
+    model_name: str,
+    base_url: str,
+    api_key: str,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+) -> "OpenAICompatibleModel":
+    if OpenAICompatibleModel is None:
+        raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
+    return OpenAICompatibleModel(
+        model_name=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        model_config=model_config,
+        token_callback=token_callback,
+    )
+
+
 MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenAI models - GPT-5.x series (Standard tier pricing from platform.openai.com/docs/pricing)
@@ -203,7 +229,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Google Gemini Embedding models (pricing from ai.google.dev/pricing)
     # ==========================================================================
-    "gemini-embedding-001": _emb(8192, 0.15),  # Newest embedding model
+    "gemini-embedding-001": _emb(2048, 0.15),  # Newest embedding model
     "text-embedding-004": _emb(2048, 0.00),  # 768 dimensions, free tier
     # ==========================================================================
     # MiniMax models (direct API - pricing from api.minimax.chat)
@@ -215,25 +241,21 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # Together AI models - Llama series (pricing from together.ai/pricing)
     # ==========================================================================
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": _mi(1048576, 0.27, 0.85),
-    "meta-llama/Llama-4-Scout-17B-16E-Instruct": _mi(327680, 0.18, 0.59),
     "meta-llama/Llama-3.3-70B-Instruct-Turbo": _mi(131072, 0.88, 0.88, fc=False),
-    "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),
-    "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),
+    "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),  # Dep 2026-03
+    "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),  # Dep 2026-03
     "meta-llama/Meta-Llama-3-8B-Instruct-Lite": _mi(8192, 0.10, 0.10, fc=False),
     "meta-llama/Llama-3-70b-chat-hf": _mi(8192, 0.88, 0.88, fc=False),
     # ==========================================================================
     # Together AI models - Qwen series (pricing from together.ai/pricing)
     # ==========================================================================
-    # Qwen3 series (from together.ai/pricing)
-    "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": _mi(256000, 2.00, 2.00),
+    "Qwen/Qwen3.5-397B-A17B": _mi(262144, 0.60, 3.60, fc=False),
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": _mi(262144, 2.00, 2.00),
     "Qwen/Qwen3-Coder-Next-FP8": _mi(262144, 0.50, 1.20),
-    "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),
+    "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),  # Dep 2026-03
     "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.20, 0.60, fc=False),
     "Qwen/Qwen3-Next-80B-A3B-Instruct": _mi(262144, 0.15, 1.50),
-    "Qwen/Qwen3-Next-80B-A3B-Thinking": _mi(262144, 0.15, 1.50, fc=False),
-    "Qwen/Qwen3-VL-32B-Instruct": _mi(256000, 0.50, 1.50, fc=False),  # Vision model
-    "Qwen/Qwen3-VL-8B-Instruct": _mi(262100, 0.30, 0.90, fc=False),  # Vision model
-    # Qwen2.5 series
+    "Qwen/Qwen3-VL-8B-Instruct": _mi(262144, 0.18, 0.68, fc=False),  # Vision model
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
     # ==========================================================================
     # Together AI models - Mistral series (most have unreliable function calling)
@@ -244,46 +266,39 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Together AI models - DeepSeek series (pricing from together.ai/pricing)
     # ==========================================================================
-    # DeepSeek R1 reasoning models (R1-0528 served as deepseek-ai/DeepSeek-R1)
-    "deepseek-ai/DeepSeek-R1": _mi(163839, 3.00, 7.00, fc=False),  # Reasoning model
-    # DeepSeek V3 series
-    "deepseek-ai/DeepSeek-V3-0324": _mi(163839, 1.25, 1.25, fc=False),
-    "deepseek-ai/DeepSeek-V3.1": _mi(128000, 0.60, 1.70, fc=False),
+    "deepseek-ai/DeepSeek-R1": _mi(163840, 3.00, 7.00, fc=False),  # Serves R1-0528
+    "deepseek-ai/DeepSeek-V3.1": _mi(131072, 0.60, 1.70, fc=False),
     # ==========================================================================
     # Together AI models - Other providers (pricing from together.ai/pricing)
     # ==========================================================================
+    # MiniMax (via Together AI)
+    "MiniMaxAI/MiniMax-M2.5": _mi(196608, 0.30, 1.20),
     # Google Gemma
     "google/gemma-3n-E4B-it": _mi(32768, 0.02, 0.04, fc=False),
-    "google/gemma-2b-it": _mi(8192, 0.10, 0.10, fc=False),  # Deprecated
-    # MoonshotAI Kimi (pricing from together.ai/pricing)
+    # MoonshotAI Kimi
     "moonshotai/Kimi-K2-Instruct": _mi(128000, 1.00, 3.00, fc=False),
-    "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),
-    "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # SLOW: thinking model
+    "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),  # Dep 2026-03
+    "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
     # Z.AI GLM models
-    "zai-org/GLM-5.0": _mi(200000, 1.00, 3.20),  # 744B MoE - FC via OpenRouter verified
+    "zai-org/GLM-5": _mi(202752, 1.00, 3.20),
     "zai-org/GLM-4.5-Air-FP8": _mi(131072, 0.20, 1.10),
-    "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),  # Enhanced agentic coding
+    "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),
     # OpenAI GPT-OSS models
-    "openai/gpt-oss-120b": _mi(128000, 0.15, 0.60, fc=False),
-    "openai/gpt-oss-20b": _mi(128000, 0.05, 0.20, fc=False),
-    # NVIDIA models
-    "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.10, 0.10, fc=False),
+    "openai/gpt-oss-120b": _mi(131072, 0.15, 0.60, fc=False),
+    "openai/gpt-oss-20b": _mi(131072, 0.05, 0.20, fc=False),
     # Arcee AI models
-    "arcee-ai/trinity-mini": _mi(32768, 0.04, 0.15, fc=False),
-    # Marin Community
-    "marin-community/marin-8b-instruct": _mi(4096, 0.10, 0.10, fc=False),
+    "arcee-ai/trinity-mini": _mi(128000, 0.04, 0.15, fc=False),
     # Essential AI
     "essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
     # ==========================================================================
     # Together AI models - Deep Cogito (pricing from together.ai/pricing)
     # ==========================================================================
-    "deepcogito/cogito-v2-1-671b": _mi(32768, 1.25, 1.25, fc=False),  # Hybrid reasoning
+    "deepcogito/cogito-v2-1-671b": _mi(163840, 1.25, 1.25, fc=False),
     # ==========================================================================
     # Together AI Embedding models (pricing from together.ai/pricing)
     # ==========================================================================
     "BAAI/bge-base-en-v1.5": _emb(512, 0.01),  # 768 dimensions
-    "Alibaba-NLP/gte-modernbert-base": _emb(8192, 0.08),  # 768 dimensions
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),  # 1024 dimensions
     # ==========================================================================
     # OpenRouter models - Aurora (free cloaked reasoning model)
@@ -306,7 +321,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Alibaba
     # ==========================================================================
-    "openrouter/alibaba/tongyi-deepresearch-30b-a3b": _mi(131072, 0.09, 0.40, fc=False),
+    "openrouter/alibaba/tongyi-deepresearch-30b-a3b": _mi(131072, 0.09, 0.45, fc=False),
     # ==========================================================================
     # OpenRouter models - Amazon Nova
     # ==========================================================================
@@ -325,9 +340,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     "openrouter/anthropic/claude-3-haiku": _mi(200000, 0.25, 1.25),
     "openrouter/anthropic/claude-3.5-haiku": _mi(200000, 0.80, 4.00),  # Deprecated
-    "openrouter/anthropic/claude-sonnet-4": _mi(200000, 3.00, 15.00),
-    "openrouter/anthropic/claude-sonnet-4.6": _mi(200000, 3.00, 15.00),
-    "openrouter/anthropic/claude-sonnet-4.5": _mi(200000, 3.00, 15.00),
+    "openrouter/anthropic/claude-sonnet-4": _mi(1000000, 3.00, 15.00),
+    "openrouter/anthropic/claude-sonnet-4.6": _mi(1000000, 3.00, 15.00),
+    "openrouter/anthropic/claude-sonnet-4.5": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-haiku-4.5": _mi(200000, 1.00, 5.00),
     "openrouter/anthropic/claude-opus-4": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.1": _mi(200000, 15.00, 75.00),
@@ -344,7 +359,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/bytedance-seed/seed-1.6": _mi(262144, 0.25, 2.00),
     "openrouter/bytedance-seed/seed-1.6-flash": _mi(262144, 0.075, 0.30),
     "openrouter/bytedance-seed/seed-2.0": _mi(262144, 0.30, 2.50),
-    "openrouter/bytedance-seed/seed-2.0-thinking": _mi(262144, 0.15, 0.60, fc=False),  # SLOW
     # ==========================================================================
     # OpenRouter models - Cohere (unreliable function calling)
     # ==========================================================================
@@ -361,11 +375,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # FLAKY: deepseek-chat can timeout; use deepseek-v3.2 instead
     # Reasoning models (R1 series) use <think> tags for chain-of-thought
     # ==========================================================================
-    "openrouter/deepseek/deepseek-chat": _mi(163840, 0.30, 1.20),  # FLAKY: can timeout
+    "openrouter/deepseek/deepseek-chat": _mi(163840, 0.32, 0.89),  # FLAKY: can timeout
     "openrouter/deepseek/deepseek-chat-v3-0324": _mi(163840, 0.19, 0.87, fc=False),
     "openrouter/deepseek/deepseek-chat-v3.1": _mi(32768, 0.15, 0.75, fc=False, gen=False),
     # DeepSeek R1 reasoning models (text-based tool calling enabled)
-    "openrouter/deepseek/deepseek-r1": _mi(163840, 0.70, 2.40),  # Reasoning model
+    "openrouter/deepseek/deepseek-r1": _mi(64000, 0.70, 2.50),  # Reasoning model
     "openrouter/deepseek/deepseek-r1-0528": _mi(163840, 0.40, 1.75),  # Reasoning model
     "openrouter/deepseek/deepseek-r1-turbo": _mi(163840, 0.35, 1.40),  # Faster reasoning
     # DeepSeek R1 distilled models (text-based tool calling enabled)
@@ -373,14 +387,14 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/deepseek/deepseek-r1-distill-qwen-7b": _mi(64000, 0.01, 0.02),
     "openrouter/deepseek/deepseek-r1-distill-llama-8b": _mi(131072, 0.01, 0.03),
     "openrouter/deepseek/deepseek-r1-distill-qwen-14b": _mi(131072, 0.02, 0.05),
-    "openrouter/deepseek/deepseek-r1-distill-qwen-32b": _mi(131072, 0.03, 0.08),
-    "openrouter/deepseek/deepseek-r1-distill-llama-70b": _mi(131072, 0.03, 0.11),
+    "openrouter/deepseek/deepseek-r1-distill-qwen-32b": _mi(32768, 0.29, 0.29),
+    "openrouter/deepseek/deepseek-r1-distill-llama-70b": _mi(131072, 0.70, 0.80),
     # DeepSeek V3 series
     "openrouter/deepseek/deepseek-v3": _mi(163840, 0.27, 1.10),  # Base V3 model
     "openrouter/deepseek/deepseek-v3.1-terminus": _mi(163840, 0.21, 0.79, fc=False, gen=False),
-    "openrouter/deepseek/deepseek-v3.2": _mi(163840, 0.25, 0.38),
-    "openrouter/deepseek/deepseek-v3.2-exp": _mi(163840, 0.21, 0.32),
-    "openrouter/deepseek/deepseek-v3.2-speciale": _mi(163840, 0.27, 0.41),  # Specialized variant
+    "openrouter/deepseek/deepseek-v3.2": _mi(163840, 0.26, 0.38),
+    "openrouter/deepseek/deepseek-v3.2-exp": _mi(163840, 0.27, 0.41),
+    "openrouter/deepseek/deepseek-v3.2-speciale": _mi(163840, 0.40, 1.20),  # Specialized variant
     # DeepSeek specialized models
     "openrouter/deepseek/deepseek-prover-v2": _mi(163840, 0.50, 2.18, fc=False),  # Math proofs
     "openrouter/deepseek/deepseek-coder-v2": _mi(131072, 0.14, 0.28, fc=False),  # Code generation
@@ -391,7 +405,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Google (pricing from ai.google.dev/pricing)
     # ==========================================================================
-    "openrouter/google/gemini-3.1-pro-preview": _mi(1048576, 2.50, 15.00),  # Latest Feb 2026
+    "openrouter/google/gemini-3.1-pro-preview": _mi(1048576, 2.00, 12.00),  # Latest Feb 2026
     "openrouter/google/gemini-3-pro-preview": _mi(1048576, 2.00, 12.00),
     "openrouter/google/gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
     "openrouter/google/gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
@@ -399,10 +413,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "openrouter/google/gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),  # Unreliable FC
     "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
-    "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.08, 0.30),
-    "openrouter/google/gemma-3-27b-it": _mi(131072, 0.04, 0.06, fc=False),
-    "openrouter/google/gemma-3-12b-it": _mi(131072, 0.03, 0.10, fc=False),
-    "openrouter/google/gemma-3-4b-it": _mi(96000, 0.02, 0.07, fc=False),
+    "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.075, 0.30),
+    "openrouter/google/gemma-3-27b-it": _mi(128000, 0.04, 0.15, fc=False),
+    "openrouter/google/gemma-3-12b-it": _mi(131072, 0.04, 0.13, fc=False),
+    "openrouter/google/gemma-3-4b-it": _mi(131072, 0.04, 0.08, fc=False),
     "openrouter/google/gemma-3n-e4b-it": _mi(32768, 0.02, 0.04, fc=False),
     # ==========================================================================
     # OpenRouter models - Kwaipilot
@@ -416,9 +430,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Meta Llama (most have unreliable function calling)
     # ==========================================================================
-    "openrouter/meta-llama/llama-3-70b-instruct": _mi(8192, 0.30, 0.40, fc=False),
-    "openrouter/meta-llama/llama-3-8b-instruct": _mi(8192, 0.03, 0.06, fc=False),
-    "openrouter/meta-llama/llama-3.1-405b-instruct": _mi(10000, 3.50, 3.50, fc=False, gen=False),
+    "openrouter/meta-llama/llama-3-70b-instruct": _mi(8192, 0.51, 0.74, fc=False),
+    "openrouter/meta-llama/llama-3-8b-instruct": _mi(8192, 0.03, 0.04, fc=False),
+    "openrouter/meta-llama/llama-3.1-405b-instruct": _mi(131000, 4.00, 4.00, fc=False, gen=False),
     "openrouter/meta-llama/llama-3.1-70b-instruct": _mi(131072, 0.40, 0.40, fc=False),
     "openrouter/meta-llama/llama-3.1-8b-instruct": _mi(16384, 0.02, 0.05, fc=False),
     "openrouter/meta-llama/llama-3.2-3b-instruct": _mi(131072, 0.02, 0.02, fc=False),
@@ -433,7 +447,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - LiquidAI
     # ==========================================================================
-    "openrouter/liquid/lfm2-8b-a1b": _mi(65536, 0.08, 0.16, fc=False),
+    "openrouter/liquid/lfm2-8b-a1b": _mi(32768, 0.01, 0.02, fc=False),
     "openrouter/liquid/lfm-2.5-1.2b-instruct": _mi(32768, 0.00, 0.00, fc=False),  # Free
     "openrouter/liquid/lfm-2.5-1.2b-thinking": _mi(32768, 0.00, 0.00, fc=False),  # Free
     # ==========================================================================
@@ -447,15 +461,15 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - Mistral (most have unreliable function calling)
     # ==========================================================================
     "openrouter/mistralai/codestral-2508": _mi(256000, 0.30, 0.90, fc=False),
-    "openrouter/mistralai/devstral-2512": _mi(262144, 0.05, 0.22, fc=False),
+    "openrouter/mistralai/devstral-2512": _mi(262144, 0.40, 2.00, fc=False),
     "openrouter/mistralai/devstral-medium": _mi(131072, 0.40, 2.00, fc=False, gen=False),
-    "openrouter/mistralai/devstral-small": _mi(128000, 0.07, 0.28, fc=False, gen=False),
+    "openrouter/mistralai/devstral-small": _mi(131072, 0.10, 0.30, fc=False, gen=False),
     "openrouter/mistralai/ministral-3b-2512": _mi(131072, 0.10, 0.10, fc=False),
     "openrouter/mistralai/ministral-8b-2512": _mi(262144, 0.15, 0.15, fc=False),
     "openrouter/mistralai/ministral-14b-2512": _mi(262144, 0.20, 0.20, fc=False),
     "openrouter/mistralai/ministral-3b": _mi(131072, 0.04, 0.04, fc=False),
     "openrouter/mistralai/ministral-8b": _mi(131072, 0.10, 0.10, fc=False),
-    "openrouter/mistralai/mistral-7b-instruct": _mi(32768, 0.03, 0.05, fc=False),
+    "openrouter/mistralai/mistral-7b-instruct": _mi(32768, 0.20, 0.20, fc=False),
     "openrouter/mistralai/mistral-large": _mi(128000, 2.00, 6.00, fc=False),
     "openrouter/mistralai/mistral-large-2411": _mi(131072, 2.00, 6.00, fc=False),
     "openrouter/mistralai/mistral-large-2512": _mi(262144, 0.50, 1.50, fc=False),
@@ -463,8 +477,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/mistralai/mistral-medium-3.1": _mi(131072, 0.40, 2.00, fc=False),
     "openrouter/mistralai/mistral-nemo": _mi(131072, 0.02, 0.04, fc=False),
     "openrouter/mistralai/mistral-saba": _mi(32768, 0.20, 0.60, fc=False),
-    "openrouter/mistralai/mistral-small-24b-instruct-2501": _mi(32768, 0.03, 0.11, fc=False),
-    "openrouter/mistralai/mistral-small-3.1-24b-instruct": _mi(131072, 0.03, 0.11, fc=False),
+    "openrouter/mistralai/mistral-small-24b-instruct-2501": _mi(32768, 0.05, 0.08, fc=False),
+    "openrouter/mistralai/mistral-small-3.1-24b-instruct": _mi(128000, 0.35, 0.56, fc=False),
     "openrouter/mistralai/mistral-small-3.2-24b-instruct": _mi(131072, 0.06, 0.18, fc=False),
     "openrouter/mistralai/mistral-small-creative": _mi(32768, 0.10, 0.30, fc=False),
     "openrouter/mistralai/mistral-tiny": _mi(32768, 0.25, 0.25, fc=False),
@@ -477,16 +491,16 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - MoonshotAI
     # ==========================================================================
     "openrouter/moonshotai/kimi-k2": _mi(131072, 0.50, 2.40, fc=False),  # Unreliable FC
-    "openrouter/moonshotai/kimi-k2-0905": _mi(262144, 0.39, 1.90, fc=False),  # Unreliable FC
-    "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.40, 1.75, fc=False),  # SLOW
-    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.45, 2.50),  # Multimodal + agentic
+    "openrouter/moonshotai/kimi-k2-0905": _mi(131072, 0.40, 2.00, fc=False),  # Unreliable FC
+    "openrouter/moonshotai/kimi-k2-thinking": _mi(131072, 0.47, 2.00, fc=False),  # SLOW
+    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.23, 3.00),  # Multimodal + agentic
     # ==========================================================================
     # OpenRouter models - Nous Research (unreliable function calling)
     # ==========================================================================
     "openrouter/nousresearch/deephermes-3-mistral-24b-preview": _mi(
         32768, 0.02, 0.10, fc=False, gen=False
     ),
-    "openrouter/nousresearch/hermes-4-70b": _mi(131072, 0.11, 0.38, fc=False),
+    "openrouter/nousresearch/hermes-4-70b": _mi(131072, 0.13, 0.40, fc=False),
     # ==========================================================================
     # OpenRouter models - NVIDIA
     # ==========================================================================
@@ -494,7 +508,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": _mi(131072, 0.10, 0.40),
     "openrouter/nvidia/nemotron-3-nano-30b-a3b": _mi(262144, 0.05, 0.20, fc=False),  # Unreliable FC
     "openrouter/nvidia/nemotron-nano-9b-v2": _mi(131072, 0.04, 0.16),
-    "openrouter/nvidia/nemotron-nano-12b-v2-vl": _mi(131072, 0.20, 0.60, fc=False),  # Vision model
+    "openrouter/nvidia/nemotron-nano-12b-v2-vl": _mi(131072, 0.07, 0.20, fc=False),  # Vision model
     # ==========================================================================
     # OpenRouter models - Nex AGI
     # ==========================================================================
@@ -506,9 +520,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-3.5-turbo-16k": _mi(16385, 3.00, 4.00),
     "openrouter/openai/gpt-4": _mi(8191, 30.00, 60.00),
     "openrouter/openai/gpt-4-turbo": _mi(128000, 10.00, 30.00),
-    "openrouter/openai/gpt-4.1": _mi(128000, 2.00, 8.00),
-    "openrouter/openai/gpt-4.1-mini": _mi(128000, 0.40, 1.60),
-    "openrouter/openai/gpt-4.1-nano": _mi(128000, 0.10, 0.40, fc=False),
+    "openrouter/openai/gpt-4.1": _mi(1047576, 2.00, 8.00),
+    "openrouter/openai/gpt-4.1-mini": _mi(1047576, 0.40, 1.60),
+    "openrouter/openai/gpt-4.1-nano": _mi(1047576, 0.10, 0.40, fc=False),
     "openrouter/openai/gpt-4o": _mi(128000, 2.50, 10.00),
     "openrouter/openai/gpt-4o-mini": _mi(128000, 0.15, 0.60),
     "openrouter/openai/gpt-5": _mi(400000, 1.25, 10.00),
@@ -527,8 +541,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/o3-pro": _mi(200000, 20.00, 80.00, fc=False),
     "openrouter/openai/o4-mini": _mi(200000, 1.10, 4.40),
     "openrouter/openai/o4-mini-high": _mi(200000, 1.10, 4.40),
-    "openrouter/openai/gpt-oss-120b": _mi(131072, 0.15, 0.60, fc=False),
-    "openrouter/openai/gpt-oss-20b": _mi(131072, 0.05, 0.20, fc=False),
+    "openrouter/openai/gpt-oss-120b": _mi(131072, 0.039, 0.19, fc=False),
+    "openrouter/openai/gpt-oss-20b": _mi(131072, 0.03, 0.14, fc=False),
     # ==========================================================================
     # OpenRouter models - Perplexity
     # ==========================================================================
@@ -543,25 +557,25 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     "openrouter/qwen/qwen-2.5-72b-instruct": _mi(32768, 0.12, 0.39),
     "openrouter/qwen/qwen-2.5-7b-instruct": _mi(32768, 0.04, 0.10, fc=False),
-    "openrouter/qwen/qwen-2.5-coder-32b-instruct": _mi(32768, 0.03, 0.11, fc=False),
+    "openrouter/qwen/qwen-2.5-coder-32b-instruct": _mi(32768, 0.20, 0.20, fc=False),
     "openrouter/qwen/qwen-max": _mi(32768, 1.60, 6.40, fc=False),
-    "openrouter/qwen/qwen-plus": _mi(131072, 0.40, 1.20),
-    "openrouter/qwen/qwen-turbo": _mi(1000000, 0.05, 0.20),
-    "openrouter/qwen/qwen3-8b": _mi(128000, 0.04, 0.14, fc=False),
-    "openrouter/qwen/qwen3-14b": _mi(40960, 0.05, 0.22, fc=False),
-    "openrouter/qwen/qwen3-30b-a3b": _mi(40960, 0.06, 0.22, fc=False),
+    "openrouter/qwen/qwen-plus": _mi(1000000, 0.40, 1.20),
+    "openrouter/qwen/qwen-turbo": _mi(131072, 0.05, 0.20),
+    "openrouter/qwen/qwen3-8b": _mi(32000, 0.05, 0.40, fc=False),
+    "openrouter/qwen/qwen3-14b": _mi(40960, 0.06, 0.24, fc=False),
+    "openrouter/qwen/qwen3-30b-a3b": _mi(40960, 0.08, 0.28, fc=False),
     "openrouter/qwen/qwen3-32b": _mi(40960, 0.08, 0.24, fc=False),
-    "openrouter/qwen/qwen3-235b-a22b": _mi(40960, 0.18, 0.54, fc=False, gen=False),  # Returns empty
-    "openrouter/qwen/qwen3-235b-a22b-2507": _mi(262144, 0.07, 0.46, fc=False),
-    "openrouter/qwen/qwen3-coder": _mi(262144, 0.22, 0.95),
+    "openrouter/qwen/qwen3-235b-a22b": _mi(131072, 0.455, 1.82, fc=False, gen=False),
+    "openrouter/qwen/qwen3-235b-a22b-2507": _mi(262144, 0.07, 0.10, fc=False),
+    "openrouter/qwen/qwen3-coder": _mi(262144, 0.22, 1.00),
     "openrouter/qwen/qwen3-coder-30b-a3b-instruct": _mi(160000, 0.07, 0.27),
-    "openrouter/qwen/qwen3-coder-flash": _mi(128000, 0.30, 1.50),
-    "openrouter/qwen/qwen3-coder-plus": _mi(128000, 1.00, 5.00, fc=False),
-    "openrouter/qwen/qwen3-coder-next": _mi(262144, 0.07, 0.30),  # Latest agentic coding model
+    "openrouter/qwen/qwen3-coder-flash": _mi(1000000, 0.30, 1.50),
+    "openrouter/qwen/qwen3-coder-plus": _mi(1000000, 1.00, 5.00, fc=False),
+    "openrouter/qwen/qwen3-coder-next": _mi(262144, 0.12, 0.75),  # Latest agentic coding model
     "openrouter/qwen/qwen3-max-thinking": _mi(262144, 1.20, 6.00, fc=False),  # SLOW: thinking
-    "openrouter/qwen/qwen3-max": _mi(256000, 1.20, 6.00),
-    "openrouter/qwen/qwen3-next-80b-a3b-instruct": _mi(262144, 0.06, 0.60),
-    "openrouter/qwen/qwen3-vl-32b-instruct": _mi(262144, 0.50, 1.50, fc=False),  # Vision model
+    "openrouter/qwen/qwen3-max": _mi(262144, 1.20, 6.00),
+    "openrouter/qwen/qwen3-next-80b-a3b-instruct": _mi(262144, 0.09, 1.10),
+    "openrouter/qwen/qwen3-vl-32b-instruct": _mi(131072, 0.104, 0.416, fc=False),  # Vision model
     "openrouter/qwen/qwq-32b": _mi(32768, 0.15, 0.40, fc=False),  # SLOW: reasoning model
     # ==========================================================================
     # OpenRouter models - Relace
@@ -598,14 +612,14 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Z.AI GLM
     # ==========================================================================
-    "openrouter/z-ai/glm-5": _mi(203000, 1.00, 3.20),  # 744B MoE - FC verified
+    "openrouter/z-ai/glm-5": _mi(204800, 0.30, 2.55),  # 744B MoE - FC verified
     "openrouter/z-ai/glm-4-32b": _mi(128000, 0.10, 0.10),
-    "openrouter/z-ai/glm-4.5": _mi(131072, 0.35, 1.55),
-    "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.05, 0.22),
+    "openrouter/z-ai/glm-4.5": _mi(131000, 0.55, 2.00),
+    "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.13, 0.85),
     "openrouter/z-ai/glm-4.5v": _mi(65536, 0.60, 1.80, fc=False),
-    "openrouter/z-ai/glm-4.6": _mi(202752, 0.35, 1.50, fc=False),  # Unreliable FC
+    "openrouter/z-ai/glm-4.6": _mi(202752, 0.35, 1.71, fc=False),  # Unreliable FC
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
-    "openrouter/z-ai/glm-4.7": _mi(202752, 0.40, 1.50),
+    "openrouter/z-ai/glm-4.7": _mi(202752, 0.38, 1.70),
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
     # ==========================================================================
     # OpenRouter models - OpenAI (additional)
@@ -731,12 +745,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - Microsoft (additional)
     # ==========================================================================
-    "openrouter/microsoft/wizardlm-2-8x22b": _mi(65536, 0.48, 0.48, fc=False),
+    "openrouter/microsoft/wizardlm-2-8x22b": _mi(65535, 0.62, 0.62, fc=False),
     # ==========================================================================
     # OpenRouter models - MiniMax (additional)
     # ==========================================================================
     "openrouter/minimax/minimax-01": _mi(1000192, 0.20, 1.10, fc=False),
-    "openrouter/minimax/minimax-m2.5": _mi(204800, 0.30, 1.20),
+    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.30, 1.10),
     # ==========================================================================
     # OpenRouter models - Mistral (additional)
     # ==========================================================================
@@ -792,7 +806,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # OpenRouter models - OpenGVLab
     # ==========================================================================
-    "openrouter/opengvlab/internvl3-78b": _mi(32768, 0.10, 0.39, fc=False),
+    "openrouter/opengvlab/internvl3-78b": _mi(32768, 0.15, 0.60, fc=False),
     # ==========================================================================
     # OpenRouter models - Perplexity (additional)
     # ==========================================================================
@@ -805,20 +819,20 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen-plus-2025-07-28": _mi(1000000, 0.40, 1.20),
     "openrouter/qwen/qwen-plus-2025-07-28:thinking": _mi(1000000, 0.40, 4.00),  # SLOW: thinking
     "openrouter/qwen/qwen-vl-max": _mi(131072, 0.80, 3.20),  # Vision model
-    "openrouter/qwen/qwen-vl-plus": _mi(7500, 0.21, 0.63, fc=False),  # Vision model
+    "openrouter/qwen/qwen-vl-plus": _mi(131072, 0.21, 0.63, fc=False),  # Vision model
     "openrouter/qwen/qwen2.5-coder-7b-instruct": _mi(32768, 0.03, 0.09, fc=False),
-    "openrouter/qwen/qwen2.5-vl-32b-instruct": _mi(16384, 0.05, 0.22, fc=False),  # Vision model
-    "openrouter/qwen/qwen2.5-vl-72b-instruct": _mi(32768, 0.15, 0.60, fc=False),  # Vision model
-    "openrouter/qwen/qwen3-235b-a22b-thinking-2507": _mi(262144, 0.11, 0.60),  # SLOW: thinking
-    "openrouter/qwen/qwen3-30b-a3b-instruct-2507": _mi(262144, 0.08, 0.33),
+    "openrouter/qwen/qwen2.5-vl-32b-instruct": _mi(128000, 0.20, 0.60, fc=False),  # Vision model
+    "openrouter/qwen/qwen2.5-vl-72b-instruct": _mi(32000, 0.25, 0.75, fc=False),  # Vision model
+    "openrouter/qwen/qwen3-235b-a22b-thinking-2507": _mi(131072, 0.00, 0.00),  # SLOW: thinking
+    "openrouter/qwen/qwen3-30b-a3b-instruct-2507": _mi(262144, 0.09, 0.30),
     "openrouter/qwen/qwen3-30b-a3b-thinking-2507": _mi(32768, 0.05, 0.34),  # SLOW: thinking
     "openrouter/qwen/qwen3-next-80b-a3b-thinking": _mi(128000, 0.15, 1.20),  # SLOW: thinking
     "openrouter/qwen/qwen3-vl-235b-a22b-instruct": _mi(262144, 0.20, 0.88),  # Vision model
-    "openrouter/qwen/qwen3-vl-235b-a22b-thinking": _mi(262144, 0.45, 3.50, fc=False),
-    "openrouter/qwen/qwen3-vl-30b-a3b-instruct": _mi(262144, 0.15, 0.60),  # Vision model
-    "openrouter/qwen/qwen3-vl-30b-a3b-thinking": _mi(131072, 0.20, 1.00),  # SLOW: thinking
+    "openrouter/qwen/qwen3-vl-235b-a22b-thinking": _mi(131072, 0.00, 0.00, fc=False),
+    "openrouter/qwen/qwen3-vl-30b-a3b-instruct": _mi(131072, 0.13, 0.52),  # Vision model
+    "openrouter/qwen/qwen3-vl-30b-a3b-thinking": _mi(131072, 0.00, 0.00),  # SLOW: thinking
     "openrouter/qwen/qwen3-vl-8b-instruct": _mi(131072, 0.08, 0.50),  # Vision model
-    "openrouter/qwen/qwen3-vl-8b-thinking": _mi(256000, 0.18, 2.10),  # SLOW: thinking
+    "openrouter/qwen/qwen3-vl-8b-thinking": _mi(131072, 0.117, 1.365),  # SLOW: thinking
     # ==========================================================================
     # OpenRouter models - Raifle
     # ==========================================================================
@@ -854,6 +868,21 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # OpenRouter models - Undi95
     # ==========================================================================
     "openrouter/undi95/remm-slerp-l2-13b": _mi(6144, 0.45, 0.65, fc=False),
+    # ==========================================================================
+    # Auto-discovered models (verify pricing and capabilities)
+    # ==========================================================================
+    "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.40, 2.40),  # NEW
+    "openrouter/qwen/qwen3.5-397b-a17b": _mi(262144, 0.15, 1.00),  # NEW
+    "openrouter/stepfun/step-3.5-flash": _mi(256000, 0.10, 0.30),  # NEW
+    "openrouter/anthropic/claude-3.7-sonnet": _mi(200000, 3.00, 15.00),  # NEW
+    "openrouter/anthropic/claude-3.5-sonnet": _mi(200000, 6.00, 30.00),  # NEW
+    "Qwen/Qwen3-VL-32B-Instruct": _mi(262144, 0.50, 1.50),  # NEW
+    "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": _mi(131072, 0.88, 0.88),  # NEW
+    "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.06, 0.25),  # NEW
+    "Qwen/Qwen3-Next-80B-A3B-Thinking": _mi(262144, 0.15, 1.50),  # NEW
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": _mi(32768, 0.60, 0.60, fc=False),  # NEW
+    "zai-org/GLM-4.6": _mi(202752, 0.60, 2.20),  # NEW
+    "mistralai/Mistral-7B-Instruct-v0.3": _mi(32768, 0.20, 0.20, fc=False),  # NEW
 }
 
 # ==========================================================================
@@ -861,19 +890,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
 # Models that have been tested and found to have reliability issues
 # ==========================================================================
 FLAKY_MODELS: dict[str, str] = {
-    # Models with 503 errors (service unavailable)
-    "openrouter/arcee-ai/virtuoso-large": "503 Service Unavailable errors",
-    # Models with unreliable function calling
-    "openrouter/baidu/ernie-4.5-21b-a3b": "Exceeds step limit in agentic mode",
-    # Models that timeout frequently
-    "openrouter/deepseek/deepseek-chat": "Can timeout on requests",
-    # Slow thinking/reasoning models (not flaky, just slow)
-    "openrouter/deepseek/deepseek-r1": "Slow: thinking model",
-    "openrouter/deepseek/deepseek-r1-0528": "Slow: thinking model",
-    "openrouter/openai/o1": "Slow: reasoning model",
-    "openrouter/openai/o3-pro": "Slow: reasoning model",
-    "openrouter/qwen/qwq-32b": "Slow: reasoning model",
-    "openrouter/moonshotai/kimi-k2-thinking": "Slow: thinking model",
+    "openrouter/baidu/ernie-4.5-21b-a3b": "Ignores function calling tools",
 }
 
 
@@ -922,132 +939,61 @@ def model(
         KISSError: If the model name is not recognized.
     """
     if model_config and "base_url" in model_config:
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use custom base_url."
-            )
         base_url = model_config["base_url"]
         api_key = model_config.get("api_key", "")
         filtered = {k: v for k, v in model_config.items() if k not in ("base_url", "api_key")}
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url=base_url,
-            api_key=api_key,
-            model_config=filtered if filtered else None,
-            token_callback=token_callback,
+        return _openai_compatible(
+            model_name, base_url, api_key, filtered or None, token_callback,
         )
-    # OpenRouter models (strip "openrouter/" prefix for API calls)
+    keys = config_module.DEFAULT_CONFIG.agent.api_keys
     if model_name.startswith("openrouter/"):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use OpenRouter models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://openrouter.ai/api/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENROUTER_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+        return _openai_compatible(
+            model_name, "https://openrouter.ai/api/v1",
+            keys.OPENROUTER_API_KEY, model_config, token_callback,
         )
-    # Google Gemini embedding models (text-embedding-004 is Gemini, not OpenAI)
-    elif model_name == "text-embedding-004":
+    if model_name == "text-embedding-004":
         if GeminiModel is None:
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
         return GeminiModel(
-            model_name=model_name,
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+            model_name=model_name, api_key=keys.GEMINI_API_KEY,
+            model_config=model_config, token_callback=token_callback,
         )
-    # OpenAI models (generation and embedding)
-    elif model_name.startswith(
-        ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-    ) and not model_name.startswith("openai/gpt-oss"):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use OpenAI models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://api.openai.com/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+    if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
+        return _openai_compatible(
+            model_name, "https://api.openai.com/v1",
+            keys.OPENAI_API_KEY, model_config, token_callback,
         )
-    # Together AI models (generation and embedding)
-    elif model_name.startswith(
-        (
-            "meta-llama/",
-            "Qwen/",
-            "mistralai/",
-            "deepseek-ai/",
-            "deepcogito/",
-            "google/gemma",
-            "moonshotai/",
-            "nvidia/",
-            "zai-org/",
-            "openai/gpt-oss",
-            "arcee-ai/",
-            "marin-community/",
-            "essentialai/",
-            # Together AI embedding models
-            "BAAI/",
-            "intfloat/",
-            "Alibaba-NLP/",
+    if model_name.startswith(_TOGETHER_PREFIXES):
+        return _openai_compatible(
+            model_name, "https://api.together.xyz/v1",
+            keys.TOGETHER_API_KEY, model_config, token_callback,
         )
-    ):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use Together AI models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://api.together.xyz/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.TOGETHER_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
-        )
-    # Anthropic Claude models (direct Anthropic API)
-    elif model_name.startswith("claude-"):
+    if model_name.startswith("claude-"):
         if AnthropicModel is None:
             raise KISSError(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
             )
         return AnthropicModel(
-            model_name=model_name,
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.ANTHROPIC_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+            model_name=model_name, api_key=keys.ANTHROPIC_API_KEY,
+            model_config=model_config, token_callback=token_callback,
         )
-    # Google Gemini models (direct Google API)
-    elif model_name.startswith("gemini-"):
+    if model_name.startswith("gemini-"):
         if GeminiModel is None:
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
         return GeminiModel(
-            model_name=model_name,
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.GEMINI_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+            model_name=model_name, api_key=keys.GEMINI_API_KEY,
+            model_config=model_config, token_callback=token_callback,
         )
-    # MiniMax models (direct MiniMax API, OpenAI-compatible)
-    elif model_name.startswith("minimax-"):
-        if OpenAICompatibleModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use MiniMax models."
-            )
-        return OpenAICompatibleModel(
-            model_name=model_name,
-            base_url="https://api.minimax.chat/v1",
-            api_key=config_module.DEFAULT_CONFIG.agent.api_keys.MINIMAX_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
+    if model_name.startswith("minimax-"):
+        return _openai_compatible(
+            model_name, "https://api.minimax.chat/v1",
+            keys.MINIMAX_API_KEY, model_config, token_callback,
         )
-    else:
-        raise KISSError(f"Unknown model name: {model_name}")
+    raise KISSError(f"Unknown model name: {model_name}")
 
 
 def get_available_models() -> list[str]:
@@ -1058,35 +1004,44 @@ def get_available_models() -> list[str]:
             and support text generation.
     """
     keys = config_module.DEFAULT_CONFIG.agent.api_keys
-    provider_keys = {
+    prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,
         "gemini-": keys.GEMINI_API_KEY,
         "minimax-": keys.MINIMAX_API_KEY,
     }
-    openai_prefixes = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-    together_prefixes = (
-        "meta-llama/", "Qwen/", "mistralai/", "deepseek-ai/", "deepcogito/",
-        "google/gemma", "moonshotai/", "nvidia/", "zai-org/", "openai/gpt-oss",
-        "arcee-ai/", "marin-community/", "essentialai/", "BAAI/", "intfloat/", "Alibaba-NLP/",
-    )
     result = []
     for name, info in MODEL_INFO.items():
         if not info.is_generation_supported:
             continue
         api_key = ""
-        for prefix, key in provider_keys.items():
+        for prefix, key in prefix_to_key.items():
             if name.startswith(prefix):
                 api_key = key
                 break
         if not api_key:
-            if name.startswith(openai_prefixes) and not name.startswith("openai/gpt-oss"):
+            if name == "text-embedding-004":
+                api_key = keys.GEMINI_API_KEY
+            elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
                 api_key = keys.OPENAI_API_KEY
-            elif name.startswith(together_prefixes):
+            elif name.startswith(_TOGETHER_PREFIXES):
                 api_key = keys.TOGETHER_API_KEY
         if api_key:
             result.append(name)
     return sorted(result)
+
+
+def get_most_expensive_model(fc_only: bool = True) -> str:
+    best_name, best_price = "", -1.0
+    for name in get_available_models():
+        info = MODEL_INFO[name]
+        if fc_only and not info.is_function_calling_supported:
+            continue
+        price = info.input_price_per_1M + info.output_price_per_1M
+        if price > best_price:
+            best_price = price
+            best_name = name
+    return best_name
 
 
 def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int) -> float:
@@ -1103,9 +1058,10 @@ def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: in
     info = MODEL_INFO.get(model_name)
     if info is None:
         return 0.0
-    input_cost: float = (num_input_tokens / 1_000_000) * info.input_price_per_1M
-    output_cost: float = (num_output_tokens / 1_000_000) * info.output_price_per_1M
-    return input_cost + output_cost
+    return (
+        num_input_tokens * info.input_price_per_1M
+        + num_output_tokens * info.output_price_per_1M
+    ) / 1_000_000
 
 
 def get_max_context_length(model_name: str) -> int:
