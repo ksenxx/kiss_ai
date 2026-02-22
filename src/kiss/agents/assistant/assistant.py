@@ -23,7 +23,7 @@ from kiss.core.browser_ui import (
     find_free_port,
 )
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.models.model_info import MODEL_INFO, get_available_models
+from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_most_expensive_model
 
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.json"
@@ -59,7 +59,7 @@ def _load_history() -> list[dict[str, str]]:
 def _save_history(entries: list[dict[str, str]]) -> None:
     try:
         _KISS_DIR.mkdir(parents=True, exist_ok=True)
-        HISTORY_FILE.write_text(json.dumps(entries[:MAX_HISTORY]))
+        HISTORY_FILE.write_text(json.dumps(entries[:MAX_HISTORY], indent=2))
     except OSError:
         pass
 
@@ -91,11 +91,7 @@ def _save_proposals(proposals: list[str]) -> None:
 
 
 def _add_task(task: str) -> None:
-    history = _load_history()
-    task_strings = [e["task"] for e in history]
-    if task in task_strings:
-        idx = next(i for i, e in enumerate(history) if e["task"] == task)
-        history.pop(idx)
+    history = [e for e in _load_history() if e["task"] != task]
     history.insert(0, {"task": task, "result": ""})
     _save_history(history[:MAX_HISTORY])
 
@@ -113,9 +109,11 @@ def _scan_files(work_dir: str) -> list[str]:
                 dirs.clear()
                 continue
             dirs[:] = sorted(d for d in dirs if d not in skip and not d.startswith("."))
+            for d in dirs:
+                paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
             for name in sorted(files):
                 paths.append(os.path.relpath(os.path.join(root, name), work_dir))
-                if len(paths) >= 1000:
+                if len(paths) >= 2000:
                     return paths
     except OSError:
         pass
@@ -126,83 +124,312 @@ class _StopRequested(BaseException):
     pass
 
 
+_OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "codex", "computer-use")
+
+
+def _model_vendor_order(name: str) -> int:
+    if name.startswith("claude-"):
+        return 0
+    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
+        return 1
+    if name.startswith("gemini-"):
+        return 2
+    if name.startswith("minimax-"):
+        return 3
+    if name.startswith("openrouter/"):
+        return 4
+    return 5
+
+
 CHATBOT_CSS = r"""
+body{
+  font-family:'Inter',system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+  background:#0a0a0c;
+}
+header{
+  background:rgba(10,10,12,0.85);backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+  border-bottom:1px solid rgba(255,255,255,0.06);padding:14px 24px;z-index:50;
+  box-shadow:0 1px 12px rgba(0,0,0,0.3);
+}
+.logo{font-size:15px;color:rgba(255,255,255,0.9);font-weight:600;letter-spacing:-0.2px}
+.logo span{
+  color:rgba(255,255,255,0.25);font-weight:400;font-size:12px;margin-left:10px;
+  max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  display:inline-block;vertical-align:middle;
+}
+.status{font-size:12px;color:rgba(255,255,255,0.35)}
+.dot{width:7px;height:7px;background:rgba(255,255,255,0.2)}
+.dot.running{background:#22c55e}
 #output{
-  flex:2;overflow-y:auto;padding:16px 24px;
-  scroll-behavior:smooth;border-bottom:1px solid var(--border);min-height:0;
+  flex:1;overflow-y:auto;padding:32px 24px 24px;
+  scroll-behavior:smooth;min-height:0;
 }
+.ev,.txt,.spinner,.empty-msg,.user-msg{max-width:820px;margin-left:auto;margin-right:auto}
+.user-msg{
+  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);
+  border-radius:14px;padding:14px 20px;margin:20px auto 16px;
+  font-size:14.5px;line-height:1.6;color:rgba(255,255,255,0.88);
+}
+.txt{font-size:14.5px;line-height:1.75;color:rgba(255,255,255,0.82);padding:2px 0}
+.think{
+  border-left:2px solid rgba(120,180,255,0.25);
+  background:rgba(120,180,255,0.02);border-radius:0 12px 12px 0;margin:12px auto;
+}
+.think .lbl{color:rgba(120,180,255,0.6)}
+.think .cnt{color:rgba(255,255,255,0.4)}
+.tc{
+  border:1px solid rgba(255,255,255,0.06);border-radius:12px;
+  margin:12px auto;background:rgba(255,255,255,0.015);
+  transition:border-color 0.2s,box-shadow 0.2s;
+}
+.tc:hover{box-shadow:0 2px 16px rgba(0,0,0,0.15);border-color:rgba(255,255,255,0.1)}
+.tc-h{padding:10px 16px;background:rgba(255,255,255,0.02);border-radius:12px 12px 0 0}
+.tc-h:hover{background:rgba(255,255,255,0.035)}
+.tn{color:rgba(88,166,255,0.9);font-size:13px}
+.tp{font-size:12px;color:rgba(255,255,255,0.3)}
+.td{color:rgba(255,255,255,0.3)}
+.tr{
+  border-left:2px solid rgba(34,197,94,0.35);
+  background:rgba(34,197,94,0.02);border-radius:0 10px 10px 0;
+}
+.tr.err{border-left-color:rgba(248,81,73,0.35);background:rgba(248,81,73,0.02)}
+.rc{
+  border:1px solid rgba(34,197,94,0.15);border-radius:14px;
+  background:rgba(34,197,94,0.02);
+}
+.rc-h{padding:16px 24px;background:rgba(34,197,94,0.04)}
+.usage{border-color:rgba(255,255,255,0.05);background:rgba(255,255,255,0.02);color:rgba(255,255,255,0.3)}
+.spinner{color:rgba(255,255,255,0.35)}
+.spinner::before{border-color:rgba(255,255,255,0.08);border-top-color:rgba(88,166,255,0.7)}
 #input-area{
-  flex-shrink:0;padding:12px 24px;background:var(--surface);
-  border-bottom:1px solid var(--border);position:relative;
+  flex-shrink:0;padding:0 24px 24px;position:relative;
+  background:linear-gradient(transparent,rgba(10,10,12,0.9) 50%);
+  padding-top:24px;
 }
-#input-row{display:flex;gap:10px;align-items:center}
+#input-container{
+  max-width:820px;margin:0 auto;position:relative;
+  background:rgba(255,255,255,0.035);
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:16px;padding:14px 18px;
+  box-shadow:0 0 0 1px rgba(255,255,255,0.02),0 8px 40px rgba(0,0,0,0.35);
+  transition:border-color 0.3s,box-shadow 0.3s;
+}
+#input-container:focus-within{
+  border-color:rgba(88,166,255,0.4);
+  box-shadow:0 0 0 1px rgba(88,166,255,0.12),0 0 30px rgba(88,166,255,0.1),
+    0 8px 40px rgba(0,0,0,0.35);
+}
+#input-wrap{position:relative}
 #task-input{
-  flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;
-  padding:10px 14px;color:var(--text);font-size:14px;font-family:inherit;outline:none;
-  transition:border-color .2s;
+  width:100%;background:transparent;border:none;
+  color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
+  resize:none;outline:none;line-height:1.5;
+  max-height:200px;min-height:24px;
+  position:relative;z-index:1;
 }
-#task-input:focus{border-color:var(--accent)}
-#task-input:disabled{opacity:.5;cursor:not-allowed}
+#task-input::placeholder{color:rgba(255,255,255,0.28)}
+#task-input:disabled{opacity:0.35;cursor:not-allowed}
+#ghost-overlay{
+  position:absolute;top:0;left:0;right:0;bottom:0;
+  pointer-events:none;user-select:none;
+  font-size:15px;font-family:inherit;line-height:1.5;
+  white-space:pre-wrap;word-break:break-word;overflow:hidden;
+  z-index:0;
+}
+.gm{visibility:hidden;white-space:pre-wrap}
+.gs{color:rgba(255,255,255,0.22);font-style:italic}
+#input-footer{
+  display:flex;justify-content:space-between;align-items:center;
+  margin-top:10px;padding-top:10px;
+  border-top:1px solid rgba(255,255,255,0.04);
+}
+#model-picker{position:relative}
+#model-btn{
+  background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
+  border:1px solid rgba(255,255,255,0.08);border-radius:8px;
+  padding:6px 12px;font-size:12px;font-family:inherit;
+  outline:none;cursor:pointer;max-width:300px;transition:border-color 0.2s;
+  display:flex;align-items:center;gap:6px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;
+}
+#model-btn:hover{border-color:rgba(255,255,255,0.16);color:rgba(255,255,255,0.65)}
+#model-btn svg{flex-shrink:0;opacity:0.4}
+#model-dropdown{
+  position:absolute;bottom:100%;left:0;min-width:320px;max-width:420px;
+  background:rgba(18,18,20,0.97);backdrop-filter:blur(20px);
+  border:1px solid rgba(255,255,255,0.08);border-radius:12px;
+  max-height:360px;display:none;z-index:15;
+  box-shadow:0 -8px 32px rgba(0,0,0,0.5);overflow:hidden;
+  flex-direction:column;
+}
+#model-dropdown.open{display:flex}
+#model-search{
+  width:100%;background:transparent;border:none;
+  border-bottom:1px solid rgba(255,255,255,0.06);
+  color:rgba(255,255,255,0.8);font-size:12px;font-family:inherit;
+  padding:10px 14px;outline:none;
+}
+#model-search::placeholder{color:rgba(255,255,255,0.25)}
+#model-list{overflow-y:auto;flex:1}
+.model-item{
+  padding:7px 14px;cursor:pointer;font-size:12px;
+  display:flex;justify-content:space-between;align-items:center;
+  border-bottom:1px solid rgba(255,255,255,0.02);transition:background 0.08s;
+  color:rgba(255,255,255,0.6);
+}
+.model-item:hover,.model-item.sel{background:rgba(88,166,255,0.08)}
+.model-item.active{color:rgba(88,166,255,0.9);font-weight:500}
+.model-cost{font-size:10px;color:rgba(255,255,255,0.2);flex-shrink:0;margin-left:12px}
+.model-group-hdr{
+  padding:6px 14px 4px;font-size:10px;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.05em;
+  color:rgba(255,255,255,0.25);
+  background:rgba(18,18,20,0.97);
+  border-bottom:1px solid rgba(255,255,255,0.04);
+  position:sticky;top:0;z-index:1;
+}
+#input-actions{display:flex;gap:8px;align-items:center}
 #send-btn{
-  background:var(--accent);color:#fff;border:none;border-radius:8px;
-  padding:10px 20px;font-size:14px;font-weight:600;cursor:pointer;
-  transition:background .2s;white-space:nowrap;
+  background:rgba(88,166,255,0.15);color:rgba(88,166,255,0.9);border:none;
+  border-radius:50%;width:36px;height:36px;cursor:pointer;
+  transition:all 0.2s;display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;
 }
-#send-btn:hover{background:#79b8ff}
-#send-btn:disabled{opacity:.5;cursor:not-allowed}
+#send-btn:hover{background:rgba(88,166,255,0.3);color:#fff;box-shadow:0 0 16px rgba(88,166,255,0.2)}
+#send-btn:disabled{opacity:0.2;cursor:not-allowed;box-shadow:none}
+#send-btn svg{width:16px;height:16px}
 #stop-btn{
-  background:var(--red);color:#fff;border:none;border-radius:8px;
-  padding:10px 20px;font-size:14px;font-weight:600;cursor:pointer;
-  transition:background .2s;white-space:nowrap;display:none;
+  background:rgba(248,81,73,0.1);color:#f85149;
+  border:1px solid rgba(248,81,73,0.15);
+  border-radius:50%;width:36px;height:36px;
+  cursor:pointer;transition:all 0.2s;display:none;
+  align-items:center;justify-content:center;flex-shrink:0;
 }
-#stop-btn:hover{background:#f9706a}
+#stop-btn:hover{background:rgba(248,81,73,0.2);box-shadow:0 0 16px rgba(248,81,73,0.15)}
+#stop-btn svg{width:14px;height:14px}
 #autocomplete{
-  position:absolute;bottom:100%;left:24px;right:24px;
-  background:var(--surface2);border:1px solid var(--border);border-radius:8px;
-  max-height:220px;overflow-y:auto;display:none;z-index:10;
-  box-shadow:0 -4px 16px rgba(0,0,0,.4);
+  position:absolute;bottom:100%;left:0;right:0;
+  max-width:820px;margin:0 auto;
+  background:rgba(18,18,20,0.97);backdrop-filter:blur(20px);
+  border:1px solid rgba(255,255,255,0.08);border-radius:12px;
+  max-height:340px;overflow-y:auto;display:none;z-index:10;
+  box-shadow:0 -8px 32px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.03);
+}
+.ac-section{
+  padding:6px 16px 4px;font-size:10px;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.05em;
+  color:rgba(255,255,255,0.2);
+  background:rgba(18,18,20,0.97);
+  border-bottom:1px solid rgba(255,255,255,0.03);
+  position:sticky;top:0;z-index:1;
 }
 .ac-item{
-  padding:8px 14px;cursor:pointer;font-size:13px;
-  border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;
+  padding:8px 16px;cursor:pointer;font-size:13px;
+  border-bottom:1px solid rgba(255,255,255,0.025);
+  display:flex;align-items:center;gap:8px;transition:background 0.08s;
 }
 .ac-item:last-child{border-bottom:none}
-.ac-item:hover,.ac-item.sel{background:rgba(88,166,255,.1)}
-.ac-type{
+.ac-item:hover,.ac-item.sel{background:rgba(88,166,255,0.08)}
+.ac-icon{font-size:13px;flex-shrink:0;width:18px;text-align:center;opacity:0.4}
+.ac-text{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:rgba(255,255,255,0.6);flex:1;min-width:0;
+}
+.ac-hl{color:rgba(88,166,255,0.95);font-weight:600}
+.ac-hint{
+  font-size:10px;color:rgba(255,255,255,0.2);
+  background:rgba(255,255,255,0.04);
+  padding:2px 6px;border-radius:4px;margin-left:auto;flex-shrink:0;
+  font-family:'SF Mono','Fira Code',monospace;
+}
+.ac-footer{
+  padding:5px 16px;font-size:10px;color:rgba(255,255,255,0.15);
+  border-top:1px solid rgba(255,255,255,0.04);
+  display:flex;gap:14px;background:rgba(255,255,255,0.01);
+  position:sticky;bottom:0;
+}
+.ac-footer kbd{
+  background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.25);
+  padding:1px 5px;border-radius:3px;font-size:9px;
+  font-family:'SF Mono','Fira Code',monospace;
+}
+#welcome{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:100%;padding:40px 20px;text-align:center;max-width:820px;margin:0 auto;
+}
+#welcome h2{
+  font-size:28px;font-weight:700;color:rgba(255,255,255,0.92);
+  margin-bottom:8px;letter-spacing:-0.5px;
+  animation:fadeUp 0.5s ease;
+}
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+#welcome p{color:rgba(255,255,255,0.4);font-size:14px;margin-bottom:36px;
+  animation:fadeUp 0.5s ease 0.1s both}
+#suggestions{animation:fadeUp 0.5s ease 0.2s both;
+  display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;max-width:760px;
+}
+.suggestion-chip{
+  background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);
+  border-radius:12px;padding:14px 18px;cursor:pointer;text-align:left;
+  font-size:13px;color:rgba(255,255,255,0.7);line-height:1.5;
+  transition:all 0.2s ease;
+}
+.suggestion-chip:hover{
+  background:rgba(255,255,255,0.055);border-color:rgba(255,255,255,0.14);
+  color:rgba(255,255,255,0.9);transform:translateY(-2px);
+  box-shadow:0 4px 24px rgba(0,0,0,0.35),0 0 0 1px rgba(255,255,255,0.05);
+}
+.suggestion-chip:active{transform:translateY(0);transition-duration:0.05s}
+.chip-label{
   font-size:10px;font-weight:600;text-transform:uppercase;
-  padding:2px 6px;border-radius:3px;flex-shrink:0;
+  letter-spacing:0.04em;margin-bottom:5px;display:block;
 }
-.ac-type.task{background:rgba(188,140,255,.15);color:var(--purple)}
-.ac-type.file{background:rgba(63,185,80,.15);color:var(--green)}
-.ac-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#bottom-panel{flex:1;display:flex;gap:1px;background:var(--border);min-height:0}
-.panel-col{flex:1;overflow-y:auto;padding:10px 16px;background:var(--bg);min-height:0}
-.panel-hdr{
+.chip-label.recent{color:rgba(88,166,255,0.7)}
+.chip-label.suggested{color:rgba(188,140,255,0.7)}
+#sidebar{
+  position:fixed;right:0;top:0;bottom:0;width:340px;
+  background:rgba(12,12,14,0.95);backdrop-filter:blur(24px);
+  border-left:1px solid rgba(255,255,255,0.06);
+  transform:translateX(100%);transition:transform 0.3s cubic-bezier(0.4,0,0.2,1);
+  z-index:200;overflow-y:auto;padding:24px;
+}
+#sidebar.open{transform:translateX(0)}
+#sidebar-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,0.4);
+  z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
+}
+#sidebar-overlay.open{opacity:1;pointer-events:auto}
+#sidebar-close{
+  position:absolute;top:16px;right:16px;background:none;border:none;
+  color:rgba(255,255,255,0.3);font-size:20px;cursor:pointer;
+  padding:4px 8px;border-radius:6px;transition:all 0.15s;
+}
+#sidebar-close:hover{color:rgba(255,255,255,0.7);background:rgba(255,255,255,0.05)}
+.sidebar-section{margin-bottom:28px}
+.sidebar-hdr{
   font-size:11px;font-weight:600;text-transform:uppercase;
-  letter-spacing:.06em;color:var(--dim);margin-bottom:8px;padding:0 2px;
+  letter-spacing:0.06em;color:rgba(255,255,255,0.25);margin-bottom:12px;
 }
-.task-item{
-  padding:8px 12px;background:var(--surface);border:1px solid var(--border);
-  border-radius:6px;margin-bottom:6px;cursor:pointer;font-size:13px;
-  transition:all .15s;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+.sidebar-item{
+  padding:10px 14px;background:rgba(255,255,255,0.02);
+  border:1px solid rgba(255,255,255,0.04);border-radius:10px;
+  margin-bottom:6px;cursor:pointer;font-size:13px;
+  color:rgba(255,255,255,0.5);transition:all 0.15s;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-.task-item:hover{border-color:var(--accent);background:var(--surface2)}
-.proposed-item{
-  padding:8px 12px;background:var(--surface);border:1px solid var(--border);
-  border-radius:6px;margin-bottom:6px;cursor:pointer;font-size:13px;
-  transition:all .15s;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+.sidebar-item:hover{
+  border-color:rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);
+  color:rgba(255,255,255,0.8);
 }
-.proposed-item:hover{border-color:var(--purple);background:var(--surface2)}
-.no-tasks{color:var(--dim);font-size:13px;padding:8px 2px}
-.loading-proposals{color:var(--dim);font-size:12px;font-style:italic;padding:8px 2px}
-#model-select{
-  background:var(--bg);color:var(--text);
-  border:1px solid var(--border);border-radius:8px;
-  padding:8px 10px;font-size:13px;font-family:inherit;
-  outline:none;max-width:260px;flex-shrink:0;cursor:pointer;
+.sidebar-empty{color:rgba(255,255,255,0.2);font-size:13px;padding:8px 0}
+#history-btn,#proposals-btn{
+  background:none;border:1px solid rgba(255,255,255,0.07);border-radius:8px;
+  color:rgba(255,255,255,0.35);font-size:12px;cursor:pointer;
+  padding:5px 12px;transition:all 0.15s;display:flex;align-items:center;gap:6px;
 }
-#model-select:focus{border-color:var(--accent)}
-#model-select option.no-fc{color:var(--yellow)}
+#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.6);border-color:rgba(255,255,255,0.14)}
+#history-btn svg,#proposals-btn svg{opacity:0.7}
 """
 
 CHATBOT_JS = r"""
@@ -215,10 +442,47 @@ var stopBtn=document.getElementById('stop-btn');
 var ac=document.getElementById('autocomplete');
 var rl=document.getElementById('recent-list');
 var pl=document.getElementById('proposed-list');
-var modelSel=document.getElementById('model-select');
+var modelBtn=document.getElementById('model-btn');
+var modelLabel=document.getElementById('model-label');
+var modelDD=document.getElementById('model-dropdown');
+var modelSearch=document.getElementById('model-search');
+var modelList=document.getElementById('model-list');
+var allModels=[],selectedModel='',modelDDIdx=-1;
+var sidebar=document.getElementById('sidebar');
+var sidebarOverlay=document.getElementById('sidebar-overlay');
+var suggestionsEl=document.getElementById('suggestions');
 var running=false,autoScroll=true,userScrolled=false;
 var scrollRaf=0,state={thinkEl:null,txtEl:null};
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
+var acTimer=null,histIdx=-1,histCache=[];
+var ghostEl=document.getElementById('ghost-overlay');
+var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
+var ghostCache={q:'',s:''};
+inp.addEventListener('input',function(){
+  this.style.height='auto';
+  this.style.height=Math.min(this.scrollHeight,200)+'px';
+  histIdx=-1;
+  clearGhost();
+  if(getAtCtx()){
+    if(acTimer)clearTimeout(acTimer);
+    acTimer=setTimeout(fetchAC,150);
+  } else {
+    hideAC();
+    if(ghostTimer2)clearTimeout(ghostTimer2);
+    ghostTimer2=setTimeout(fetchGhost,500);
+  }
+});
+var sidebarHistSec=document.getElementById('sidebar-history-sec');
+var sidebarPropSec=document.getElementById('sidebar-proposals-sec');
+function toggleSidebar(mode){
+  if(mode){
+    sidebarHistSec.style.display=mode==='proposals'?'none':'';
+    sidebarPropSec.style.display=mode==='history'?'none':'';
+    if(sidebar.classList.contains('open'))return;
+  }
+  sidebar.classList.toggle('open');
+  sidebarOverlay.classList.toggle('open');
+}
 O.addEventListener('scroll',function(){
   var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
   if(!atBottom&&running)userScrolled=true;
@@ -248,7 +512,7 @@ function showSpinner(msg){
   removeSpinner();
   var sp=mkEl('div','spinner');
   sp.id='wait-spinner';
-  sp.textContent=msg||'Waiting for agent output\u2026';
+  sp.textContent=msg||'Working\u2026';
   O.appendChild(sp);sb();
 }
 function setReady(label){
@@ -263,20 +527,20 @@ function setReady(label){
 function connectSSE(){
   if(evtSrc)evtSrc.close();
   evtSrc=new EventSource('/events');
-  evtSrc.onopen=function(){console.log('SSE connected');};
+  evtSrc.onopen=function(){};
   evtSrc.onmessage=function(e){
-    var ev;try{ev=JSON.parse(e.data);}catch(x){console.error('Parse error:',x);return;}
+    var ev;try{ev=JSON.parse(e.data);}catch(x){return;}
     try{handleEvent(ev);}catch(err){console.error('Event error:',err,ev);}
   };
-  evtSrc.onerror=function(e){console.error('SSE error:',e);};
+  evtSrc.onerror=function(){};
 }
 function handleEvent(ev){
   var t=ev.type;
   if(t==='thinking_start'||t==='text_delta'||t==='tool_call'
     ||t==='task_done'||t==='task_error'||t==='task_stopped')removeSpinner();
   switch(t){
-  case'tasks_updated':loadTasks();break;
-  case'proposed_updated':loadProposed();break;
+  case'tasks_updated':loadTasks();loadWelcome();break;
+  case'proposed_updated':loadProposed();loadWelcome();break;
   case'clear':
     O.innerHTML='';state.thinkEl=null;state.txtEl=null;
     autoScroll=true;userScrolled=false;showSpinner();break;
@@ -297,7 +561,7 @@ function handleEvent(ev){
     setReady('Stopped');loadTasks();loadProposed();break}
   default:
     handleOutputEvent(ev,O,state);
-    if(t==='tool_call'&&running)showSpinner('Waiting for tool\u2026');
+    if(t==='tool_call'&&running)showSpinner('Running tool\u2026');
     if(t==='tool_result'&&running)showSpinner();
     if(t==='thinking_end'&&running)showSpinner();
   }
@@ -306,28 +570,85 @@ function handleEvent(ev){
 function loadModels(){
   fetch('/models').then(function(r){return r.json();})
   .then(function(d){
-    modelSel.innerHTML='';
-    d.models.forEach(function(m){
-      var o=document.createElement('option');
-      o.value=m.name;
-      o.textContent=m.name+(m.fc?'':' [no FC]');
-      if(!m.fc)o.className='no-fc';
-      if(m.name===d.selected)o.selected=true;
-      modelSel.appendChild(o);
-    });
+    allModels=d.models;
+    selectedModel=d.selected;
+    modelLabel.textContent=selectedModel;
+    renderModelList('');
   }).catch(function(){});
 }
+function modelVendor(name){
+  if(name.startsWith('claude-'))return'Anthropic';
+  if(/^(gpt|o[134]|codex|computer-use)/.test(name)&&!name.startsWith('openai/'))return'OpenAI';
+  if(name.startsWith('gemini-'))return'Gemini';
+  if(name.startsWith('minimax-'))return'MiniMax';
+  if(name.startsWith('openrouter/'))return'OpenRouter';
+  return'Together AI';
+}
+function renderModelList(q){
+  modelList.innerHTML='';modelDDIdx=-1;
+  var ql=q.toLowerCase(),lastVendor='';
+  allModels.forEach(function(m){
+    if(ql&&m.name.toLowerCase().indexOf(ql)<0)return;
+    var v=modelVendor(m.name);
+    if(v!==lastVendor){
+      var hdr=mkEl('div','model-group-hdr');
+      hdr.textContent=v;
+      modelList.appendChild(hdr);
+      lastVendor=v;
+    }
+    var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
+    var price='$'+m.inp.toFixed(2)+' / $'+m.out.toFixed(2);
+    d.innerHTML='<span>'+esc(m.name)+'</span><span class="model-cost">'+price+'</span>';
+    d.addEventListener('click',function(){selectModel(m.name)});
+    modelList.appendChild(d);
+  });
+}
+function selectModel(name){
+  selectedModel=name;
+  modelLabel.textContent=name;
+  closeModelDD();
+  renderModelList('');
+}
+function toggleModelDD(){
+  if(modelDD.classList.contains('open')){closeModelDD();return}
+  modelDD.classList.add('open');
+  modelSearch.value='';
+  renderModelList('');
+  modelSearch.focus();
+}
+function closeModelDD(){
+  modelDD.classList.remove('open');
+  modelSearch.value='';
+  modelDDIdx=-1;
+}
+modelSearch.addEventListener('input',function(){renderModelList(this.value)});
+modelSearch.addEventListener('keydown',function(e){
+  var items=modelList.querySelectorAll('.model-item');
+  if(e.key==='ArrowDown'){e.preventDefault();modelDDIdx=Math.min(modelDDIdx+1,items.length-1);updateModelSel(items);return}
+  if(e.key==='ArrowUp'){e.preventDefault();modelDDIdx=Math.max(modelDDIdx-1,-1);updateModelSel(items);return}
+  if(e.key==='Enter'){e.preventDefault();var ti=modelDDIdx>=0?modelDDIdx:0;if(items[ti])items[ti].click();return}
+  if(e.key==='Escape'){e.preventDefault();closeModelDD();return}
+});
+function updateModelSel(items){
+  items.forEach(function(it,i){it.classList.toggle('sel',i===modelDDIdx)});
+  if(modelDDIdx>=0)items[modelDDIdx].scrollIntoView({block:'nearest'});
+}
+document.addEventListener('click',function(e){
+  if(!document.getElementById('model-picker').contains(e.target))closeModelDD();
+  if(!ac.contains(e.target)&&e.target!==inp)hideAC();
+});
 function submitTask(){
   var task=inp.value.trim();
   if(!task||running)return;
   running=true;inp.disabled=true;
   btn.style.display='none';
-  stopBtn.style.display='inline-block';
+  stopBtn.style.display='inline-flex';
   D.classList.add('running');hideAC();startTimer();
+  inp.style.height='auto';
   fetch('/run',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({task:task,model:modelSel.value})
+    body:JSON.stringify({task:task,model:selectedModel})
   }).then(function(r){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
     inp.value='';
@@ -340,102 +661,266 @@ inp.addEventListener('keydown',function(e){
     var items=ac.querySelectorAll('.ac-item');
     if(e.key==='ArrowDown'){e.preventDefault();acIdx=Math.min(acIdx+1,items.length-1);updateACSel(items);return}
     if(e.key==='ArrowUp'){e.preventDefault();acIdx=Math.max(acIdx-1,-1);updateACSel(items);return}
+    if(e.key==='Tab'){e.preventDefault();var ti=acIdx>=0?acIdx:0;
+      if(items[ti])items[ti].click();return}
     if(e.key==='Enter'&&acIdx>=0){e.preventDefault();items[acIdx].click();return}
     if(e.key==='Escape'){hideAC();return}
   }
+  if(ghostSuggest){
+    if(e.key==='Tab'){e.preventDefault();acceptGhost();return}
+    if(e.key==='ArrowRight'&&inp.selectionStart===inp.value.length){e.preventDefault();acceptGhost();return}
+    if(e.key==='Escape'){clearGhost();return}
+  }
+  if(e.key==='ArrowUp'&&ac.style.display!=='block'&&(!inp.value.trim()||histIdx>=0)){
+    e.preventDefault();cycleHistory(1);return;
+  }
+  if(e.key==='ArrowDown'&&histIdx>=0&&ac.style.display!=='block'){
+    e.preventDefault();cycleHistory(-1);return;
+  }
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitTask()}
 });
-var acTimer=null;
-inp.addEventListener('input',function(){if(acTimer)clearTimeout(acTimer);acTimer=setTimeout(fetchAC,200)});
+function getAtCtx(){
+  var val=inp.value,pos=inp.selectionStart||0;
+  var before=val.substring(0,pos);
+  var m=before.match(/@([^\s]*)$/);
+  return m?{start:before.length-m[0].length,query:m[1]}:null;
+}
 function fetchAC(){
-  var q=inp.value.trim();
-  if(!q){hideAC();return}
-  fetch('/suggestions?q='+encodeURIComponent(q))
-  .then(function(r){return r.json()})
-  .then(function(data){
-    if(!data.length){hideAC();return}
-    ac.innerHTML='';acIdx=-1;
-    data.forEach(function(item){
+  var atCtx=getAtCtx();
+  if(!atCtx){hideAC();return}
+  fetch('/suggestions?mode=files&q='+encodeURIComponent(atCtx.query))
+    .then(function(r){return r.json()}).then(renderAC).catch(function(){hideAC()});
+}
+function hlMatch(text,query){
+  if(!query)return esc(text);
+  var idx=text.toLowerCase().indexOf(query.toLowerCase());
+  if(idx<0)return esc(text);
+  return esc(text.substring(0,idx))
+    +'<strong class="ac-hl">'+esc(text.substring(idx,idx+query.length))+'</strong>'
+    +esc(text.substring(idx+query.length));
+}
+function renderAC(data){
+  if(!data.length){hideAC();return}
+  ac.innerHTML='';acIdx=-1;
+  var atCtx=getAtCtx();
+  var searchQ=atCtx?atCtx.query:'';
+  var groups={},order=['dir','file'];
+  var labels={dir:'Directories',file:'Files'};
+  var icons={dir:'\uD83D\uDCC1',file:'\uD83D\uDCCB'};
+  data.forEach(function(item){
+    if(!groups[item.type])groups[item.type]=[];
+    groups[item.type].push(item);
+  });
+  var isFirst=true;
+  order.forEach(function(type){
+    var g=groups[type];if(!g)return;
+    var hdr=mkEl('div','ac-section');
+    hdr.textContent=labels[type]||type;
+    ac.appendChild(hdr);
+    g.forEach(function(item){
       var d=mkEl('div','ac-item');
-      d.innerHTML='<span class="ac-type '+item.type+'">'+item.type+'</span>'
-        +'<span class="ac-text">'+esc(item.text)+'</span>';
-      d.addEventListener('click',function(){
-        if(item.type==='task'){inp.value=item.text}
-        else{var p=inp.value.split(/\s/);p[p.length-1]=item.text;inp.value=p.join(' ')}
-        hideAC();inp.focus();
-      });
+      d.innerHTML='<span class="ac-icon">'+(icons[item.type]||'')+'</span>'
+        +'<span class="ac-text">'+hlMatch(item.text,searchQ)+'</span>';
+      if(isFirst){d.innerHTML+='<span class="ac-hint">Tab</span>';isFirst=false}
+      d.addEventListener('click',function(){selectAC(item)});
       ac.appendChild(d);
     });
-    ac.style.display='block';
-  }).catch(function(){hideAC()});
+  });
+  var footer=mkEl('div','ac-footer');
+  footer.innerHTML='<span><kbd>\u2191\u2193</kbd> navigate</span>'
+    +'<span><kbd>Tab</kbd> accept</span>'
+    +'<span><kbd>Esc</kbd> dismiss</span>';
+  ac.appendChild(footer);
+  ac.style.display='block';
+}
+function selectAC(item){
+  var atCtx=getAtCtx();
+  if(atCtx){
+    var before=inp.value.substring(0,atCtx.start);
+    var after=inp.value.substring(inp.selectionStart||inp.value.length);
+    inp.value=before+'@'+item.text+' '+after;
+    var np=before.length+1+item.text.length+1;
+    inp.setSelectionRange(np,np);
+  }
+  hideAC();inp.focus();
 }
 function hideAC(){ac.style.display='none';acIdx=-1}
 function updateACSel(items){
   items.forEach(function(it,i){it.classList.toggle('sel',i===acIdx)});
   if(acIdx>=0)items[acIdx].scrollIntoView({block:'nearest'});
 }
-document.addEventListener('click',function(e){if(!ac.contains(e.target)&&e.target!==inp)hideAC()});
+function clearGhost(){ghostSuggest='';ghostEl.innerHTML=''}
+function updateGhost(){
+  if(!ghostSuggest){ghostEl.innerHTML='';return}
+  ghostEl.innerHTML='<span class="gm">'+esc(inp.value)+'</span>'
+    +'<span class="gs">'+esc(ghostSuggest)+'</span>';
+}
+function acceptGhost(){
+  inp.value+=ghostSuggest;
+  clearGhost();inp.focus();
+}
+function fetchGhost(){
+  var q=inp.value;
+  if(!q.trim()||q.trim().length<3){clearGhost();return}
+  if(ghostCache.q&&q.startsWith(ghostCache.q)&&ghostCache.s){
+    var extra=q.substring(ghostCache.q.length);
+    if(ghostCache.s.startsWith(extra)){
+      ghostSuggest=ghostCache.s.substring(extra.length);
+      if(ghostSuggest){updateGhost();return}
+    }
+  }
+  if(ghostAbort)ghostAbort.abort();
+  ghostAbort=new AbortController();
+  fetch('/complete?q='+encodeURIComponent(q),{signal:ghostAbort.signal})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.suggestion&&inp.value===q){
+        ghostSuggest=d.suggestion;
+        ghostCache={q:q,s:d.suggestion};
+        updateGhost();
+      }
+    }).catch(function(){});
+}
+function cycleHistory(dir){
+  if(!histCache.length){
+    fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
+      histCache=tasks.map(function(t){return typeof t==='string'?t:(t.task||'')});
+      doHistCycle(dir);
+    });return;
+  }
+  doHistCycle(dir);
+}
+function doHistCycle(dir){
+  histIdx+=dir;
+  if(histIdx<0){histIdx=-1;inp.value='';return}
+  if(histIdx>=histCache.length){histIdx=histCache.length-1;return}
+  inp.value=histCache[histIdx];
+}
 function loadTasks(){
   fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
     rl.innerHTML='';
-    if(!tasks.length){rl.innerHTML='<div class="no-tasks">No recent tasks yet</div>';return}
+    if(!tasks.length){rl.innerHTML='<div class="sidebar-empty">No recent tasks</div>';return}
     tasks.forEach(function(t){
       var taskText=typeof t==='string'?t:(t.task||'');
-      var resultText=typeof t==='string'?'':(t.result||'');
-      var d=mkEl('div','task-item');
-      d.textContent=taskText;
-      d.title=resultText?taskText+'\n\nResult: '+resultText:taskText;
-      d.addEventListener('click',function(){inp.value=taskText;inp.focus()});
+      var d=mkEl('div','sidebar-item');
+      d.textContent=taskText;d.title=taskText;
+      d.addEventListener('click',function(){inp.value=taskText;inp.focus();toggleSidebar()});
       rl.appendChild(d);
     });
   }).catch(function(){});
 }
 function loadProposed(){
-  pl.innerHTML='<div class="loading-proposals">Loading suggestions\u2026</div>';
   fetch('/proposed_tasks').then(function(r){return r.json()}).then(function(tasks){
     pl.innerHTML='';
-    if(!tasks.length){pl.innerHTML='<div class="no-tasks">No suggestions yet</div>';return}
+    if(!tasks.length){pl.innerHTML='<div class="sidebar-empty">No suggestions yet</div>';return}
     tasks.forEach(function(t){
-      var d=mkEl('div','proposed-item');
+      var d=mkEl('div','sidebar-item');
       d.textContent=t;d.title=t;
-      d.addEventListener('click',function(){inp.value=t;inp.focus()});
+      d.addEventListener('click',function(){inp.value=t;inp.focus();toggleSidebar()});
       pl.appendChild(d);
     });
-  }).catch(function(){pl.innerHTML='<div class="no-tasks">Could not load suggestions</div>'});
+  }).catch(function(){});
 }
-connectSSE();loadModels();loadTasks();loadProposed();inp.focus();
+function loadWelcome(){
+  if(!suggestionsEl)return;
+  Promise.all([
+    fetch('/tasks').then(function(r){return r.json()}).catch(function(){return []}),
+    fetch('/proposed_tasks').then(function(r){return r.json()}).catch(function(){return []})
+  ]).then(function(res){
+    var tasks=res[0],proposed=res[1];
+    suggestionsEl.innerHTML='';
+    var items=[];
+    proposed.slice(0,3).forEach(function(t){items.push({text:t,type:'suggested'})});
+    tasks.slice(0,3).forEach(function(t){
+      items.push({text:typeof t==='string'?t:(t.task||''),type:'recent'});
+    });
+    items.slice(0,6).forEach(function(item){
+      var chip=mkEl('div','suggestion-chip');
+      chip.innerHTML='<span class="chip-label '+item.type+'">'
+        +(item.type==='recent'?'Recent':'Suggested')+'</span>'
+        +esc(item.text);
+      chip.addEventListener('click',function(){inp.value=item.text;inp.focus()});
+      suggestionsEl.appendChild(chip);
+    });
+  });
+}
+connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
 
 
 def _build_html(title: str, subtitle: str) -> str:
-    css = BASE_CSS + OUTPUT_CSS + CHATBOT_CSS
+    font_import = "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');\n"
+    css = font_import + BASE_CSS + OUTPUT_CSS + CHATBOT_CSS
     return HTML_HEAD.format(title=title, css=css) + f"""<body>
+<div id="sidebar-overlay" onclick="toggleSidebar()"></div>
+<div id="sidebar">
+  <button id="sidebar-close" onclick="toggleSidebar()">&times;</button>
+  <div class="sidebar-section" id="sidebar-history-sec">
+    <div class="sidebar-hdr">Recent Tasks</div>
+    <div id="recent-list"></div>
+  </div>
+  <div class="sidebar-section" id="sidebar-proposals-sec">
+    <div class="sidebar-hdr">Suggested Tasks</div>
+    <div id="proposed-list"></div>
+  </div>
+</div>
 <header>
   <div class="logo">{title}<span>{subtitle}</span></div>
-  <div class="status"><div class="dot" id="dot"></div><span id="stxt">Ready</span></div>
+  <div style="display:flex;align-items:center;gap:14px">
+    <div class="status"><div class="dot" id="dot"></div><span id="stxt">Ready</span></div>
+    <button id="history-btn" onclick="toggleSidebar('history')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+      History
+    </button>
+    <button id="proposals-btn" onclick="toggleSidebar('proposals')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      Proposals
+    </button>
+  </div>
 </header>
 <div id="output">
-  <div class="empty-msg">Enter a task below to start the agent.<br>
-    The output will appear here.</div>
+  <div id="welcome">
+    <h2>What can I help you with?</h2>
+    <p>Describe a task and the agent will work on it</p>
+    <div id="suggestions"></div>
+  </div>
 </div>
 <div id="input-area">
   <div id="autocomplete"></div>
-  <div id="input-row">
-    <select id="model-select"></select>
-    <input type="text" id="task-input"
-      placeholder="Describe your task..." autocomplete="off">
-    <button id="send-btn">Send</button>
-    <button id="stop-btn">Stop</button>
-  </div>
-</div>
-<div id="bottom-panel">
-  <div class="panel-col">
-    <div class="panel-hdr">Recent Tasks</div>
-    <div id="recent-list"></div>
-  </div>
-  <div class="panel-col">
-    <div class="panel-hdr">Proposed Tasks</div>
-    <div id="proposed-list"></div>
+  <div id="input-container">
+    <div id="input-wrap">
+      <div id="ghost-overlay"></div>
+      <textarea id="task-input" placeholder="Ask anything\u2026" rows="1"
+        autocomplete="off"></textarea>
+    </div>
+    <div id="input-footer">
+      <div id="model-picker">
+        <button type="button" id="model-btn" onclick="toggleModelDD()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+          <span id="model-label">Loading…</span>
+        </button>
+        <div id="model-dropdown">
+          <input type="text" id="model-search" placeholder="Search models…" autocomplete="off"/>
+          <div id="model-list"></div>
+        </div>
+      </div>
+      <div id="input-actions">
+        <button id="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+          ><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"
+          /></svg></button>
+        <button id="stop-btn"><svg viewBox="0 0 24 24" fill="currentColor"
+          ><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -451,13 +936,10 @@ def run_chatbot(
     title: str = "KISS Assistant",
     subtitle: str = "Interactive Agent",
     work_dir: str | None = None,
-    default_model: str = "claude-sonnet-4-5",
+    default_model: str = "",
     agent_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Run a browser-based chatbot UI for any RelentlessAgent-based agent.
-
-    Starts a Starlette web server with SSE streaming, task history, autocomplete,
-    model selection, and proposed task suggestions.
 
     Args:
         agent_factory: Callable that takes a name string and returns a RelentlessAgent instance.
@@ -481,8 +963,7 @@ def run_chatbot(
     agent_thread: threading.Thread | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
-    selected_model = default_model
-    extra_kwargs = agent_kwargs or {}
+    selected_model = default_model or get_most_expensive_model() or "claude-sonnet-4-5"
     html_page = _build_html(title, subtitle)
 
     def refresh_file_cache() -> None:
@@ -536,7 +1017,7 @@ def run_chatbot(
                 work_dir=actual_work_dir,
                 printer=printer,
                 model_name=model_name,
-                **extra_kwargs,
+                **(agent_kwargs or {}),
             )
             _set_latest_result(result or "")
             printer.broadcast({"type": "task_done"})
@@ -626,24 +1107,40 @@ def run_chatbot(
 
     async def suggestions(request: Request) -> JSONResponse:
         query = request.query_params.get("q", "").strip()
+        mode = request.query_params.get("mode", "general")
+        if mode == "files":
+            q = query.lower()
+            results: list[dict[str, str]] = []
+            for path in file_cache:
+                if not q or q in path.lower():
+                    ptype = "dir" if path.endswith("/") else "file"
+                    results.append({"type": ptype, "text": path})
+                    if len(results) >= 20:
+                        break
+            return JSONResponse(results)
         if not query:
             return JSONResponse([])
         q_lower = query.lower()
-        results: list[dict[str, str]] = []
+        results = []
         for entry in _load_history():
             task = entry["task"]
             if q_lower in task.lower():
                 results.append({"type": "task", "text": task})
                 if len(results) >= 5:
                     break
-        last_word = query.split()[-1].lower() if query.split() else q_lower
-        if last_word:
+        with proposed_lock:
+            for t in proposed_tasks:
+                if q_lower in t.lower():
+                    results.append({"type": "suggested", "text": t})
+        words = query.split()
+        last_word = words[-1].lower() if words else q_lower
+        if last_word and len(last_word) >= 2:
             count = 0
             for path in file_cache:
                 if last_word in path.lower():
                     results.append({"type": "file", "text": path})
                     count += 1
-                    if count >= 10:
+                    if count >= 8:
                         break
         return JSONResponse(results)
 
@@ -654,13 +1151,59 @@ def run_chatbot(
         with proposed_lock:
             return JSONResponse(list(proposed_tasks))
 
+    async def complete(request: Request) -> JSONResponse:
+        raw_query = request.query_params.get("q", "")
+        query = raw_query.strip()
+        if not query or len(query) < 3:
+            return JSONResponse({"suggestion": ""})
+
+        def _generate() -> str:
+            history = _load_history()
+            task_list = "\n".join(f"- {e['task']}" for e in history[:20])
+            agent = KISSAgent("Autocomplete")
+            try:
+                result = agent.run(
+                    model_name="gemini-2.0-flash",
+                    prompt_template=(
+                        "You are an inline autocomplete engine for a coding assistant. "
+                        "Given the user's partial input and their past task history, "
+                        "predict what they want to type and return ONLY the remaining "
+                        "text to complete their input. Do NOT repeat the text they already typed. "
+                        "Keep the completion concise and natural.\n\n"
+                        "Past tasks:\n{task_list}\n\n"
+                        'Partial input: "{query}"\n\n'
+                        "Return ONLY the completion text (the part after what they typed). "
+                        "If no good completion, return empty string."
+                    ),
+                    arguments={"task_list": task_list, "query": query},
+                    is_agentic=False,
+                )
+                s = result.strip().strip('"').strip("'")
+                if s.lower().startswith(query.lower()):
+                    s = s[len(query):]
+                if s and not s[0].isspace() and raw_query and not raw_query[-1].isspace():
+                    s = " " + s
+                return s
+            except Exception:
+                return ""
+
+        suggestion = await asyncio.to_thread(_generate)
+        return JSONResponse({"suggestion": suggestion})
+
     async def models_endpoint(request: Request) -> JSONResponse:
-        available = get_available_models()
-        models_list = []
-        for name in available:
+        models_list: list[dict[str, Any]] = []
+        for name in get_available_models():
             info = MODEL_INFO.get(name)
-            if info:
-                models_list.append({"name": name, "fc": info.is_function_calling_supported})
+            if info and info.is_function_calling_supported:
+                models_list.append({
+                    "name": name,
+                    "inp": info.input_price_per_1M,
+                    "out": info.output_price_per_1M,
+                })
+        models_list.sort(key=lambda m: (
+            _model_vendor_order(str(m["name"])),
+            -(float(m["inp"]) + float(m["out"])),
+        ))
         return JSONResponse({"models": models_list, "selected": selected_model})
 
     app = Starlette(routes=[
@@ -669,6 +1212,7 @@ def run_chatbot(
         Route("/run", run_task, methods=["POST"]),
         Route("/stop", stop_task, methods=["POST"]),
         Route("/suggestions", suggestions),
+        Route("/complete", complete),
         Route("/tasks", tasks),
         Route("/proposed_tasks", proposed_tasks_endpoint),
         Route("/models", models_endpoint),

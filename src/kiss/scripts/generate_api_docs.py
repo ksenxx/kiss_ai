@@ -17,10 +17,17 @@ EXCLUDE_FILES = {"_version.py", "conftest.py", "novelty_prompts.py"}
 
 
 @dataclass
+class ParsedDoc:
+    summary: str
+    args: list[tuple[str, str]] = field(default_factory=list)
+    returns: str = ""
+
+
+@dataclass
 class FuncInfo:
     name: str
     signature: str
-    doc: str
+    parsed_doc: ParsedDoc
     is_async: bool = False
     is_property: bool = False
 
@@ -31,6 +38,7 @@ class ClassInfo:
     bases: list[str]
     doc: str
     init_sig: str = ""
+    init_doc: ParsedDoc = field(default_factory=lambda: ParsedDoc(""))
     methods: list[FuncInfo] = field(default_factory=list)
 
 
@@ -85,18 +93,90 @@ def _format_func_sig(node: ast.FunctionDef | ast.AsyncFunctionDef, skip_self: bo
     return f"({', '.join(parts)}){ret}"
 
 
-def _get_docstring(
+def _get_summary(
     node: ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> str:
-    if (
-        node.body
-        and isinstance(node.body[0], ast.Expr)
-        and isinstance(node.body[0].value, ast.Constant)
-        and isinstance(node.body[0].value.value, str)
-    ):
-        lines = node.body[0].value.value.strip().split("\n")
-        return lines[0].strip()
-    return ""
+    doc = ast.get_docstring(node)
+    if not doc:
+        return ""
+    return doc.split("\n")[0].strip()
+
+
+def _parse_google_docstring(raw: str) -> ParsedDoc:
+    if not raw:
+        return ParsedDoc("")
+
+    lines = raw.split("\n")
+    summary_lines: list[str] = []
+    args: list[tuple[str, str]] = []
+    returns_parts: list[str] = []
+
+    section = "summary"
+    current_arg_name = ""
+    current_arg_desc = ""
+    args_base_indent = -1
+
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip()) if stripped else 0
+
+        if stripped.lower() in ("args:", "arguments:", "parameters:"):
+            section = "args"
+            args_base_indent = -1
+            continue
+
+        if indent == 0 and stripped.lower().startswith("returns:"):
+            if current_arg_name:
+                args.append((current_arg_name, current_arg_desc.strip()))
+                current_arg_name = current_arg_desc = ""
+            section = "returns"
+            rest = stripped[len("returns:"):].strip()
+            if rest:
+                returns_parts.append(rest)
+            continue
+
+        if indent == 0 and stripped.lower().startswith(
+            ("raises:", "example:", "examples:", "note:", "notes:", "yields:", "see also:")
+        ):
+            if current_arg_name:
+                args.append((current_arg_name, current_arg_desc.strip()))
+                current_arg_name = current_arg_desc = ""
+            section = "other"
+            continue
+
+        if section == "summary":
+            if stripped:
+                summary_lines.append(stripped)
+        elif section == "args":
+            if not stripped:
+                continue
+            if args_base_indent == -1:
+                args_base_indent = indent
+            if indent <= args_base_indent and ":" in stripped:
+                if current_arg_name:
+                    args.append((current_arg_name, current_arg_desc.strip()))
+                parts = stripped.split(":", 1)
+                param_part = parts[0].strip()
+                paren_idx = param_part.find(" (")
+                if paren_idx > 0:
+                    current_arg_name = param_part[:paren_idx].strip()
+                elif "(" in param_part:
+                    current_arg_name = param_part.split("(")[0].strip()
+                else:
+                    current_arg_name = param_part
+                current_arg_desc = parts[1].strip() if len(parts) > 1 else ""
+            elif current_arg_name:
+                current_arg_desc += " " + stripped
+        elif section == "returns":
+            if stripped:
+                returns_parts.append(stripped)
+
+    if current_arg_name:
+        args.append((current_arg_name, current_arg_desc.strip()))
+
+    summary = " ".join(summary_lines).strip()
+    returns = " ".join(returns_parts).strip()
+    return ParsedDoc(summary=summary, args=args, returns=returns)
 
 
 def _has_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
@@ -110,23 +190,25 @@ def _has_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> b
 def _extract_class(node: ast.ClassDef) -> ClassInfo:
     bases = [ast.unparse(b) for b in node.bases]
     init_sig = ""
+    init_doc = ParsedDoc("")
     methods: list[FuncInfo] = []
     for item in node.body:
         if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if item.name == "__init__":
             init_sig = _format_func_sig(item, skip_self=True)
+            init_doc = _parse_google_docstring(ast.get_docstring(item) or "")
         elif not item.name.startswith("_"):
             methods.append(FuncInfo(
                 name=item.name,
                 signature=_format_func_sig(item, skip_self=True),
-                doc=_get_docstring(item),
+                parsed_doc=_parse_google_docstring(ast.get_docstring(item) or ""),
                 is_async=isinstance(item, ast.AsyncFunctionDef),
                 is_property=_has_decorator(item, "property"),
             ))
     return ClassInfo(
-        name=node.name, bases=bases, doc=_get_docstring(node),
-        init_sig=init_sig, methods=methods,
+        name=node.name, bases=bases, doc=_get_summary(node),
+        init_sig=init_sig, init_doc=init_doc, methods=methods,
     )
 
 
@@ -134,7 +216,7 @@ def _extract_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> FuncInfo:
     return FuncInfo(
         name=node.name,
         signature=_format_func_sig(node),
-        doc=_get_docstring(node),
+        parsed_doc=_parse_google_docstring(ast.get_docstring(node) or ""),
         is_async=isinstance(node, ast.AsyncFunctionDef),
     )
 
@@ -227,7 +309,7 @@ def discover_modules() -> list[ModuleDoc]:
         source = init_path.read_text()
         tree = ast.parse(source)
         all_list = _parse_all_list(tree)
-        doc = _get_docstring(tree)
+        doc = _get_summary(tree)
         deprecated = "deprecated" in source[:500].lower()
         if deprecated:
             continue
@@ -269,7 +351,7 @@ def discover_modules() -> list[ModuleDoc]:
         functions = [f for f in functions if f.name not in already]
         if not classes and not functions:
             continue
-        doc = _get_docstring(ast.parse(py_file.read_text()))
+        doc = _get_summary(ast.parse(py_file.read_text()))
         modules.append(ModuleDoc(
             name=module_name, doc=doc, all_exports=None,
             classes=classes, functions=functions,
@@ -314,11 +396,7 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
 
 
 def _slug(text: str) -> str:
-    return text.replace(".", "").replace("_", "-").replace(" ", "-").lower()
-
-
-def _escape_pipe(text: str) -> str:
-    return text.replace("|", "\\|")
+    return text.replace(".", "").replace(" ", "-").lower()
 
 
 def _heading_depth(module_name: str) -> int:
@@ -372,24 +450,42 @@ def _render_class(lines: list[str], cls: ClassInfo, depth: int) -> None:
     if cls.init_sig:
         lines.append("**Constructor:**\n")
         lines.append(f"```python\n{cls.name}{cls.init_sig}\n```\n")
+        _render_args_returns(lines, cls.init_doc)
     if cls.methods:
         lines.append("**Methods:**\n")
-        lines.append("| Method | Signature | Description |")
-        lines.append("|--------|-----------|-------------|")
         for m in cls.methods:
-            prefix = "async " if m.is_async else ""
-            suffix = " *(property)*" if m.is_property else ""
-            sig = _escape_pipe(f"{prefix}{m.name}{m.signature}")
-            lines.append(f"| `{m.name}` | `{sig}`{suffix} | {_escape_pipe(m.doc)} |")
-        lines.append("")
+            _render_method(lines, m)
+
+
+def _render_method(lines: list[str], func: FuncInfo) -> None:
+    prefix = "async " if func.is_async else ""
+    prop_tag = " *(property)*" if func.is_property else ""
+    lines.append(f"**`{func.name}`**{prop_tag}\n")
+    lines.append(f"```python\n{prefix}{func.name}{func.signature}\n```\n")
+    pd = func.parsed_doc
+    if pd.summary:
+        lines.append(f"{pd.summary}\n")
+    _render_args_returns(lines, pd)
 
 
 def _render_function(lines: list[str], func: FuncInfo) -> None:
     prefix = "async " if func.is_async else ""
     lines.append(f"**`{func.name}`**\n")
     lines.append(f"```python\n{prefix}def {func.name}{func.signature}\n```\n")
-    if func.doc:
-        lines.append(f"{func.doc}\n")
+    pd = func.parsed_doc
+    if pd.summary:
+        lines.append(f"{pd.summary}\n")
+    _render_args_returns(lines, pd)
+
+
+def _render_args_returns(lines: list[str], doc: ParsedDoc) -> None:
+    if doc.args:
+        lines.append("**Args:**\n")
+        for name, desc in doc.args:
+            lines.append(f"- `{name}`: {desc}")
+        lines.append("")
+    if doc.returns:
+        lines.append(f"**Returns:** {doc.returns}\n")
 
 
 def main() -> int:
