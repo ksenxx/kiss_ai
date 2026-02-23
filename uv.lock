@@ -2225,7 +2225,6 @@ wheels = [
 
 [[package]]
 name = "kiss-agent-framework"
-version = "0.1.30"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
