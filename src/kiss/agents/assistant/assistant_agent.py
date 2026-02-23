@@ -113,28 +113,66 @@ class AssistantAgent(RelentlessAgent):
 
 def main() -> None:
     """Run a demo of the AssistantAgent with a sample Gmail task."""
+    import argparse
     import time as time_mod
 
-    agent = AssistantAgent("Assistant Agent Test")
-    task_description = """
+    parser = argparse.ArgumentParser(description="Run AssistantAgent demo")
+    parser.add_argument(
+        "--model_name", type=str, default="claude-sonnet-4-6", help="LLM model name"
+    )
+    parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
+    parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
+    parser.add_argument("--work_dir", type=str, default=None, help="Working directory")
+    parser.add_argument(
+        "--headless",
+        type=lambda x: (str(x).lower() == "true"),
+        default=False,
+        help="Run browser headless (true/false)",
+    )
+    parser.add_argument(
+        "--print_to_console",
+        type=lambda x: (str(x).lower() == "true"),
+        default=True,
+        help="Print output to console",
+    )
+    parser.add_argument(
+        "--print_to_browser",
+        type=lambda x: (str(x).lower() == "true"),
+        default=True,
+        help="Print output to browser UI",
+    )
+    parser.add_argument("--task", type=str, default=None, help="Prompt template/task description")
+
+    args = parser.parse_args()
+
+    # Simple prompt default if not provided
+    if args.task is not None:
+        task_description = args.task
+    else:
+        task_description = """
 can you login to gmail using the username 'kissagent1@gmail.com' and
 password 'For AI Assistant.' and read the messages.
 """
 
-    work_dir = tempfile.mkdtemp()
+    if args.work_dir is not None:
+        work_dir = args.work_dir
+        os.makedirs(work_dir, exist_ok=True)
+    else:
+        work_dir = tempfile.mkdtemp()
+    agent = AssistantAgent("Assistant Agent Test")
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
     try:
         result = agent.run(
             prompt_template=task_description,
-            model_name="claude-sonnet-4-5",
-            max_steps=30,
-            max_budget=5.0,
-            work_dir=work_dir,
-            headless=False,
-            print_to_browser=True,
-            print_to_console=True,
+            model_name=args.model_name,
+            max_steps=args.max_steps,
+            max_budget=args.max_budget,
+            work_dir=args.work_dir,
+            headless=args.headless,
+            print_to_browser=args.print_to_browser,
+            print_to_console=args.print_to_console,
         )
     finally:
         os.chdir(old_cwd)
