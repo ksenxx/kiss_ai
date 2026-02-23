@@ -1166,6 +1166,8 @@ def run_chatbot(
         _load_last_model() or default_model or get_most_expensive_model() or "claude-opus-4-6"
     )
     html_page = _build_html(title, subtitle)
+    shutdown_timer: threading.Timer | None = None
+    ever_connected = False
 
     def refresh_file_cache() -> None:
         nonlocal file_cache
@@ -1288,11 +1290,35 @@ def run_chatbot(
         )
         return True
 
+    def _schedule_shutdown() -> None:
+        nonlocal shutdown_timer
+        with printer._lock:
+            if printer._clients or not ever_connected:
+                return
+        if shutdown_timer is not None:
+            shutdown_timer.cancel()
+
+        def _do_shutdown() -> None:
+            with printer._lock:
+                if printer._clients:
+                    return
+            stop_agent()
+            os._exit(0)
+
+        shutdown_timer = threading.Timer(3.0, _do_shutdown)
+        shutdown_timer.daemon = True
+        shutdown_timer.start()
+
     async def index(request: Request) -> HTMLResponse:
         return HTMLResponse(html_page)
 
     async def events(request: Request) -> StreamingResponse:
+        nonlocal ever_connected, shutdown_timer
         cq = printer.add_client()
+        ever_connected = True
+        if shutdown_timer is not None:
+            shutdown_timer.cancel()
+            shutdown_timer = None
 
         async def generate() -> AsyncGenerator[str]:
             try:
@@ -1307,6 +1333,7 @@ def run_chatbot(
                 pass
             finally:
                 printer.remove_client(cq)
+                _schedule_shutdown()
 
         return StreamingResponse(
             generate(),
