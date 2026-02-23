@@ -137,7 +137,7 @@ class SelfEvolvingMultiAgent:
         def run_bash(command: str, description: str = "") -> str:
             if not self.docker:
                 raise KISSError("Docker not initialized.")
-            return self.docker.run_bash_command(command, description or "Command")
+            return self.docker.Bash(command, description or "Command")
 
         def read_file(path: str) -> str:
             return run_bash(f"cat -n {path}", f"Read {path}")
@@ -242,7 +242,7 @@ class SelfEvolvingMultiAgent:
 
         with DockerManager(self.docker_image, workdir="/", mount_shared_volume=True) as docker:
             self.docker = docker
-            docker.run_bash_command("mkdir -p /workspace", "Init")
+            docker.Bash("mkdir -p /workspace", "Init")
             docker.workdir = self.workdir
             try:
                 return self._run_orchestrator(task)
@@ -665,12 +665,11 @@ def verify_task_completion(docker: DockerManager) -> bool:
 
     try:
         # Write test script
-        docker.run_bash_command(
+        docker.Bash(
             f"cat > /tmp/verify_task.py << 'VERIFY_EOF'\n{COMPLEX_TASK_TEST}\nVERIFY_EOF",
             "Creating verification script"
         )
-        # Run verification
-        result = docker.run_bash_command("python /tmp/verify_task.py", "Verification")
+        result = docker.Bash("python /tmp/verify_task.py", "Verification")
 
         if "PASS" in result:
             print("\n✅ Task verification PASSED!")
@@ -703,7 +702,7 @@ def main() -> None:
         agent.docker_image, workdir="/", mount_shared_volume=True
     ) as docker:
         agent.docker = docker
-        docker.run_bash_command("mkdir -p /workspace", "Init")
+        docker.Bash("mkdir -p /workspace", "Init")
         docker.workdir = agent.workdir
 
         try:

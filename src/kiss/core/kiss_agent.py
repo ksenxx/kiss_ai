@@ -354,17 +354,15 @@ class KISSAgent(Base):
             self.function_map[tool.__name__] = tool
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
-        """Updates token counter and budget from API response.
-
-        Args:
-            response: The API response object containing usage information.
-        """
+        """Updates token counter and budget from API response."""
         try:
-            input_tokens, output_tokens = (
+            input_tokens, output_tokens, cache_read, cache_write = (
                 self.model.extract_input_output_token_counts_from_response(response)
             )
-            self.total_tokens_used += input_tokens + output_tokens
-            cost = calculate_cost(self.model.model_name, input_tokens, output_tokens)
+            self.total_tokens_used += input_tokens + output_tokens + cache_read + cache_write
+            cost = calculate_cost(
+                self.model.model_name, input_tokens, output_tokens, cache_read, cache_write
+            )
             self.budget_used += cost
             Base.global_budget_used += cost
         except Exception as e:  # pragma: no cover

@@ -340,7 +340,7 @@ with DockerManager("ubuntu:latest") as env:
     result = agent.run(
         model_name="gemini-3-flash-preview",
         prompt_template="Install nginx and configure it",
-        tools=[env.run_bash_command]
+        tools=[env.Bash]
     )
 ```
 

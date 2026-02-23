@@ -126,7 +126,7 @@ def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str:
             model_name=model_name,
             prompt_template=prompt_template_for_general_bash_agent,
             arguments={"task": task},
-            tools=[env.run_bash_command],
+            tools=[env.Bash],
         )
         return result
 

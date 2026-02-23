@@ -146,6 +146,7 @@ class WebUseTool:
             self._page = pages[-1]
 
     def _resolve_locator(self, element_id: int) -> Any:
+        element_id = int(element_id)
         if element_id < 1 or element_id > len(self._elements):
             snapshot = self._page.locator("body").aria_snapshot()
             if snapshot:

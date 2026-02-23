@@ -107,6 +107,11 @@ class ConsolePrinter(Printer):
                 )
             )
             return ""
+        if type == "bash_stream":
+            self._file.write(str(content))
+            self._file.flush()
+            self._mid_line = not str(content).endswith("\n")
+            return ""
         if type == "tool_call":
             self._flush_newline()
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))

@@ -351,20 +351,19 @@ class GeminiModel(Model):
             content = f"{content}\n\n{self.usage_info_for_messages}"
         self.conversation.append({"role": role, "content": content})
 
-    def extract_input_output_token_counts_from_response(self, response: Any) -> tuple[int, int]:
-        """Extracts input and output token counts from an API response.
-
-        Args:
-            response: The raw Gemini API response object.
+    def extract_input_output_token_counts_from_response(
+        self, response: Any
+    ) -> tuple[int, int, int, int]:
+        """Extracts token counts from a Gemini API response.
 
         Returns:
-            tuple[int, int]: A tuple of (input_tokens, output_tokens).
+            (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
         """
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             prompt_tokens = response.usage_metadata.prompt_token_count or 0
             output_tokens = response.usage_metadata.candidates_token_count or 0
-            return prompt_tokens, output_tokens
-        return 0, 0
+            return prompt_tokens, output_tokens, 0, 0
+        return 0, 0, 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.

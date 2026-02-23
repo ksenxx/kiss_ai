@@ -44,23 +44,17 @@ class ModelInfo:
         is_function_calling_supported: bool,
         is_embedding_supported: bool,
         is_generation_supported: bool,
+        cache_read_price_per_million: float | None = None,
+        cache_write_price_per_million: float | None = None,
     ):
-        """Initialize a ModelInfo instance.
-
-        Args:
-            context_length: Maximum context window size in tokens.
-            input_price_per_million: Cost per million input tokens in USD.
-            output_price_per_million: Cost per million output tokens in USD.
-            is_function_calling_supported: Whether the model supports function calling.
-            is_embedding_supported: Whether the model supports embedding generation.
-            is_generation_supported: Whether the model supports text generation.
-        """
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
         self.output_price_per_1M = output_price_per_million
         self.is_function_calling_supported = is_function_calling_supported
         self.is_embedding_supported = is_embedding_supported
         self.is_generation_supported = is_generation_supported
+        self.cache_read_price_per_1M = cache_read_price_per_million
+        self.cache_write_price_per_1M = cache_write_price_per_million
 
 
 def _mi(
@@ -70,6 +64,8 @@ def _mi(
     fc: bool = True,
     emb: bool = False,
     gen: bool = True,
+    cr: float | None = None,
+    cw: float | None = None,
 ) -> ModelInfo:
     """Helper to create ModelInfo with shorter syntax.
 
@@ -80,8 +76,10 @@ def _mi(
         fc: is_function_calling_supported (default True for generation models)
         emb: is_embedding_supported (default False)
         gen: is_generation_supported (default True)
+        cr: cache_read_price_per_million (None = use input price)
+        cw: cache_write_price_per_million (None = use input price)
     """
-    return ModelInfo(ctx, inp, out, fc, emb, gen)
+    return ModelInfo(ctx, inp, out, fc, emb, gen, cr, cw)
 
 
 def _emb(ctx: int, inp: float) -> ModelInfo:
@@ -585,6 +583,22 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "zai-org/GLM-5": _mi(202752, 1.00, 3.20),
 }
 
+# Populate cache pricing for known providers.
+# Anthropic: cache_read = 10% of input, cache_write = 125% of input.
+# OpenAI: cache_read = 50% of input (automatic caching, no write premium).
+for _name, _info in MODEL_INFO.items():
+    if _info.cache_read_price_per_1M is not None:
+        continue
+    if _name.startswith("claude-"):
+        _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.1
+        _info.cache_write_price_per_1M = _info.input_price_per_1M * 1.25
+    elif (
+        _name.startswith(_OPENAI_PREFIXES)
+        and not _name.startswith(("text-embedding", "openai/"))
+        and _info.is_generation_supported
+    ):
+        _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.5
+
 # ==========================================================================
 # FLAKY MODEL REGISTRY
 # Models that have been tested and found to have reliability issues
@@ -744,13 +758,21 @@ def get_most_expensive_model(fc_only: bool = True) -> str:
     return best_name
 
 
-def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int) -> float:
+def calculate_cost(
+    model_name: str,
+    num_input_tokens: int,
+    num_output_tokens: int,
+    num_cache_read_tokens: int = 0,
+    num_cache_write_tokens: int = 0,
+) -> float:
     """Calculates the cost in USD for the given token counts.
 
     Args:
         model_name: Name of the model (with or without provider prefix).
-        num_input_tokens: Number of input tokens.
+        num_input_tokens: Number of non-cached input tokens.
         num_output_tokens: Number of output tokens.
+        num_cache_read_tokens: Number of tokens read from cache.
+        num_cache_write_tokens: Number of tokens written to cache.
 
     Returns:
         float: Cost in USD, or 0.0 if pricing is not available for the model.
@@ -758,9 +780,21 @@ def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: in
     info = MODEL_INFO.get(model_name)
     if info is None:
         return 0.0
+    cr_price = (
+        info.cache_read_price_per_1M
+        if info.cache_read_price_per_1M is not None
+        else info.input_price_per_1M
+    )
+    cw_price = (
+        info.cache_write_price_per_1M
+        if info.cache_write_price_per_1M is not None
+        else info.input_price_per_1M
+    )
     return (
         num_input_tokens * info.input_price_per_1M
         + num_output_tokens * info.output_price_per_1M
+        + num_cache_read_tokens * cr_price
+        + num_cache_write_tokens * cw_price
     ) / 1_000_000
 
 
