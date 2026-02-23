@@ -165,9 +165,23 @@ def _load_model_usage() -> dict[str, int]:
     return {}
 
 
+def _load_last_model() -> str:
+    if MODEL_USAGE_FILE.exists():
+        try:
+            data = json.loads(MODEL_USAGE_FILE.read_text())
+            if isinstance(data, dict):
+                last = data.get("_last")
+                if isinstance(last, str):
+                    return last
+        except (json.JSONDecodeError, OSError):
+            pass
+    return ""
+
+
 def _record_model_usage(model: str) -> None:
-    usage = _load_model_usage()
-    usage[model] = usage.get(model, 0) + 1
+    usage: dict[str, int | str] = dict(_load_model_usage())
+    usage[model] = int(usage.get(model, 0)) + 1
+    usage["_last"] = model
     try:
         _KISS_DIR.mkdir(parents=True, exist_ok=True)
         MODEL_USAGE_FILE.write_text(json.dumps(usage))
@@ -556,13 +570,6 @@ header{
   font-size:13.5px;color:rgba(255,255,255,0.7);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-#history-btn,#proposals-btn{
-  background:none;border:1px solid rgba(255,255,255,0.15);border-radius:8px;
-  color:rgba(255,255,255,0.6);font-size:12px;cursor:pointer;
-  padding:5px 12px;transition:all 0.15s;display:flex;align-items:center;gap:6px;
-}
-#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.85);border-color:rgba(255,255,255,0.3)}
-#history-btn svg,#proposals-btn svg{opacity:0.85}
 .llm-panel{
   border:1px solid rgba(88,166,255,0.15);border-radius:10px;
   margin:8px auto;max-height:350px;overflow-y:auto;
@@ -707,6 +714,7 @@ function handleEvent(ev){
     loadTasks();loadProposed();break}
   case'followup_suggestion':{
     var fu=mkEl('div','followup-bar');
+    fu.title=ev.text;
     fu.innerHTML='<span class="fu-label">Suggested next</span>'
       +'<span class="fu-text">'+esc(ev.text)+'</span>';
     fu.addEventListener('click',function(){
@@ -1040,6 +1048,7 @@ function loadWelcome(){
     });
     items.slice(0,6).forEach(function(item){
       var chip=mkEl('div','suggestion-chip');
+      chip.title=item.text;
       chip.innerHTML='<span class="chip-label '+item.type+'">'
         +(item.type==='recent'?'Recent':'Suggested')+'</span>'
         +esc(item.text);
@@ -1073,21 +1082,6 @@ def _build_html(title: str, subtitle: str) -> str:
   <div class="logo">{title}<span>{subtitle}</span></div>
   <div style="display:flex;align-items:center;gap:14px">
     <div class="status"><div class="dot" id="dot"></div><span id="stxt">Ready</span></div>
-    <button id="history-btn" onclick="toggleSidebar('history')">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-      </svg>
-      History
-    </button>
-    <button id="proposals-btn" onclick="toggleSidebar('proposals')">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
-        <path d="M2 12l10 5 10-5"/>
-      </svg>
-      Proposals
-    </button>
   </div>
 </header>
 <div id="output">
@@ -1168,7 +1162,9 @@ def run_chatbot(
     agent_thread: threading.Thread | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
-    selected_model = default_model or get_most_expensive_model() or "claude-opus-4-6"
+    selected_model = (
+        _load_last_model() or default_model or get_most_expensive_model() or "claude-opus-4-6"
+    )
     html_page = _build_html(title, subtitle)
 
     def refresh_file_cache() -> None:
@@ -1328,11 +1324,11 @@ def run_chatbot(
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
         selected_model = model
-        _record_model_usage(model)
         if not task:
             with running_lock:
                 running = False
             return JSONResponse({"error": "Empty task"}, status_code=400)
+        _record_model_usage(model)
         t = threading.Thread(target=run_agent_thread, args=(task, model), daemon=True)
         with running_lock:
             agent_thread = t
