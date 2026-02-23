@@ -3,8 +3,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/ksenxx/kiss_ai.git
 cd kiss_ai
 
-uv venv --python 3.13 .venv
-. .venv/bin/activate
+uv init --python 3.13
 uv sync
 uv run check
 if [[ -z "${GEMINI_API_KEY}" && -z "${OPENAI_API_KEY}" && -z "${ANTHROPIC_API_KEY}" && -z "${TOGETHER_API_KEY}" && -z "${OPENROUTER_API_KEY}" && -z "${MINIMAX_API_KEY}" ]]; then
