@@ -408,21 +408,19 @@ def generate_markdown(modules: list[ModuleDoc]) -> str:
     lines: list[str] = []
 
     lines.append("# KISS Framework API Reference\n")
-    lines.append("> **Auto-generated** from source code by `generate_api_docs.py`.")
-    lines.append("> Run `uv run generate-api-docs` to regenerate.\n")
-    lines.append("---\n")
+    lines.append("> **Auto-generated** — run `uv run generate-api-docs` to regenerate.\n")
 
-    lines.append("## Table of Contents\n")
+    lines.append("<details><summary><b>Table of Contents</b></summary>\n")
     for mod in modules:
         indent = "  " * mod.name.count(".")
         lines.append(f"{indent}- [`{mod.name}`](#{_slug(mod.name)})")
-    lines.append("\n---\n")
+    lines.append("\n</details>\n")
+    lines.append("---\n")
 
     for mod in modules:
         h = "#" * _heading_depth(mod.name)
-        lines.append(f"{h} `{mod.name}`\n")
-        if mod.doc:
-            lines.append(f"*{mod.doc}*\n")
+        doc_part = f" — *{mod.doc}*" if mod.doc else ""
+        lines.append(f"{h} `{mod.name}`{doc_part}\n")
 
         if mod.is_package and mod.all_exports:
             exports = ", ".join(mod.all_exports)
@@ -431,9 +429,8 @@ def generate_markdown(modules: list[ModuleDoc]) -> str:
         for cls in mod.classes:
             _render_class(lines, cls, _heading_depth(mod.name) + 1)
 
-        if mod.functions:
-            for func in mod.functions:
-                _render_function(lines, func)
+        for func in mod.functions:
+            _render_function(lines, func)
 
         lines.append("---\n")
 
@@ -443,16 +440,12 @@ def generate_markdown(modules: list[ModuleDoc]) -> str:
 def _render_class(lines: list[str], cls: ClassInfo, depth: int) -> None:
     h = "#" * min(depth, 6)
     bases_str = f"({', '.join(cls.bases)})" if cls.bases else ""
-    lines.append(f"{h} `{cls.name}`\n")
-    lines.append(f"```python\nclass {cls.name}{bases_str}\n```\n")
-    if cls.doc:
-        lines.append(f"{cls.doc}\n")
+    doc_part = f" — {cls.doc}" if cls.doc else ""
+    lines.append(f"{h} `class {cls.name}{bases_str}`{doc_part}\n")
     if cls.init_sig:
-        lines.append("**Constructor:**\n")
-        lines.append(f"```python\n{cls.name}{cls.init_sig}\n```\n")
+        lines.append(f"**Constructor:** `{cls.name}{cls.init_sig}`\n")
         _render_args_returns(lines, cls.init_doc)
     if cls.methods:
-        lines.append("**Methods:**\n")
         for m in cls.methods:
             _render_method(lines, m)
 
@@ -460,32 +453,28 @@ def _render_class(lines: list[str], cls: ClassInfo, depth: int) -> None:
 def _render_method(lines: list[str], func: FuncInfo) -> None:
     prefix = "async " if func.is_async else ""
     prop_tag = " *(property)*" if func.is_property else ""
-    lines.append(f"**`{func.name}`**{prop_tag}\n")
-    lines.append(f"```python\n{prefix}{func.name}{func.signature}\n```\n")
-    pd = func.parsed_doc
-    if pd.summary:
-        lines.append(f"{pd.summary}\n")
-    _render_args_returns(lines, pd)
+    sig = f"`{prefix}{func.name}{func.signature}`{prop_tag}"
+    summary = f" — {func.parsed_doc.summary}" if func.parsed_doc.summary else ""
+    lines.append(f"- **{func.name}**{summary}<br/>{sig}")
+    _render_args_returns(lines, func.parsed_doc, indent="  ")
 
 
 def _render_function(lines: list[str], func: FuncInfo) -> None:
     prefix = "async " if func.is_async else ""
-    lines.append(f"**`{func.name}`**\n")
-    lines.append(f"```python\n{prefix}def {func.name}{func.signature}\n```\n")
-    pd = func.parsed_doc
-    if pd.summary:
-        lines.append(f"{pd.summary}\n")
-    _render_args_returns(lines, pd)
+    sig = f"`{prefix}def {func.name}{func.signature}`"
+    summary = f" — {func.parsed_doc.summary}" if func.parsed_doc.summary else ""
+    lines.append(f"**`{func.name}`**{summary}<br/>{sig}\n")
+    _render_args_returns(lines, func.parsed_doc)
 
 
-def _render_args_returns(lines: list[str], doc: ParsedDoc) -> None:
+def _render_args_returns(lines: list[str], doc: ParsedDoc, indent: str = "") -> None:
     if doc.args:
-        lines.append("**Args:**\n")
         for name, desc in doc.args:
-            lines.append(f"- `{name}`: {desc}")
-        lines.append("")
+            lines.append(f"{indent}- `{name}`: {desc}")
     if doc.returns:
-        lines.append(f"**Returns:** {doc.returns}\n")
+        lines.append(f"{indent}- **Returns:** {doc.returns}")
+    if doc.args or doc.returns:
+        lines.append("")
 
 
 def main() -> int:

@@ -1,11 +1,8 @@
 # KISS Framework API Reference
 
-> **Auto-generated** from source code by `generate_api_docs.py`.
-> Run `uv run generate-api-docs` to regenerate.
+> **Auto-generated** — run `uv run generate-api-docs` to regenerate.
 
-______________________________________________________________________
-
-## Table of Contents
+<details><summary><b>Table of Contents</b></summary>
 
 - [`kiss`](#kiss)
   - [`kiss.core`](#kisscore)
@@ -42,11 +39,11 @@ ______________________________________________________________________
   - [`kiss.multiprocessing`](#kissmultiprocessing)
   - [`kiss.rag`](#kissrag)
 
+</details>
+
 ______________________________________________________________________
 
-## `kiss`
-
-*Top-level Kiss module for the project.*
+## `kiss` — *Top-level Kiss module for the project.*
 
 ```python
 from kiss import __version__
@@ -54,1933 +51,822 @@ from kiss import __version__
 
 ______________________________________________________________________
 
-### `kiss.core`
-
-*Core module for the KISS agent framework.*
+### `kiss.core` — *Core module for the KISS agent framework.*
 
 ```python
 from kiss.core import AgentConfig, AnthropicModel, Config, DEFAULT_CONFIG, GeminiModel, KISSError, Model, OpenAICompatibleModel
 ```
 
-#### `AgentConfig`
+#### `class AgentConfig(BaseModel)`
 
-```python
-class AgentConfig(BaseModel)
-```
+#### `class Config(BaseModel)`
 
-#### `Config`
-
-```python
-class Config(BaseModel)
-```
-
-#### `KISSError`
-
-```python
-class KISSError(ValueError)
-```
-
-Custom exception class for KISS framework errors.
+#### `class KISSError(ValueError)` — Custom exception class for KISS framework errors.
 
 ______________________________________________________________________
 
-#### `kiss.core.kiss_agent`
+#### `kiss.core.kiss_agent` — *Core KISS agent implementation with native function calling support.*
 
-*Core KISS agent implementation with native function calling support.*
+##### `class KISSAgent(Base)` — A KISS agent using native function calling.
 
-##### `KISSAgent`
+**Constructor:** `KISSAgent(name: str) -> None`
 
-```python
-class KISSAgent(Base)
-```
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
 
-A KISS agent using native function calling.
+  - `model_name`: The name of the model to use for the agent.
+  - `prompt_template`: The prompt template for the agent.
+  - `arguments`: The arguments to be substituted into the prompt template. Default is None.
+  - `tools`: The tools to use for the agent. If None, no tools are provided (only the built-in finish tool is added).
+  - `is_agentic`: Whether the agent is agentic. Default is True.
+  - `max_steps`: The maximum number of steps to take. Default is DEFAULT_CONFIG.agent.max_steps.
+  - `max_budget`: The maximum budget to spend. Default is DEFAULT_CONFIG.agent.max_agent_budget.
+  - `model_config`: The model configuration to use for the agent. Default is None.
+  - `printer`: Optional printer for streaming output. Default is None.
+  - `print_to_console`: Override config to enable/disable console printing. Default is None (uses config).
+  - `print_to_browser`: Override config to enable/disable browser printing. Default is None (uses config).
+  - **Returns:** str: The result of the agent's task.
 
-**Constructor:**
+- **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
 
-```python
-KISSAgent(name: str) -> None
-```
-
-**Methods:**
-
-**`run`**
-
-```python
-run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str
-```
-
-Runs the agent's main ReAct loop to solve the task.
-
-**Args:**
-
-- `model_name`: The name of the model to use for the agent.
-- `prompt_template`: The prompt template for the agent.
-- `arguments`: The arguments to be substituted into the prompt template. Default is None.
-- `tools`: The tools to use for the agent. If None, no tools are provided (only the built-in finish tool is added).
-- `is_agentic`: Whether the agent is agentic. Default is True.
-- `max_steps`: The maximum number of steps to take. Default is DEFAULT_CONFIG.agent.max_steps.
-- `max_budget`: The maximum budget to spend. Default is DEFAULT_CONFIG.agent.max_agent_budget.
-- `model_config`: The model configuration to use for the agent. Default is None.
-- `printer`: Optional printer for streaming output. Default is None.
-- `print_to_console`: Override config to enable/disable console printing. Default is None (uses config).
-- `print_to_browser`: Override config to enable/disable browser printing. Default is None (uses config).
-
-**Returns:** str: The result of the agent's task.
-
-**`finish`**
-
-```python
-finish(result: str) -> str
-```
-
-The agent must call this function with the final answer to the task.
-
-**Args:**
-
-- `result`: The result generated by the agent.
-
-**Returns:** Returns the result of the agent's task.
+  - `result`: The result generated by the agent.
+  - **Returns:** Returns the result of the agent's task.
 
 ______________________________________________________________________
 
-#### `kiss.core.config`
+#### `kiss.core.config` — *Configuration Pydantic models for KISS agent settings with CLI support.*
 
-*Configuration Pydantic models for KISS agent settings with CLI support.*
+##### `class APIKeysConfig(BaseModel)`
 
-##### `APIKeysConfig`
-
-```python
-class APIKeysConfig(BaseModel)
-```
-
-##### `DockerConfig`
-
-```python
-class DockerConfig(BaseModel)
-```
+##### `class DockerConfig(BaseModel)`
 
 ______________________________________________________________________
 
-#### `kiss.core.config_builder`
+#### `kiss.core.config_builder` — *Configuration builder for KISS agent settings with CLI support.*
 
-*Configuration builder for KISS agent settings with CLI support.*
-
-**`add_config`**
-
-```python
-def add_config(name: str, config_class: type[BaseModel]) -> None
-```
-
-Build the KISS config, optionally overriding with command-line arguments. This function accumulates configs - each call adds a new config field while preserving existing fields from previous calls.
-
-**Args:**
+**`add_config`** — Build the KISS config, optionally overriding with command-line arguments. This function accumulates configs - each call adds a new config field while preserving existing fields from previous calls.<br/>`def add_config(name: str, config_class: type[BaseModel]) -> None`
 
 - `name`: Name of the config class.
 - `config_class`: Class of the config.
 
 ______________________________________________________________________
 
-#### `kiss.core.models`
-
-*Model implementations for different LLM providers.*
+#### `kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
 from kiss.core.models import Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
 ```
 
-##### `Model`
+##### `class Model(ABC)` — Abstract base class for LLM provider implementations.
 
-```python
-class Model(ABC)
-```
-
-Abstract base class for LLM provider implementations.
-
-**Constructor:**
-
-```python
-Model(model_name: str, model_description: str = '', model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
-```
-
-**Args:**
+**Constructor:** `Model(model_name: str, model_description: str = '', model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
 
 - `model_name`: The name/identifier of the model.
+
 - `model_description`: Optional description of the model.
+
 - `model_config`: Optional dictionary of model configuration parameters.
+
 - `token_callback`: Optional async callback invoked with each streamed text token.
 
-**Methods:**
+- **close_callback_loop** — Close the per-instance event loop used for synchronous token callback invocation. Safe to call multiple times; subsequent calls are no-ops.<br/>`close_callback_loop() -> None`
 
-**`close_callback_loop`**
+- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
 
-```python
-close_callback_loop() -> None
-```
+  - `prompt`: The initial user prompt to start the conversation.
 
-Close the per-instance event loop used for synchronous token callback invocation. Safe to call multiple times; subsequent calls are no-ops.
+- **generate** — Generates content from prompt.<br/>`generate() -> tuple[str, Any]`
 
-**`initialize`**
+  - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-```python
-initialize(prompt: str) -> None
-```
+- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
 
-Initializes the conversation with an initial user prompt.
+  - `function_map`: Dictionary mapping function names to callable functions.
+  - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
-**Args:**
+- **add_function_results_to_conversation_and_return** — Adds function results to the conversation state.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
 
-- `prompt`: The initial user prompt to start the conversation.
+  - `function_results`: List of tuples containing (function_name, result_dict).
 
-**`generate`**
+- **add_message_to_conversation** — Adds a message to the conversation state.<br/>`add_message_to_conversation(role: str, content: str) -> None`
 
-```python
-generate() -> tuple[str, Any]
-```
+  - `role`: The role of the message sender (e.g., 'user', 'assistant').
+  - `content`: The message content.
 
-Generates content from prompt.
+- **extract_input_output_token_counts_from_response** — Extracts token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
-**Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
+  - `response`: The raw API response object.
+  - **Returns:** tuple\[int, int, int, int\]: (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
 
-**`generate_and_process_with_tools`**
+- **get_embedding** — Generates an embedding vector for the given text.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
-```python
-generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]
-```
+  - `text`: The text to generate an embedding for.
+  - `embedding_model`: Optional model name to use for embedding generation.
+  - **Returns:** list\[float\]: The embedding vector as a list of floats.
 
-Generates content with tools, processes the response, and adds it to conversation.
+- **set_usage_info_for_messages** — Sets token information to append to messages sent to the LLM.<br/>`set_usage_info_for_messages(usage_info: str) -> None`
 
-**Args:**
-
-- `function_map`: Dictionary mapping function names to callable functions.
-
-**Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
-
-**`add_function_results_to_conversation_and_return`**
-
-```python
-add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None
-```
-
-Adds function results to the conversation state.
-
-**Args:**
-
-- `function_results`: List of tuples containing (function_name, result_dict).
-
-**`add_message_to_conversation`**
-
-```python
-add_message_to_conversation(role: str, content: str) -> None
-```
-
-Adds a message to the conversation state.
-
-**Args:**
-
-- `role`: The role of the message sender (e.g., 'user', 'assistant').
-- `content`: The message content.
-
-**`extract_input_output_token_counts_from_response`**
-
-```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
-```
-
-Extracts token counts from an API response.
-
-**Args:**
-
-- `response`: The raw API response object.
-
-**Returns:** tuple\[int, int, int, int\]: (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
-
-**`get_embedding`**
-
-```python
-get_embedding(text: str, embedding_model: str | None = None) -> list[float]
-```
-
-Generates an embedding vector for the given text.
-
-**Args:**
-
-- `text`: The text to generate an embedding for.
-- `embedding_model`: Optional model name to use for embedding generation.
-
-**Returns:** list\[float\]: The embedding vector as a list of floats.
-
-**`set_usage_info_for_messages`**
-
-```python
-set_usage_info_for_messages(usage_info: str) -> None
-```
-
-Sets token information to append to messages sent to the LLM.
-
-**Args:**
-
-- `usage_info`: The usage information string to append.
+  - `usage_info`: The usage information string to append.
 
 ______________________________________________________________________
 
-#### `kiss.core.models.model_info`
+#### `kiss.core.models.model_info` — *Model information: pricing and context lengths for supported LLM providers.*
 
-*Model information: pricing and context lengths for supported LLM providers.*
+##### `class ModelInfo` — Container for model metadata including pricing and capabilities.
 
-##### `ModelInfo`
+**Constructor:** `ModelInfo(context_length: int, input_price_per_million: float, output_price_per_million: float, is_function_calling_supported: bool, is_embedding_supported: bool, is_generation_supported: bool, cache_read_price_per_million: float | None = None, cache_write_price_per_million: float | None = None)`
 
-```python
-class ModelInfo
-```
-
-Container for model metadata including pricing and capabilities.
-
-**Constructor:**
-
-```python
-ModelInfo(context_length: int, input_price_per_million: float, output_price_per_million: float, is_function_calling_supported: bool, is_embedding_supported: bool, is_generation_supported: bool, cache_read_price_per_million: float | None = None, cache_write_price_per_million: float | None = None)
-```
-
-**`is_model_flaky`**
-
-```python
-def is_model_flaky(model_name: str) -> bool
-```
-
-Check if a model is known to be flaky.
-
-**Args:**
+**`is_model_flaky`** — Check if a model is known to be flaky.<br/>`def is_model_flaky(model_name: str) -> bool`
 
 - `model_name`: The name of the model to check.
+- **Returns:** bool: True if the model is known to have reliability issues.
 
-**Returns:** bool: True if the model is known to have reliability issues.
-
-**`get_flaky_reason`**
-
-```python
-def get_flaky_reason(model_name: str) -> str
-```
-
-Get the reason why a model is flaky.
-
-**Args:**
+**`get_flaky_reason`** — Get the reason why a model is flaky.<br/>`def get_flaky_reason(model_name: str) -> str`
 
 - `model_name`: The name of the model to check.
+- **Returns:** str: The reason for flakiness, or empty string if not flaky.
 
-**Returns:** str: The reason for flakiness, or empty string if not flaky.
-
-**`model`**
-
-```python
-def model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None) -> Model
-```
-
-Get a model instance based on model name prefix.
-
-**Args:**
+**`model`** — Get a model instance based on model name prefix.<br/>`def model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None) -> Model`
 
 - `model_name`: The name of the model (with provider prefix if applicable).
 - `model_config`: Optional dictionary of model configuration parameters. If it contains "base_url", routing is bypassed and an OpenAICompatibleModel is built with that base_url and optional "api_key".
 - `token_callback`: Optional async callback invoked with each streamed text token.
+- **Returns:** Model: An appropriate Model instance for the specified model.
 
-**Returns:** Model: An appropriate Model instance for the specified model.
+**`get_available_models`** — Return model names for which an API key is configured and generation is supported.<br/>`def get_available_models() -> list[str]`
 
-**`get_available_models`**
+- **Returns:** list\[str\]: Sorted list of model name strings that have a configured API key and support text generation.
 
-```python
-def get_available_models() -> list[str]
-```
+**`get_most_expensive_model`**<br/>`def get_most_expensive_model(fc_only: bool = True) -> str`
 
-Return model names for which an API key is configured and generation is supported.
-
-**Returns:** list\[str\]: Sorted list of model name strings that have a configured API key and support text generation.
-
-**`get_most_expensive_model`**
-
-```python
-def get_most_expensive_model(fc_only: bool = True) -> str
-```
-
-**`calculate_cost`**
-
-```python
-def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int, num_cache_read_tokens: int = 0, num_cache_write_tokens: int = 0) -> float
-```
-
-Calculates the cost in USD for the given token counts.
-
-**Args:**
+**`calculate_cost`** — Calculates the cost in USD for the given token counts.<br/>`def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int, num_cache_read_tokens: int = 0, num_cache_write_tokens: int = 0) -> float`
 
 - `model_name`: Name of the model (with or without provider prefix).
 - `num_input_tokens`: Number of non-cached input tokens.
 - `num_output_tokens`: Number of output tokens.
 - `num_cache_read_tokens`: Number of tokens read from cache.
 - `num_cache_write_tokens`: Number of tokens written to cache.
+- **Returns:** float: Cost in USD, or 0.0 if pricing is not available for the model.
 
-**Returns:** float: Cost in USD, or 0.0 if pricing is not available for the model.
-
-**`get_max_context_length`**
-
-```python
-def get_max_context_length(model_name: str) -> int
-```
-
-Returns the maximum context length supported by the model.
-
-**Args:**
+**`get_max_context_length`** — Returns the maximum context length supported by the model.<br/>`def get_max_context_length(model_name: str) -> int`
 
 - `model_name`: Name of the model (with or without provider prefix).
-
-**Returns:** int: Maximum context length in tokens.
+- **Returns:** int: Maximum context length in tokens.
 
 ______________________________________________________________________
 
-#### `kiss.core.models.openai_compatible_model`
+#### `kiss.core.models.openai_compatible_model` — *OpenAI-compatible model implementation for custom endpoints.*
 
-*OpenAI-compatible model implementation for custom endpoints.*
+##### `class OpenAICompatibleModel(Model)` — A model that uses an OpenAI-compatible API with a custom base URL.
 
-##### `OpenAICompatibleModel`
-
-```python
-class OpenAICompatibleModel(Model)
-```
-
-A model that uses an OpenAI-compatible API with a custom base URL.
-
-**Constructor:**
-
-```python
-OpenAICompatibleModel(model_name: str, base_url: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
-```
-
-**Args:**
+**Constructor:** `OpenAICompatibleModel(model_name: str, base_url: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
 
 - `model_name`: The name/identifier of the model to use.
+
 - `base_url`: The base URL for the API endpoint (e.g., "http://localhost:11434/v1").
+
 - `api_key`: API key for authentication.
+
 - `model_config`: Optional dictionary of model configuration parameters.
+
 - `token_callback`: Optional async callback invoked with each streamed text token.
 
-**Methods:**
+- **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
 
-**`initialize`**
+  - `prompt`: The initial user prompt to start the conversation.
 
-```python
-initialize(prompt: str) -> None
-```
+- **generate** — Generate content from prompt without tools.<br/>`generate() -> tuple[str, Any]`
 
-Initialize the conversation with an initial user prompt.
+  - **Returns:** A tuple of (content, response) where content is the generated text and response is the raw API response object.
 
-**Args:**
+- **generate_and_process_with_tools** — Generate content with tools, process the response, and add it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
 
-- `prompt`: The initial user prompt to start the conversation.
+  - `function_map`: Dictionary mapping function names to callable functions.
+  - **Returns:** A tuple of (function_calls, content, response) where function_calls is a list of dictionaries containing tool call information, content is the text response, and response is the raw API response object.
 
-**`generate`**
+- **add_function_results_to_conversation_and_return** — Add function results to the conversation state.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
 
-```python
-generate() -> tuple[str, Any]
-```
+  - `function_results`: A list of tuples where each tuple contains the function name and a dictionary with the function result.
 
-Generate content from prompt without tools.
+- **add_message_to_conversation** — Add a message to the conversation state.<br/>`add_message_to_conversation(role: str, content: str) -> None`
 
-**Returns:** A tuple of (content, response) where content is the generated text and response is the raw API response object.
+  - `role`: The role of the message sender ('user', 'assistant', or 'system').
+  - `content`: The content of the message to add.
 
-**`generate_and_process_with_tools`**
+- **extract_input_output_token_counts_from_response** — Extract token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
-```python
-generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]
-```
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
 
-Generate content with tools, process the response, and add it to conversation.
+- **get_embedding** — Generate an embedding vector for the given text.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
-**Args:**
-
-- `function_map`: Dictionary mapping function names to callable functions.
-
-**Returns:** A tuple of (function_calls, content, response) where function_calls is a list of dictionaries containing tool call information, content is the text response, and response is the raw API response object.
-
-**`add_function_results_to_conversation_and_return`**
-
-```python
-add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None
-```
-
-Add function results to the conversation state.
-
-**Args:**
-
-- `function_results`: A list of tuples where each tuple contains the function name and a dictionary with the function result.
-
-**`add_message_to_conversation`**
-
-```python
-add_message_to_conversation(role: str, content: str) -> None
-```
-
-Add a message to the conversation state.
-
-**Args:**
-
-- `role`: The role of the message sender ('user', 'assistant', or 'system').
-- `content`: The content of the message to add.
-
-**`extract_input_output_token_counts_from_response`**
-
-```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
-```
-
-Extract token counts from an API response.
-
-**Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
-
-**`get_embedding`**
-
-```python
-get_embedding(text: str, embedding_model: str | None = None) -> list[float]
-```
-
-Generate an embedding vector for the given text.
-
-**Args:**
-
-- `text`: The text to generate an embedding for.
-- `embedding_model`: Optional model name for embedding generation. Uses the model's name if not specified.
-
-**Returns:** A list of floating point numbers representing the embedding vector.
+  - `text`: The text to generate an embedding for.
+  - `embedding_model`: Optional model name for embedding generation. Uses the model's name if not specified.
+  - **Returns:** A list of floating point numbers representing the embedding vector.
 
 ______________________________________________________________________
 
-#### `kiss.core.models.anthropic_model`
+#### `kiss.core.models.anthropic_model` — *Anthropic model implementation for Claude models.*
 
-*Anthropic model implementation for Claude models.*
+##### `class AnthropicModel(Model)` — A model that uses Anthropic's Messages API (Claude).
 
-##### `AnthropicModel`
-
-```python
-class AnthropicModel(Model)
-```
-
-A model that uses Anthropic's Messages API (Claude).
-
-**Constructor:**
-
-```python
-AnthropicModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
-```
-
-**Args:**
+**Constructor:** `AnthropicModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
 
 - `model_name`: The name of the Claude model to use.
+
 - `api_key`: The Anthropic API key for authentication.
+
 - `model_config`: Optional dictionary of model configuration parameters.
+
 - `token_callback`: Optional async callback invoked with each streamed text token.
 
-**Methods:**
+- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
 
-**`initialize`**
+  - `prompt`: The initial user prompt to start the conversation.
 
-```python
-initialize(prompt: str) -> None
-```
+- **generate** — Generates content from the current conversation.<br/>`generate() -> tuple[str, Any]`
 
-Initializes the conversation with an initial user prompt.
+  - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-**Args:**
+- **generate_and_process_with_tools** — Generates content with tools and processes the response.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
 
-- `prompt`: The initial user prompt to start the conversation.
+  - `function_map`: Dictionary mapping function names to callable functions.
+  - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
-**`generate`**
+- **add_function_results_to_conversation_and_return** — Add tool results to the conversation.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
 
-```python
-generate() -> tuple[str, Any]
-```
+  - `function_results`: List of (func_name, result_dict) tuples. result_dict can contain: - "result": The result content string - "tool_use_id": Optional explicit tool_use_id to use
 
-Generates content from the current conversation.
+- **add_message_to_conversation** — Adds a message to the conversation state.<br/>`add_message_to_conversation(role: str, content: str) -> None`
 
-**Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
+  - `role`: The role of the message sender (e.g., 'user', 'assistant').
+  - `content`: The message content.
 
-**`generate_and_process_with_tools`**
+- **extract_input_output_token_counts_from_response** — Extracts token counts from an Anthropic API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
-```python
-generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]
-```
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
 
-Generates content with tools and processes the response.
+- **get_embedding** — Generates an embedding vector for the given text.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
-**Args:**
-
-- `function_map`: Dictionary mapping function names to callable functions.
-
-**Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
-
-**`add_function_results_to_conversation_and_return`**
-
-```python
-add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None
-```
-
-Add tool results to the conversation.
-
-**Args:**
-
-- `function_results`: List of (func_name, result_dict) tuples. result_dict can contain: - "result": The result content string - "tool_use_id": Optional explicit tool_use_id to use
-
-**`add_message_to_conversation`**
-
-```python
-add_message_to_conversation(role: str, content: str) -> None
-```
-
-Adds a message to the conversation state.
-
-**Args:**
-
-- `role`: The role of the message sender (e.g., 'user', 'assistant').
-- `content`: The message content.
-
-**`extract_input_output_token_counts_from_response`**
-
-```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
-```
-
-Extracts token counts from an Anthropic API response.
-
-**Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
-
-**`get_embedding`**
-
-```python
-get_embedding(text: str, embedding_model: str | None = None) -> list[float]
-```
-
-Generates an embedding vector for the given text.
-
-**Args:**
-
-- `text`: The text to generate an embedding for.
-- `embedding_model`: Optional model name (not used by Anthropic).
+  - `text`: The text to generate an embedding for.
+  - `embedding_model`: Optional model name (not used by Anthropic).
 
 ______________________________________________________________________
 
-#### `kiss.core.models.gemini_model`
+#### `kiss.core.models.gemini_model` — *Gemini model implementation for Google's GenAI models.*
 
-*Gemini model implementation for Google's GenAI models.*
+##### `class GeminiModel(Model)` — A model that uses Google's GenAI API (Gemini).
 
-##### `GeminiModel`
-
-```python
-class GeminiModel(Model)
-```
-
-A model that uses Google's GenAI API (Gemini).
-
-**Constructor:**
-
-```python
-GeminiModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)
-```
-
-**Args:**
+**Constructor:** `GeminiModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
 
 - `model_name`: The name of the Gemini model to use.
+
 - `api_key`: The Google API key for authentication.
+
 - `model_config`: Optional dictionary of model configuration parameters.
+
 - `token_callback`: Optional async callback invoked with each streamed text token.
 
-**Methods:**
+- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
 
-**`initialize`**
+  - `prompt`: The initial user prompt to start the conversation.
 
-```python
-initialize(prompt: str) -> None
-```
+- **generate** — Generates content from prompt without tools.<br/>`generate() -> tuple[str, Any]`
 
-Initializes the conversation with an initial user prompt.
+  - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-**Args:**
+- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
 
-- `prompt`: The initial user prompt to start the conversation.
+  - `function_map`: Dictionary mapping function names to callable functions.
+  - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
-**`generate`**
+- **add_function_results_to_conversation_and_return** — Adds function results to the conversation state.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
 
-```python
-generate() -> tuple[str, Any]
-```
+  - `function_results`: List of tuples containing (function_name, result_dict).
 
-Generates content from prompt without tools.
+- **add_message_to_conversation** — Adds a message to the conversation state.<br/>`add_message_to_conversation(role: str, content: str) -> None`
 
-**Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
+  - `role`: The role of the message sender (e.g., 'user', 'assistant').
+  - `content`: The message content.
 
-**`generate_and_process_with_tools`**
+- **extract_input_output_token_counts_from_response** — Extracts token counts from a Gemini API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
-```python
-generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]
-```
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
 
-Generates content with tools, processes the response, and adds it to conversation.
+- **get_embedding** — Generates an embedding vector for the given text.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
-**Args:**
-
-- `function_map`: Dictionary mapping function names to callable functions.
-
-**Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
-
-**`add_function_results_to_conversation_and_return`**
-
-```python
-add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None
-```
-
-Adds function results to the conversation state.
-
-**Args:**
-
-- `function_results`: List of tuples containing (function_name, result_dict).
-
-**`add_message_to_conversation`**
-
-```python
-add_message_to_conversation(role: str, content: str) -> None
-```
-
-Adds a message to the conversation state.
-
-**Args:**
-
-- `role`: The role of the message sender (e.g., 'user', 'assistant').
-- `content`: The message content.
-
-**`extract_input_output_token_counts_from_response`**
-
-```python
-extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]
-```
-
-Extracts token counts from a Gemini API response.
-
-**Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
-
-**`get_embedding`**
-
-```python
-get_embedding(text: str, embedding_model: str | None = None) -> list[float]
-```
-
-Generates an embedding vector for the given text.
-
-**Args:**
-
-- `text`: The text to generate an embedding for.
-- `embedding_model`: Optional model name. Defaults to "text-embedding-004".
-
-**Returns:** list\[float\]: The embedding vector as a list of floats.
+  - `text`: The text to generate an embedding for.
+  - `embedding_model`: Optional model name. Defaults to "text-embedding-004".
+  - **Returns:** list\[float\]: The embedding vector as a list of floats.
 
 ______________________________________________________________________
 
-#### `kiss.core.printer`
+#### `kiss.core.printer` — *Abstract base class and shared utilities for KISS agent printers.*
 
-*Abstract base class and shared utilities for KISS agent printers.*
+##### `class Printer(ABC)`
 
-##### `Printer`
+- **print** — Render content to the output destination.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
-```python
-class Printer(ABC)
-```
+  - `content`: The content to display.
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `**kwargs`: Additional type-specific options (e.g. tool_input, is_error).
+  - **Returns:** str: Any extracted text (e.g. streamed text deltas), or empty string.
 
-**Methods:**
+- **token_callback** — Handle a single streamed token from the LLM.<br/>`async token_callback(token: str) -> None`
 
-**`print`**
+  - `token`: The text token to process.
 
-```python
-print(content: Any, type: str = 'text', **kwargs: Any) -> str
-```
+- **reset** — Reset the printer's internal streaming state between messages.<br/>`reset() -> None`
 
-Render content to the output destination.
+##### `class MultiPrinter(Printer)`
 
-**Args:**
+**Constructor:** `MultiPrinter(printers: list[Printer]) -> None`
 
-- `content`: The content to display.
-- `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
-- `**kwargs`: Additional type-specific options (e.g. tool_input, is_error).
+- **print** — Dispatch a print call to all child printers.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
-**Returns:** str: Any extracted text (e.g. streamed text deltas), or empty string.
+  - `content`: The content to display.
+  - `type`: Content type forwarded to each child printer.
+  - `**kwargs`: Additional options forwarded to each child printer.
+  - **Returns:** str: The result from the last child printer.
 
-**`token_callback`**
+- **token_callback** — Forward a streamed token to all child printers.<br/>`async token_callback(token: str) -> None`
 
-```python
-async token_callback(token: str) -> None
-```
+  - `token`: The text token to forward.
 
-Handle a single streamed token from the LLM.
-
-**Args:**
-
-- `token`: The text token to process.
-
-**`reset`**
-
-```python
-reset() -> None
-```
-
-Reset the printer's internal streaming state between messages.
-
-##### `MultiPrinter`
-
-```python
-class MultiPrinter(Printer)
-```
-
-**Constructor:**
-
-```python
-MultiPrinter(printers: list[Printer]) -> None
-```
-
-**Methods:**
-
-**`print`**
-
-```python
-print(content: Any, type: str = 'text', **kwargs: Any) -> str
-```
-
-Dispatch a print call to all child printers.
-
-**Args:**
-
-- `content`: The content to display.
-- `type`: Content type forwarded to each child printer.
-- `**kwargs`: Additional options forwarded to each child printer.
-
-**Returns:** str: The result from the last child printer.
-
-**`token_callback`**
-
-```python
-async token_callback(token: str) -> None
-```
-
-Forward a streamed token to all child printers.
-
-**Args:**
-
-- `token`: The text token to forward.
-
-**`reset`**
-
-```python
-reset() -> None
-```
-
-Reset streaming state on all child printers.
-
-**`lang_for_path`**
-
-```python
-def lang_for_path(path: str) -> str
-```
-
-Map a file path to its syntax-highlighting language name.
-
-**Args:**
+- **reset** — Reset streaming state on all child printers.<br/>`reset() -> None`
+  **`lang_for_path`** — Map a file path to its syntax-highlighting language name.<br/>`def lang_for_path(path: str) -> str`
 
 - `path`: File path whose extension determines the language.
 
-**Returns:** str: Language name (e.g. "python", "javascript"), or the raw extension, or "text" if no extension is present.
+- **Returns:** str: Language name (e.g. "python", "javascript"), or the raw extension, or "text" if no extension is present.
 
-**`truncate_result`**
-
-```python
-def truncate_result(content: str) -> str
-```
-
-Truncate long content to MAX_RESULT_LEN, keeping the first and last halves.
-
-**Args:**
+**`truncate_result`** — Truncate long content to MAX_RESULT_LEN, keeping the first and last halves.<br/>`def truncate_result(content: str) -> str`
 
 - `content`: The string to truncate.
+- **Returns:** str: The original string if short enough, otherwise the first and last halves joined by a truncation marker.
 
-**Returns:** str: The original string if short enough, otherwise the first and last halves joined by a truncation marker.
-
-**`extract_path_and_lang`**
-
-```python
-def extract_path_and_lang(tool_input: dict) -> tuple[str, str]
-```
-
-Extract the file path and inferred language from a tool input dict.
-
-**Args:**
+**`extract_path_and_lang`** — Extract the file path and inferred language from a tool input dict.<br/>`def extract_path_and_lang(tool_input: dict) -> tuple[str, str]`
 
 - `tool_input`: Dictionary of tool call arguments, checked for "file_path" or "path" keys.
+- **Returns:** tuple\[str, str\]: A (file_path, language) pair. Language defaults to "text" if no path is found.
 
-**Returns:** tuple\[str, str\]: A (file_path, language) pair. Language defaults to "text" if no path is found.
-
-**`extract_extras`**
-
-```python
-def extract_extras(tool_input: dict) -> dict[str, str]
-```
-
-Extract non-standard keys from a tool input dict for display.
-
-**Args:**
+**`extract_extras`** — Extract non-standard keys from a tool input dict for display.<br/>`def extract_extras(tool_input: dict) -> dict[str, str]`
 
 - `tool_input`: Dictionary of tool call arguments.
-
-**Returns:** dict\[str, str\]: Keys not in KNOWN_KEYS mapped to their string values (truncated to 200 chars).
-
-______________________________________________________________________
-
-#### `kiss.core.print_to_console`
-
-*Console output formatting for KISS agents.*
-
-##### `ConsolePrinter`
-
-```python
-class ConsolePrinter(Printer)
-```
-
-**Constructor:**
-
-```python
-ConsolePrinter(file: Any = None) -> None
-```
-
-**Methods:**
-
-**`reset`**
-
-```python
-reset() -> None
-```
-
-Reset internal streaming and tool-parsing state for a new turn.
-
-**`print`**
-
-```python
-print(content: Any, type: str = 'text', **kwargs: Any) -> str
-```
-
-Render content to the console using Rich formatting.
-
-**Args:**
-
-- `content`: The content to display.
-- `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
-- `**kwargs`: Additional options such as tool_input, is_error, cost, step_count, total_tokens.
-
-**Returns:** str: Extracted text from stream events, or empty string.
-
-**`token_callback`**
-
-```python
-async token_callback(token: str) -> None
-```
-
-Stream a single token to the console, styled by current block type.
-
-**Args:**
-
-- `token`: The text token to display.
+- **Returns:** dict\[str, str\]: Keys not in KNOWN_KEYS mapped to their string values (truncated to 200 chars).
 
 ______________________________________________________________________
 
-#### `kiss.core.print_to_browser`
+#### `kiss.core.print_to_console` — *Console output formatting for KISS agents.*
 
-*Browser output streaming for KISS agents via SSE.*
+##### `class ConsolePrinter(Printer)`
 
-##### `BrowserPrinter`
+**Constructor:** `ConsolePrinter(file: Any = None) -> None`
 
-```python
-class BrowserPrinter(BaseBrowserPrinter)
-```
+- **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-**Constructor:**
+- **print** — Render content to the console using Rich formatting.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
-```python
-BrowserPrinter() -> None
-```
+  - `content`: The content to display.
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `**kwargs`: Additional options such as tool_input, is_error, cost, step_count, total_tokens.
+  - **Returns:** str: Extracted text from stream events, or empty string.
 
-**Methods:**
+- **token_callback** — Stream a single token to the console, styled by current block type.<br/>`async token_callback(token: str) -> None`
 
-**`start`**
-
-```python
-start(open_browser: bool = True) -> None
-```
-
-Launch a local SSE server and optionally open the browser viewer.
-
-**Args:**
-
-- `open_browser`: If True, automatically opens the stream viewer in the default web browser.
-
-**`stop`**
-
-```python
-stop() -> None
-```
-
-Broadcast a done event to all clients and shut down the SSE server.
+  - `token`: The text token to display.
 
 ______________________________________________________________________
 
-#### `kiss.core.browser_ui`
+#### `kiss.core.print_to_browser` — *Browser output streaming for KISS agents via SSE.*
 
-*Shared browser UI components for KISS agent viewers.*
+##### `class BrowserPrinter(BaseBrowserPrinter)`
 
-##### `BaseBrowserPrinter`
+**Constructor:** `BrowserPrinter() -> None`
 
-```python
-class BaseBrowserPrinter(Printer)
-```
+- **start** — Launch a local SSE server and optionally open the browser viewer.<br/>`start(open_browser: bool = True) -> None`
 
-**Constructor:**
+  - `open_browser`: If True, automatically opens the stream viewer in the default web browser.
 
-```python
-BaseBrowserPrinter() -> None
-```
+- **stop** — Broadcast a done event to all clients and shut down the SSE server.<br/>`stop() -> None`
 
-**Methods:**
+______________________________________________________________________
 
-**`reset`**
+#### `kiss.core.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
-```python
-reset() -> None
-```
+##### `class BaseBrowserPrinter(Printer)`
 
-Reset internal streaming and tool-parsing state for a new turn.
+**Constructor:** `BaseBrowserPrinter() -> None`
 
-**`broadcast`**
+- **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-```python
-broadcast(event: dict[str, Any]) -> None
-```
+- **broadcast** — Send an SSE event dict to all connected clients.<br/>`broadcast(event: dict[str, Any]) -> None`
 
-Send an SSE event dict to all connected clients.
+  - `event`: The event dictionary to broadcast.
 
-**Args:**
+- **add_client** — Register a new SSE client and return its event queue.<br/>`add_client() -> queue.Queue[dict[str, Any]]`
 
-- `event`: The event dictionary to broadcast.
+  - **Returns:** queue.Queue\[dict[str, Any]\]: A queue that will receive broadcast events.
 
-**`add_client`**
+- **remove_client** — Unregister an SSE client's event queue.<br/>`remove_client(cq: queue.Queue[dict[str, Any]]) -> None`
 
-```python
-add_client() -> queue.Queue[dict[str, Any]]
-```
+  - `cq`: The client queue to remove.
 
-Register a new SSE client and return its event queue.
+- **print** — Render content by broadcasting SSE events to connected browser clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
-**Returns:** queue.Queue\[dict[str, Any]\]: A queue that will receive broadcast events.
+  - `content`: The content to display.
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `**kwargs`: Additional options such as tool_input, is_error, cost, step_count, total_tokens.
+  - **Returns:** str: Extracted text from stream events, or empty string.
 
-**`remove_client`**
+- **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`async token_callback(token: str) -> None`
 
-```python
-remove_client(cq: queue.Queue[dict[str, Any]]) -> None
-```
+  - `token`: The text token to broadcast.
 
-Unregister an SSE client's event queue.
+**`find_free_port`** — Find and return an available TCP port on localhost.<br/>`def find_free_port() -> int`
 
-**Args:**
+- **Returns:** int: A free port number.
 
-- `cq`: The client queue to remove.
-
-**`print`**
-
-```python
-print(content: Any, type: str = 'text', **kwargs: Any) -> str
-```
-
-Render content by broadcasting SSE events to connected browser clients.
-
-**Args:**
-
-- `content`: The content to display.
-- `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
-- `**kwargs`: Additional options such as tool_input, is_error, cost, step_count, total_tokens.
-
-**Returns:** str: Extracted text from stream events, or empty string.
-
-**`token_callback`**
-
-```python
-async token_callback(token: str) -> None
-```
-
-Broadcast a streamed token as an SSE delta event to browser clients.
-
-**Args:**
-
-- `token`: The text token to broadcast.
-
-**`find_free_port`**
-
-```python
-def find_free_port() -> int
-```
-
-Find and return an available TCP port on localhost.
-
-**Returns:** int: A free port number.
-
-**`build_stream_viewer_html`**
-
-```python
-def build_stream_viewer_html(title: str = 'KISS Agent', subtitle: str = 'Live Stream') -> str
-```
-
-Build a self-contained HTML page for the SSE-based stream viewer.
-
-**Args:**
+**`build_stream_viewer_html`** — Build a self-contained HTML page for the SSE-based stream viewer.<br/>`def build_stream_viewer_html(title: str = 'KISS Agent', subtitle: str = 'Live Stream') -> str`
 
 - `title`: Page title and header text.
 - `subtitle`: Subtitle shown next to the title in the header.
-
-**Returns:** str: Complete HTML document string with embedded CSS and JavaScript.
+- **Returns:** str: Complete HTML document string with embedded CSS and JavaScript.
 
 ______________________________________________________________________
 
-#### `kiss.core.useful_tools`
+#### `kiss.core.useful_tools` — *Useful tools for agents: file editing, bash execution, web search, and URL fetching.*
 
-*Useful tools for agents: file editing, bash execution, web search, and URL fetching.*
+##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
-##### `UsefulTools`
-
-```python
-class UsefulTools
-```
-
-A hardened collection of useful tools with improved security.
-
-**Constructor:**
-
-```python
-UsefulTools(base_dir: str, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, stream_callback: Callable[[str], None] | None = None) -> None
-```
-
-**Args:**
+**Constructor:** `UsefulTools(base_dir: str, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, stream_callback: Callable[[str], None] | None = None) -> None`
 
 - `base_dir`: The base directory for tool operations.
+
 - `readable_paths`: Optional list of paths allowed for read operations.
+
 - `writable_paths`: Optional list of paths allowed for write operations.
+
 - `stream_callback`: Optional callback for streaming Bash output line-by-line.
 
-**Methods:**
+- **Read** — Read file contents.<br/>`Read(file_path: str, max_lines: int = 2000) -> str`
 
-**`Read`**
+  - `file_path`: Absolute path to file.
+  - `max_lines`: Maximum number of lines to return.
 
-```python
-Read(file_path: str, max_lines: int = 2000) -> str
-```
+- **Write** — Write content to a file, creating it if it doesn't exist or overwriting if it does.<br/>`Write(file_path: str, content: str) -> str`
 
-Read file contents.
+  - `file_path`: Path to the file to write.
+  - `content`: The full content to write to the file.
 
-**Args:**
+- **Edit** — Performs precise string replacements in files with exact matching.<br/>`Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str`
 
-- `file_path`: Absolute path to file.
-- `max_lines`: Maximum number of lines to return.
+  - `file_path`: Absolute path to the file to modify.
+  - `old_string`: Exact text to find and replace.
+  - `new_string`: Replacement text, must differ from old_string.
+  - `replace_all`: If True, replace all occurrences.
+  - `timeout_seconds`: Timeout in seconds for the edit command.
+  - **Returns:** The output of the edit operation.
 
-**`Write`**
+- **MultiEdit** — Performs precise string replacements in files with exact matching.<br/>`MultiEdit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str`
 
-```python
-Write(file_path: str, content: str) -> str
-```
+  - `file_path`: Absolute path to the file to modify.
+  - `old_string`: Exact text to find and replace.
+  - `new_string`: Replacement text, must differ from old_string.
+  - `replace_all`: If True, replace all occurrences.
+  - `timeout_seconds`: Timeout in seconds for the edit command.
+  - **Returns:** The output of the edit operation.
 
-Write content to a file, creating it if it doesn't exist or overwriting if it does.
+- **Bash** — Runs a bash command and returns its output.<br/>`Bash(command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str`
 
-**Args:**
+  - `command`: The bash command to run.
+  - `description`: A brief description of the command.
+  - `timeout_seconds`: Timeout in seconds for the command.
+  - `max_output_chars`: Maximum characters in output before truncation.
+  - **Returns:** The output of the command.
 
-- `file_path`: Path to the file to write.
-- `content`: The full content to write to the file.
-
-**`Edit`**
-
-```python
-Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str
-```
-
-Performs precise string replacements in files with exact matching.
-
-**Args:**
-
-- `file_path`: Absolute path to the file to modify.
-- `old_string`: Exact text to find and replace.
-- `new_string`: Replacement text, must differ from old_string.
-- `replace_all`: If True, replace all occurrences.
-- `timeout_seconds`: Timeout in seconds for the edit command.
-
-**Returns:** The output of the edit operation.
-
-**`MultiEdit`**
-
-```python
-MultiEdit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str
-```
-
-Performs precise string replacements in files with exact matching.
-
-**Args:**
-
-- `file_path`: Absolute path to the file to modify.
-- `old_string`: Exact text to find and replace.
-- `new_string`: Replacement text, must differ from old_string.
-- `replace_all`: If True, replace all occurrences.
-- `timeout_seconds`: Timeout in seconds for the edit command.
-
-**Returns:** The output of the edit operation.
-
-**`Bash`**
-
-```python
-Bash(command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str
-```
-
-Runs a bash command and returns its output.
-
-**Args:**
-
-- `command`: The bash command to run.
-- `description`: A brief description of the command.
-- `timeout_seconds`: Timeout in seconds for the command.
-- `max_output_chars`: Maximum characters in output before truncation.
-
-**Returns:** The output of the command.
-
-**`fetch_url`**
-
-```python
-def fetch_url(url: str, headers: dict[str, str], max_characters: int = 10000, timeout_seconds: float = 10.0) -> str
-```
-
-Fetch and extract text content from a URL using BeautifulSoup.
-
-**Args:**
+**`fetch_url`** — Fetch and extract text content from a URL using BeautifulSoup.<br/>`def fetch_url(url: str, headers: dict[str, str], max_characters: int = 10000, timeout_seconds: float = 10.0) -> str`
 
 - `url`: The URL to fetch.
 - `headers`: HTTP headers to use for the request.
 - `max_characters`: Maximum number of characters to return.
 - `timeout_seconds`: Request timeout in seconds.
+- **Returns:** Extracted text content from the page.
 
-**Returns:** Extracted text content from the page.
-
-**`search_web`**
-
-```python
-def search_web(query: str, max_results: int = 10) -> str
-```
-
-Perform a web search and return the top search results with page contents. Tries DuckDuckGo first (more reliable for automated access), then falls back to Startpage if needed. Uses Playwright headless browser with Safari/WebKit to render JavaScript and avoid bot detection.
-
-**Args:**
+**`search_web`** — Perform a web search and return the top search results with page contents. Tries DuckDuckGo first (more reliable for automated access), then falls back to Startpage if needed. Uses Playwright headless browser with Safari/WebKit to render JavaScript and avoid bot detection.<br/>`def search_web(query: str, max_results: int = 10) -> str`
 
 - `query`: The search query.
 - `max_results`: Maximum number of results to fetch content for. Defaults to 5.
+- **Returns:** A string containing titles, links, and page contents of the top search results.
 
-**Returns:** A string containing titles, links, and page contents of the top search results.
-
-**`parse_bash_command_paths`**
-
-```python
-def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]
-```
-
-Parse a bash command to extract readable and writable directory paths. This function analyzes bash commands to determine which directories are being read from and which are being written to.
-
-**Args:**
+**`parse_bash_command_paths`** — Parse a bash command to extract readable and writable directory paths. This function analyzes bash commands to determine which directories are being read from and which are being written to.<br/>`def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]`
 
 - `command`: A bash command string to parse
-
-**Returns:** A tuple of (readable_dirs, writable_dirs) where each is a list of directory paths
-
-______________________________________________________________________
-
-#### `kiss.core.web_use_tool`
-
-*Browser automation tool for LLM agents using Playwright.*
-
-##### `WebUseTool`
-
-```python
-class WebUseTool
-```
-
-Browser automation tool using Playwright with zero JS injection.
-
-**Constructor:**
-
-```python
-WebUseTool(browser_type: str = 'chromium', headless: bool = False, viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _AUTO_DETECT) -> None
-```
-
-**Methods:**
-
-**`go_to_url`**
-
-```python
-go_to_url(url: str) -> str
-```
-
-Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).
-
-**Args:**
-
-- `url`: Full URL to open, or "tab:list" for tab list, or "tab:N" to switch to tab N.
-
-**Returns:** On success: page title, URL, and accessibility tree with [N] IDs. For "tab:list": list of open tabs with indices. On error: "Error navigating to <url>: <message>".
-
-**`click`**
-
-```python
-click(element_id: int, action: str = 'click') -> str
-```
-
-Click or hover on an interactive element by its [N] ID from the accessibility tree. Use after get_page_content or go_to_url to interact with links, buttons, tabs, etc.
-
-**Args:**
-
-- `element_id`: Numeric ID shown in brackets [N] next to the element in the tree.
-- `action`: "click" (default) to click the element, "hover" to only move focus.
-
-**Returns:** Updated accessibility tree (title, URL, numbered elements), or on error "Error clicking element <id>: <message>".
-
-**`type_text`**
-
-```python
-type_text(element_id: int, text: str, press_enter: bool = False) -> str
-```
-
-Type text into a textbox, searchbox, or other editable element by its [N] ID. Clears existing content then types the given text. Use for forms, search boxes, etc.
-
-**Args:**
-
-- `element_id`: Numeric ID from the accessibility tree (brackets [N]).
-- `text`: String to type into the element.
-- `press_enter`: If True, press Enter after typing (e.g. to submit a search).
-
-**Returns:** Updated accessibility tree, or "Error typing into element <id>: <message>" on error.
-
-**`press_key`**
-
-```python
-press_key(key: str) -> str
-```
-
-Press a single key or key combination. Use for navigation, closing dialogs, shortcuts.
-
-**Args:**
-
-- `key`: Key name, e.g. "Enter", "Escape", "Tab", "ArrowDown", "PageDown", "Backspace", or combination like "Control+a", "Shift+Tab".
-
-**Returns:** Updated accessibility tree, or "Error pressing key '<key>': <message>" on error.
-
-**`scroll`**
-
-```python
-scroll(direction: str = 'down', amount: int = 3) -> str
-```
-
-Scroll the current page to reveal more content. Use when needed elements are off-screen.
-
-**Args:**
-
-- `direction`: "down", "up", "left", or "right".
-- `amount`: Number of scroll steps (default 3).
-
-**Returns:** Updated accessibility tree after scrolling, or "Error scrolling <direction>: <message>" on error.
-
-**`screenshot`**
-
-```python
-screenshot(file_path: str = 'screenshot.png') -> str
-```
-
-Capture the visible viewport as an image. Use to verify layout, captchas, or visual state.
-
-**Args:**
-
-- `file_path`: Path where the PNG will be saved (default "screenshot.png"). Parent directories are created if needed.
-
-**Returns:** "Screenshot saved to \<resolved_path>", or "Error taking screenshot: <message>" on error.
-
-**`get_page_content`**
-
-```python
-get_page_content(text_only: bool = False) -> str
-```
-
-Get the current page content. Use to decide what to click or type next.
-
-**Args:**
-
-- `text_only`: If False (default), return accessibility tree with [N] IDs for interactive elements. If True, return plain text only (title, URL, body text).
-
-**Returns:** Accessibility tree or plain text as described above, or "Error getting page content: <message>" on error.
-
-**`close`**
-
-```python
-close() -> str
-```
-
-Close the browser and release resources. Call when done with the session or before exit.
-
-**Returns:** "Browser closed." (always, even if nothing was open).
-
-**`get_tools`**
-
-```python
-get_tools() -> list[Callable[..., str]]
-```
-
-Return callable web tools for registration with an agent.
-
-**Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content. Does not include close.
+- **Returns:** A tuple of (readable_dirs, writable_dirs) where each is a list of directory paths
 
 ______________________________________________________________________
 
-#### `kiss.core.utils`
+#### `kiss.core.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
 
-*Utility functions for the KISS core module.*
+##### `class WebUseTool` — Browser automation tool using Playwright with zero JS injection.
 
-**`get_config_value`**
+**Constructor:** `WebUseTool(browser_type: str = 'chromium', headless: bool = False, viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _AUTO_DETECT) -> None`
 
-```python
-def get_config_value(value: T | None, config_obj: Any, attr_name: str, default: T | None = None) -> T
-```
+- **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
-Get a config value, preferring explicit value over config default. This eliminates the repetitive pattern: value if value is not None else config.attr_name
+  - `url`: Full URL to open, or "tab:list" for tab list, or "tab:N" to switch to tab N.
+  - **Returns:** On success: page title, URL, and accessibility tree with [N] IDs. For "tab:list": list of open tabs with indices. On error: "Error navigating to <url>: <message>".
 
-**Args:**
+- **click** — Click or hover on an interactive element by its [N] ID from the accessibility tree. Use after get_page_content or go_to_url to interact with links, buttons, tabs, etc.<br/>`click(element_id: int, action: str = 'click') -> str`
+
+  - `element_id`: Numeric ID shown in brackets [N] next to the element in the tree.
+  - `action`: "click" (default) to click the element, "hover" to only move focus.
+  - **Returns:** Updated accessibility tree (title, URL, numbered elements), or on error "Error clicking element <id>: <message>".
+
+- **type_text** — Type text into a textbox, searchbox, or other editable element by its [N] ID. Clears existing content then types the given text. Use for forms, search boxes, etc.<br/>`type_text(element_id: int, text: str, press_enter: bool = False) -> str`
+
+  - `element_id`: Numeric ID from the accessibility tree (brackets [N]).
+  - `text`: String to type into the element.
+  - `press_enter`: If True, press Enter after typing (e.g. to submit a search).
+  - **Returns:** Updated accessibility tree, or "Error typing into element <id>: <message>" on error.
+
+- **press_key** — Press a single key or key combination. Use for navigation, closing dialogs, shortcuts.<br/>`press_key(key: str) -> str`
+
+  - `key`: Key name, e.g. "Enter", "Escape", "Tab", "ArrowDown", "PageDown", "Backspace", or combination like "Control+a", "Shift+Tab".
+  - **Returns:** Updated accessibility tree, or "Error pressing key '<key>': <message>" on error.
+
+- **scroll** — Scroll the current page to reveal more content. Use when needed elements are off-screen.<br/>`scroll(direction: str = 'down', amount: int = 3) -> str`
+
+  - `direction`: "down", "up", "left", or "right".
+  - `amount`: Number of scroll steps (default 3).
+  - **Returns:** Updated accessibility tree after scrolling, or "Error scrolling <direction>: <message>" on error.
+
+- **screenshot** — Capture the visible viewport as an image. Use to verify layout, captchas, or visual state.<br/>`screenshot(file_path: str = 'screenshot.png') -> str`
+
+  - `file_path`: Path where the PNG will be saved (default "screenshot.png"). Parent directories are created if needed.
+  - **Returns:** "Screenshot saved to \<resolved_path>", or "Error taking screenshot: <message>" on error.
+
+- **get_page_content** — Get the current page content. Use to decide what to click or type next.<br/>`get_page_content(text_only: bool = False) -> str`
+
+  - `text_only`: If False (default), return accessibility tree with [N] IDs for interactive elements. If True, return plain text only (title, URL, body text).
+  - **Returns:** Accessibility tree or plain text as described above, or "Error getting page content: <message>" on error.
+
+- **close** — Close the browser and release resources. Call when done with the session or before exit.<br/>`close() -> str`
+
+  - **Returns:** "Browser closed." (always, even if nothing was open).
+
+- **get_tools** — Return callable web tools for registration with an agent.<br/>`get_tools() -> list[Callable[..., str]]`
+
+  - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content. Does not include close.
+
+______________________________________________________________________
+
+#### `kiss.core.utils` — *Utility functions for the KISS core module.*
+
+**`get_config_value`** — Get a config value, preferring explicit value over config default. This eliminates the repetitive pattern: value if value is not None else config.attr_name<br/>`def get_config_value(value: T | None, config_obj: Any, attr_name: str, default: T | None = None) -> T`
 
 - `value`: The explicitly provided value (may be None)
 - `config_obj`: The config object to read from if value is None
 - `attr_name`: The attribute name to read from config_obj
 - `default`: Fallback default if both value and config attribute are None
+- **Returns:** The resolved value (explicit value > config value > default)
 
-**Returns:** The resolved value (explicit value > config value > default)
-
-**`get_template_field_names`**
-
-```python
-def get_template_field_names(text: str) -> list[str]
-```
-
-Get the field names from the text.
-
-**Args:**
+**`get_template_field_names`** — Get the field names from the text.<br/>`def get_template_field_names(text: str) -> list[str]`
 
 - `text`: The text containing template field placeholders.
+- **Returns:** list\[str\]: A list of field names found in the text.
 
-**Returns:** list\[str\]: A list of field names found in the text.
-
-**`add_prefix_to_each_line`**
-
-```python
-def add_prefix_to_each_line(text: str, prefix: str) -> str
-```
-
-Adds a prefix to each line of the text.
-
-**Args:**
+**`add_prefix_to_each_line`** — Adds a prefix to each line of the text.<br/>`def add_prefix_to_each_line(text: str, prefix: str) -> str`
 
 - `text`: The text to add prefix to.
 - `prefix`: The prefix to add to each line.
+- **Returns:** str: The text with prefix added to each line.
 
-**Returns:** str: The text with prefix added to each line.
+**`config_to_dict`** — Convert the config to a dictionary.<br/>`def config_to_dict() -> dict[Any, Any]`
 
-**`config_to_dict`**
+- **Returns:** dict\[Any, Any\]: A dictionary representation of the default config.
 
-```python
-def config_to_dict() -> dict[Any, Any]
-```
-
-Convert the config to a dictionary.
-
-**Returns:** dict\[Any, Any\]: A dictionary representation of the default config.
-
-**`fc`**
-
-```python
-def fc(file_path: str) -> str
-```
-
-Reads a file and returns the content.
-
-**Args:**
+**`fc`** — Reads a file and returns the content.<br/>`def fc(file_path: str) -> str`
 
 - `file_path`: The path to the file to read.
+- **Returns:** str: The content of the file.
 
-**Returns:** str: The content of the file.
-
-**`finish`**
-
-```python
-def finish(status: str = 'success', analysis: str = '', result: str = '') -> str
-```
-
-The agent must call this function with the final status, analysis, and result when it has solved the given task. Status **MUST** be 'success' or 'failure'.
-
-**Args:**
+**`finish`** — The agent must call this function with the final status, analysis, and result when it has solved the given task. Status **MUST** be 'success' or 'failure'.<br/>`def finish(status: str = 'success', analysis: str = '', result: str = '') -> str`
 
 - `status`: The status of the agent's task ('success' or 'failure'). Defaults to 'success'.
 - `analysis`: The analysis of the agent's trajectory.
 - `result`: The result generated by the agent.
+- **Returns:** A YAML string containing the status, analysis, and result of the agent's task.
 
-**Returns:** A YAML string containing the status, analysis, and result of the agent's task.
-
-**`read_project_file`**
-
-```python
-def read_project_file(file_path_relative_to_project_root: str) -> str
-```
-
-Read a file from the project root. Compatible with installations packaged as .whl (zip) or source.
-
-**Args:**
+**`read_project_file`** — Read a file from the project root. Compatible with installations packaged as .whl (zip) or source.<br/>`def read_project_file(file_path_relative_to_project_root: str) -> str`
 
 - `file_path_relative_to_project_root`: Path relative to the project root.
+- **Returns:** str: The file's contents.
 
-**Returns:** str: The file's contents.
-
-**`read_project_file_from_package`**
-
-```python
-def read_project_file_from_package(file_name_as_python_package: str) -> str
-```
-
-Read a file from the project root.
-
-**Args:**
+**`read_project_file_from_package`** — Read a file from the project root.<br/>`def read_project_file_from_package(file_name_as_python_package: str) -> str`
 
 - `file_name_as_python_package`: File name as a Python package.
+- **Returns:** str: The file's contents.
 
-**Returns:** str: The file's contents.
-
-**`resolve_path`**
-
-```python
-def resolve_path(p: str, base_dir: str) -> Path
-```
-
-Resolve a path relative to base_dir if not absolute.
-
-**Args:**
+**`resolve_path`** — Resolve a path relative to base_dir if not absolute.<br/>`def resolve_path(p: str, base_dir: str) -> Path`
 
 - `p`: The path string to resolve.
 - `base_dir`: The base directory for relative path resolution.
+- **Returns:** Path: The resolved absolute path.
 
-**Returns:** Path: The resolved absolute path.
-
-**`is_subpath`**
-
-```python
-def is_subpath(target: Path, whitelist: list[Path]) -> bool
-```
-
-Check if target has any prefix in whitelist.
-
-**Args:**
+**`is_subpath`** — Check if target has any prefix in whitelist.<br/>`def is_subpath(target: Path, whitelist: list[Path]) -> bool`
 
 - `target`: The path to check.
 - `whitelist`: List of allowed path prefixes.
-
-**Returns:** bool: True if target is under any path in whitelist, False otherwise.
+- **Returns:** bool: True if target is under any path in whitelist, False otherwise.
 
 ______________________________________________________________________
 
-### `kiss.agents`
-
-*KISS agents package with pre-built agent implementations.*
+### `kiss.agents` — *KISS agents package with pre-built agent implementations.*
 
 ```python
 from kiss.agents import ClaudeCodingAgent, prompt_refiner_agent, get_run_simple_coding_agent, run_bash_task_in_sandboxed_ubuntu_latest
 ```
 
-**`prompt_refiner_agent`**
-
-```python
-def prompt_refiner_agent(original_prompt_template: str, previous_prompt_template: str, agent_trajectory_summary: str, model_name: str) -> str
-```
-
-Refines the prompt template based on the agent's trajectory summary.
-
-**Args:**
+**`prompt_refiner_agent`** — Refines the prompt template based on the agent's trajectory summary.<br/>`def prompt_refiner_agent(original_prompt_template: str, previous_prompt_template: str, agent_trajectory_summary: str, model_name: str) -> str`
 
 - `original_prompt_template`: The original prompt template.
 - `previous_prompt_template`: The previous version of the prompt template that led to the given trajectory.
 - `agent_trajectory_summary`: The agent's trajectory summary as a string.
 - `model_name`: The name of the model to use for the agent.
+- **Returns:** str: The refined prompt template.
 
-**Returns:** str: The refined prompt template.
-
-**`get_run_simple_coding_agent`**
-
-```python
-def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]
-```
-
-Return a function that runs a simple coding agent with a test function.
-
-**Args:**
+**`get_run_simple_coding_agent`** — Return a function that runs a simple coding agent with a test function.<br/>`def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]`
 
 - `test_fn`: The test function to use for the agent.
+- **Returns:** Callable\[..., str\]: A function that runs a simple coding agent with a test function. Accepts keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
 
-**Returns:** Callable\[..., str\]: A function that runs a simple coding agent with a test function. Accepts keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
-
-**`run_bash_task_in_sandboxed_ubuntu_latest`**
-
-```python
-def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str
-```
-
-Run a bash task in a sandboxed Ubuntu latest container.
-
-**Args:**
+**`run_bash_task_in_sandboxed_ubuntu_latest`** — Run a bash task in a sandboxed Ubuntu latest container.<br/>`def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str`
 
 - `task`: The task to run.
 - `model_name`: The name of the model to use for the agent.
-
-**Returns:** str: The result of the task.
+- **Returns:** str: The result of the task.
 
 ______________________________________________________________________
 
-#### `kiss.agents.coding_agents`
-
-*Coding agents for KISS framework.*
+#### `kiss.agents.coding_agents` — *Coding agents for KISS framework.*
 
 ```python
 from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS, ClaudeCodingAgent
 ```
 
-##### `Base`
+##### `class Base` — Base class for all KISS agents with common state management and persistence.
 
-```python
-class Base
-```
-
-Base class for all KISS agents with common state management and persistence.
-
-**Constructor:**
-
-```python
-Base(name: str) -> None
-```
-
-**Args:**
+**Constructor:** `Base(name: str) -> None`
 
 - `name`: The name identifier for the agent.
 
-**Methods:**
+- **set_printer** — Configure the output printer(s) for this agent.<br/>`set_printer(printer: Printer | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> None`
 
-**`set_printer`**
+  - `printer`: An existing Printer instance to use directly. If provided, print_to_console and print_to_browser are ignored.
+  - `print_to_console`: Whether to print to the console. Defaults to the agent config value if None.
+  - `print_to_browser`: Whether to stream output to a browser viewer. Defaults to the agent config value if None.
 
-```python
-set_printer(printer: Printer | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> None
-```
+- **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
 
-Configure the output printer(s) for this agent.
-
-**Args:**
-
-- `printer`: An existing Printer instance to use directly. If provided, print_to_console and print_to_browser are ignored.
-- `print_to_console`: Whether to print to the console. Defaults to the agent config value if None.
-- `print_to_browser`: Whether to stream output to a browser viewer. Defaults to the agent config value if None.
-
-**`get_trajectory`**
-
-```python
-get_trajectory() -> str
-```
-
-Return the trajectory as JSON for visualization.
-
-**Returns:** str: A JSON-formatted string of all messages in the agent's history.
+  - **Returns:** str: A JSON-formatted string of all messages in the agent's history.
 
 ______________________________________________________________________
 
-#### `kiss.agents.coding_agents.claude_coding_agent`
+#### `kiss.agents.coding_agents.claude_coding_agent` — *Claude Coding Agent using the Claude Agent SDK.*
 
-*Claude Coding Agent using the Claude Agent SDK.*
+##### `class ClaudeCodingAgent(Base)`
 
-##### `ClaudeCodingAgent`
+**Constructor:** `ClaudeCodingAgent(name: str) -> None`
 
-```python
-class ClaudeCodingAgent(Base)
-```
+- **permission_handler** — Check whether a tool call is allowed based on path permissions.<br/>`async permission_handler(tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> PermissionResultAllow | PermissionResultDeny`
 
-**Constructor:**
+  - `tool_name`: Name of the tool being invoked (e.g. "Read", "Write").
+  - `tool_input`: Dictionary of tool input parameters.
+  - `context`: Permission context provided by the Claude Agent SDK.
+  - **Returns:** PermissionResultAllow if access is permitted, PermissionResultDeny otherwise.
 
-```python
-ClaudeCodingAgent(name: str) -> None
-```
+- **run** — Run the Claude Coding Agent on a task using the Claude Agent SDK.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_thinking_tokens: int = 1024, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
 
-**Methods:**
-
-**`permission_handler`**
-
-```python
-async permission_handler(tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> PermissionResultAllow | PermissionResultDeny
-```
-
-Check whether a tool call is allowed based on path permissions.
-
-**Args:**
-
-- `tool_name`: Name of the tool being invoked (e.g. "Read", "Write").
-- `tool_input`: Dictionary of tool input parameters.
-- `context`: Permission context provided by the Claude Agent SDK.
-
-**Returns:** PermissionResultAllow if access is permitted, PermissionResultDeny otherwise.
-
-**`run`**
-
-```python
-run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_thinking_tokens: int = 1024, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str
-```
-
-Run the Claude Coding Agent on a task using the Claude Agent SDK.
-
-**Args:**
-
-- `model_name`: LLM model to use. Defaults to "claude-sonnet-4-5".
-- `prompt_template`: Task prompt template with format placeholders.
-- `arguments`: Dictionary of values to fill prompt_template placeholders.
-- `max_steps`: Maximum agent steps. Defaults to config value.
-- `max_budget`: Maximum budget in USD. Defaults to config value.
-- `work_dir`: Working directory for the agent. Defaults to artifact_dir/claude_workdir.
-- `base_dir`: Base directory for path resolution. Defaults to ".".
-- `readable_paths`: Paths the agent can read from.
-- `writable_paths`: Paths the agent can write to.
-- `printer`: Printer instance for output display.
-- `max_thinking_tokens`: Maximum tokens for extended thinking.
-- `print_to_console`: Whether to print output to console.
-- `print_to_browser`: Whether to print output to browser UI.
-
-**Returns:** The agent's final result text, or empty string if no result.
+  - `model_name`: LLM model to use. Defaults to "claude-sonnet-4-5".
+  - `prompt_template`: Task prompt template with format placeholders.
+  - `arguments`: Dictionary of values to fill prompt_template placeholders.
+  - `max_steps`: Maximum agent steps. Defaults to config value.
+  - `max_budget`: Maximum budget in USD. Defaults to config value.
+  - `work_dir`: Working directory for the agent. Defaults to artifact_dir/claude_workdir.
+  - `base_dir`: Base directory for path resolution. Defaults to ".".
+  - `readable_paths`: Paths the agent can read from.
+  - `writable_paths`: Paths the agent can write to.
+  - `printer`: Printer instance for output display.
+  - `max_thinking_tokens`: Maximum tokens for extended thinking.
+  - `print_to_console`: Whether to print output to console.
+  - `print_to_browser`: Whether to print output to browser UI.
+  - **Returns:** The agent's final result text, or empty string if no result.
 
 ______________________________________________________________________
 
-#### `kiss.agents.coding_agents.relentless_coding_agent`
+#### `kiss.agents.coding_agents.relentless_coding_agent` — *Single-agent coding system with smart continuation for long tasks.*
 
-*Single-agent coding system with smart continuation for long tasks.*
+##### `class RelentlessCodingAgent(RelentlessAgent)` — Single-agent coding system with auto-continuation for infinite tasks.
 
-##### `RelentlessCodingAgent`
+**Constructor:** `RelentlessCodingAgent(name: str) -> None`
 
-```python
-class RelentlessCodingAgent(RelentlessAgent)
-```
-
-Single-agent coding system with auto-continuation for infinite tasks.
-
-**Constructor:**
-
-```python
-RelentlessCodingAgent(name: str) -> None
-```
-
-**Methods:**
-
-**`run`**
-
-```python
-run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str
-```
-
-Run the coding agent with file and bash tools.
-
-**Args:**
-
-- `model_name`: LLM model to use. Defaults to config value.
-- `prompt_template`: Task prompt template with format placeholders.
-- `arguments`: Dictionary of values to fill prompt_template placeholders.
-- `max_steps`: Maximum steps per sub-session. Defaults to config value.
-- `max_budget`: Maximum budget in USD. Defaults to config value.
-- `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-- `base_dir`: Base directory for path resolution. Defaults to work_dir.
-- `readable_paths`: Additional paths the agent can read from.
-- `writable_paths`: Additional paths the agent can write to.
-- `printer`: Printer instance for output display.
-- `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
-- `docker_image`: Docker image name to run tools inside a container.
-- `print_to_console`: Whether to print output to console.
-- `print_to_browser`: Whether to print output to browser UI.
-
-**Returns:** YAML string with 'success' and 'summary' keys.
+- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
+  - `model_name`: LLM model to use. Defaults to config value.
+  - `prompt_template`: Task prompt template with format placeholders.
+  - `arguments`: Dictionary of values to fill prompt_template placeholders.
+  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
+  - `max_budget`: Maximum budget in USD. Defaults to config value.
+  - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
+  - `base_dir`: Base directory for path resolution. Defaults to work_dir.
+  - `readable_paths`: Additional paths the agent can read from.
+  - `writable_paths`: Additional paths the agent can write to.
+  - `printer`: Printer instance for output display.
+  - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
+  - `docker_image`: Docker image name to run tools inside a container.
+  - `print_to_console`: Whether to print output to console.
+  - `print_to_browser`: Whether to print output to browser UI.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ______________________________________________________________________
 
-#### `kiss.agents.coding_agents.config`
+#### `kiss.agents.coding_agents.config` — *Configuration Pydantic models for coding agent settings.*
 
-*Configuration Pydantic models for coding agent settings.*
+##### `class RelentlessCodingAgentConfig(BaseModel)`
 
-##### `RelentlessCodingAgentConfig`
-
-```python
-class RelentlessCodingAgentConfig(BaseModel)
-```
-
-##### `CodingAgentConfig`
-
-```python
-class CodingAgentConfig(BaseModel)
-```
+##### `class CodingAgentConfig(BaseModel)`
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant`
-
-*Assistant agent with coding tools and browser automation.*
+#### `kiss.agents.assistant` — *Assistant agent with coding tools and browser automation.*
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.relentless_agent`
+#### `kiss.agents.assistant.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
 
-*Base relentless agent with smart continuation for long tasks.*
+##### `class RelentlessAgent(Base)` — Base agent with auto-continuation for long tasks.
 
-##### `RelentlessAgent`
+**Constructor:** `RelentlessAgent(name: str) -> None`
 
-```python
-class RelentlessAgent(Base)
-```
+- **perform_task** — Execute the task with auto-continuation across multiple sub-sessions.<br/>`perform_task(tools: list[Callable[..., Any]]) -> str`
 
-Base agent with auto-continuation for long tasks.
+  - `tools`: List of callable tools available to the agent during execution.
+  - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
-**Constructor:**
+- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, config_path: str = 'agent') -> str`
 
-```python
-RelentlessAgent(name: str) -> None
-```
+  - `model_name`: LLM model to use. Defaults to config value.
+  - `prompt_template`: Task prompt template with format placeholders.
+  - `arguments`: Dictionary of values to fill prompt_template placeholders.
+  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
+  - `max_budget`: Maximum budget in USD. Defaults to config value.
+  - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
+  - `base_dir`: Base directory for path resolution. Defaults to work_dir.
+  - `readable_paths`: Additional paths the agent can read from.
+  - `writable_paths`: Additional paths the agent can write to.
+  - `printer`: Printer instance for output display.
+  - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
+  - `docker_image`: Docker image name to run tools inside a container.
+  - `print_to_console`: Whether to print output to console.
+  - `print_to_browser`: Whether to print output to browser UI.
+  - `tools_factory`: Callable that returns the list of tools for the agent.
+  - `config_path`: Dot-separated path to config section (e.g. "agent").
+  - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**Methods:**
-
-**`perform_task`**
-
-```python
-perform_task(tools: list[Callable[..., Any]]) -> str
-```
-
-Execute the task with auto-continuation across multiple sub-sessions.
-
-**Args:**
-
-- `tools`: List of callable tools available to the agent during execution.
-
-**Returns:** YAML string with 'success' and 'summary' keys on successful completion.
-
-**`run`**
-
-```python
-run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, config_path: str = 'agent') -> str
-```
-
-Run the agent with tools created by tools_factory (called after \_reset).
-
-**Args:**
-
-- `model_name`: LLM model to use. Defaults to config value.
-- `prompt_template`: Task prompt template with format placeholders.
-- `arguments`: Dictionary of values to fill prompt_template placeholders.
-- `max_steps`: Maximum steps per sub-session. Defaults to config value.
-- `max_budget`: Maximum budget in USD. Defaults to config value.
-- `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-- `base_dir`: Base directory for path resolution. Defaults to work_dir.
-- `readable_paths`: Additional paths the agent can read from.
-- `writable_paths`: Additional paths the agent can write to.
-- `printer`: Printer instance for output display.
-- `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
-- `docker_image`: Docker image name to run tools inside a container.
-- `print_to_console`: Whether to print output to console.
-- `print_to_browser`: Whether to print output to browser UI.
-- `tools_factory`: Callable that returns the list of tools for the agent.
-- `config_path`: Dot-separated path to config section (e.g. "agent").
-
-**Returns:** YAML string with 'success' and 'summary' keys.
-
-**`finish`**
-
-```python
-def finish(success: bool, summary: str) -> str
-```
-
-Finish execution with status and summary.
-
-**Args:**
+**`finish`** — Finish execution with status and summary.<br/>`def finish(success: bool, summary: str) -> str`
 
 - `success`: True if successful, False otherwise.
 - `summary`: Detailed summary of work done so far.
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.assistant_agent`
+#### `kiss.agents.assistant.assistant_agent` — *Assistant agent with both coding tools and browser automation.*
 
-*Assistant agent with both coding tools and browser automation.*
+##### `class AssistantAgent(RelentlessAgent)` — Agent with both coding tools and browser automation for web + code tasks.
 
-##### `AssistantAgent`
+**Constructor:** `AssistantAgent(name: str) -> None`
 
-```python
-class AssistantAgent(RelentlessAgent)
-```
-
-Agent with both coding tools and browser automation for web + code tasks.
-
-**Constructor:**
-
-```python
-AssistantAgent(name: str) -> None
-```
-
-**Methods:**
-
-**`run`**
-
-```python
-run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str
-```
-
-Run the assistant agent with coding tools and browser automation.
-
-**Args:**
-
-- `model_name`: LLM model to use. Defaults to config value.
-- `prompt_template`: Task prompt template with format placeholders.
-- `arguments`: Dictionary of values to fill prompt_template placeholders.
-- `max_steps`: Maximum steps per sub-session. Defaults to config value.
-- `max_budget`: Maximum budget in USD. Defaults to config value.
-- `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-- `base_dir`: Base directory for path resolution. Defaults to work_dir.
-- `readable_paths`: Additional paths the agent can read from.
-- `writable_paths`: Additional paths the agent can write to.
-- `printer`: Printer instance for output display.
-- `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
-- `docker_image`: Docker image name to run tools inside a container.
-- `headless`: Whether to run the browser in headless mode. Defaults to config value.
-- `print_to_console`: Whether to print output to console.
-- `print_to_browser`: Whether to print output to browser UI.
-
-**Returns:** YAML string with 'success' and 'summary' keys.
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
+  - `model_name`: LLM model to use. Defaults to config value.
+  - `prompt_template`: Task prompt template with format placeholders.
+  - `arguments`: Dictionary of values to fill prompt_template placeholders.
+  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
+  - `max_budget`: Maximum budget in USD. Defaults to config value.
+  - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
+  - `base_dir`: Base directory for path resolution. Defaults to work_dir.
+  - `readable_paths`: Additional paths the agent can read from.
+  - `writable_paths`: Additional paths the agent can write to.
+  - `printer`: Printer instance for output display.
+  - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
+  - `docker_image`: Docker image name to run tools inside a container.
+  - `headless`: Whether to run the browser in headless mode. Defaults to config value.
+  - `print_to_console`: Whether to print output to console.
+  - `print_to_browser`: Whether to print output to browser UI.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.assistant`
+#### `kiss.agents.assistant.assistant` — *Browser-based chatbot for RelentlessAgent-based agents.*
 
-*Browser-based chatbot for RelentlessAgent-based agents.*
-
-**`run_chatbot`**
-
-```python
-def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', subtitle: str = 'Interactive Agent', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None
-```
-
-Run a browser-based chatbot UI for any RelentlessAgent-based agent.
-
-**Args:**
+**`run_chatbot`** — Run a browser-based chatbot UI for any RelentlessAgent-based agent.<br/>`def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', subtitle: str = 'Interactive Agent', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None`
 
 - `agent_factory`: Callable that takes a name string and returns a RelentlessAgent instance.
 - `title`: Title displayed in the browser UI header.
@@ -1991,495 +877,266 @@ Run a browser-based chatbot UI for any RelentlessAgent-based agent.
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.config`
+#### `kiss.agents.assistant.config` — *Configuration for the Assistant Agent.*
 
-*Configuration for the Assistant Agent.*
+##### `class AssistantAgentConfig(BaseModel)`
 
-##### `AssistantAgentConfig`
-
-```python
-class AssistantAgentConfig(BaseModel)
-```
-
-##### `AssistantConfig`
-
-```python
-class AssistantConfig(BaseModel)
-```
+##### `class AssistantConfig(BaseModel)`
 
 ______________________________________________________________________
 
-#### `kiss.agents.gepa`
-
-*GEPA (Genetic-Pareto) prompt optimization package.*
+#### `kiss.agents.gepa` — *GEPA (Genetic-Pareto) prompt optimization package.*
 
 ```python
 from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, create_progress_callback
 ```
 
-##### `GEPA`
+##### `class GEPA` — GEPA (Genetic-Pareto) prompt optimizer.
 
-```python
-class GEPA
-```
-
-GEPA (Genetic-Pareto) prompt optimizer.
-
-**Constructor:**
-
-```python
-GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int | None = None, population_size: int | None = None, pareto_size: int | None = None, mutation_rate: float | None = None, reflection_model: str | None = None, dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)
-```
-
-**Args:**
+**Constructor:** `GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int | None = None, population_size: int | None = None, pareto_size: int | None = None, mutation_rate: float | None = None, reflection_model: str | None = None, dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)`
 
 - `agent_wrapper`: Function (prompt_template, arguments) -> (result, trajectory). Used when batched_agent_wrapper is not provided, or as fallback.
+
 - `initial_prompt_template`: The initial prompt template to optimize
+
 - `evaluation_fn`: Function to evaluate result -> {metric: score}
+
 - `max_generations`: Maximum evolutionary generations
+
 - `population_size`: Number of candidates per generation
+
 - `pareto_size`: Maximum Pareto frontier size
+
 - `mutation_rate`: Probability of mutation (default: 0.5)
+
 - `reflection_model`: Model for reflection
+
 - `dev_val_split`: Fraction for dev set (default: 0.5)
+
 - `perfect_score`: Score threshold to skip mutation (default: 1.0)
+
 - `use_merge`: Whether to enable structural merge (default: True)
+
 - `max_merge_invocations`: Maximum merge operations to attempt (default: 5)
+
 - `merge_val_overlap_floor`: Minimum validation overlap for merge (default: 2)
+
 - `progress_callback`: Optional callback function called with GEPAProgress during optimization. Use this to track progress, display progress bars, or log intermediate results.
+
 - `batched_agent_wrapper`: Optional batched version of agent_wrapper. Function (prompt_template, [arguments]) -> [(result, trajectory)]. When provided, GEPA calls this with all examples in a minibatch at once instead of calling agent_wrapper one at a time. This enables prompt merging (combining multiple prompts into a single API call) for significantly higher throughput.
 
-**Methods:**
+- **optimize** — Run GEPA optimization.<br/>`optimize(train_examples: list[dict[str, str]], dev_minibatch_size: int | None = None) -> PromptCandidate`
 
-**`optimize`**
+  - `train_examples`: Training examples (will be split into dev/val)
+  - `dev_minibatch_size`: Dev examples per evaluation (default: all)
+  - **Returns:** Best PromptCandidate found
 
-```python
-optimize(train_examples: list[dict[str, str]], dev_minibatch_size: int | None = None) -> PromptCandidate
-```
+- **get_pareto_frontier** — Get a copy of the current Pareto frontier.<br/>`get_pareto_frontier() -> list[PromptCandidate]`
 
-Run GEPA optimization.
+  - **Returns:** A list of PromptCandidate instances representing the current Pareto frontier (best candidates per validation instance).
 
-**Args:**
+- **get_best_prompt** — Get the best prompt template found during optimization.<br/>`get_best_prompt() -> str`
 
-- `train_examples`: Training examples (will be split into dev/val)
-- `dev_minibatch_size`: Dev examples per evaluation (default: all)
+  - **Returns:** The prompt template string from the best candidate.
 
-**Returns:** Best PromptCandidate found
+##### `class GEPAPhase(Enum)` — Enum representing the current phase of GEPA optimization.
 
-**`get_pareto_frontier`**
+##### `class GEPAProgress` — Progress information for GEPA optimization callbacks.
 
-```python
-get_pareto_frontier() -> list[PromptCandidate]
-```
+##### `class PromptCandidate` — Represents a prompt candidate with its performance metrics.
 
-Get a copy of the current Pareto frontier.
-
-**Returns:** A list of PromptCandidate instances representing the current Pareto frontier (best candidates per validation instance).
-
-**`get_best_prompt`**
-
-```python
-get_best_prompt() -> str
-```
-
-Get the best prompt template found during optimization.
-
-**Returns:** The prompt template string from the best candidate.
-
-##### `GEPAPhase`
-
-```python
-class GEPAPhase(Enum)
-```
-
-Enum representing the current phase of GEPA optimization.
-
-##### `GEPAProgress`
-
-```python
-class GEPAProgress
-```
-
-Progress information for GEPA optimization callbacks.
-
-##### `PromptCandidate`
-
-```python
-class PromptCandidate
-```
-
-Represents a prompt candidate with its performance metrics.
-
-**`create_progress_callback`**
-
-```python
-def create_progress_callback(verbose: bool = False) -> 'Callable[[GEPAProgress], None]'
-```
-
-Create a standard progress callback for GEPA optimization.
-
-**Args:**
+**`create_progress_callback`** — Create a standard progress callback for GEPA optimization.<br/>`def create_progress_callback(verbose: bool = False) -> 'Callable[[GEPAProgress], None]'`
 
 - `verbose`: If True, prints all phases. If False, only prints val evaluation completion messages (when a candidate has been fully evaluated).
-
-**Returns:** A callback function that prints progress updates during optimization.
-
-______________________________________________________________________
-
-#### `kiss.agents.gepa.config`
-
-*GEPA-specific configuration that extends the main KISS config.*
-
-##### `GEPAConfig`
-
-```python
-class GEPAConfig(BaseModel)
-```
-
-GEPA-specific configuration settings.
+- **Returns:** A callback function that prints progress updates during optimization.
 
 ______________________________________________________________________
 
-#### `kiss.agents.kiss_evolve`
+#### `kiss.agents.gepa.config` — *GEPA-specific configuration that extends the main KISS config.*
 
-*KISSEvolve: Evolutionary Algorithm Discovery using LLMs.*
+##### `class GEPAConfig(BaseModel)` — GEPA-specific configuration settings.
+
+______________________________________________________________________
+
+#### `kiss.agents.kiss_evolve` — *KISSEvolve: Evolutionary Algorithm Discovery using LLMs.*
 
 ```python
 from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve
 ```
 
-##### `CodeVariant`
+##### `class CodeVariant` — Represents a code variant in the evolutionary population.
 
-```python
-class CodeVariant
-```
+##### `class KISSEvolve` — KISSEvolve: Evolutionary algorithm discovery using LLMs.
 
-Represents a code variant in the evolutionary population.
-
-##### `KISSEvolve`
-
-```python
-class KISSEvolve
-```
-
-KISSEvolve: Evolutionary algorithm discovery using LLMs.
-
-**Constructor:**
-
-```python
-KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int | None = None, max_generations: int | None = None, mutation_rate: float | None = None, elite_size: int | None = None, num_islands: int | None = None, migration_frequency: int | None = None, migration_size: int | None = None, migration_topology: str | None = None, enable_novelty_rejection: bool | None = None, novelty_threshold: float | None = None, max_rejection_attempts: int | None = None, novelty_rag_model: Model | None = None, parent_sampling_method: str | None = None, power_law_alpha: float | None = None, performance_novelty_lambda: float | None = None)
-```
-
-**Args:**
+**Constructor:** `KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int | None = None, max_generations: int | None = None, mutation_rate: float | None = None, elite_size: int | None = None, num_islands: int | None = None, migration_frequency: int | None = None, migration_size: int | None = None, migration_topology: str | None = None, enable_novelty_rejection: bool | None = None, novelty_threshold: float | None = None, max_rejection_attempts: int | None = None, novelty_rag_model: Model | None = None, parent_sampling_method: str | None = None, power_law_alpha: float | None = None, performance_novelty_lambda: float | None = None)`
 
 - `code_agent_wrapper`: The code generation agent wrapper. Should accept keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
+
 - `initial_code`: The initial code to evolve.
+
 - `evaluation_fn`: Function that takes code string and returns dict with: - 'fitness': float (higher is better) - 'metrics': dict[str, float] (optional additional metrics) - 'artifacts': dict[str, Any] (optional execution artifacts) - 'error': str (optional error message if evaluation failed)
+
 - `model_names`: List of tuples containing (model_name, probability). Probabilities will be normalized to sum to 1.0.
+
 - `extra_coding_instructions`: Extra instructions to add to the code generation prompt.
+
 - `population_size`: Number of variants to maintain in population. If None, uses value from DEFAULT_CONFIG.kiss_evolve.population_size.
+
 - `max_generations`: Maximum number of evolutionary generations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_generations.
+
 - `mutation_rate`: Probability of mutating a variant. If None, uses value from DEFAULT_CONFIG.kiss_evolve.mutation_rate.
+
 - `elite_size`: Number of best variants to preserve each generation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.elite_size.
+
 - `num_islands`: Number of islands for island-based evolution. If None, uses value from DEFAULT_CONFIG.kiss_evolve.num_islands.
+
 - `migration_frequency`: Number of generations between migrations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_frequency.
+
 - `migration_size`: Number of individuals to migrate between islands. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_size.
+
 - `migration_topology`: Migration topology ('ring', 'fully_connected', 'random'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_topology.
+
 - `enable_novelty_rejection`: Enable code novelty rejection sampling. If None, uses value from DEFAULT_CONFIG.kiss_evolve.enable_novelty_rejection.
+
 - `novelty_threshold`: Cosine similarity threshold for rejecting code (0.0-1.0, higher = more strict). If None, uses value from DEFAULT_CONFIG.kiss_evolve.novelty_threshold.
+
 - `max_rejection_attempts`: Maximum number of rejection attempts before accepting a variant anyway. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_rejection_attempts.
+
 - `novelty_rag_model`: Model to use for generating code embeddings. If None and novelty rejection is enabled, uses the first model from models list.
+
 - `parent_sampling_method`: Parent sampling method ('tournament', 'power_law', or 'performance_novelty'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.parent_sampling_method.
+
 - `power_law_alpha`: Power-law sampling parameter (α) for rank-based sampling. Lower = more exploration, higher = more exploitation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.power_law_alpha.
+
 - `performance_novelty_lambda`: Performance-novelty sampling parameter (λ) controlling selection pressure. If None, uses value from DEFAULT_CONFIG.kiss_evolve.performance_novelty_lambda.
 
-**Methods:**
+- **evolve** — Run the evolutionary algorithm.<br/>`evolve() -> CodeVariant`
 
-**`evolve`**
+  - **Returns:** CodeVariant: The best code variant found during evolution.
 
-```python
-evolve() -> CodeVariant
-```
+- **get_best_variant** — Get the best variant from the current population or islands.<br/>`get_best_variant() -> CodeVariant`
 
-Run the evolutionary algorithm.
+  - **Returns:** The CodeVariant with the highest fitness from the current population or all islands. Returns a default variant with initial_code if no population exists.
 
-**Returns:** CodeVariant: The best code variant found during evolution.
+- **get_population_stats** — Get statistics about the current population.<br/>`get_population_stats() -> dict[str, Any]`
 
-**`get_best_variant`**
-
-```python
-get_best_variant() -> CodeVariant
-```
-
-Get the best variant from the current population or islands.
-
-**Returns:** The CodeVariant with the highest fitness from the current population or all islands. Returns a default variant with initial_code if no population exists.
-
-**`get_population_stats`**
-
-```python
-get_population_stats() -> dict[str, Any]
-```
-
-Get statistics about the current population.
-
-**Returns:** Dictionary containing: - size: Total population size - avg_fitness: Average fitness across all variants - best_fitness: Maximum fitness value - worst_fitness: Minimum fitness value
+  - **Returns:** Dictionary containing: - size: Total population size - avg_fitness: Average fitness across all variants - best_fitness: Maximum fitness value - worst_fitness: Minimum fitness value
 
 ______________________________________________________________________
 
-#### `kiss.agents.kiss_evolve.config`
+#### `kiss.agents.kiss_evolve.config` — *KISSEvolve-specific configuration that extends the main KISS config.*
 
-*KISSEvolve-specific configuration that extends the main KISS config.*
-
-##### `KISSEvolveConfig`
-
-```python
-class KISSEvolveConfig(BaseModel)
-```
-
-KISSEvolve-specific configuration settings.
+##### `class KISSEvolveConfig(BaseModel)` — KISSEvolve-specific configuration settings.
 
 ______________________________________________________________________
 
-### `kiss.docker`
-
-*Docker wrapper module for the KISS agent framework.*
+### `kiss.docker` — *Docker wrapper module for the KISS agent framework.*
 
 ```python
 from kiss.docker import DockerManager
 ```
 
-#### `DockerManager`
+#### `class DockerManager` — Manages Docker container lifecycle and command execution.
 
-```python
-class DockerManager
-```
-
-Manages Docker container lifecycle and command execution.
-
-**Constructor:**
-
-```python
-DockerManager(image_name: str, tag: str = 'latest', workdir: str = '/', mount_shared_volume: bool = True, ports: dict[int, int] | None = None) -> None
-```
-
-**Args:**
+**Constructor:** `DockerManager(image_name: str, tag: str = 'latest', workdir: str = '/', mount_shared_volume: bool = True, ports: dict[int, int] | None = None) -> None`
 
 - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
+
 - `tag`: The tag/version of the image (default: 'latest')
+
 - `workdir`: The working directory inside the container
+
 - `mount_shared_volume`: Whether to mount a shared volume. Set to False for images that already have content in the workdir (e.g., SWE-bench).
+
 - `ports`: Port mapping from container port to host port. Example: {8080: 8080} maps container port 8080 to host port 8080. Example: {80: 8000, 443: 8443} maps multiple ports.
 
-**Methods:**
+- **open** — Pull and load a Docker image, then create and start a container.<br/>`open() -> None`
 
-**`open`**
+  - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
+  - `tag`: The tag/version of the image (default: 'latest')
 
-```python
-open() -> None
-```
+- **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str) -> str`
 
-Pull and load a Docker image, then create and start a container.
+  - `command`: The bash command to execute
+  - `description`: A short description of the command in natural language
+  - **Returns:** The output of the command, including stdout, stderr, and exit code
 
-**Args:**
+- **get_host_port** — Get the host port mapped to a container port.<br/>`get_host_port(container_port: int) -> int | None`
 
-- `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
-- `tag`: The tag/version of the image (default: 'latest')
+  - `container_port`: The container port to look up.
+  - **Returns:** The host port mapped to the container port, or None if not mapped.
 
-**`Bash`**
-
-```python
-Bash(command: str, description: str) -> str
-```
-
-Execute a bash command in the running Docker container.
-
-**Args:**
-
-- `command`: The bash command to execute
-- `description`: A short description of the command in natural language
-
-**Returns:** The output of the command, including stdout, stderr, and exit code
-
-**`get_host_port`**
-
-```python
-get_host_port(container_port: int) -> int | None
-```
-
-Get the host port mapped to a container port.
-
-**Args:**
-
-- `container_port`: The container port to look up.
-
-**Returns:** The host port mapped to the container port, or None if not mapped.
-
-**`close`**
-
-```python
-close() -> None
-```
-
-Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.
+- **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
 
 ______________________________________________________________________
 
-### `kiss.multiprocessing`
-
-*Parallel execution utilities using multiprocessing.*
+### `kiss.multiprocessing` — *Parallel execution utilities using multiprocessing.*
 
 ```python
 from kiss.multiprocessing import get_available_cores, run_functions_in_parallel, run_functions_in_parallel_with_kwargs
 ```
 
-**`get_available_cores`**
+**`get_available_cores`** — Get the number of available CPU cores.<br/>`def get_available_cores() -> int`
 
-```python
-def get_available_cores() -> int
-```
-
-Get the number of available CPU cores.
-
-**`run_functions_in_parallel`**
-
-```python
-def run_functions_in_parallel(tasks: list[tuple[Callable[..., Any], list[Any]]]) -> list[Any]
-```
-
-Run a list of functions in parallel using multiprocessing.
-
-**Args:**
+**`run_functions_in_parallel`** — Run a list of functions in parallel using multiprocessing.<br/>`def run_functions_in_parallel(tasks: list[tuple[Callable[..., Any], list[Any]]]) -> list[Any]`
 
 - `tasks`: List of tuples, where each tuple contains (function, arguments).
+- **Returns:** List of results from each function, in the same order as the input tasks.
 
-**Returns:** List of results from each function, in the same order as the input tasks.
-
-**`run_functions_in_parallel_with_kwargs`**
-
-```python
-def run_functions_in_parallel_with_kwargs(functions: list[Callable[..., Any]], args_list: list[list[Any]] | None = None, kwargs_list: list[dict[str, Any]] | None = None) -> list[Any]
-```
-
-Run a list of functions in parallel using multiprocessing with support for kwargs.
-
-**Args:**
+**`run_functions_in_parallel_with_kwargs`** — Run a list of functions in parallel using multiprocessing with support for kwargs.<br/>`def run_functions_in_parallel_with_kwargs(functions: list[Callable[..., Any]], args_list: list[list[Any]] | None = None, kwargs_list: list[dict[str, Any]] | None = None) -> list[Any]`
 
 - `functions`: List of callable functions to execute.
 - `args_list`: Optional list of argument lists for positional arguments.
 - `kwargs_list`: Optional list of keyword argument dictionaries.
-
-**Returns:** List of results from each function, in the same order as the input functions.
+- **Returns:** List of results from each function, in the same order as the input functions.
 
 ______________________________________________________________________
 
-### `kiss.rag`
-
-*Simple RAG system for retrieval-augmented generation.*
+### `kiss.rag` — *Simple RAG system for retrieval-augmented generation.*
 
 ```python
 from kiss.rag import SimpleRAG
 ```
 
-#### `SimpleRAG`
+#### `class SimpleRAG` — Simple and elegant RAG system for document storage and retrieval.
 
-```python
-class SimpleRAG
-```
-
-Simple and elegant RAG system for document storage and retrieval.
-
-**Constructor:**
-
-```python
-SimpleRAG(model_name: str, metric: str = 'cosine', embedding_model_name: str | None = None)
-```
-
-**Args:**
+**Constructor:** `SimpleRAG(model_name: str, metric: str = 'cosine', embedding_model_name: str | None = None)`
 
 - `model_name`: Model name to use for the LLM provider.
+
 - `metric`: Distance metric to use - "cosine" or "l2" (default: "cosine").
+
 - `embedding_model_name`: Optional specific model name for embeddings. If None, uses model_name or provider default.
 
-**Methods:**
+- **add_documents** — Add documents to the vector store.<br/>`add_documents(documents: list[dict[str, Any]], batch_size: int = 100) -> None`
 
-**`add_documents`**
+  - `documents`: List of document dictionaries. Each document should have: - "id": Unique identifier (str) - "text": Document text content (str) - "metadata": Optional metadata dictionary (dict)
+  - `batch_size`: Number of documents to process in each batch (default: 100).
+  - **Returns:** None.
 
-```python
-add_documents(documents: list[dict[str, Any]], batch_size: int = 100) -> None
-```
+- **query** — Query similar documents from the collection.<br/>`query(query_text: str, top_k: int = 5, filter_fn: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]`
 
-Add documents to the vector store.
+  - `query_text`: Query text to search for.
+  - `top_k`: Number of top results to return (default: 5).
+  - `filter_fn`: Optional filter function that takes a document dict and returns bool.
+  - **Returns:** List of dictionaries containing: - "id": Document ID - "text": Document text - "metadata": Document metadata - "score": Similarity score (higher is better for cosine, lower for L2)
 
-**Args:**
+- **delete_documents** — Delete documents from the collection by their IDs.<br/>`delete_documents(document_ids: list[str]) -> None`
 
-- `documents`: List of document dictionaries. Each document should have: - "id": Unique identifier (str) - "text": Document text content (str) - "metadata": Optional metadata dictionary (dict)
-- `batch_size`: Number of documents to process in each batch (default: 100).
+  - `document_ids`: List of document IDs to delete.
+  - **Returns:** None.
 
-**Returns:** None.
+- **get_collection_stats** — Get statistics about the collection.<br/>`get_collection_stats() -> dict[str, Any]`
 
-**`query`**
+  - **Returns:** Dictionary containing collection statistics.
 
-```python
-query(query_text: str, top_k: int = 5, filter_fn: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]
-```
+- **clear_collection** — Clear all documents from the collection.<br/>`clear_collection() -> None`
 
-Query similar documents from the collection.
+  - **Returns:** None.
 
-**Args:**
+- **get_document** — Get a document by its ID.<br/>`get_document(document_id: str) -> dict[str, Any] | None`
 
-- `query_text`: Query text to search for.
-- `top_k`: Number of top results to return (default: 5).
-- `filter_fn`: Optional filter function that takes a document dict and returns bool.
-
-**Returns:** List of dictionaries containing: - "id": Document ID - "text": Document text - "metadata": Document metadata - "score": Similarity score (higher is better for cosine, lower for L2)
-
-**`delete_documents`**
-
-```python
-delete_documents(document_ids: list[str]) -> None
-```
-
-Delete documents from the collection by their IDs.
-
-**Args:**
-
-- `document_ids`: List of document IDs to delete.
-
-**Returns:** None.
-
-**`get_collection_stats`**
-
-```python
-get_collection_stats() -> dict[str, Any]
-```
-
-Get statistics about the collection.
-
-**Returns:** Dictionary containing collection statistics.
-
-**`clear_collection`**
-
-```python
-clear_collection() -> None
-```
-
-Clear all documents from the collection.
-
-**Returns:** None.
-
-**`get_document`**
-
-```python
-get_document(document_id: str) -> dict[str, Any] | None
-```
-
-Get a document by its ID.
-
-**Args:**
-
-- `document_id`: Document ID to retrieve.
-
-**Returns:** Document dictionary or None if not found.
+  - `document_id`: Document ID to retrieve.
+  - **Returns:** Document dictionary or None if not found.
 
 ______________________________________________________________________
