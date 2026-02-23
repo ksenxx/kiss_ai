@@ -517,6 +517,13 @@ header{
   z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
+#history-btn,#proposals-btn{
+  background:none;border:1px solid rgba(255,255,255,0.15);border-radius:8px;
+  color:rgba(255,255,255,0.6);font-size:12px;cursor:pointer;
+  padding:5px 12px;transition:all 0.15s;display:flex;align-items:center;gap:6px;
+}
+#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.85);border-color:rgba(255,255,255,0.3)}
+#history-btn svg,#proposals-btn svg{opacity:0.85}
 #sidebar-close{
   position:absolute;top:16px;right:16px;background:none;border:none;
   color:rgba(255,255,255,0.3);font-size:20px;cursor:pointer;
@@ -1082,6 +1089,21 @@ def _build_html(title: str, subtitle: str) -> str:
   <div class="logo">{title}<span>{subtitle}</span></div>
   <div style="display:flex;align-items:center;gap:14px">
     <div class="status"><div class="dot" id="dot"></div><span id="stxt">Ready</span></div>
+    <button id="history-btn" onclick="toggleSidebar('history')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+      History
+    </button>
+    <button id="proposals-btn" onclick="toggleSidebar('proposals')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      Proposals
+    </button>
   </div>
 </header>
 <div id="output">

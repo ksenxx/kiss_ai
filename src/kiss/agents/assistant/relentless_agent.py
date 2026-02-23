@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -13,26 +12,34 @@ from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model_info import get_max_context_length
 from kiss.core.printer import Printer
 from kiss.core.utils import resolve_path
 from kiss.docker.docker_manager import DockerManager
 
 TASK_PROMPT = """# Task
+
 {task_description}
 
 # Rules
 - Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
-- Call finish(success=True, summary="done") immediately when task is complete.
-- At step {step_threshold}: finish(success=False, summary={{"done":[...], "next":[...]}})
+- Call finish(success=True, summary="detailed summary of what was accomplished") \
+immediately when task is complete.
+- If detailed-progress.md exists, it contains a detailed summary of the work done so far. \
+Update it when you make large progress.
+- At step {step_threshold}: finish(success=False, summary="detailed summary of work done so far")
 - Work dir: {work_dir}
-{previous_progress}"""
+{previous_progress}
+"""
 
-CONTINUATION_PROMPT = """# CONTINUATION
+CONTINUATION_PROMPT = """
+# Task Progress
 
 {progress_text}
 
-Fix remaining issues then call finish. Don't redo completed work."""
+# Continue
+- Complete the rest of the task.
+- Don't redo completed work.
+"""
 
 
 def finish(success: bool, summary: str) -> str:
@@ -40,7 +47,7 @@ def finish(success: bool, summary: str) -> str:
 
     Args:
         success: True if successful, False otherwise.
-        summary: Summary of work done and remaining work (JSON for continuation).
+        summary: Detailed summary of work done so far.
     """
     if isinstance(success, str):
         success = success.strip().lower() not in ("false", "0", "no", "")
@@ -72,13 +79,10 @@ class RelentlessAgent(Base):
             cfg = getattr(cfg, part)
         default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
 
-        actual_base_dir = base_dir if base_dir is not None else default_work_dir
-        actual_work_dir = work_dir if work_dir is not None else default_work_dir
-
-        Path(actual_base_dir).mkdir(parents=True, exist_ok=True)
-        Path(actual_work_dir).mkdir(parents=True, exist_ok=True)
-        self.base_dir = str(Path(actual_base_dir).resolve())
-        self.work_dir = str(Path(actual_work_dir).resolve())
+        self.work_dir = str(Path(work_dir or default_work_dir).resolve())
+        self.base_dir = str(Path(base_dir or default_work_dir).resolve())
+        Path(self.base_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.work_dir).mkdir(parents=True, exist_ok=True)
         self.readable_paths = [resolve_path(p, self.base_dir) for p in readable_paths or []]
         self.writable_paths = [resolve_path(p, self.base_dir) for p in writable_paths or []]
         self.readable_paths.append(Path(self.work_dir))
@@ -91,11 +95,8 @@ class RelentlessAgent(Base):
         self.max_steps = max_steps if max_steps is not None else cfg.max_steps
         self.max_budget = max_budget if max_budget is not None else cfg.max_budget
         self.model_name = model_name if model_name is not None else cfg.model_name
-        self.max_tokens = get_max_context_length(self.model_name)
-
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
-
         self.docker_image = docker_image
         self.docker_manager: DockerManager | None = None
 
@@ -103,39 +104,6 @@ class RelentlessAgent(Base):
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
         return self.docker_manager.Bash(command, description)
-
-    def _parse_progress(self, summary: str) -> tuple[list[str], list[str]]:
-        try:
-            progress = json.loads(summary)
-            done = progress.get("done", [])
-            next_items = progress.get("next", [])
-            if isinstance(done, list) and isinstance(next_items, list):
-                done = list(dict.fromkeys(str(d) for d in done if d))
-                next_items = list(dict.fromkeys(str(n) for n in next_items if n))
-                return done, next_items
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            pass
-        return [], []
-
-    def _format_progress(self, done_items: list[str], next_items: list[str]) -> str:
-        if not done_items:
-            return ""
-        progress = "## Done\n"
-        for item in done_items[-10:]:
-            progress += f"- {item}\n"
-        if next_items:
-            progress += "\n## TODO\n"
-            for item in next_items:
-                progress += f"- {item}\n"
-        return progress
-
-    def _build_continuation_section(
-        self, done_items: list[str], next_items: list[str]
-    ) -> str:
-        progress_text = self._format_progress(done_items, next_items)
-        return "\n\n" + CONTINUATION_PROMPT.format(
-            progress_text=progress_text,
-        )
 
     def perform_task(self, tools: list[Callable[..., Any]]) -> str:
         """Execute the task with auto-continuation across multiple sub-sessions.
@@ -150,22 +118,11 @@ class RelentlessAgent(Base):
             KISSError: If the task fails after exhausting all sub-sessions.
         """
         print(f"Executing task: {self.task_description}")
-
-        done_items: list[str] = []
-        next_items: list[str] = []
-
         all_tools: list[Callable[..., Any]] = [finish, *tools]
 
+        progress_section = ""
+        summary = ""
         for trial in range(self.max_sub_sessions):
-            step_threshold = self.max_steps - 2
-
-            if trial == 0:
-                progress_section = ""
-            else:
-                progress_section = self._build_continuation_section(
-                    done_items, next_items
-                )
-
             executor = KISSAgent(f"{self.name} Trial-{trial}")
             try:
                 result = executor.run(
@@ -174,7 +131,7 @@ class RelentlessAgent(Base):
                     arguments={
                         "task_description": self.task_description,
                         "previous_progress": progress_section,
-                        "step_threshold": str(step_threshold),
+                        "step_threshold": str(self.max_steps - 2),
                         "work_dir": self.work_dir,
                     },
                     tools=all_tools,
@@ -182,43 +139,26 @@ class RelentlessAgent(Base):
                     max_budget=self.max_budget,
                     printer=self.printer,
                 )
-            except Exception:
-                last_msgs = executor.messages[-2:] if hasattr(executor, "messages") else []
-                context = " ".join(
-                    str(m.get("content", ""))
-                    for m in last_msgs
-                    if isinstance(m, dict)
-                )
+            except Exception as e:
+                err_summary = f"{summary}\n# Failure\n- Failed with Error: {e}"
                 result = yaml.dump(
-                    {
-                        "success": False,
-                        "summary": json.dumps(
-                            {"done": done_items, "next": [f"Continue: {context}"]}
-                        ),
-                    },
+                    {"success": False, "summary": err_summary},
                     sort_keys=False,
                 )
 
             self.budget_used += executor.budget_used
             self.total_tokens_used += executor.total_tokens_used
 
-            ret = yaml.safe_load(result)
-            payload = ret if isinstance(ret, dict) else {}
+            payload = yaml.safe_load(result)
+            if not isinstance(payload, dict):
+                payload = {}
 
             if payload.get("success", False):
                 return result
 
             summary = payload.get("summary", "")
-            trial_done, trial_next = self._parse_progress(summary)
-
-            if trial_done:
-                for item in trial_done:
-                    if item not in done_items:
-                        done_items.append(item)
-                next_items = trial_next
-            elif summary and summary not in done_items:
-                done_items.append(summary)
-
+            if summary:
+                progress_section = CONTINUATION_PROMPT.format(progress_text=summary)
         raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
 
     def run(
@@ -264,24 +204,15 @@ class RelentlessAgent(Base):
             YAML string with 'success' and 'summary' keys.
         """
         self._reset(
-            model_name,
-            max_sub_sessions,
-            max_steps,
-            max_budget,
-            work_dir,
-            base_dir,
-            readable_paths,
-            writable_paths,
-            docker_image,
-            config_path,
+            model_name, max_sub_sessions, max_steps, max_budget,
+            work_dir, base_dir, readable_paths, writable_paths,
+            docker_image, config_path,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
         self.set_printer(
-            printer,
-            print_to_console=print_to_console,
-            print_to_browser=print_to_browser,
+            printer, print_to_console=print_to_console, print_to_browser=print_to_browser,
         )
 
         tools = tools_factory() if tools_factory else []
@@ -300,5 +231,4 @@ class RelentlessAgent(Base):
                     return self.perform_task(tools)
                 finally:
                     self.docker_manager = None
-        else:
-            return self.perform_task(tools)
+        return self.perform_task(tools)

@@ -1914,7 +1914,7 @@ Finish execution with status and summary.
 **Args:**
 
 - `success`: True if successful, False otherwise.
-- `summary`: Summary of work done and remaining work (JSON for continuation).
+- `summary`: Detailed summary of work done so far.
 
 ______________________________________________________________________
 

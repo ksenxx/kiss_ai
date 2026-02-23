@@ -274,10 +274,9 @@ function handleOutputEvent(ev,O,state){
   case'result':{
     var rc=mkEl('div','ev rc');
     var rb='';
-    if(ev.success!==undefined){
-      var sl=ev.success?'color:var(--green);font-weight:700':'color:var(--red);font-weight:700';
-      var stLabel=ev.success?'PASSED':'FAILED';
-      rb+='<div style="'+sl+';font-size:16px;margin-bottom:12px">Status: '+stLabel+'</div>';
+    if(ev.success===false){
+      var fs='color:var(--red);font-weight:700;font-size:16px;margin-bottom:12px';
+      rb+='<div style="'+fs+'">Status: FAILED</div>';
     }
     if(ev.summary){
       var sum=(ev.summary||'').replace(/\n{3,}/g,'\n\n').trim();
