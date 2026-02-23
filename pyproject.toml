@@ -1,6 +1,6 @@
 [project]
 name = "kiss-agent-framework"
-version = "0.1.30"
+dynamic = ["version"]
 description = "KISS Agent Framework - A simple and portable agent framework for building and evolving AI agents"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -62,6 +62,9 @@ dependencies = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/kiss/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kiss"]
