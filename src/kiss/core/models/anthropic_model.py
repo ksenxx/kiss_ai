@@ -60,9 +60,6 @@ class AnthropicModel(Model):
             if isinstance(block, dict):
                 blocks.append(block)
                 continue
-            if hasattr(block, "model_dump"):
-                blocks.append(block.model_dump())
-                continue
             block_type = getattr(block, "type", None)
             if block_type == "text":
                 blocks.append({"type": "text", "text": getattr(block, "text", "")})
@@ -75,6 +72,12 @@ class AnthropicModel(Model):
                         "input": getattr(block, "input", {}) or {},
                     }
                 )
+            elif block_type == "thinking":
+                blocks.append(
+                    {"type": "thinking", "thinking": getattr(block, "thinking", "")}
+                )
+            elif hasattr(block, "model_dump"):
+                blocks.append(block.model_dump(exclude_none=True))
             else:
                 blocks.append({"type": "text", "text": str(block)})
         return blocks
