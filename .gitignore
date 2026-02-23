@@ -9,7 +9,6 @@ artifacts/
 
 # uv artifacts
 .uv/
-uv.lock
 *.egg-info
 build/
 dist/
