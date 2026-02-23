@@ -126,8 +126,9 @@ OUTPUT_CSS = r"""
 .rs b{color:var(--text);font-weight:500}
 .rc-body{
   padding:16px 20px;font-size:14px;max-height:400px;overflow-y:auto;
-  white-space:pre-wrap;word-break:break-word;line-height:1.7;
+  word-break:break-word;line-height:1.7;
 }
+.rc-body.pre{white-space:pre-wrap}
 .prompt{
   border:1px solid var(--cyan);border-radius:8px;margin:10px 0;
   overflow:hidden;background:var(--surface);
@@ -278,9 +279,11 @@ function handleOutputEvent(ev,O,state){
       var fs='color:var(--red);font-weight:700;font-size:16px;margin-bottom:12px';
       rb+='<div style="'+fs+'">Status: FAILED</div>';
     }
+    var usePre=true;
     if(ev.summary){
       var sum=(ev.summary||'').replace(/\n{3,}/g,'\n\n').trim();
-      rb+=typeof marked!=='undefined'?marked.parse(sum):esc(sum);
+      if(typeof marked!=='undefined'){rb+=marked.parse(sum);usePre=false;}
+      else{rb+=esc(sum);}
     }else{
       rb+=esc((ev.text||'(no result)').replace(/\n{3,}/g,'\n\n').trim());
     }
@@ -288,7 +291,7 @@ function handleOutputEvent(ev,O,state){
       +'Steps: <b>'+(ev.step_count||0)+'</b>'
       +' &nbsp; Tokens: <b>'+(ev.total_tokens||0)+'</b>'
       +' &nbsp; Cost: <b>'+(ev.cost||'N/A')+'</b>'
-      +'</div></div><div class="rc-body">'+rb+'</div>';
+      +'</div></div><div class="rc-body'+(usePre?' pre':'')+'">'+rb+'</div>';
     if(typeof hljs!=='undefined')rc.querySelectorAll('pre code').forEach(
       function(bl){hljs.highlightElement(bl)});
     O.appendChild(rc);break}

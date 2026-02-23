@@ -337,9 +337,9 @@ header{
   box-shadow:0 0 0 1px rgba(88,166,255,0.12),0 0 30px rgba(88,166,255,0.1),
     0 8px 40px rgba(0,0,0,0.35);
 }
-#input-wrap{position:relative}
+#input-wrap{position:relative;display:flex;align-items:flex-start;gap:8px}
 #task-input{
-  width:100%;background:transparent;border:none;
+  flex:1;min-width:0;background:transparent;border:none;
   color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
   resize:none;outline:none;line-height:1.5;
   max-height:200px;min-height:24px;
@@ -425,6 +425,14 @@ header{
 }
 #stop-btn:hover{background:rgba(248,81,73,0.2);box-shadow:0 0 16px rgba(248,81,73,0.15)}
 #stop-btn svg{width:14px;height:14px}
+#clear-btn{
+  background:none;color:rgba(255,255,255,0.2);border:none;
+  width:24px;height:24px;cursor:pointer;flex-shrink:0;
+  transition:color 0.15s;display:flex;align-items:center;justify-content:center;
+  padding:0;margin-top:1px;
+}
+#clear-btn:hover{color:rgba(255,255,255,0.6)}
+#clear-btn svg{width:14px;height:14px}
 #autocomplete{
   position:absolute;bottom:100%;left:0;right:0;
   max-width:820px;margin:0 auto;
@@ -599,6 +607,7 @@ var ST=document.getElementById('stxt');
 var inp=document.getElementById('task-input');
 var btn=document.getElementById('send-btn');
 var stopBtn=document.getElementById('stop-btn');
+var clearBtn=document.getElementById('clear-btn');
 var ac=document.getElementById('autocomplete');
 var rl=document.getElementById('recent-list');
 var pl=document.getElementById('proposed-list');
@@ -866,6 +875,17 @@ function submitTask(){
 }
 btn.addEventListener('click',submitTask);
 stopBtn.addEventListener('click',function(){fetch('/stop',{method:'POST'}).catch(function(){})});
+clearBtn.addEventListener('click',function(){
+  if(running)return;
+  O.innerHTML='<div id="welcome"><h2>What can I help you with?</h2>'
+    +'<p>Describe a task and the agent will work on it</p>'
+    +'<div id="suggestions"></div></div>';
+  suggestionsEl=document.getElementById('suggestions');
+  state={thinkEl:null,txtEl:null,bashPanel:null};
+  llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};
+  lastToolName='';pendingPanel=false;_scrollLock=false;
+  loadWelcome();inp.value='';inp.focus();
+});
 inp.addEventListener('keydown',function(e){
   if(ac.style.display==='block'){
     var items=ac.querySelectorAll('.ac-item');
@@ -1120,6 +1140,9 @@ def _build_html(title: str, subtitle: str) -> str:
       <div id="ghost-overlay"></div>
       <textarea id="task-input" placeholder="Ask anything\u2026" rows="1"
         autocomplete="off"></textarea>
+      <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+        ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div id="input-footer">
       <div id="model-picker">
