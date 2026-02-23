@@ -28,7 +28,69 @@ from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_mo
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.json"
 PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
+MODEL_USAGE_FILE = _KISS_DIR / "model_usage.json"
 MAX_HISTORY = 1000
+
+SAMPLE_TASKS = [
+    {"task": "run 'uv run check --clean' and fix", "result": ""},
+    {
+        "task": (
+            "plan a trip to Yosemite over the weekend based on"
+            " road closures, warnings, hotel availability"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "find the cheapest afternoon non-stop flight"
+            " from SFO to NYC around March 15"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "run a command in the background, monitor output,"
+            " fix errors, and optimize the code iteratively"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "implement and validate results from a research"
+            " paper using relentless_coding_agent and kiss_agent"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "develop an automated evaluation framework for"
+            " agent performance against benchmarks"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "launch a browser, research technical innovations,"
+            " and compile a document incrementally"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "read all *.md files, check consistency with"
+            " the code, and fix any inconsistencies"
+        ),
+        "result": "",
+    },
+    {
+        "task": (
+            "remove duplicate or redundant tests while"
+            " ensuring coverage doesn't decrease"
+        ),
+        "result": "",
+    },
+]
+
 
 
 def _normalize_history_entry(raw: Any) -> dict[str, str]:
@@ -41,7 +103,7 @@ def _load_history() -> list[dict[str, str]]:
     if HISTORY_FILE.exists():
         try:
             data = json.loads(HISTORY_FILE.read_text())
-            if isinstance(data, list):
+            if isinstance(data, list) and data:
                 seen: set[str] = set()
                 result: list[dict[str, str]] = []
                 for t in data[:MAX_HISTORY]:
@@ -53,7 +115,9 @@ def _load_history() -> list[dict[str, str]]:
                 return result
         except (json.JSONDecodeError, OSError):
             pass
-    return []
+    entries = [_normalize_history_entry(t) for t in SAMPLE_TASKS]
+    _save_history(entries)
+    return entries
 
 
 def _save_history(entries: list[dict[str, str]]) -> None:
@@ -86,6 +150,41 @@ def _save_proposals(proposals: list[str]) -> None:
     try:
         _KISS_DIR.mkdir(parents=True, exist_ok=True)
         PROPOSALS_FILE.write_text(json.dumps(proposals))
+    except OSError:
+        pass
+
+
+def _load_model_usage() -> dict[str, int]:
+    if MODEL_USAGE_FILE.exists():
+        try:
+            data = json.loads(MODEL_USAGE_FILE.read_text())
+            if isinstance(data, dict):
+                return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float))}
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _load_last_model() -> str:
+    if MODEL_USAGE_FILE.exists():
+        try:
+            data = json.loads(MODEL_USAGE_FILE.read_text())
+            if isinstance(data, dict):
+                last = data.get("_last")
+                if isinstance(last, str):
+                    return last
+        except (json.JSONDecodeError, OSError):
+            pass
+    return ""
+
+
+def _record_model_usage(model: str) -> None:
+    usage: dict[str, int | str] = dict(_load_model_usage())
+    usage[model] = int(usage.get(model, 0)) + 1
+    usage["_last"] = model
+    try:
+        _KISS_DIR.mkdir(parents=True, exist_ok=True)
+        MODEL_USAGE_FILE.write_text(json.dumps(usage))
     except OSError:
         pass
 
@@ -154,12 +253,12 @@ header{
 }
 .logo{font-size:15px;color:rgba(255,255,255,0.9);font-weight:600;letter-spacing:-0.2px}
 .logo span{
-  color:rgba(255,255,255,0.25);font-weight:400;font-size:12px;margin-left:10px;
+  color:rgba(255,255,255,0.55);font-weight:400;font-size:12px;margin-left:10px;
   max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   display:inline-block;vertical-align:middle;
 }
-.status{font-size:12px;color:rgba(255,255,255,0.35)}
-.dot{width:7px;height:7px;background:rgba(255,255,255,0.2)}
+.status{font-size:12px;color:rgba(255,255,255,0.6)}
+.dot{width:7px;height:7px;background:rgba(255,255,255,0.4)}
 .dot.running{background:#22c55e}
 #output{
   flex:1;overflow-y:auto;padding:32px 24px 24px;
@@ -167,39 +266,57 @@ header{
 }
 .ev,.txt,.spinner,.empty-msg,.user-msg{max-width:820px;margin-left:auto;margin-right:auto}
 .user-msg{
-  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);
+  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+  border-left:2px solid rgba(210,155,34,0.5);
   border-radius:14px;padding:14px 20px;margin:20px auto 16px;
   font-size:14.5px;line-height:1.6;color:rgba(255,255,255,0.88);
 }
-.txt{font-size:14.5px;line-height:1.75;color:rgba(255,255,255,0.82);padding:2px 0}
-.think{
-  border-left:2px solid rgba(120,180,255,0.25);
-  background:rgba(120,180,255,0.02);border-radius:0 12px 12px 0;margin:12px auto;
+.txt{
+  font-size:14.5px;line-height:1.75;color:rgba(255,255,255,0.82);padding:8px 14px;
+  border-left:2px solid rgba(255,255,255,0.08);margin:6px auto;
 }
-.think .lbl{color:rgba(120,180,255,0.6)}
+.think{
+  border-left:2px solid rgba(168,130,255,0.4);border:1px solid rgba(168,130,255,0.12);
+  background:rgba(168,130,255,0.03);border-radius:10px;margin:12px auto;
+  padding:12px 16px;
+}
+.think .lbl{color:rgba(168,130,255,0.7)}
 .think .cnt{color:rgba(255,255,255,0.4)}
 .tc{
-  border:1px solid rgba(255,255,255,0.06);border-radius:12px;
-  margin:12px auto;background:rgba(255,255,255,0.015);
+  border:1px solid rgba(88,166,255,0.15);border-radius:12px;
+  margin:12px auto;background:rgba(88,166,255,0.02);
   transition:border-color 0.2s,box-shadow 0.2s;
 }
-.tc:hover{box-shadow:0 2px 16px rgba(0,0,0,0.15);border-color:rgba(255,255,255,0.1)}
-.tc-h{padding:10px 16px;background:rgba(255,255,255,0.02);border-radius:12px 12px 0 0}
-.tc-h:hover{background:rgba(255,255,255,0.035)}
+.tc:hover{box-shadow:0 2px 20px rgba(88,166,255,0.08);border-color:rgba(88,166,255,0.3)}
+.tc-h{
+  padding:10px 16px;background:rgba(88,166,255,0.03);border-radius:12px 12px 0 0;
+  border-bottom:1px solid rgba(88,166,255,0.08);
+}
+.tc-h:hover{background:rgba(88,166,255,0.06)}
 .tn{color:rgba(88,166,255,0.9);font-size:13px}
-.tp{font-size:12px;color:rgba(255,255,255,0.3)}
+.tp{font-size:12px;color:rgba(120,180,255,0.45)}
 .td{color:rgba(255,255,255,0.3)}
 .tr{
-  border-left:2px solid rgba(34,197,94,0.35);
+  border:1px solid rgba(34,197,94,0.15);border-left:2px solid rgba(34,197,94,0.5);
   background:rgba(34,197,94,0.02);border-radius:0 10px 10px 0;
 }
-.tr.err{border-left-color:rgba(248,81,73,0.35);background:rgba(248,81,73,0.02)}
-.rc{
-  border:1px solid rgba(34,197,94,0.15);border-radius:14px;
-  background:rgba(34,197,94,0.02);
+.tr.err{
+  border-color:rgba(248,81,73,0.15);border-left-color:rgba(248,81,73,0.5);
+  background:rgba(248,81,73,0.02);
 }
-.rc-h{padding:16px 24px;background:rgba(34,197,94,0.04)}
-.usage{border-color:rgba(255,255,255,0.05);background:rgba(255,255,255,0.02);color:rgba(255,255,255,0.3)}
+.rc{
+  border:1px solid rgba(34,197,94,0.25);border-radius:14px;
+  background:rgba(34,197,94,0.02);
+  box-shadow:0 0 20px rgba(34,197,94,0.04);
+}
+.rc-h{
+  padding:16px 24px;background:rgba(34,197,94,0.05);
+  border-bottom:1px solid rgba(34,197,94,0.12);
+}
+.usage{
+  border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);
+  color:rgba(255,255,255,0.3);border-radius:8px;
+}
 .spinner{color:rgba(255,255,255,0.35)}
 .spinner::before{border-color:rgba(255,255,255,0.08);border-top-color:rgba(88,166,255,0.7)}
 #input-area{
@@ -220,9 +337,9 @@ header{
   box-shadow:0 0 0 1px rgba(88,166,255,0.12),0 0 30px rgba(88,166,255,0.1),
     0 8px 40px rgba(0,0,0,0.35);
 }
-#input-wrap{position:relative}
+#input-wrap{position:relative;display:flex;align-items:flex-start;gap:8px}
 #task-input{
-  width:100%;background:transparent;border:none;
+  flex:1;min-width:0;background:transparent;border:none;
   color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
   resize:none;outline:none;line-height:1.5;
   max-height:200px;min-height:24px;
@@ -308,6 +425,14 @@ header{
 }
 #stop-btn:hover{background:rgba(248,81,73,0.2);box-shadow:0 0 16px rgba(248,81,73,0.15)}
 #stop-btn svg{width:14px;height:14px}
+#clear-btn{
+  background:none;color:rgba(255,255,255,0.2);border:none;
+  width:24px;height:24px;cursor:pointer;flex-shrink:0;
+  transition:color 0.15s;display:flex;align-items:center;justify-content:center;
+  padding:0;margin-top:1px;
+}
+#clear-btn:hover{color:rgba(255,255,255,0.6)}
+#clear-btn svg{width:14px;height:14px}
 #autocomplete{
   position:absolute;bottom:100%;left:0;right:0;
   max-width:820px;margin:0 auto;
@@ -400,6 +525,13 @@ header{
   z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
+#history-btn,#proposals-btn{
+  background:none;border:1px solid rgba(255,255,255,0.15);border-radius:8px;
+  color:rgba(255,255,255,0.6);font-size:12px;cursor:pointer;
+  padding:5px 12px;transition:all 0.15s;display:flex;align-items:center;gap:6px;
+}
+#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.85);border-color:rgba(255,255,255,0.3)}
+#history-btn svg,#proposals-btn svg{opacity:0.85}
 #sidebar-close{
   position:absolute;top:16px;right:16px;background:none;border:none;
   color:rgba(255,255,255,0.3);font-size:20px;cursor:pointer;
@@ -423,13 +555,49 @@ header{
   color:rgba(255,255,255,0.8);
 }
 .sidebar-empty{color:rgba(255,255,255,0.2);font-size:13px;padding:8px 0}
-#history-btn,#proposals-btn{
-  background:none;border:1px solid rgba(255,255,255,0.07);border-radius:8px;
-  color:rgba(255,255,255,0.35);font-size:12px;cursor:pointer;
-  padding:5px 12px;transition:all 0.15s;display:flex;align-items:center;gap:6px;
+#history-search{
+  width:100%;background:rgba(255,255,255,0.04);
+  border:1px solid rgba(255,255,255,0.08);border-radius:8px;
+  color:rgba(255,255,255,0.8);font-size:12px;font-family:inherit;
+  padding:8px 12px;outline:none;margin-bottom:12px;
+  transition:border-color 0.2s;
 }
-#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.6);border-color:rgba(255,255,255,0.14)}
-#history-btn svg,#proposals-btn svg{opacity:0.7}
+#history-search:focus{border-color:rgba(88,166,255,0.4)}
+#history-search::placeholder{color:rgba(255,255,255,0.25)}
+.followup-bar{
+  max-width:820px;margin:16px auto 8px;padding:12px 18px;
+  background:rgba(188,140,255,0.04);
+  border:1px solid rgba(188,140,255,0.15);border-radius:12px;
+  cursor:pointer;transition:all 0.2s;display:flex;align-items:center;gap:10px;
+}
+.followup-bar:hover{
+  background:rgba(188,140,255,0.08);
+  border-color:rgba(188,140,255,0.3);
+  transform:translateY(-1px);
+  box-shadow:0 4px 20px rgba(188,140,255,0.08);
+}
+.fu-label{
+  font-size:10px;font-weight:600;text-transform:uppercase;
+  letter-spacing:0.04em;color:rgba(188,140,255,0.7);
+  white-space:nowrap;flex-shrink:0;
+}
+.fu-text{
+  font-size:13.5px;color:rgba(255,255,255,0.7);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.llm-panel{
+  border:1px solid rgba(88,166,255,0.15);border-radius:10px;
+  margin:8px auto;max-height:350px;overflow-y:auto;
+  padding:12px 16px;background:rgba(88,166,255,0.03);
+  max-width:820px;
+}
+.llm-panel .txt{font-size:10px;line-height:1.5;color:rgba(255,255,255,0.6)}
+.llm-panel .think .cnt{font-size:10px}
+.bash-panel{
+  max-width:820px;margin-left:auto;margin-right:auto;
+  background:rgba(0,0,0,0.5);color:rgba(255,255,255,0.55);
+  border-color:rgba(255,255,255,0.05);
+}
 """
 
 CHATBOT_JS = r"""
@@ -439,9 +607,12 @@ var ST=document.getElementById('stxt');
 var inp=document.getElementById('task-input');
 var btn=document.getElementById('send-btn');
 var stopBtn=document.getElementById('stop-btn');
+var clearBtn=document.getElementById('clear-btn');
 var ac=document.getElementById('autocomplete');
 var rl=document.getElementById('recent-list');
 var pl=document.getElementById('proposed-list');
+var histSearch=document.getElementById('history-search');
+var allTasks=[];
 var modelBtn=document.getElementById('model-btn');
 var modelLabel=document.getElementById('model-label');
 var modelDD=document.getElementById('model-dropdown');
@@ -451,10 +622,12 @@ var allModels=[],selectedModel='',modelDDIdx=-1;
 var sidebar=document.getElementById('sidebar');
 var sidebarOverlay=document.getElementById('sidebar-overlay');
 var suggestionsEl=document.getElementById('suggestions');
-var running=false,autoScroll=true,userScrolled=false;
-var scrollRaf=0,state={thinkEl:null,txtEl:null};
+var running=false,_scrollLock=false;
+var scrollRaf=0,state={thinkEl:null,txtEl:null,bashPanel:null};
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
 var acTimer=null,histIdx=-1,histCache=[];
+var lastToolName='',llmPanel=null,pendingPanel=false;
+var llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};
 var ghostEl=document.getElementById('ghost-overlay');
 var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
 var ghostCache={q:'',s:''};
@@ -483,17 +656,21 @@ function toggleSidebar(mode){
   sidebar.classList.toggle('open');
   sidebarOverlay.classList.toggle('open');
 }
+O.addEventListener('wheel',function(e){
+  if(running&&e.deltaY<0)_scrollLock=true;
+});
 O.addEventListener('scroll',function(){
-  var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
-  if(!atBottom&&running)userScrolled=true;
-  if(atBottom)userScrolled=false;
-  autoScroll=!userScrolled;
+  if(_scrollLock){
+    var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-150;
+    if(atBottom)_scrollLock=false;
+  }
 });
 function sb(){
-  if(autoScroll&&!scrollRaf){scrollRaf=requestAnimationFrame(function(){
-    O.scrollTop=O.scrollHeight;scrollRaf=0;
+  if(!_scrollLock&&!scrollRaf){scrollRaf=requestAnimationFrame(function(){
+    O.scrollTo({top:O.scrollHeight,behavior:'instant'});scrollRaf=0;
   });}
 }
+new MutationObserver(function(){sb()}).observe(O,{childList:true,subtree:true,characterData:true});
 function startTimer(){
   t0=Date.now();
   if(timerIv)clearInterval(timerIv);
@@ -512,7 +689,7 @@ function showSpinner(msg){
   removeSpinner();
   var sp=mkEl('div','spinner');
   sp.id='wait-spinner';
-  sp.textContent=msg||'Working\u2026';
+  sp.textContent=msg||'Waiting ...';
   O.appendChild(sp);sb();
 }
 function setReady(label){
@@ -536,19 +713,30 @@ function connectSSE(){
 }
 function handleEvent(ev){
   var t=ev.type;
-  if(t==='thinking_start'||t==='text_delta'||t==='tool_call'
+  if(t==='thinking_start'||t==='thinking_delta'||t==='text_delta'
+    ||t==='tool_call'||t==='tool_result'||t==='system_output'
     ||t==='task_done'||t==='task_error'||t==='task_stopped')removeSpinner();
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
   case'proposed_updated':loadProposed();loadWelcome();break;
   case'clear':
-    O.innerHTML='';state.thinkEl=null;state.txtEl=null;
-    autoScroll=true;userScrolled=false;showSpinner();break;
+    O.innerHTML='';state.thinkEl=null;state.txtEl=null;state.bashPanel=null;
+    llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};lastToolName='';pendingPanel=false;
+    _scrollLock=false;showSpinner();break;
   case'task_done':{
     var el=t0?Math.floor((Date.now()-t0)/1000):0;
     var em=Math.floor(el/60);
     setReady('Done ('+(em>0?em+'m ':'')+el%60+'s)');
     loadTasks();loadProposed();break}
+  case'followup_suggestion':{
+    var fu=mkEl('div','followup-bar');
+    fu.title=ev.text;
+    fu.innerHTML='<span class="fu-label">Suggested next</span>'
+      +'<span class="fu-text">'+esc(ev.text)+'</span>';
+    fu.addEventListener('click',function(){
+      inp.value=ev.text;inp.focus();
+    });
+    O.appendChild(fu);sb();break}
   case'task_error':{
     var err=mkEl('div','ev tr err');
     err.innerHTML='<div class="rl fail">ERROR</div>'+esc(ev.text||'Unknown error');
@@ -559,12 +747,27 @@ function handleEvent(ev){
     stEl.innerHTML='<div class="rl fail">STOPPED</div>Agent execution stopped by user';
     O.appendChild(stEl);
     setReady('Stopped');loadTasks();loadProposed();break}
-  default:
-    handleOutputEvent(ev,O,state);
-    if(t==='tool_call'&&running)showSpinner('Running tool\u2026');
-    if(t==='tool_result'&&running)showSpinner();
-    if(t==='thinking_end'&&running)showSpinner();
-  }
+  default:{
+    if(t==='tool_call'){
+      lastToolName=ev.name||'';
+      llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};pendingPanel=false;
+    }
+    if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
+    if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
+      llmPanel=mkEl('div','llm-panel');
+      O.appendChild(llmPanel);
+      llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};pendingPanel=false;
+    }
+    var target=O,tState=state;
+    if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
+      ||t==='text_delta'||t==='text_end')){
+      target=llmPanel;tState=llmPanelState;
+    }
+    handleOutputEvent(ev,target,tState);
+    if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+    if(running&&(t==='tool_call'||t==='tool_result'||t==='thinking_end'
+      ||t==='text_end'||(t==='system_output'&&!state.bashPanel)))showSpinner();
+  }}
   sb();
 }
 function loadModels(){
@@ -584,11 +787,30 @@ function modelVendor(name){
   if(name.startsWith('openrouter/'))return'OpenRouter';
   return'Together AI';
 }
+function renderModelItem(m){
+  var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
+  var price='$'+m.inp.toFixed(2)+' / $'+m.out.toFixed(2);
+  d.innerHTML='<span>'+esc(m.name)+'</span><span class="model-cost">'+price+'</span>';
+  d.addEventListener('click',function(){selectModel(m.name)});
+  return d;
+}
 function renderModelList(q){
   modelList.innerHTML='';modelDDIdx=-1;
-  var ql=q.toLowerCase(),lastVendor='';
+  var ql=q.toLowerCase();
+  var used=[],rest=[];
   allModels.forEach(function(m){
     if(ql&&m.name.toLowerCase().indexOf(ql)<0)return;
+    if(m.uses>0)used.push(m);else rest.push(m);
+  });
+  used.sort(function(a,b){return b.uses-a.uses});
+  if(used.length){
+    var hdr=mkEl('div','model-group-hdr');
+    hdr.textContent='Recently Used';
+    modelList.appendChild(hdr);
+    used.forEach(function(m){modelList.appendChild(renderModelItem(m))});
+  }
+  var lastVendor='';
+  rest.forEach(function(m){
     var v=modelVendor(m.name);
     if(v!==lastVendor){
       var hdr=mkEl('div','model-group-hdr');
@@ -596,11 +818,7 @@ function renderModelList(q){
       modelList.appendChild(hdr);
       lastVendor=v;
     }
-    var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
-    var price='$'+m.inp.toFixed(2)+' / $'+m.out.toFixed(2);
-    d.innerHTML='<span>'+esc(m.name)+'</span><span class="model-cost">'+price+'</span>';
-    d.addEventListener('click',function(){selectModel(m.name)});
-    modelList.appendChild(d);
+    modelList.appendChild(renderModelItem(m));
   });
 }
 function selectModel(name){
@@ -652,11 +870,22 @@ function submitTask(){
     body:JSON.stringify({task:task,model:selectedModel})
   }).then(function(r){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
-    inp.value='';
+    inp.value='';loadModels();
   }).catch(function(){setReady('Error');alert('Network error')});
 }
 btn.addEventListener('click',submitTask);
 stopBtn.addEventListener('click',function(){fetch('/stop',{method:'POST'}).catch(function(){})});
+clearBtn.addEventListener('click',function(){
+  if(running)return;
+  O.innerHTML='<div id="welcome"><h2>What can I help you with?</h2>'
+    +'<p>Describe a task and the agent will work on it</p>'
+    +'<div id="suggestions"></div></div>';
+  suggestionsEl=document.getElementById('suggestions');
+  state={thinkEl:null,txtEl:null,bashPanel:null};
+  llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};
+  lastToolName='';pendingPanel=false;_scrollLock=false;
+  loadWelcome();inp.value='';inp.focus();
+});
 inp.addEventListener('keydown',function(e){
   if(ac.style.display==='block'){
     var items=ac.querySelectorAll('.ac-item');
@@ -799,17 +1028,26 @@ function doHistCycle(dir){
 }
 function loadTasks(){
   fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
-    rl.innerHTML='';
-    if(!tasks.length){rl.innerHTML='<div class="sidebar-empty">No recent tasks</div>';return}
-    tasks.forEach(function(t){
-      var taskText=typeof t==='string'?t:(t.task||'');
-      var d=mkEl('div','sidebar-item');
-      d.textContent=taskText;d.title=taskText;
-      d.addEventListener('click',function(){inp.value=taskText;inp.focus();toggleSidebar()});
-      rl.appendChild(d);
-    });
+    allTasks=tasks;renderTasks('');histSearch.value='';
   }).catch(function(){});
 }
+function renderTasks(q){
+  rl.innerHTML='';
+  var ql=q.toLowerCase(),filtered=[];
+  allTasks.forEach(function(t){
+    var txt=typeof t==='string'?t:(t.task||'');
+    if(!ql||txt.toLowerCase().indexOf(ql)>=0)filtered.push(txt);
+  });
+  if(!filtered.length){rl.innerHTML='<div class="sidebar-empty">'
+    +(ql?'No matches':'No recent tasks')+'</div>';return}
+  filtered.forEach(function(taskText){
+    var d=mkEl('div','sidebar-item');
+    d.textContent=taskText;d.title=taskText;
+    d.addEventListener('click',function(){inp.value=taskText;inp.focus();toggleSidebar()});
+    rl.appendChild(d);
+  });
+}
+histSearch.addEventListener('input',function(){renderTasks(this.value)});
 function loadProposed(){
   fetch('/proposed_tasks').then(function(r){return r.json()}).then(function(tasks){
     pl.innerHTML='';
@@ -837,6 +1075,7 @@ function loadWelcome(){
     });
     items.slice(0,6).forEach(function(item){
       var chip=mkEl('div','suggestion-chip');
+      chip.title=item.text;
       chip.innerHTML='<span class="chip-label '+item.type+'">'
         +(item.type==='recent'?'Recent':'Suggested')+'</span>'
         +esc(item.text);
@@ -858,6 +1097,7 @@ def _build_html(title: str, subtitle: str) -> str:
   <button id="sidebar-close" onclick="toggleSidebar()">&times;</button>
   <div class="sidebar-section" id="sidebar-history-sec">
     <div class="sidebar-hdr">Recent Tasks</div>
+    <input type="text" id="history-search" placeholder="Search history\u2026" autocomplete="off"/>
     <div id="recent-list"></div>
   </div>
   <div class="sidebar-section" id="sidebar-proposals-sec">
@@ -900,6 +1140,9 @@ def _build_html(title: str, subtitle: str) -> str:
       <div id="ghost-overlay"></div>
       <textarea id="task-input" placeholder="Ask anything\u2026" rows="1"
         autocomplete="off"></textarea>
+      <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+        ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div id="input-footer">
       <div id="model-picker">
@@ -964,8 +1207,12 @@ def run_chatbot(
     agent_thread: threading.Thread | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
-    selected_model = default_model or get_most_expensive_model() or "claude-opus-4-6"
+    selected_model = (
+        _load_last_model() or default_model or get_most_expensive_model() or "claude-opus-4-6"
+    )
     html_page = _build_html(title, subtitle)
+    shutdown_timer: threading.Timer | None = None
+    ever_connected = False
 
     def refresh_file_cache() -> None:
         nonlocal file_cache
@@ -1006,6 +1253,34 @@ def run_chatbot(
         _save_proposals(proposals)
         printer.broadcast({"type": "proposed_updated"})
 
+    def generate_followup(task: str, result: str) -> None:
+        try:
+            agent = KISSAgent("Followup Proposer")
+            raw = agent.run(
+                model_name="gemini-2.0-flash",
+                prompt_template=(
+                    "A developer just completed this task:\n"
+                    "Task: {task}\n"
+                    "Result summary: {result}\n\n"
+                    "Suggest ONE short, concrete follow-up task they "
+                    "might want to do next. Return ONLY the task "
+                    "description as a single plain-text sentence."
+                ),
+                arguments={
+                    "task": task,
+                    "result": result[:500],
+                },
+                is_agentic=False,
+            )
+            suggestion = raw.strip().strip('"').strip("'")
+            if suggestion:
+                printer.broadcast({
+                    "type": "followup_suggestion",
+                    "text": suggestion,
+                })
+        except Exception:
+            pass
+
     def run_agent_thread(task: str, model_name: str) -> None:
         nonlocal running, agent_thread
         try:
@@ -1022,6 +1297,11 @@ def run_chatbot(
             )
             _set_latest_result(result or "")
             printer.broadcast({"type": "task_done"})
+            threading.Thread(
+                target=generate_followup,
+                args=(task, result or ""),
+                daemon=True,
+            ).start()
         except _StopRequested:
             _set_latest_result("(stopped)")
             printer.broadcast({"type": "task_stopped"})
@@ -1055,11 +1335,35 @@ def run_chatbot(
         )
         return True
 
+    def _schedule_shutdown() -> None:
+        nonlocal shutdown_timer
+        with printer._lock:
+            if printer._clients or not ever_connected:
+                return
+        if shutdown_timer is not None:
+            shutdown_timer.cancel()
+
+        def _do_shutdown() -> None:
+            with printer._lock:
+                if printer._clients:
+                    return
+            stop_agent()
+            os._exit(0)
+
+        shutdown_timer = threading.Timer(3.0, _do_shutdown)
+        shutdown_timer.daemon = True
+        shutdown_timer.start()
+
     async def index(request: Request) -> HTMLResponse:
         return HTMLResponse(html_page)
 
     async def events(request: Request) -> StreamingResponse:
+        nonlocal ever_connected, shutdown_timer
         cq = printer.add_client()
+        ever_connected = True
+        if shutdown_timer is not None:
+            shutdown_timer.cancel()
+            shutdown_timer = None
 
         async def generate() -> AsyncGenerator[str]:
             try:
@@ -1074,6 +1378,7 @@ def run_chatbot(
                 pass
             finally:
                 printer.remove_client(cq)
+                _schedule_shutdown()
 
         return StreamingResponse(
             generate(),
@@ -1095,6 +1400,7 @@ def run_chatbot(
             with running_lock:
                 running = False
             return JSONResponse({"error": "Empty task"}, status_code=400)
+        _record_model_usage(model)
         t = threading.Thread(target=run_agent_thread, args=(task, model), daemon=True)
         with running_lock:
             agent_thread = t
@@ -1192,6 +1498,7 @@ def run_chatbot(
         return JSONResponse({"suggestion": suggestion})
 
     async def models_endpoint(request: Request) -> JSONResponse:
+        usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
         for name in get_available_models():
             info = MODEL_INFO.get(name)
@@ -1200,6 +1507,7 @@ def run_chatbot(
                     "name": name,
                     "inp": info.input_price_per_1M,
                     "out": info.output_price_per_1M,
+                    "uses": usage.get(name, 0),
                 })
         models_list.sort(key=lambda m: (
             _model_vendor_order(str(m["name"])),

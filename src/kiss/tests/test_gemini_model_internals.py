@@ -64,4 +64,4 @@ class TestGeminiModelConversationConversion:
         class Dummy:
             usage_metadata = None
 
-        assert model.extract_input_output_token_counts_from_response(Dummy()) == (0, 0)
+        assert model.extract_input_output_token_counts_from_response(Dummy()) == (0, 0, 0, 0)

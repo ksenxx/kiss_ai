@@ -9,6 +9,7 @@ import os
 import shlex
 import shutil
 import tempfile
+from collections.abc import Callable
 from typing import Any
 
 import docker
@@ -49,6 +50,7 @@ class DockerManager:
         self.ports = ports
         self.client_shared_path = config_module.DEFAULT_CONFIG.docker.client_shared_path
         self.host_shared_path: str | None = None
+        self.stream_callback: Callable[[str], None] | None = None
 
         if ":" in image_name:
             self.image, self.tag = image_name.rsplit(":", 1)
@@ -94,7 +96,7 @@ class DockerManager:
         container_id = self.container.id[:12] if self.container.id else "unknown"
         print(f"Container {container_id} is now running")
 
-    def run_bash_command(self, command: str, description: str) -> str:
+    def Bash(self, command: str, description: str) -> str:  # noqa: N802
         """
         Execute a bash command in the running Docker container.
 
@@ -108,6 +110,10 @@ class DockerManager:
             raise KISSError("No container is open. Please call open() first.")
 
         print(f"{description}")
+
+        if self.stream_callback:
+            return self._bash_streaming(command)
+
         exec_result = self.container.exec_run(
             f"/bin/bash -c {shlex.quote(command)}",
             stdout=True,
@@ -125,6 +131,40 @@ class DockerManager:
         stderr = stderr_bytes.decode("utf-8") if stderr_bytes else ""
         exit_code = exec_result.exit_code
         output = stdout + "\n" + stderr
+        if exit_code != 0:
+            output += f"\n[exit code: {exit_code}]"
+        return output
+
+    def _bash_streaming(self, command: str) -> str:
+        assert self.container is not None
+        assert self.stream_callback is not None
+        exec_resp = self.client.api.exec_create(
+            self.container.id,
+            f"/bin/bash -c {shlex.quote(command)}",
+            stdout=True,
+            stderr=True,
+            workdir=self.workdir,
+        )
+        exec_id = exec_resp["Id"]
+        output_gen = self.client.api.exec_start(exec_id, stream=True, demux=True)
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        for chunk in output_gen:
+            if isinstance(chunk, tuple):
+                stdout_chunk, stderr_chunk = chunk
+            else:
+                stdout_chunk, stderr_chunk = chunk, None
+            if stdout_chunk:
+                text = stdout_chunk.decode("utf-8")
+                stdout_parts.append(text)
+                self.stream_callback(text)
+            if stderr_chunk:
+                text = stderr_chunk.decode("utf-8")
+                stderr_parts.append(text)
+                self.stream_callback(text)
+        inspect_result = self.client.api.exec_inspect(exec_id)
+        exit_code = inspect_result.get("ExitCode", 0)
+        output = "".join(stdout_parts) + "\n" + "".join(stderr_parts)
         if exit_code != 0:
             output += f"\n[exit code: {exit_code}]"
         return output

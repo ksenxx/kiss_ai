@@ -123,6 +123,7 @@ class AnthropicModel(Model):
             dict[str, Any]: The keyword arguments for the API call.
         """
         kwargs = self.model_config.copy()
+        enable_cache = kwargs.pop("enable_cache", True)
 
         # Anthropic requires max_tokens; accept OpenAI-style "max_completion_tokens" too.
         max_tokens = kwargs.pop("max_tokens", None)
@@ -160,6 +161,22 @@ class AnthropicModel(Model):
         )
         if tools:
             kwargs["tools"] = tools
+
+        if enable_cache:
+            if tools:
+                tools[-1]["cache_control"] = {"type": "ephemeral"}
+            for msg in reversed(self.conversation):
+                if msg.get("role") == "user":
+                    content = msg["content"]
+                    if isinstance(content, str):
+                        msg["content"] = [
+                            {"type": "text", "text": content,
+                             "cache_control": {"type": "ephemeral"}}
+                        ]
+                    elif isinstance(content, list) and content:
+                        content[-1]["cache_control"] = {"type": "ephemeral"}
+                    break
+
         return kwargs
 
     def _create_message(self, kwargs: dict[str, Any]) -> Any:
@@ -294,21 +311,22 @@ class AnthropicModel(Model):
             content = f"{content}\n\n{self.usage_info_for_messages}"
         self.conversation.append({"role": role, "content": content})
 
-    def extract_input_output_token_counts_from_response(self, response: Any) -> tuple[int, int]:
-        """Extracts input and output token counts from an API response.
-
-        Args:
-            response: The raw Anthropic API response object.
+    def extract_input_output_token_counts_from_response(
+        self, response: Any
+    ) -> tuple[int, int, int, int]:
+        """Extracts token counts from an Anthropic API response.
 
         Returns:
-            tuple[int, int]: A tuple of (input_tokens, output_tokens).
+            (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
         """
         if hasattr(response, "usage") and response.usage:
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,
                 getattr(response.usage, "output_tokens", 0) or 0,
+                getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
             )
-        return 0, 0
+        return 0, 0, 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.

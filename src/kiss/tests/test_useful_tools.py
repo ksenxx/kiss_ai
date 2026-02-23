@@ -941,5 +941,89 @@ class TestEditScriptLiteralGrep:
         assert f.read_text() == "he.*llo world"
 
 
+@pytest.fixture
+def streaming_sandbox(temp_test_dir):
+    readable_dir = temp_test_dir / "readable"
+    writable_dir = temp_test_dir / "writable"
+    readable_dir.mkdir()
+    writable_dir.mkdir()
+    streamed: list[str] = []
+    tools = UsefulTools(
+        base_dir=str(temp_test_dir),
+        readable_paths=[str(readable_dir)],
+        writable_paths=[str(writable_dir)],
+        stream_callback=streamed.append,
+    )
+    return tools, readable_dir, writable_dir, temp_test_dir, streamed
+
+
+class TestBashStreaming:
+    def test_streaming_captures_output_lines(self, streaming_sandbox):
+        tools, readable_dir, _, _, streamed = streaming_sandbox
+        test_file = readable_dir / "lines.txt"
+        test_file.write_text("line1\nline2\nline3\n")
+        result = tools.Bash(f"cat {test_file}", "Stream cat")
+        assert "line1" in result
+        assert "line2" in result
+        assert len(streamed) >= 3
+        joined = "".join(streamed)
+        assert "line1" in joined
+        assert "line2" in joined
+        assert "line3" in joined
+
+    def test_streaming_returns_full_output(self, streaming_sandbox):
+        tools, _, _, _, streamed = streaming_sandbox
+        result = tools.Bash("echo hello && echo world", "Two echoes")
+        assert "hello" in result
+        assert "world" in result
+        assert len(streamed) >= 2
+
+    def test_streaming_handles_error(self, streaming_sandbox):
+        tools, _, _, _, streamed = streaming_sandbox
+        result = tools.Bash("false", "Failing command")
+        assert "Error:" in result
+
+    def test_streaming_timeout(self, streaming_sandbox):
+        tools, _, _, _, _ = streaming_sandbox
+        result = tools.Bash("sleep 10", "Slow command", timeout_seconds=0.1)
+        assert result == "Error: Command execution timeout"
+
+    def test_streaming_output_truncation(self, streaming_sandbox):
+        tools, readable_dir, _, _, streamed = streaming_sandbox
+        big_file = readable_dir / "big.txt"
+        big_file.write_text("X" * 200)
+        result = tools.Bash(f"cat {big_file}", "Cat big", max_output_chars=50)
+        assert "truncated" in result
+        assert len(streamed) >= 1
+
+    def test_streaming_permission_denied(self, streaming_sandbox):
+        tools, _, _, test_dir, streamed = streaming_sandbox
+        outside = test_dir / "secret.txt"
+        outside.write_text("secret")
+        result = tools.Bash(f"cat {outside}", "Read outside")
+        assert "Error: Access denied for reading" in result
+        assert len(streamed) == 0
+
+    def test_streaming_echo_no_file_access(self, streaming_sandbox):
+        tools, _, _, _, streamed = streaming_sandbox
+        result = tools.Bash("echo streaming_test", "Simple echo")
+        assert "streaming_test" in result
+        joined = "".join(streamed)
+        assert "streaming_test" in joined
+
+    def test_streaming_stderr_captured(self, streaming_sandbox):
+        tools, _, _, _, streamed = streaming_sandbox
+        tools.Bash("echo out && echo err >&2", "Mixed output")
+        joined = "".join(streamed)
+        assert "out" in joined
+        assert "err" in joined
+
+    def test_no_streaming_without_callback(self, tools_sandbox):
+        tools, _, _, _ = tools_sandbox
+        assert tools.stream_callback is None
+        result = tools.Bash("echo normal", "No streaming")
+        assert "normal" in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

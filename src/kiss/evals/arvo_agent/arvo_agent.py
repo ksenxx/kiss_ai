@@ -137,7 +137,7 @@ def find_vulnerability(
 
             host_input_python_file.write_text(python_input_code)
             command = f"python3 {container_input_python_file.as_posix()} > /tmp/poc && arvo"
-            return env.run_bash_command(command, "Running test")
+            return env.Bash(command, "Running test")
 
         original_prompt_template = prompt_template_vuln_agent
         vuln_agent = KISSAgent(name="Vulnerability Detector Agent")
@@ -146,7 +146,7 @@ def find_vulnerability(
                 model_name=model_name,
                 prompt_template=current_prompt,
                 arguments={"location": location},
-                tools=[env.run_bash_command, run_test, utils.finish],
+                tools=[env.Bash, run_test, utils.finish],
             )
             result = yaml.safe_load(result_str)
             # Handle case where yaml parsing returns None or dict without 'status'

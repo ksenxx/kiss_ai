@@ -157,7 +157,7 @@ def solve_instance(
                 sub_result = sub_agent.run(
                     model_name=config.model,
                     prompt_template=prompt,
-                    tools=[env.run_bash_command, utils.finish],
+                    tools=[env.Bash, utils.finish],
                     max_steps=config.max_steps // 2,  # Half steps for sub-tasks
                     max_budget=config.max_budget / 4,  # Quarter budget for sub-tasks
                 )
@@ -173,7 +173,7 @@ def solve_instance(
                 model_name=config.model,
                 prompt_template=prompt_template,
                 arguments={"issue": issue_statement},
-                tools=[env.run_bash_command, do_sub_task, utils.finish],
+                tools=[env.Bash, do_sub_task, utils.finish],
                 max_steps=config.max_steps,
                 max_budget=config.max_budget,
             )
