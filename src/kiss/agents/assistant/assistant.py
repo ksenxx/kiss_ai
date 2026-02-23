@@ -49,15 +49,15 @@ SAMPLE_TASKS = [
     },
     {
         "task": (
-            "run a command in the background, monitor output,"
+            "run <<command>> in the background, monitor output,"
             " fix errors, and optimize the code iteratively"
         ),
         "result": "",
     },
     {
         "task": (
-            "implement and validate results from a research"
-            " paper using relentless_coding_agent and kiss_agent"
+            "implement and validate results from the research"
+            " paper https://arxiv.org/pdf/2505.10961 using relentless_coding_agent and kiss_agent"
         ),
         "result": "",
     },
