@@ -6,6 +6,7 @@
 """Script to run all code quality checks: syntax check, lint, and type check."""
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -158,9 +159,9 @@ def main() -> int:
     """
     parser = argparse.ArgumentParser(description="Run code quality checks")
     parser.add_argument(
-        "--clean",
+        "--no-clean",
         action="store_true",
-        help="Clean build artifacts before running checks",
+        help="Skip cleaning build artifacts before running checks",
     )
     parser.add_argument(
         "--clean-only",
@@ -169,8 +170,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Clean if requested
-    if args.clean or args.clean_only:
+    if not args.no_clean:
         clean_build_artifacts()
         if args.clean_only:
             return 0
@@ -190,6 +190,29 @@ def main() -> int:
     # Add markdown lint check if there are markdown files
     if md_files:
         checks.append((["uv", "run", "mdformat", "--check", *md_files], "Lint markdown (mdformat)"))
+
+    # Sync pyproject.toml version from _version.py
+    project_root = Path(__file__).parent.parent.parent.parent
+    version_file = project_root / "src" / "kiss" / "_version.py"
+    pyproject_file = project_root / "pyproject.toml"
+    ver_match = re.search(r'__version__\s*=\s*"([^"]+)"', version_file.read_text())
+    if not ver_match:
+        print("❌ Could not parse version from _version.py")
+        return 1
+    pyproject_text = pyproject_file.read_text()
+    pyp_match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject_text, re.MULTILINE)
+    if not pyp_match:
+        print("❌ Could not parse version from pyproject.toml")
+        return 1
+    if ver_match.group(1) != pyp_match.group(1):
+        new_text = pyproject_text.replace(
+            f'version = "{pyp_match.group(1)}"', f'version = "{ver_match.group(1)}"', 1
+        )
+        pyproject_file.write_text(new_text)
+        print(
+            f"🔧 Updated pyproject.toml version: {pyp_match.group(1)!r} → {ver_match.group(1)!r}"
+        )
+        subprocess.run(["uv", "lock"], check=True)
 
     print("\n🔍 Running all code quality checks...\n")
 
