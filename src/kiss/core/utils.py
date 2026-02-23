@@ -7,17 +7,15 @@
 
 from pathlib import Path
 from string import Formatter as StringFormatter
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import yaml
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 
-T = TypeVar("T")
 
-
-def get_config_value(
+def get_config_value[T](
     value: T | None, config_obj: Any, attr_name: str, default: T | None = None
 ) -> T:
     """Get a config value, preferring explicit value over config default.
