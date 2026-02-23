@@ -73,9 +73,14 @@ class AnthropicModel(Model):
                     }
                 )
             elif block_type == "thinking":
-                blocks.append(
-                    {"type": "thinking", "thinking": getattr(block, "thinking", "")}
-                )
+                thinking_block: dict[str, Any] = {
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", ""),
+                }
+                signature = getattr(block, "signature", None)
+                if signature is not None:
+                    thinking_block["signature"] = signature
+                blocks.append(thinking_block)
             elif hasattr(block, "model_dump"):
                 blocks.append(block.model_dump(exclude_none=True))
             else:
@@ -166,6 +171,14 @@ class AnthropicModel(Model):
             kwargs["tools"] = tools
 
         if enable_cache:
+            # Strip stale cache_control from all conversation blocks first.
+            for msg in self.conversation:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            block.pop("cache_control", None)
+
             if tools:
                 tools[-1]["cache_control"] = {"type": "ephemeral"}
             for msg in reversed(self.conversation):
