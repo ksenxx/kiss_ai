@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.1.22-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.1.34-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -330,7 +330,6 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Relentless Coding Agent**: Single-agent coding system with smart auto-continuation for long-running tasks
 - **Browser-Based Assistant**: Interactive web UI for agents with real-time streaming and task history
 - **Repo Optimizer**: Uses RelentlessCodingAgent to iteratively optimize code in your project for speed and cost (💡 new idea)
-- **IMO Agent**: Verification-and-refinement pipeline for solving competition math problems (based on [arXiv:2507.15855](https://arxiv.org/abs/2507.15855))
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
@@ -404,11 +403,11 @@ uv sync --group claude --group dev
 
 | Group | Description | Key Packages |
 |-------|-------------|--------------|
-| `core` | Minimal core module | pydantic, rich, requests, beautifulsoup4, playwright, flask |
+| `core` | Minimal core module | pydantic, rich, requests, beautifulsoup4, playwright, uvicorn, starlette |
 | `claude` | Core + Anthropic | core + anthropic |
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
-| `docker` | Docker integration | docker, types-docker |
+| `docker` | Docker integration | docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
 
@@ -561,12 +560,6 @@ kiss/
 │   │   │   ├── gepa.py
 │   │   │   ├── config.py           # GEPA configuration
 │   │   │   └── README.md           # GEPA documentation
-│   │   ├── imo_agent/              # IMO mathematical problem-solving agent
-│   │   │   ├── __init__.py
-│   │   │   ├── imo_agent.py            # Verification-and-refinement pipeline (arXiv:2507.15855)
-│   │   │   ├── imo_problems.py         # IMO 2025 problem statements, validation criteria, and difficulty
-│   │   │   ├── imo_agent_creator.py    # Repo agent that created the IMO agent
-│   │   │   └── config.py               # IMO agent configuration
 │   │   ├── kiss_evolve/            # KISSEvolve evolutionary algorithm discovery
 │   │   │   ├── kiss_evolve.py
 │   │   │   ├── novelty_prompts.py  # Prompts for novelty-based evolution
@@ -574,7 +567,6 @@ kiss/
 │   │   │   └── README.md           # KISSEvolve documentation
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
-│   │   │   ├── claude_coding_agent.py     # Claude-based coding agent
 │   │   │   ├── repo_optimizer.py          # Iterative code optimizer using RelentlessCodingAgent
 │   │   │   ├── repo_agent.py              # Repo-level task agent using RelentlessCodingAgent
 │   │   │   ├── agent_optimizer.py         # Meta-optimizer that optimizes agent source code
@@ -629,14 +621,14 @@ kiss/
 │   │   └── kiss_demo.py               # Interactive demo with streaming output to terminal and browser
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
+│   │   ├── generate_api_docs.py        # API documentation generator
 │   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
-│   │   └── kissevolve_bubblesort.py    # KISSEvolve example: evolving bubble sort
+│   │   └── update_models.py            # Model info updater script
 │   ├── tests/           # Test suite
 │   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_kiss_agent_coverage.py    # Coverage tests for KISSAgent
-│   │   ├── test_kissevolve_bubblesort.py
 │   │   ├── test_gepa_hotpotqa.py
 │   │   ├── test_gepa_batched.py           # Tests for GEPA batched wrapper behavior and performance
 │   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
@@ -647,11 +639,10 @@ kiss/
 │   │   ├── test_internal.py
 │   │   ├── test_core_branch_coverage.py   # Branch coverage tests for core components
 │   │   ├── test_gemini_model_internals.py # Tests for Gemini model internals
+│   │   ├── test_generate_api_docs.py      # Tests for API docs generator
 │   │   ├── test_cli_options.py            # Tests for CLI option parsing
-│   │   ├── test_claude_coding_agent.py    # Tests for coding agents
 │   │   ├── test_evolver_progress_callback.py # Tests for AgentEvolver progress callbacks
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
-│   │   ├── test_coding_agent_token_callback.py # Tests for token callback in coding agents
 │   │   ├── test_a_model.py                    # Tests for model implementations
 │   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
 │   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter browser output
@@ -721,14 +712,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 200)
   - `max_steps`: Maximum steps per sub-session (default: 25)
   - `max_budget`: Maximum budget in USD (default: 200.0)
-- **IMO Agent Settings**: Modify `DEFAULT_CONFIG.imo_agent` in `src/kiss/agents/imo_agent/config.py`:
-  - `solver_model`: Model for solving IMO problems (default: "o3")
-  - `verifier_model`: Model for verifying solutions (default: "gemini-2.5-pro")
-  - `validator_model`: Model for independent validation against known answers (default: "gemini-3-pro-preview")
-  - `max_refinement_rounds`: Max verification-refinement iterations per attempt (default: 2)
-  - `num_verify_passes`: Number of verification passes required to accept a solution (default: 1)
-  - `max_attempts`: Max independent attempts per problem (default: 1)
-  - `max_budget`: Maximum budget in USD per problem (default: 50.0)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
   - `max_generations`: Maximum number of evolutionary generations (default: 10)
@@ -802,6 +785,10 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 
 - `uv run assistant` - Launch the browser-based assistant UI (coding + browser automation)
 - `uv run assistant --work-dir ./my-project` - Launch with custom working directory
+
+### Documentation
+
+- `uv run generate-api-docs` - Generate API documentation
 
 ### AlgoTune
 

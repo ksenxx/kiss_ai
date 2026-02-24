@@ -496,15 +496,7 @@ ______________________________________________________________________
 
 ##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
-**Constructor:** `UsefulTools(base_dir: str, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, stream_callback: Callable[[str], None] | None = None) -> None`
-
-- `base_dir`: The base directory for tool operations.
-
-- `readable_paths`: Optional list of paths allowed for read operations.
-
-- `writable_paths`: Optional list of paths allowed for write operations.
-
-- `stream_callback`: Optional callback for streaming Bash output line-by-line.
+**Constructor:** `UsefulTools(stream_callback: Callable[[str], None] | None = None) -> None`
 
 - **Read** — Read file contents.<br/>`Read(file_path: str, max_lines: int = 2000) -> str`
 
@@ -555,11 +547,6 @@ ______________________________________________________________________
 - `query`: The search query.
 - `max_results`: Maximum number of results to fetch content for. Defaults to 5.
 - **Returns:** A string containing titles, links, and page contents of the top search results.
-
-**`parse_bash_command_paths`** — Parse a bash command to extract readable and writable directory paths. This function analyzes bash commands to determine which directories are being read from and which are being written to.<br/>`def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]`
-
-- `command`: A bash command string to parse
-- **Returns:** A tuple of (readable_dirs, writable_dirs) where each is a list of directory paths
 
 ______________________________________________________________________
 
@@ -736,16 +723,13 @@ ______________________________________________________________________
 
 **Constructor:** `RelentlessCodingAgent(name: str) -> None`
 
-- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
+- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-  - `base_dir`: Base directory for path resolution. Defaults to work_dir.
-  - `readable_paths`: Additional paths the agent can read from.
-  - `writable_paths`: Additional paths the agent can write to.
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
@@ -778,7 +762,7 @@ ______________________________________________________________________
   - `tools`: List of callable tools available to the agent during execution.
   - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
-- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, config_path: str = 'agent') -> str`
+- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, config_path: str = 'agent') -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -786,9 +770,6 @@ ______________________________________________________________________
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-  - `base_dir`: Base directory for path resolution. Defaults to work_dir.
-  - `readable_paths`: Additional paths the agent can read from.
-  - `writable_paths`: Additional paths the agent can write to.
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
@@ -811,16 +792,13 @@ ______________________________________________________________________
 
 **Constructor:** `AssistantAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-  - `base_dir`: Base directory for path resolution. Defaults to work_dir.
-  - `readable_paths`: Additional paths the agent can read from.
-  - `writable_paths`: Additional paths the agent can write to.
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
