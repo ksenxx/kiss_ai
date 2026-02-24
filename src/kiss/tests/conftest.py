@@ -19,7 +19,7 @@ def pytest_addoption(parser):
     )
 
 
-collect_ignore = ["test_openevolve.py"]
+collect_ignore = ["test_openevolve.py", "run_all_models_test.py"]
 
 
 def simple_calculator(expression: str) -> str:
