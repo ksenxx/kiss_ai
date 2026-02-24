@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import webbrowser
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -1574,6 +1575,7 @@ def run_chatbot(
     printer = BaseBrowserPrinter()
     running = False
     running_lock = threading.Lock()
+    shutting_down = threading.Event()
     actual_work_dir = work_dir or os.getcwd()
     file_cache: list[str] = _scan_files(actual_work_dir)
     agent_thread: threading.Thread | None = None
@@ -1626,7 +1628,6 @@ def run_chatbot(
 
     html_page = _build_html(title, subtitle, code_server_url, actual_work_dir)
     shutdown_timer: threading.Timer | None = None
-    ever_connected = False
 
     def refresh_file_cache() -> None:
         nonlocal file_cache
@@ -1749,28 +1750,30 @@ def run_chatbot(
         )
         return True
 
+    def _cleanup() -> None:
+        stop_agent()
+        if cs_proc:
+            cs_proc.terminate()
+            try:
+                cs_proc.wait()
+            except Exception:
+                cs_proc.kill()
+
+    def _do_shutdown() -> None:
+        with printer._lock:
+            if printer._clients:
+                return
+        _cleanup()
+        os._exit(0)
+
     def _schedule_shutdown() -> None:
         nonlocal shutdown_timer
         with printer._lock:
-            if printer._clients or not ever_connected:
+            if printer._clients:
                 return
         if shutdown_timer is not None:
             shutdown_timer.cancel()
-
-        def _do_shutdown() -> None:
-            with printer._lock:
-                if printer._clients:
-                    return
-            stop_agent()
-            if cs_proc:
-                cs_proc.terminate()
-                try:
-                    cs_proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    cs_proc.kill()
-            os._exit(0)
-
-        shutdown_timer = threading.Timer(3.0, _do_shutdown)
+        shutdown_timer = threading.Timer(1.0, _do_shutdown)
         shutdown_timer.daemon = True
         shutdown_timer.start()
 
@@ -1778,16 +1781,11 @@ def run_chatbot(
         return HTMLResponse(html_page)
 
     async def events(request: Request) -> StreamingResponse:
-        nonlocal ever_connected, shutdown_timer
         cq = printer.add_client()
-        ever_connected = True
-        if shutdown_timer is not None:
-            shutdown_timer.cancel()
-            shutdown_timer = None
 
         async def generate() -> AsyncGenerator[str]:
             try:
-                while True:
+                while not shutting_down.is_set():
                     try:
                         event = cq.get_nowait()
                     except queue.Empty:
@@ -2010,12 +2008,34 @@ def run_chatbot(
 
     threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
 
+    import atexit
+    atexit.register(_cleanup)
+
     port = find_free_port()
     url = f"http://127.0.0.1:{port}"
     print(f"{title} running at {url}")
     print(f"Work directory: {actual_work_dir}")
     webbrowser.open(url)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    import logging
+    logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning",
+        timeout_graceful_shutdown=1,
+    )
+    server = uvicorn.Server(config)
+    _orig_handle_exit = server.handle_exit
+
+    def _on_exit(sig: int, frame: types.FrameType | None) -> None:
+        shutting_down.set()
+        _orig_handle_exit(sig, frame)
+
+    server.handle_exit = _on_exit  # type: ignore[method-assign]
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    _cleanup()
+    os._exit(0)
 
 
 def main() -> None:
