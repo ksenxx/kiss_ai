@@ -1539,6 +1539,7 @@ def run_chatbot(
 
 def main() -> None:
     """Launch the KISS chatbot UI in assistant or coding mode based on KISS_MODE env var."""
+    from kiss._version import __version__
     from kiss.agents.assistant.assistant_agent import AssistantAgent
     from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 
@@ -1548,7 +1549,7 @@ def main() -> None:
     if mode == "assistant":
         run_chatbot(
             agent_factory=AssistantAgent,
-            title="KISS General Assistant: SWE, browsing, agent creation, optimization and more",
+            title=f"KISS General Assistant: {__version__}",
             subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
             agent_kwargs={"headless": False},
@@ -1556,7 +1557,7 @@ def main() -> None:
     else:
         run_chatbot(
             agent_factory=RelentlessCodingAgent,
-            title="KISS Relentless Coding Assistant",
+            title=f"KISS Relentless Coding Assistant: {__version__}",
             subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
         )
