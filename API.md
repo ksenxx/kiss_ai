@@ -23,7 +23,6 @@
     - [`kiss.core.utils`](#kisscoreutils)
   - [`kiss.agents`](#kissagents)
     - [`kiss.agents.coding_agents`](#kissagentscoding_agents)
-      - [`kiss.agents.coding_agents.claude_coding_agent`](#kissagentscoding_agentsclaude_coding_agent)
       - [`kiss.agents.coding_agents.relentless_coding_agent`](#kissagentscoding_agentsrelentless_coding_agent)
       - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
     - [`kiss.agents.assistant`](#kissagentsassistant)
@@ -683,7 +682,7 @@ ______________________________________________________________________
 ### `kiss.agents` — *KISS agents package with pre-built agent implementations.*
 
 ```python
-from kiss.agents import ClaudeCodingAgent, prompt_refiner_agent, get_run_simple_coding_agent, run_bash_task_in_sandboxed_ubuntu_latest
+from kiss.agents import prompt_refiner_agent, get_run_simple_coding_agent, run_bash_task_in_sandboxed_ubuntu_latest
 ```
 
 **`prompt_refiner_agent`** — Refines the prompt template based on the agent's trajectory summary.<br/>`def prompt_refiner_agent(original_prompt_template: str, previous_prompt_template: str, agent_trajectory_summary: str, model_name: str) -> str`
@@ -710,7 +709,7 @@ ______________________________________________________________________
 #### `kiss.agents.coding_agents` — *Coding agents for KISS framework.*
 
 ```python
-from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS, ClaudeCodingAgent
+from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS
 ```
 
 ##### `class Base` — Base class for all KISS agents with common state management and persistence.
@@ -728,38 +727,6 @@ from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS, ClaudeCodingAge
 - **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
 
   - **Returns:** str: A JSON-formatted string of all messages in the agent's history.
-
-______________________________________________________________________
-
-#### `kiss.agents.coding_agents.claude_coding_agent` — *Claude Coding Agent using the Claude Agent SDK.*
-
-##### `class ClaudeCodingAgent(Base)`
-
-**Constructor:** `ClaudeCodingAgent(name: str) -> None`
-
-- **permission_handler** — Check whether a tool call is allowed based on path permissions.<br/>`async permission_handler(tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> PermissionResultAllow | PermissionResultDeny`
-
-  - `tool_name`: Name of the tool being invoked (e.g. "Read", "Write").
-  - `tool_input`: Dictionary of tool input parameters.
-  - `context`: Permission context provided by the Claude Agent SDK.
-  - **Returns:** PermissionResultAllow if access is permitted, PermissionResultDeny otherwise.
-
-- **run** — Run the Claude Coding Agent on a task using the Claude Agent SDK.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, base_dir: str | None = None, readable_paths: list[str] | None = None, writable_paths: list[str] | None = None, printer: Printer | None = None, max_thinking_tokens: int = 1024, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
-
-  - `model_name`: LLM model to use. Defaults to "claude-sonnet-4-5".
-  - `prompt_template`: Task prompt template with format placeholders.
-  - `arguments`: Dictionary of values to fill prompt_template placeholders.
-  - `max_steps`: Maximum agent steps. Defaults to config value.
-  - `max_budget`: Maximum budget in USD. Defaults to config value.
-  - `work_dir`: Working directory for the agent. Defaults to artifact_dir/claude_workdir.
-  - `base_dir`: Base directory for path resolution. Defaults to ".".
-  - `readable_paths`: Paths the agent can read from.
-  - `writable_paths`: Paths the agent can write to.
-  - `printer`: Printer instance for output display.
-  - `max_thinking_tokens`: Maximum tokens for extended thinking.
-  - `print_to_console`: Whether to print output to console.
-  - `print_to_browser`: Whether to print output to browser UI.
-  - **Returns:** The agent's final result text, or empty string if no result.
 
 ______________________________________________________________________
 
