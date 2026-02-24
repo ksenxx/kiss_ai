@@ -369,8 +369,7 @@ class ImproverAgent:
                     "previous_report": previous_report_text,
                     "kiss_folder": str(PROJECT_ROOT),
                 },
-                readable_paths=[work_dir, str(PROJECT_ROOT)],
-                writable_paths=[work_dir],
+                work_dir=work_dir,
             )
         except Exception as e:
             print(f"Error during improvement: {e}")
