@@ -250,10 +250,6 @@ optimizer = KISSEvolve(
 )
 ```
 
-## Examples
-
-See `src/kiss/scripts/kissevolve_bubblesort.py` for a complete example that evolves bubble sort to discover faster sorting algorithms.
-
 ## Authors
 
 - Koushik Sen (ksen@berkeley.edu)
