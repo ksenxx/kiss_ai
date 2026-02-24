@@ -803,7 +803,7 @@ header{
   content:' (reverted)';color:rgba(248,81,73,0.7);margin-left:8px;
 }
 #assistant-panel header{padding:8px 12px}
-#assistant-panel .logo{font-size:12px}
+#assistant-panel .logo{font-size:9px}
 #assistant-panel .logo span{display:none}
 #assistant-panel .status{font-size:9px}
 #assistant-panel #history-btn,#assistant-panel #proposals-btn,#assistant-panel #merge-btn{
