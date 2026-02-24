@@ -242,6 +242,9 @@ _CS_SETTINGS = {
     "chat.setupFromDialog": False,
     "chat.agent.enabled": False,
     "github.copilot.chat.welcomeMessage": "never",
+    "editor.fontSize": 11,
+    "terminal.integrated.fontSize": 11,
+    "window.zoomLevel": -1,
     "window.restoreWindows": "all",
     "workbench.editor.restoreViewState": True,
     "files.hotExit": "onExitAndWindowClose",
@@ -802,10 +805,11 @@ header{
 .merge-hunk.reverted .merge-hunk-header::after{
   content:' (reverted)';color:rgba(248,81,73,0.7);margin-left:8px;
 }
+#assistant-panel{font-size:11px}
 #assistant-panel header{padding:8px 12px}
-#assistant-panel .logo{font-size:9px}
+#assistant-panel .logo{font-size:11px}
 #assistant-panel .logo span{display:none}
-#assistant-panel .status{font-size:9px}
+#assistant-panel .status{font-size:11px}
 #assistant-panel #history-btn,#assistant-panel #proposals-btn,#assistant-panel #merge-btn{
   font-size:0;padding:5px;border-radius:6px;gap:0;
 }
@@ -813,66 +817,79 @@ header{
 #assistant-panel #merge-btn svg{width:13px;height:13px}
 #assistant-panel #welcome{padding:20px 14px}
 #assistant-panel #welcome h2{font-size:17px;margin-bottom:3px;letter-spacing:-0.3px}
-#assistant-panel #welcome p{font-size:10px;margin-bottom:14px}
+#assistant-panel #welcome p{font-size:11px;margin-bottom:14px}
 #assistant-panel #suggestions{grid-template-columns:1fr;gap:5px;max-width:100%}
 #assistant-panel .suggestion-chip{
-  padding:7px 11px;border-radius:8px;font-size:10px;line-height:1.35;
+  padding:7px 11px;border-radius:8px;font-size:11px;line-height:1.35;
 }
-#assistant-panel .chip-label{font-size:7px;margin-bottom:2px}
+#assistant-panel .chip-label{font-size:9px;margin-bottom:2px}
 #assistant-panel #output{padding:14px 12px 12px}
 #assistant-panel .ev,#assistant-panel .txt,#assistant-panel .spinner,
 #assistant-panel .empty-msg,#assistant-panel .user-msg,
 #assistant-panel .llm-panel,#assistant-panel .bash-panel,
 #assistant-panel .followup-bar{max-width:none}
 #assistant-panel .user-msg{
-  font-size:11.5px;padding:10px 14px;margin:12px 0 10px;border-radius:10px;
+  font-size:11px;padding:10px 14px;margin:12px 0 10px;border-radius:10px;
 }
-#assistant-panel .txt{font-size:11.5px;padding:4px 10px}
-#assistant-panel .tn{font-size:10px}
-#assistant-panel .tp{font-size:9px}
+#assistant-panel .txt{font-size:11px;padding:4px 10px}
+#assistant-panel .tn{font-size:11px}
+#assistant-panel .tp{font-size:11px}
 #assistant-panel .tc{margin:8px 0;border-radius:8px}
 #assistant-panel .tc-h{padding:7px 10px;border-radius:8px 8px 0 0}
-#assistant-panel .tc-b{padding:6px 10px;max-height:200px}
-#assistant-panel .tr{padding:5px 10px;max-height:150px}
+#assistant-panel .tc-b{padding:6px 10px;max-height:200px;font-size:11px}
+#assistant-panel .tr{padding:5px 10px;max-height:150px;font-size:11px}
 #assistant-panel .think{padding:8px 12px;margin:8px 0;border-radius:8px}
+#assistant-panel .think .cnt{font-size:10px}
 #assistant-panel .rc{border-radius:10px}
 #assistant-panel .rc-h{padding:10px 14px}
-#assistant-panel .rc-body{padding:10px 14px;max-height:250px}
+#assistant-panel .rc-body{padding:10px 14px;max-height:250px;font-size:11px}
 #assistant-panel #input-area{padding:0 12px 12px;padding-top:10px}
 #assistant-panel #input-container{padding:8px 10px;border-radius:10px}
 #assistant-panel #input-wrap{gap:4px}
-#assistant-panel #task-input,#assistant-panel #ghost-overlay{font-size:12px}
+#assistant-panel #task-input,#assistant-panel #ghost-overlay{font-size:11px}
 #assistant-panel #input-footer{margin-top:5px;padding-top:5px}
-#assistant-panel #model-btn{font-size:9px;padding:4px 8px;border-radius:6px}
-#assistant-panel #model-search{font-size:9px;padding:7px 10px}
-#assistant-panel .model-item{font-size:9px;padding:5px 10px}
-#assistant-panel .model-cost{font-size:7px}
-#assistant-panel .model-group-hdr{font-size:7px;padding:4px 10px 3px}
+#assistant-panel #model-btn{font-size:11px;padding:4px 8px;border-radius:6px}
+#assistant-panel #model-search{font-size:11px;padding:7px 10px}
+#assistant-panel .model-item{font-size:11px;padding:5px 10px}
+#assistant-panel .model-cost{font-size:9px}
+#assistant-panel .model-group-hdr{font-size:9px;padding:4px 10px 3px}
 #assistant-panel #send-btn{width:28px;height:28px}
 #assistant-panel #send-btn svg{width:12px;height:12px}
 #assistant-panel #stop-btn{width:28px;height:28px}
 #assistant-panel #stop-btn svg{width:11px;height:11px}
 #assistant-panel #clear-btn{width:18px;height:18px}
 #assistant-panel #clear-btn svg{width:11px;height:11px}
-#assistant-panel #history-search{font-size:9px;padding:6px 10px}
-#assistant-panel .sidebar-hdr{font-size:8px}
-#assistant-panel .sidebar-item{font-size:10px;padding:7px 10px;border-radius:8px;margin-bottom:4px}
-#assistant-panel .sidebar-empty{font-size:10px}
+#assistant-panel #history-search{font-size:11px;padding:6px 10px}
+#assistant-panel .sidebar-hdr{font-size:10px}
+#assistant-panel .sidebar-item{font-size:11px;padding:7px 10px;border-radius:8px;margin-bottom:4px}
+#assistant-panel .sidebar-empty{font-size:11px}
 #assistant-panel #sidebar-close{font-size:17px}
-#assistant-panel .ac-item{font-size:10px;padding:6px 12px}
-#assistant-panel .ac-icon{font-size:10px}
-#assistant-panel .ac-section{font-size:7px;padding:4px 12px 3px}
-#assistant-panel .ac-hint{font-size:7px}
-#assistant-panel .ac-footer{font-size:7px;padding:4px 12px}
-#assistant-panel .ac-footer kbd{font-size:7px}
-#assistant-panel .fu-label{font-size:7px}
-#assistant-panel .fu-text{font-size:10.5px}
+#assistant-panel .ac-item{font-size:11px;padding:6px 12px}
+#assistant-panel .ac-icon{font-size:11px}
+#assistant-panel .ac-section{font-size:9px;padding:4px 12px 3px}
+#assistant-panel .ac-hint{font-size:9px}
+#assistant-panel .ac-footer{font-size:9px;padding:4px 12px}
+#assistant-panel .ac-footer kbd{font-size:9px}
+#assistant-panel .fu-label{font-size:9px}
+#assistant-panel .fu-text{font-size:11px}
 #assistant-panel .followup-bar{padding:8px 12px;margin:10px 0 6px;border-radius:8px}
 #assistant-panel .llm-panel{padding:8px 10px;margin:6px 0;border-radius:8px}
-#assistant-panel .llm-panel .txt{font-size:7px}
-#assistant-panel .llm-panel .think .cnt{font-size:7px}
-#assistant-panel .bash-panel{max-height:200px}
-#assistant-panel .merge-empty{font-size:12px}
+#assistant-panel .llm-panel .txt{font-size:10px}
+#assistant-panel .llm-panel .think .cnt{font-size:10px}
+#assistant-panel .bash-panel{max-height:200px;font-size:10px}
+#assistant-panel .prompt-h{font-size:11px;padding:6px 12px}
+#assistant-panel .prompt-body{font-size:11px;padding:8px 12px}
+#assistant-panel .rc-h{
+  padding:10px 14px;flex-direction:column;align-items:flex-start;gap:6px;
+}
+#assistant-panel .rc-h h3{font-size:11px;margin-bottom:2px}
+#assistant-panel .rs{
+  font-size:10px;gap:0;width:100%;
+  display:grid;grid-template-columns:repeat(3,1fr);
+}
+#assistant-panel .rs b{display:block;font-size:11px}
+#assistant-panel .merge-empty{font-size:11px}
+#assistant-panel .usage{font-size:11px}
 """
 
 CHATBOT_JS = r"""

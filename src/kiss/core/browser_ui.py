@@ -289,10 +289,11 @@ function handleOutputEvent(ev,O,state){
       rb+=esc((ev.text||'(no result)').replace(/\n{3,}/g,'\n\n').trim());
     }
     rc.innerHTML='<div class="rc-h"><h3>Result</h3><div class="rs">'
-      +'Steps: <b>'+(ev.step_count||0)+'</b>'
-      +' &nbsp; Tokens: <b>'+(ev.total_tokens||0)+'</b>'
-      +' &nbsp; Cost: <b>'+(ev.cost||'N/A')+'</b>'
-      +'</div></div><div class="rc-body'+(usePre?' pre':'')+'">'+rb+'</div>';
+      +'<span>Steps <b>'+(ev.step_count||0)+'</b></span>'
+      +'<span>Tokens <b>'+(ev.total_tokens||0)+'</b></span>'
+      +'<span>Cost <b>'+(ev.cost||'N/A')+'</b></span>'
+      +'</div></div><div class="rc-body'
+      +(usePre?' pre':'')+'">'+rb+'</div>';
     if(typeof hljs!=='undefined')rc.querySelectorAll('pre code').forEach(
       function(bl){hljs.highlightElement(bl)});
     O.appendChild(rc);break}
