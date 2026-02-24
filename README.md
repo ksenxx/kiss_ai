@@ -51,13 +51,18 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 Install from PyPI with pip and launch the web based interface to interact with KISS. You must provide at least one of API keys.:
 
 ```bash
-pip install kiss-agent-framework
+export ANTHROPIC_API_KEY="your-key-here" # Recommended
 export GEMINI_API_KEY="your-key-here" # Optional
 export OPENAI_API_KEY="your-key-here" # Optional
-export ANTHROPIC_API_KEY="your-key-here" # Recommended
-export TOGETHER_API_KEY="your-key-here" # Optional
 export OPENROUTER_API_KEY="your-key-here" # Optional
+export TOGETHER_API_KEY="your-key-here" # Optional
+
+# To install as a library
+pip install kiss-agent-framework
 python -m kiss.agents.assistant.assistant
+
+# To install for development
+curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
 ```
 
 ## 🎯 The Problem with AI Agent Frameworks Today
