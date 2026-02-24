@@ -371,7 +371,7 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.core.browser_ui", "kiss.core.useful_tools", "kiss.core.web_use_tool",
         "kiss.core.utils", "kiss.core.kiss_error",
         "kiss.agents", "kiss.agents.kiss",
-        "kiss.agents.coding_agents", "kiss.agents.coding_agents.claude_coding_agent",
+        "kiss.agents.coding_agents",
         "kiss.agents.coding_agents.relentless_coding_agent",
         "kiss.agents.coding_agents.repo_agent", "kiss.agents.coding_agents.repo_optimizer",
         "kiss.agents.coding_agents.agent_optimizer", "kiss.agents.coding_agents.config",

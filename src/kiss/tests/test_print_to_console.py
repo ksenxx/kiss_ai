@@ -1,8 +1,8 @@
 """Tests for ConsolePrinter.
 
-Tests verify correctness and accuracy of all terminal printing logic
-extracted from ClaudeCodingAgent. Uses real objects with duck-typed
-attributes (SimpleNamespace) as message inputs.
+Tests verify correctness and accuracy of all terminal printing logic.
+Uses real objects with duck-typed attributes (SimpleNamespace) as
+message inputs.
 """
 
 import io
