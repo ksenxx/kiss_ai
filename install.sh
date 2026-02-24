@@ -27,5 +27,4 @@ else
   echo "❌ Unexpected error: no API key detected even after check."
   exit 1
 fi
-cd ..
-rm -rf kiss_ai
+

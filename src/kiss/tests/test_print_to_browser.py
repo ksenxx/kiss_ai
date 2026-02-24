@@ -1,8 +1,8 @@
 """Tests for BrowserPrinter.
 
-Tests verify correctness and accuracy of all browser streaming logic
-for ClaudeCodingAgent. Uses real objects with duck-typed attributes
-(SimpleNamespace) as message inputs and real queue subscribers.
+Tests verify correctness and accuracy of all browser streaming logic.
+Uses real objects with duck-typed attributes (SimpleNamespace) as
+message inputs and real queue subscribers.
 """
 
 import queue
