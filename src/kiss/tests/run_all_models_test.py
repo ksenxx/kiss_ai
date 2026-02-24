@@ -189,7 +189,7 @@ def run_test(model_name: str, test_name: str, timeout: int = 120) -> TestResult:
         )
 
 
-def test_model(model_name: str) -> ModelTestResults:
+def run_model_tests(model_name: str) -> ModelTestResults:
     """Run all applicable tests for a model."""
     info = MODEL_INFO.get(model_name)
     if info is None:
@@ -328,7 +328,7 @@ def main() -> int:
 
     for i, model_name in enumerate(all_models, 1):
         print(f"\n[{i}/{len(all_models)}] Testing: {model_name}")
-        results = test_model(model_name)
+        results = run_model_tests(model_name)
         all_results.append(results)
 
         # Track failures
