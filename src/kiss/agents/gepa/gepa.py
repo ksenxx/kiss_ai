@@ -79,6 +79,12 @@ class GEPAProgress:
     current_val_accuracy: float | None = None
     """Validation accuracy of the current candidate (if applicable)."""
 
+    current_val_scores: dict[str, float] = field(default_factory=dict)
+    """Full per-metric validation scores for the current candidate."""
+
+    current_dev_scores: dict[str, float] = field(default_factory=dict)
+    """Full per-metric dev scores for the current candidate."""
+
     pareto_frontier_size: int = 0
     """Current size of the Pareto frontier."""
 
@@ -330,6 +336,8 @@ class GEPA:
                 if candidate and candidate.val_scores
                 else None
             ),
+            current_val_scores=dict(candidate.val_scores) if candidate else {},
+            current_dev_scores=dict(candidate.dev_scores) if candidate else {},
             pareto_frontier_size=len(self.pareto_frontier),
             num_candidates_evaluated=num_candidates_evaluated,
             message=message,
@@ -487,17 +495,15 @@ class GEPA:
         if not self.progress_callback or not phase:
             return
         if scores:
-            metric_name = next(iter(scores.keys()))
-            metric_score = scores[metric_name]
+            scores_str = ", ".join(f"{k}={v:.2f}" for k, v in scores.items())
         else:
-            metric_name = "score"
-            metric_score = 0.0
+            scores_str = "score=0.00"
         self._report_progress(
             generation=generation,
             phase=phase,
             message=(
                 f"Candidate {candidate_id}: example {index + 1}/{total} "
-                f"({metric_name}={metric_score:.2f})"
+                f"({scores_str})"
             ),
         )
 
@@ -1004,6 +1010,9 @@ class GEPA:
                 self._update_best_val_accuracy(candidate)
 
                 # Report progress after val evaluation (now with updated scores)
+                val_scores_str = ", ".join(
+                    f"{k}={v:.4f}" for k, v in candidate.val_scores.items()
+                )
                 self._report_progress(
                     generation=gen,
                     phase=GEPAPhase.VAL_EVALUATION,
@@ -1011,8 +1020,7 @@ class GEPA:
                     candidate_index=idx,
                     num_candidates_evaluated=idx + 1,
                     message=(
-                        f"Evaluated candidate {candidate.id}: "
-                        f"val_accuracy={self._get_val_accuracy(candidate):.4f}"
+                        f"Evaluated candidate {candidate.id}: {val_scores_str}"
                     ),
                 )
 
@@ -1110,7 +1118,9 @@ class GEPA:
                         if merged.val_instance_wins:
                             new_candidates.append(merged)
 
-                            # Report successful merge
+                            merge_scores_str = ", ".join(
+                                f"{k}={v:.4f}" for k, v in merged.val_scores.items()
+                            )
                             self._report_progress(
                                 generation=gen,
                                 phase=GEPAPhase.MERGE,
@@ -1118,7 +1128,7 @@ class GEPA:
                                 num_candidates_evaluated=len(new_candidates),
                                 message=(
                                     f"Merge successful: created candidate {merged.id} "
-                                    f"with val_accuracy={self._get_val_accuracy(merged):.4f}"
+                                    f"({merge_scores_str})"
                                 ),
                             )
 

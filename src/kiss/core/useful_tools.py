@@ -381,7 +381,7 @@ def _render_page_with_playwright(url: str, wait_selector: str | None = None) -> 
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.webkit.launch(headless=True)
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=SAFARI_USER_AGENT,
             viewport={"width": 1920, "height": 1080},

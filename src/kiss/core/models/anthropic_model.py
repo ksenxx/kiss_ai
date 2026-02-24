@@ -132,6 +132,7 @@ class AnthropicModel(Model):
         """
         kwargs = self.model_config.copy()
         enable_cache = kwargs.pop("enable_cache", True)
+        system_instruction = kwargs.pop("system_instruction", None)
 
         # Anthropic requires max_tokens; accept OpenAI-style "max_completion_tokens" too.
         max_tokens = kwargs.pop("max_tokens", None)
@@ -167,6 +168,8 @@ class AnthropicModel(Model):
                 "max_tokens": max_tokens,
             }
         )
+        if system_instruction:
+            kwargs["system"] = system_instruction
         if tools:
             kwargs["tools"] = tools
 

@@ -396,7 +396,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2": _mi(131072, 0.50, 2.40, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-0905": _mi(131072, 0.40, 2.00, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-thinking": _mi(131072, 0.47, 2.00, fc=False),  # SLOW
-    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.23, 3.00),  # Multimodal + agentic
+    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.45, 2.20),  # Multimodal + agentic
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
     "openrouter/neversleep/llama-3.1-lumimaid-8b": _mi(32768, 0.09, 0.60, fc=False),
@@ -493,7 +493,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen-vl-plus": _mi(131072, 0.21, 0.63, fc=False),  # Vision model
     "openrouter/qwen/qwen2.5-coder-7b-instruct": _mi(32768, 0.03, 0.09, fc=False),
     "openrouter/qwen/qwen2.5-vl-32b-instruct": _mi(128000, 0.20, 0.60, fc=False),  # Vision model
-    "openrouter/qwen/qwen2.5-vl-72b-instruct": _mi(32000, 0.25, 0.75, fc=False),  # Vision model
+    "openrouter/qwen/qwen2.5-vl-72b-instruct": _mi(32768, 0.80, 0.80, fc=False),  # Vision model
     "openrouter/qwen/qwen3-14b": _mi(40960, 0.06, 0.24, fc=False),
     "openrouter/qwen/qwen3-235b-a22b": _mi(131072, 0.455, 1.82, fc=False, gen=False),
     "openrouter/qwen/qwen3-235b-a22b-2507": _mi(262144, 0.07, 0.10, fc=False),
@@ -519,7 +519,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-vl-32b-instruct": _mi(131072, 0.104, 0.416, fc=False),  # Vision model
     "openrouter/qwen/qwen3-vl-8b-instruct": _mi(131072, 0.08, 0.50),  # Vision model
     "openrouter/qwen/qwen3-vl-8b-thinking": _mi(131072, 0.117, 1.365),  # SLOW: thinking
-    "openrouter/qwen/qwen3.5-397b-a17b": _mi(262144, 0.15, 1.00),  # NEW
+    "openrouter/qwen/qwen3.5-397b-a17b": _mi(262144, 0.55, 3.50),  # NEW
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.40, 2.40),  # NEW
     "openrouter/qwen/qwq-32b": _mi(32768, 0.15, 0.40, fc=False),  # SLOW: reasoning model
     "openrouter/raifle/sorcererlm-8x22b": _mi(16000, 4.50, 4.50, fc=False),
@@ -562,7 +562,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
     "openrouter/z-ai/glm-4.7": _mi(202752, 0.38, 1.70),
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
-    "openrouter/z-ai/glm-5": _mi(204800, 0.30, 2.55),  # 744B MoE - FC verified
+    "openrouter/z-ai/glm-5": _mi(204800, 0.95, 2.55),  # 744B MoE - FC verified
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
     "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.20, 0.60, fc=False),
     "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),  # Dep 2026-03
@@ -581,6 +581,22 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "zai-org/GLM-4.6": _mi(202752, 0.60, 2.20),  # NEW
     "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),
     "zai-org/GLM-5": _mi(202752, 1.00, 3.20),
+    # ==========================================================================
+    # Auto-discovered models (verify pricing and capabilities)
+    # ==========================================================================
+    "openrouter/arcee-ai/virtuoso-large": _mi(131072, 0.75, 1.20),  # NEW
+    "meta-llama/Llama-3.1-405B-Instruct": _mi(4096, 3.50, 3.50),  # NEW
+    "meta-llama/Meta-Llama-3.1-70B-Instruct-Reference": _mi(8192, 0.90, 0.90),  # NEW
+    "meta-llama/Llama-3.2-1B-Instruct": _mi(131072, 0.06, 0.06),  # NEW
+    "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),  # NEW
+    "meta-llama/Meta-Llama-3.1-8B-Instruct-Reference": _mi(16384, 0.20, 0.20),  # NEW
+    "meta-llama/Meta-Llama-3-8B-Instruct": _mi(8192, 0.20, 0.20),  # NEW
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": _mi(1048576, 0.18, 0.59),  # NEW
+    "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": _mi(131072, 2.00, 2.00),  # NEW
+    "gemini-2.0-flash-001": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
+    "gemini-2.0-flash-lite-001": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
+    "gemini-2.5-flash-image": _mi(32768, 0.00, 0.00),  # NEW: needs pricing
 }
 
 # Populate cache pricing for known providers.

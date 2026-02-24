@@ -51,13 +51,18 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 Install from PyPI with pip and launch the web based interface to interact with KISS. You must provide at least one of API keys.:
 
 ```bash
-pip install kiss-agent-framework
+export ANTHROPIC_API_KEY="your-key-here" # Recommended
 export GEMINI_API_KEY="your-key-here" # Optional
 export OPENAI_API_KEY="your-key-here" # Optional
-export ANTHROPIC_API_KEY="your-key-here" # Recommended
-export TOGETHER_API_KEY="your-key-here" # Optional
 export OPENROUTER_API_KEY="your-key-here" # Optional
+export TOGETHER_API_KEY="your-key-here" # Optional
+
+# To install as a library
+pip install kiss-agent-framework
 python -m kiss.agents.assistant.assistant
+
+# To install for development
+curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
 ```
 
 ## 🎯 The Problem with AI Agent Frameworks Today
@@ -191,11 +196,8 @@ print(f"Result: {result}")
 **Key Features:**
 
 - **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking
-- **Structured Progress Tracking**: Each sub-session reports completed and remaining tasks in JSON format (done/next items), which is deduplicated and passed to subsequent sub-sessions
-- **Retry with Context**: Failed sub-sessions automatically pass structured progress summaries to the next sub-session
 - **Configurable Sub-Sessions**: Set high sub-session counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
-- **Path Access Control**: Enforces read/write permissions on file system paths
 - **Built-in Tools**: Bash, Read, Edit, Write, search_web, and fetch_url tools for file and web operations
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
