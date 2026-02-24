@@ -228,7 +228,8 @@ function handleOutputEvent(ev,O,state){
     state.bashPanel=null;state.bashRaf=0;
     var c=mkEl('div','ev tc');
     var h='<span class="chv open">\u25B6</span><span class="tn">'+esc(ev.name)+'</span>';
-    if(ev.path)h+='<span class="tp"> '+esc(ev.path)+'</span>';
+    if(ev.path){var ep=esc(ev.path).replace(/"/g,'&quot;');
+      h+='<span class="tp" data-path="'+ep+'"> '+esc(ev.path)+'</span>';}
     if(ev.description)h+='<span class="td"> '+esc(ev.description)+'</span>';
     var b='';
     if(ev.command)b+='<pre><code class="language-bash">'+esc(ev.command)+'</code></pre>';

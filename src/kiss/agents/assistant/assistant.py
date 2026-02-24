@@ -6,8 +6,13 @@ import asyncio
 import json
 import os
 import queue
+import shutil
+import socket
+import sqlite3
+import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -225,6 +230,106 @@ class _StopRequested(BaseException):
 
 _OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "codex", "computer-use")
 
+_CS_SETTINGS = {
+    "workbench.startupEditor": "none",
+    "workbench.tips.enabled": False,
+    "workbench.welcomePage.walkthroughs.openOnInstall": False,
+    "workbench.welcomePage.experimental.videoTutorials": "off",
+    "security.workspace.trust.enabled": False,
+    "update.showReleaseNotes": False,
+    "workbench.panel.defaultLocation": "bottom",
+    "chat.commandCenter.enabled": False,
+    "chat.setupFromDialog": False,
+    "chat.agent.enabled": False,
+    "github.copilot.chat.welcomeMessage": "never",
+    "window.restoreWindows": "all",
+    "workbench.editor.restoreViewState": True,
+    "files.hotExit": "onExitAndWindowClose",
+}
+
+_CS_STATE_ENTRIES = [
+    ("workbench.activity.pinnedViewlets2", "[]"),
+    ("workbench.welcomePage.walkthroughMetadata", "[]"),
+    ("coderGettingStarted/v1", "installed"),
+    ("workbench.panel.pinnedPanels", "[]"),
+    ("memento/gettingStartedService", '{"installed":true}'),
+    ("profileAssociations", '{"workspaces":{}}'),
+    ("userDataProfiles", '[]'),
+    ("welcomePage.gettingStartedTabs", '[]'),
+    ("workbench.welcomePage.opened", "true"),
+    ("chat.setupCompleted", "true"),
+    ("chat.panelVisible", "false"),
+    ("workbench.panel.chat.hidden", "true"),
+    ("workbench.panel.chatSidebar.hidden", "true"),
+]
+
+_CS_EXTENSION_JS = """\
+const vscode=require("vscode");
+function activate(){
+  function cleanup(){
+    for(const g of vscode.window.tabGroups.all){
+      for(const t of g.tabs){
+        if(!t.input||!t.input.uri){
+          vscode.window.tabGroups.close(t).then(()=>{},()=>{});
+        }
+      }
+    }
+    vscode.commands.executeCommand('workbench.action.closePanel');
+    vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');
+  }
+  cleanup();
+  setTimeout(cleanup,1500);
+  setTimeout(cleanup,4000);
+  setTimeout(cleanup,8000);
+}
+module.exports={activate};
+"""
+
+
+def _setup_code_server(data_dir: str) -> None:
+    """Pre-configure code-server user data: settings, state DB, and cleanup extension."""
+    user_dir = Path(data_dir) / "User"
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    settings_file = user_dir / "settings.json"
+    try:
+        existing = json.loads(settings_file.read_text()) if settings_file.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+    existing.update(_CS_SETTINGS)
+    settings_file.write_text(json.dumps(existing, indent=2))
+
+    state_db = user_dir / "globalStorage" / "state.vscdb"
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(state_db)) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ItemTable"
+            " (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)"
+        )
+        for key, value in _CS_STATE_ENTRIES:
+            conn.execute(
+                "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (key, value),
+            )
+        conn.commit()
+
+    ws_storage = user_dir / "workspaceStorage"
+    if ws_storage.exists():
+        for ws_dir in ws_storage.iterdir():
+            for sub in ("chatSessions", "chatEditingSessions"):
+                chat_dir = ws_dir / sub
+                if chat_dir.exists():
+                    shutil.rmtree(chat_dir, ignore_errors=True)
+
+    ext_dir = Path(data_dir) / "extensions" / "kiss-init"
+    ext_dir.mkdir(parents=True, exist_ok=True)
+    (ext_dir / "package.json").write_text(json.dumps({
+        "name": "kiss-init", "version": "0.0.1", "publisher": "kiss",
+        "engines": {"vscode": "^1.80.0"},
+        "activationEvents": ["onStartupFinished"],
+        "main": "./extension.js",
+    }))
+    (ext_dir / "extension.js").write_text(_CS_EXTENSION_JS)
+
 
 def _model_vendor_order(name: str) -> int:
     if name.startswith("claude-"):
@@ -243,7 +348,7 @@ def _model_vendor_order(name: str) -> int:
 CHATBOT_CSS = r"""
 body{
   font-family:'Inter',system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
-  background:#0a0a0c;
+  background:#0a0a0c;display:block;
 }
 header{
   background:rgba(10,10,12,0.85);backdrop-filter:blur(24px);
@@ -525,13 +630,13 @@ header{
   z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
-#history-btn,#proposals-btn{
+#history-btn,#proposals-btn,#merge-btn{
   background:none;border:1px solid rgba(255,255,255,0.15);border-radius:8px;
   color:rgba(255,255,255,0.6);font-size:12px;cursor:pointer;
   padding:5px 12px;transition:all 0.15s;display:flex;align-items:center;gap:6px;
 }
-#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.85);border-color:rgba(255,255,255,0.3)}
-#history-btn svg,#proposals-btn svg{opacity:0.85}
+#history-btn:hover,#proposals-btn:hover,#merge-btn:hover{color:rgba(255,255,255,0.85);border-color:rgba(255,255,255,0.3)}
+#history-btn svg,#proposals-btn svg,#merge-btn svg{opacity:0.85}
 #sidebar-close{
   position:absolute;top:16px;right:16px;background:none;border:none;
   color:rgba(255,255,255,0.3);font-size:20px;cursor:pointer;
@@ -598,6 +703,176 @@ header{
   background:rgba(0,0,0,0.5);color:rgba(255,255,255,0.55);
   border-color:rgba(255,255,255,0.05);
 }
+#split-container{display:flex;height:100vh;width:100vw;overflow:hidden}
+#editor-panel{position:relative;overflow:hidden}
+#editor-panel iframe{width:100%;height:100%;border:none}
+#editor-fallback{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:100%;background:#1e1e1e;color:rgba(255,255,255,0.7);
+  font-size:14px;text-align:center;padding:40px;gap:4px;
+}
+#editor-fallback h3{color:rgba(255,255,255,0.9);margin-bottom:12px;font-size:20px}
+#editor-fallback code{
+  background:rgba(255,255,255,0.08);padding:8px 16px;border-radius:8px;
+  display:block;margin:8px 0;font-size:13px;color:rgba(255,255,255,0.8);
+}
+#editor-fallback p{margin:4px 0;color:rgba(255,255,255,0.5);font-size:13px}
+#divider{
+  width:6px;flex-shrink:0;cursor:col-resize;
+  background:rgba(255,255,255,0.06);position:relative;z-index:10;
+  transition:background 0.15s;
+}
+#divider:hover,#divider.active{background:rgba(88,166,255,0.5)}
+#divider::after{
+  content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:2px;height:40px;background:rgba(255,255,255,0.2);border-radius:1px;
+}
+#assistant-panel{
+  display:flex;flex-direction:column;overflow:hidden;min-width:300px;
+  background:#0a0a0c;position:relative;
+}
+.tp[data-path]{cursor:pointer;text-decoration:underline dotted}
+.tp[data-path]:hover{color:rgba(120,180,255,0.8);text-decoration:underline solid}
+.logo span{max-width:150px}
+#merge-overlay{
+  position:fixed;inset:0;z-index:1000;
+  background:rgba(0,0,0,0.85);backdrop-filter:blur(8px);
+  display:none;overflow-y:auto;
+}
+#merge-overlay.open{display:flex;flex-direction:column;align-items:center}
+#merge-container{
+  max-width:1000px;width:90%;margin:40px auto;
+  background:#0d1117;border:1px solid rgba(255,255,255,0.1);
+  border-radius:16px;overflow:hidden;flex-shrink:0;
+}
+.merge-toolbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 24px;background:rgba(255,255,255,0.03);
+  border-bottom:1px solid rgba(255,255,255,0.08);
+  position:sticky;top:0;z-index:1;
+}
+.merge-toolbar h2{font-size:16px;font-weight:600;color:rgba(255,255,255,0.9)}
+.merge-toolbar-actions{display:flex;gap:8px}
+.merge-btn{
+  padding:6px 14px;border-radius:8px;font-size:12px;font-weight:500;
+  cursor:pointer;border:1px solid rgba(255,255,255,0.1);
+  transition:all 0.15s;font-family:inherit;
+}
+.merge-btn.accept{background:rgba(34,197,94,0.15);color:#22c55e;border-color:rgba(34,197,94,0.3)}
+.merge-btn.accept:hover{background:rgba(34,197,94,0.25)}
+.merge-btn.undo{background:rgba(248,81,73,0.15);color:#f85149;border-color:rgba(248,81,73,0.3)}
+.merge-btn.undo:hover{background:rgba(248,81,73,0.25)}
+.merge-btn.close-btn{background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7)}
+.merge-btn.close-btn:hover{background:rgba(255,255,255,0.1)}
+.merge-btn.small{padding:4px 10px;font-size:11px}
+.merge-btn.tiny{padding:2px 8px;font-size:10px}
+.merge-file{border-bottom:1px solid rgba(255,255,255,0.06)}
+.merge-file-header{
+  display:flex;align-items:center;gap:12px;padding:10px 24px;
+  background:rgba(255,255,255,0.02);
+  border-bottom:1px solid rgba(255,255,255,0.04);
+}
+.merge-file-name{
+  font-family:'SF Mono','Fira Code',monospace;font-size:13px;
+  color:rgba(88,166,255,0.9);flex:1;cursor:pointer;
+}
+.merge-file-name:hover{text-decoration:underline}
+.merge-hunk{border-bottom:1px solid rgba(255,255,255,0.03)}
+.merge-hunk-header{
+  display:flex;align-items:center;gap:8px;padding:6px 24px;
+  background:rgba(88,166,255,0.03);font-size:11px;
+  color:rgba(255,255,255,0.3);font-family:'SF Mono','Fira Code',monospace;
+}
+.merge-hunk-range{flex:1}
+.merge-line{
+  font-family:'SF Mono','Fira Code',monospace;font-size:12px;
+  line-height:1.6;padding:1px 24px;white-space:pre-wrap;word-break:break-all;
+}
+.merge-line.added{background:rgba(34,197,94,0.1);color:rgba(34,197,94,0.9)}
+.merge-line.removed{background:rgba(248,81,73,0.1);color:rgba(248,81,73,0.9)}
+.merge-line.context{color:rgba(255,255,255,0.35)}
+.merge-empty{
+  padding:60px 24px;text-align:center;color:rgba(255,255,255,0.3);font-size:15px;
+}
+.merge-hunk.accepted{opacity:0.3;pointer-events:none}
+.merge-hunk.accepted .merge-hunk-header::after{
+  content:' (accepted)';color:rgba(34,197,94,0.7);margin-left:8px;
+}
+.merge-hunk.reverted{opacity:0.3;pointer-events:none}
+.merge-hunk.reverted .merge-hunk-header::after{
+  content:' (reverted)';color:rgba(248,81,73,0.7);margin-left:8px;
+}
+#assistant-panel header{padding:8px 12px}
+#assistant-panel .logo{font-size:12px}
+#assistant-panel .logo span{display:none}
+#assistant-panel .status{font-size:9px}
+#assistant-panel #history-btn,#assistant-panel #proposals-btn,#assistant-panel #merge-btn{
+  font-size:0;padding:5px;border-radius:6px;gap:0;
+}
+#assistant-panel #history-btn svg,#assistant-panel #proposals-btn svg,
+#assistant-panel #merge-btn svg{width:13px;height:13px}
+#assistant-panel #welcome{padding:20px 14px}
+#assistant-panel #welcome h2{font-size:17px;margin-bottom:3px;letter-spacing:-0.3px}
+#assistant-panel #welcome p{font-size:10px;margin-bottom:14px}
+#assistant-panel #suggestions{grid-template-columns:1fr;gap:5px;max-width:100%}
+#assistant-panel .suggestion-chip{
+  padding:7px 11px;border-radius:8px;font-size:10px;line-height:1.35;
+}
+#assistant-panel .chip-label{font-size:7px;margin-bottom:2px}
+#assistant-panel #output{padding:14px 12px 12px}
+#assistant-panel .ev,#assistant-panel .txt,#assistant-panel .spinner,
+#assistant-panel .empty-msg,#assistant-panel .user-msg,
+#assistant-panel .llm-panel,#assistant-panel .bash-panel,
+#assistant-panel .followup-bar{max-width:none}
+#assistant-panel .user-msg{
+  font-size:11.5px;padding:10px 14px;margin:12px 0 10px;border-radius:10px;
+}
+#assistant-panel .txt{font-size:11.5px;padding:4px 10px}
+#assistant-panel .tn{font-size:10px}
+#assistant-panel .tp{font-size:9px}
+#assistant-panel .tc{margin:8px 0;border-radius:8px}
+#assistant-panel .tc-h{padding:7px 10px;border-radius:8px 8px 0 0}
+#assistant-panel .tc-b{padding:6px 10px;max-height:200px}
+#assistant-panel .tr{padding:5px 10px;max-height:150px}
+#assistant-panel .think{padding:8px 12px;margin:8px 0;border-radius:8px}
+#assistant-panel .rc{border-radius:10px}
+#assistant-panel .rc-h{padding:10px 14px}
+#assistant-panel .rc-body{padding:10px 14px;max-height:250px}
+#assistant-panel #input-area{padding:0 12px 12px;padding-top:10px}
+#assistant-panel #input-container{padding:8px 10px;border-radius:10px}
+#assistant-panel #input-wrap{gap:4px}
+#assistant-panel #task-input,#assistant-panel #ghost-overlay{font-size:12px}
+#assistant-panel #input-footer{margin-top:5px;padding-top:5px}
+#assistant-panel #model-btn{font-size:9px;padding:4px 8px;border-radius:6px}
+#assistant-panel #model-search{font-size:9px;padding:7px 10px}
+#assistant-panel .model-item{font-size:9px;padding:5px 10px}
+#assistant-panel .model-cost{font-size:7px}
+#assistant-panel .model-group-hdr{font-size:7px;padding:4px 10px 3px}
+#assistant-panel #send-btn{width:28px;height:28px}
+#assistant-panel #send-btn svg{width:12px;height:12px}
+#assistant-panel #stop-btn{width:28px;height:28px}
+#assistant-panel #stop-btn svg{width:11px;height:11px}
+#assistant-panel #clear-btn{width:18px;height:18px}
+#assistant-panel #clear-btn svg{width:11px;height:11px}
+#assistant-panel #history-search{font-size:9px;padding:6px 10px}
+#assistant-panel .sidebar-hdr{font-size:8px}
+#assistant-panel .sidebar-item{font-size:10px;padding:7px 10px;border-radius:8px;margin-bottom:4px}
+#assistant-panel .sidebar-empty{font-size:10px}
+#assistant-panel #sidebar-close{font-size:17px}
+#assistant-panel .ac-item{font-size:10px;padding:6px 12px}
+#assistant-panel .ac-icon{font-size:10px}
+#assistant-panel .ac-section{font-size:7px;padding:4px 12px 3px}
+#assistant-panel .ac-hint{font-size:7px}
+#assistant-panel .ac-footer{font-size:7px;padding:4px 12px}
+#assistant-panel .ac-footer kbd{font-size:7px}
+#assistant-panel .fu-label{font-size:7px}
+#assistant-panel .fu-text{font-size:10.5px}
+#assistant-panel .followup-bar{padding:8px 12px;margin:10px 0 6px;border-radius:8px}
+#assistant-panel .llm-panel{padding:8px 10px;margin:6px 0;border-radius:8px}
+#assistant-panel .llm-panel .txt{font-size:7px}
+#assistant-panel .llm-panel .think .cnt{font-size:7px}
+#assistant-panel .bash-panel{max-height:200px}
+#assistant-panel .merge-empty{font-size:12px}
 """
 
 CHATBOT_JS = r"""
@@ -1084,87 +1359,325 @@ function loadWelcome(){
     });
   });
 }
+var divider=document.getElementById('divider');
+var editorPanel=document.getElementById('editor-panel');
+var assistantPanel=document.getElementById('assistant-panel');
+var splitContainer=document.getElementById('split-container');
+var isDragging=false;
+if(divider){
+  divider.addEventListener('mousedown',function(e){
+    isDragging=true;divider.classList.add('active');
+    document.body.style.cursor='col-resize';
+    document.body.style.userSelect='none';
+    var frame=document.getElementById('code-server-frame');
+    if(frame)frame.style.pointerEvents='none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!isDragging)return;
+    var rect=splitContainer.getBoundingClientRect();
+    var x=e.clientX-rect.left;
+    var pct=Math.max(15,Math.min(85,(x/rect.width)*100));
+    editorPanel.style.width=pct+'%';
+    editorPanel.style.flex='none';
+    assistantPanel.style.flex='1';
+  });
+  document.addEventListener('mouseup',function(){
+    if(!isDragging)return;
+    isDragging=false;divider.classList.remove('active');
+    document.body.style.cursor='';
+    document.body.style.userSelect='';
+    var frame=document.getElementById('code-server-frame');
+    if(frame)frame.style.pointerEvents='';
+  });
+}
+function openInEditor(path){
+  var frame=document.getElementById('code-server-frame');
+  if(!frame||!frame.dataset.baseUrl)return;
+  var base=frame.dataset.baseUrl;
+  var wd=frame.dataset.workDir||'';
+  var full=path.startsWith('/')?path:(wd+'/'+path);
+  frame.src=base+'/?folder='+encodeURIComponent(wd)+'&goto='+encodeURIComponent(full+':1:1');
+}
+document.addEventListener('click',function(e){
+  var el=e.target.closest('[data-path]');
+  if(el&&el.dataset.path){openInEditor(el.dataset.path);}
+});
+var mergeOverlay=document.getElementById('merge-overlay');
+var mergeContent=document.getElementById('merge-content');
+var mergeData=null;
+function openMerge(){
+  mergeOverlay.classList.add('open');
+  mergeContent.innerHTML='<div class="merge-empty">Loading diff...</div>';
+  fetch('/merge-diff').then(function(r){return r.json()}).then(function(data){
+    if(data.error){
+      mergeContent.innerHTML='<div class="merge-empty">'+esc(data.error)+'</div>';
+      return;
+    }
+    mergeData=data;
+    renderMerge(data);
+  }).catch(function(){
+    mergeContent.innerHTML='<div class="merge-empty">Failed to load diff</div>';
+  });
+}
+function closeMerge(){mergeOverlay.classList.remove('open');mergeData=null;}
+function parseDiff(text){
+  var files=[],cf=null,ch=null;
+  var lines=(text||'').split('\n');
+  for(var i=0;i<lines.length;i++){
+    var l=lines[i];
+    if(l.startsWith('diff --git')){
+      if(cf)files.push(cf);
+      cf={name:'',hunks:[],headerLines:[l]};ch=null;
+    }else if(cf){
+      if(l.startsWith('--- ')){cf.headerLines.push(l)}
+      else if(l.startsWith('+++ ')){
+        cf.headerLines.push(l);
+        cf.name=l.startsWith('+++ b/')?l.substring(6):l.substring(4);
+      }else if(l.startsWith('@@')){
+        ch={header:l,lines:[],rawLines:[l]};cf.hunks.push(ch);
+      }else if(ch){
+        ch.lines.push(l);ch.rawLines.push(l);
+      }else if(!l.startsWith('index ')&&!l.startsWith('new file')
+        &&!l.startsWith('deleted file')&&!l.startsWith('old mode')
+        &&!l.startsWith('new mode')&&!l.startsWith('Binary')){
+        cf.headerLines.push(l);
+      }
+    }
+  }
+  if(cf)files.push(cf);
+  files.forEach(function(f){
+    var hdr=f.headerLines.join('\n');
+    f.hunks.forEach(function(h){
+      h.patch=hdr+'\n'+h.rawLines.join('\n')+'\n';
+    });
+  });
+  return files;
+}
+function renderMerge(data){
+  var files=parseDiff(data.diff||'');
+  if(!files.length){
+    mergeContent.innerHTML='<div class="merge-toolbar"><h2>No changes</h2>'
+      +'<div class="merge-toolbar-actions">'
+      +'<button class="merge-btn close-btn" onclick="closeMerge()">Close</button>'
+      +'</div></div>'
+      +'<div class="merge-empty">No differences between current branch and '
+      +esc(data.base_branch||'main')+'</div>';
+    return;
+  }
+  var h='<div class="merge-toolbar"><h2>Changes from '+esc(data.base_branch||'main')
+    +' ('+files.length+' file'+(files.length>1?'s':'')+')</h2>'
+    +'<div class="merge-toolbar-actions">'
+    +'<button class="merge-btn accept" onclick="mergeAcceptAll()">Accept All</button>'
+    +'<button class="merge-btn undo" onclick="mergeUndoAll()">Undo All</button>'
+    +'<button class="merge-btn close-btn" onclick="closeMerge()">Close</button>'
+    +'</div></div>';
+  files.forEach(function(f,fi){
+    h+='<div class="merge-file" id="mf-'+fi+'">';
+    h+='<div class="merge-file-header">';
+    h+='<span class="merge-file-name" onclick="openInEditor(this.textContent)">'
+      +esc(f.name)+'</span>';
+    h+='<button class="merge-btn small accept" onclick="mergeAcceptFile('
+      +fi+')">Accept File</button>';
+    h+='<button class="merge-btn small undo" onclick="mergeRevertFile('+fi+')">Undo File</button>';
+    h+='</div>';
+    f.hunks.forEach(function(hk,hi){
+      h+='<div class="merge-hunk" id="mh-'+fi+'-'+hi+'">';
+      h+='<div class="merge-hunk-header">';
+      h+='<span class="merge-hunk-range">'+esc(hk.header)+'</span>';
+      h+='<button class="merge-btn tiny accept" onclick="mergeAcceptHunk('
+        +fi+','+hi+')">Accept</button>';
+      h+='<button class="merge-btn tiny undo" onclick="mergeRevertHunk('
+        +fi+','+hi+')">Undo</button>';
+      h+='</div><div class="merge-lines">';
+      hk.lines.forEach(function(line){
+        if(line.startsWith('+')){h+='<div class="merge-line added">'+esc(line)+'</div>'}
+        else if(line.startsWith('-')){h+='<div class="merge-line removed">'+esc(line)+'</div>'}
+        else{h+='<div class="merge-line context">'+esc(line)+'</div>'}
+      });
+      h+='</div></div>';
+    });
+    h+='</div>';
+  });
+  mergeContent.innerHTML=h;
+}
+function mergeAcceptHunk(fi,hi){
+  var el=document.getElementById('mh-'+fi+'-'+hi);
+  if(el)el.classList.add('accepted');
+}
+function mergeAcceptFile(fi){
+  var el=document.getElementById('mf-'+fi);
+  if(el)el.querySelectorAll('.merge-hunk').forEach(function(h){h.classList.add('accepted')});
+}
+function mergeAcceptAll(){
+  document.querySelectorAll('.merge-hunk').forEach(function(h){h.classList.add('accepted')});
+}
+function mergeRevertHunk(fi,hi){
+  var files=parseDiff((mergeData||{}).diff||'');
+  if(!files[fi]||!files[fi].hunks[hi])return;
+  var patch=files[fi].hunks[hi].patch;
+  fetch('/merge-revert',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({patch:patch})})
+  .then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert('Revert failed: '+d.error);return}
+    var el=document.getElementById('mh-'+fi+'-'+hi);
+    if(el)el.classList.add('reverted');
+  }).catch(function(){alert('Revert failed')});
+}
+function mergeRevertFile(fi){
+  var files=parseDiff((mergeData||{}).diff||'');
+  if(!files[fi])return;
+  var base=(mergeData||{}).base_branch||'main';
+  fetch('/merge-revert',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({file:files[fi].name,base_branch:base})})
+  .then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert('Revert failed: '+d.error);return}
+    openMerge();
+  }).catch(function(){alert('Revert failed')});
+}
+function mergeUndoAll(){
+  if(!confirm('Revert ALL changes back to '+(mergeData||{}).base_branch+'?'))return;
+  fetch('/merge-revert',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({all:true,base_branch:(mergeData||{}).base_branch||'main'})})
+  .then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert('Revert failed: '+d.error);return}
+    openMerge();
+  }).catch(function(){alert('Revert failed')});
+}
+if(mergeOverlay){
+  mergeOverlay.addEventListener('click',function(e){if(e.target===mergeOverlay)closeMerge()});
+}
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&mergeOverlay&&mergeOverlay.classList.contains('open'))closeMerge();
+});
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
 
 
-def _build_html(title: str, subtitle: str) -> str:
+def _build_html(title: str, subtitle: str, code_server_url: str = "", work_dir: str = "") -> str:
     font_import = "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');\n"
     css = font_import + BASE_CSS + OUTPUT_CSS + CHATBOT_CSS
+
+    if code_server_url:
+        import urllib.parse
+        wd_enc = urllib.parse.quote(work_dir, safe="")
+        editor_content = (
+            f'<iframe id="code-server-frame"'
+            f' src="{code_server_url}/?folder={wd_enc}"'
+            f' data-base-url="{code_server_url}"'
+            f' data-work-dir="{work_dir}"></iframe>'
+        )
+    else:
+        editor_content = (
+            '<div id="editor-fallback">'
+            '<h3>VS Code Editor</h3>'
+            '<p>code-server is not installed. Install it to enable the embedded editor:</p>'
+            '<code>curl -fsSL https://code-server.dev/install.sh | sh</code>'
+            '<p>Or via Homebrew:</p>'
+            '<code>brew install code-server</code>'
+            '<p style="margin-top:16px;font-size:12px;opacity:0.5">'
+            'Restart the assistant after installation.</p>'
+            '</div>'
+        )
+
     return HTML_HEAD.format(title=title, css=css) + f"""<body>
-<div id="sidebar-overlay" onclick="toggleSidebar()"></div>
-<div id="sidebar">
-  <button id="sidebar-close" onclick="toggleSidebar()">&times;</button>
-  <div class="sidebar-section" id="sidebar-history-sec">
-    <div class="sidebar-hdr">Recent Tasks</div>
-    <input type="text" id="history-search" placeholder="Search history\u2026" autocomplete="off"/>
-    <div id="recent-list"></div>
+<div id="split-container">
+  <div id="editor-panel" style="width:80%;flex-shrink:0">
+    {editor_content}
   </div>
-  <div class="sidebar-section" id="sidebar-proposals-sec">
-    <div class="sidebar-hdr">Suggested Tasks</div>
-    <div id="proposed-list"></div>
-  </div>
-</div>
-<header>
-  <div class="logo">{title}<span>{subtitle}</span></div>
-  <div style="display:flex;align-items:center;gap:14px">
-    <div class="status"><div class="dot" id="dot"></div><span id="stxt">Ready</span></div>
-    <button id="history-btn" onclick="toggleSidebar('history')">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-      </svg>
-      History
-    </button>
-    <button id="proposals-btn" onclick="toggleSidebar('proposals')">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
-        <path d="M2 12l10 5 10-5"/>
-      </svg>
-      Proposals
-    </button>
-  </div>
-</header>
-<div id="output">
-  <div id="welcome">
-    <h2>What can I help you with?</h2>
-    <p>Describe a task and the agent will work on it</p>
-    <div id="suggestions"></div>
-  </div>
-</div>
-<div id="input-area">
-  <div id="autocomplete"></div>
-  <div id="input-container">
-    <div id="input-wrap">
-      <div id="ghost-overlay"></div>
-      <textarea id="task-input" placeholder="Ask anything\u2026" rows="1"
-        autocomplete="off"></textarea>
-      <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
-        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-        ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+  <div id="divider"></div>
+  <div id="assistant-panel">
+    <div id="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <div id="sidebar">
+      <button id="sidebar-close" onclick="toggleSidebar()">&times;</button>
+      <div class="sidebar-section" id="sidebar-history-sec">
+        <div class="sidebar-hdr">Recent Tasks</div>
+        <input type="text" id="history-search" placeholder="Search history\u2026"
+          autocomplete="off"/>
+        <div id="recent-list"></div>
+      </div>
+      <div class="sidebar-section" id="sidebar-proposals-sec">
+        <div class="sidebar-hdr">Suggested Tasks</div>
+        <div id="proposed-list"></div>
+      </div>
     </div>
-    <div id="input-footer">
-      <div id="model-picker">
-        <button type="button" id="model-btn" onclick="toggleModelDD()">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
-          <span id="model-label">Loading…</span>
+    <header>
+      <div class="logo">{title}<span>{subtitle}</span></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+        <div class="status"><div class="dot" id="dot"></div><span id="stxt">Ready</span></div>
+        <button id="merge-btn" onclick="openMerge()" title="Show diff from main branch">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+            <path d="M6 21V9a9 9 0 0 0 9 9"/>
+          </svg>
+          Merge
         </button>
-        <div id="model-dropdown">
-          <input type="text" id="model-search" placeholder="Search models…" autocomplete="off"/>
-          <div id="model-list"></div>
+        <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+          History
+        </button>
+        <button id="proposals-btn" onclick="toggleSidebar('proposals')" title="Suggested tasks">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+          </svg>
+          Proposals
+        </button>
+      </div>
+    </header>
+    <div id="output">
+      <div id="welcome">
+        <h2>What can I help you with?</h2>
+        <p>Describe a task and the agent will work on it</p>
+        <div id="suggestions"></div>
+      </div>
+    </div>
+    <div id="input-area">
+      <div id="autocomplete"></div>
+      <div id="input-container">
+        <div id="input-wrap">
+          <div id="ghost-overlay"></div>
+          <textarea id="task-input" placeholder="Ask anything\u2026" rows="1"
+            autocomplete="off"></textarea>
+          <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6"
+              x2="18" y2="18"/></svg></button>
+        </div>
+        <div id="input-footer">
+          <div id="model-picker">
+            <button type="button" id="model-btn" onclick="toggleModelDD()">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+              <span id="model-label">Loading\u2026</span>
+            </button>
+            <div id="model-dropdown">
+              <input type="text" id="model-search"
+                placeholder="Search models\u2026" autocomplete="off"/>
+              <div id="model-list"></div>
+            </div>
+          </div>
+          <div id="input-actions">
+            <button id="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              ><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"
+              /></svg></button>
+            <button id="stop-btn"><svg viewBox="0 0 24 24" fill="currentColor"
+              ><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+          </div>
         </div>
       </div>
-      <div id="input-actions">
-        <button id="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-          ><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"
-          /></svg></button>
-        <button id="stop-btn"><svg viewBox="0 0 24 24" fill="currentColor"
-          ><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
-      </div>
     </div>
+  </div>
+</div>
+<div id="merge-overlay">
+  <div id="merge-container">
+    <div id="merge-content"></div>
   </div>
 </div>
 <script>
@@ -1210,7 +1723,49 @@ def run_chatbot(
     selected_model = (
         _load_last_model() or default_model or get_most_expensive_model() or "claude-opus-4-6"
     )
-    html_page = _build_html(title, subtitle)
+
+    cs_proc: subprocess.Popen[bytes] | None = None
+    code_server_url = ""
+    cs_binary = shutil.which("code-server")
+    if cs_binary:
+        cs_data_dir = str(_KISS_DIR / "code-server-data")
+        _setup_code_server(cs_data_dir)
+        cs_port = 13338
+        port_in_use = False
+        try:
+            with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
+                port_in_use = True
+        except (ConnectionRefusedError, OSError):
+            pass
+        if port_in_use:
+            code_server_url = f"http://127.0.0.1:{cs_port}"
+            print(f"Reusing existing code-server at {code_server_url}")
+        else:
+            cs_proc = subprocess.Popen(
+                [
+                    cs_binary, "--port", str(cs_port), "--auth", "none",
+                    "--bind-addr", f"127.0.0.1:{cs_port}", "--disable-telemetry",
+                    "--user-data-dir", cs_data_dir,
+                    "--extensions-dir", str(Path(cs_data_dir) / "extensions"),
+                    "--disable-getting-started-override",
+                    "--disable-workspace-trust",
+                    actual_work_dir,
+                ],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            for _ in range(30):
+                try:
+                    with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
+                        code_server_url = f"http://127.0.0.1:{cs_port}"
+                        break
+                except (ConnectionRefusedError, OSError):
+                    time.sleep(0.5)
+            if code_server_url:
+                print(f"code-server running at {code_server_url}")
+            else:
+                print("Warning: code-server failed to start")
+
+    html_page = _build_html(title, subtitle, code_server_url, actual_work_dir)
     shutdown_timer: threading.Timer | None = None
     ever_connected = False
 
@@ -1348,6 +1903,12 @@ def run_chatbot(
                 if printer._clients:
                     return
             stop_agent()
+            if cs_proc:
+                cs_proc.terminate()
+                try:
+                    cs_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    cs_proc.kill()
             os._exit(0)
 
         shutdown_timer = threading.Timer(3.0, _do_shutdown)
@@ -1515,6 +2076,71 @@ def run_chatbot(
         ))
         return JSONResponse({"models": models_list, "selected": selected_model})
 
+    async def merge_diff(request: Request) -> JSONResponse:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            if result.returncode != 0:
+                return JSONResponse({"error": "Not a git repository"})
+            base = "main"
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify", "main"],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            if result.returncode != 0:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--verify", "master"],
+                    capture_output=True, text=True, cwd=actual_work_dir,
+                )
+                if result.returncode != 0:
+                    return JSONResponse({"error": "Neither 'main' nor 'master' branch found"})
+                base = "master"
+            result = subprocess.run(
+                ["git", "diff", base],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            return JSONResponse({"diff": result.stdout, "base_branch": base})
+        except Exception as e:
+            return JSONResponse({"error": str(e)})
+
+    async def merge_revert(request: Request) -> JSONResponse:
+        body = await request.json()
+        try:
+            if body.get("all"):
+                base = body.get("base_branch", "main")
+                result = subprocess.run(
+                    ["git", "diff", "--name-only", base],
+                    capture_output=True, text=True, cwd=actual_work_dir,
+                )
+                files = [f for f in result.stdout.strip().split("\n") if f]
+                for f in files:
+                    subprocess.run(
+                        ["git", "checkout", base, "--", f],
+                        capture_output=True, text=True, cwd=actual_work_dir, check=True,
+                    )
+                return JSONResponse({"status": "reverted"})
+            if "file" in body:
+                base = body.get("base_branch", "main")
+                subprocess.run(
+                    ["git", "checkout", base, "--", body["file"]],
+                    capture_output=True, text=True, cwd=actual_work_dir, check=True,
+                )
+                return JSONResponse({"status": "reverted"})
+            if "patch" in body:
+                subprocess.run(
+                    ["git", "apply", "--reverse"],
+                    input=body["patch"],
+                    capture_output=True, text=True, cwd=actual_work_dir, check=True,
+                )
+                return JSONResponse({"status": "reverted"})
+            return JSONResponse({"error": "Invalid request"}, status_code=400)
+        except subprocess.CalledProcessError as e:
+            return JSONResponse({"error": e.stderr or str(e)})
+        except Exception as e:
+            return JSONResponse({"error": str(e)})
+
     app = Starlette(routes=[
         Route("/", index),
         Route("/events", events),
@@ -1525,6 +2151,8 @@ def run_chatbot(
         Route("/tasks", tasks),
         Route("/proposed_tasks", proposed_tasks_endpoint),
         Route("/models", models_endpoint),
+        Route("/merge-diff", merge_diff),
+        Route("/merge-revert", merge_revert, methods=["POST"]),
     ])
 
     threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
