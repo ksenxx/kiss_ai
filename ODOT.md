@@ -1,5 +1,0 @@
-- Add memory across sessions in assistant_agent.py
-- Make tool outputs asynchronous.
-- Add agent creator prompt to assistant_agent
-- Add agent optimizer prompt to assistant agent
-- Handle the scenario where KISS is used as a library
