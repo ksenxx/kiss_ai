@@ -264,7 +264,9 @@ _CS_STATE_ENTRIES = [
 
 _CS_EXTENSION_JS = """\
 const vscode=require("vscode");
-function activate(){
+const fs=require("fs");
+const path=require("path");
+function activate(ctx){
   function cleanup(){
     for(const g of vscode.window.tabGroups.all){
       for(const t of g.tabs){
@@ -280,6 +282,56 @@ function activate(){
   setTimeout(cleanup,1500);
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
+  var home=process.env.HOME||process.env.USERPROFILE||'';
+  var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
+  var iv=setInterval(function(){
+    try{
+      if(!fs.existsSync(mp))return;
+      var data=JSON.parse(fs.readFileSync(mp,'utf8'));
+      fs.unlinkSync(mp);
+      openDiffs(data);
+    }catch(e){}
+  },800);
+  ctx.subscriptions.push({dispose:function(){clearInterval(iv)}});
+}
+async function openDiffs(data){
+  var cfg=vscode.workspace.getConfiguration('diffEditor');
+  await cfg.update('renderSideBySide',false,true);
+  await cfg.update('ignoreTrimWhitespace',false,true);
+  for(var f of (data.files||[])){
+    var left=vscode.Uri.file(f.base);
+    var right=vscode.Uri.file(f.current);
+    await vscode.commands.executeCommand('vscode.diff',left,right,
+      f.name+' ('+data.branch+' \\u2194 current)');
+  }
+  while(true){
+    var act=await vscode.window.showInformationMessage(
+      'Reviewing '+data.files.length+' file(s) vs '+data.branch,
+      'Accept All','Undo Current File');
+    if(act==='Accept All'){
+      for(var g of vscode.window.tabGroups.all){
+        for(var t of [...g.tabs]){
+          if(t.label.indexOf('\\u2194')>=0)
+            await vscode.window.tabGroups.close(t).then(function(){},function(){});
+        }
+      }
+      break;
+    }
+    if(act==='Undo Current File'){
+      var at=vscode.window.tabGroups.activeTabGroup.activeTab;
+      if(at){
+        for(var f of data.files){
+          if(at.label.indexOf(f.name)>=0){
+            fs.writeFileSync(f.current,fs.readFileSync(f.base,'utf8'));
+            vscode.window.showInformationMessage('Reverted '+f.name+' to '+data.branch);
+            break;
+          }
+        }
+      }
+      continue;
+    }
+    break;
+  }
 }
 module.exports={activate};
 """
@@ -736,74 +788,6 @@ header{
 .tp[data-path]{cursor:pointer;text-decoration:underline dotted}
 .tp[data-path]:hover{color:rgba(120,180,255,0.8);text-decoration:underline solid}
 .logo span{max-width:150px}
-#merge-overlay{
-  position:fixed;inset:0;z-index:1000;
-  background:rgba(0,0,0,0.85);backdrop-filter:blur(8px);
-  display:none;overflow-y:auto;
-}
-#merge-overlay.open{display:flex;flex-direction:column;align-items:center}
-#merge-container{
-  max-width:1000px;width:90%;margin:40px auto;
-  background:#0d1117;border:1px solid rgba(255,255,255,0.1);
-  border-radius:16px;overflow:hidden;flex-shrink:0;
-}
-.merge-toolbar{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:16px 24px;background:rgba(255,255,255,0.03);
-  border-bottom:1px solid rgba(255,255,255,0.08);
-  position:sticky;top:0;z-index:1;
-}
-.merge-toolbar h2{font-size:16px;font-weight:600;color:rgba(255,255,255,0.9)}
-.merge-toolbar-actions{display:flex;gap:8px}
-.merge-btn{
-  padding:6px 14px;border-radius:8px;font-size:12px;font-weight:500;
-  cursor:pointer;border:1px solid rgba(255,255,255,0.1);
-  transition:all 0.15s;font-family:inherit;
-}
-.merge-btn.accept{background:rgba(34,197,94,0.15);color:#22c55e;border-color:rgba(34,197,94,0.3)}
-.merge-btn.accept:hover{background:rgba(34,197,94,0.25)}
-.merge-btn.undo{background:rgba(248,81,73,0.15);color:#f85149;border-color:rgba(248,81,73,0.3)}
-.merge-btn.undo:hover{background:rgba(248,81,73,0.25)}
-.merge-btn.close-btn{background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7)}
-.merge-btn.close-btn:hover{background:rgba(255,255,255,0.1)}
-.merge-btn.small{padding:4px 10px;font-size:11px}
-.merge-btn.tiny{padding:2px 8px;font-size:10px}
-.merge-file{border-bottom:1px solid rgba(255,255,255,0.06)}
-.merge-file-header{
-  display:flex;align-items:center;gap:12px;padding:10px 24px;
-  background:rgba(255,255,255,0.02);
-  border-bottom:1px solid rgba(255,255,255,0.04);
-}
-.merge-file-name{
-  font-family:'SF Mono','Fira Code',monospace;font-size:13px;
-  color:rgba(88,166,255,0.9);flex:1;cursor:pointer;
-}
-.merge-file-name:hover{text-decoration:underline}
-.merge-hunk{border-bottom:1px solid rgba(255,255,255,0.03)}
-.merge-hunk-header{
-  display:flex;align-items:center;gap:8px;padding:6px 24px;
-  background:rgba(88,166,255,0.03);font-size:11px;
-  color:rgba(255,255,255,0.3);font-family:'SF Mono','Fira Code',monospace;
-}
-.merge-hunk-range{flex:1}
-.merge-line{
-  font-family:'SF Mono','Fira Code',monospace;font-size:12px;
-  line-height:1.6;padding:1px 24px;white-space:pre-wrap;word-break:break-all;
-}
-.merge-line.added{background:rgba(34,197,94,0.1);color:rgba(34,197,94,0.9)}
-.merge-line.removed{background:rgba(248,81,73,0.1);color:rgba(248,81,73,0.9)}
-.merge-line.context{color:rgba(255,255,255,0.35)}
-.merge-empty{
-  padding:60px 24px;text-align:center;color:rgba(255,255,255,0.3);font-size:15px;
-}
-.merge-hunk.accepted{opacity:0.3;pointer-events:none}
-.merge-hunk.accepted .merge-hunk-header::after{
-  content:' (accepted)';color:rgba(34,197,94,0.7);margin-left:8px;
-}
-.merge-hunk.reverted{opacity:0.3;pointer-events:none}
-.merge-hunk.reverted .merge-hunk-header::after{
-  content:' (reverted)';color:rgba(248,81,73,0.7);margin-left:8px;
-}
 #assistant-panel{font-size:11px}
 #assistant-panel header{padding:8px 12px}
 #assistant-panel .logo{font-size:11px}
@@ -892,7 +876,6 @@ header{
 #assistant-panel .spinner{font-size:11px}
 #assistant-panel .empty-msg{font-size:11px}
 #assistant-panel .rl{font-size:10px}
-#assistant-panel .merge-empty{font-size:11px}
 #assistant-panel .usage{font-size:11px}
 """
 
@@ -1424,153 +1407,13 @@ document.addEventListener('click',function(e){
   var el=e.target.closest('[data-path]');
   if(el&&el.dataset.path){openInEditor(el.dataset.path);}
 });
-var mergeOverlay=document.getElementById('merge-overlay');
-var mergeContent=document.getElementById('merge-content');
-var mergeData=null;
 function openMerge(){
-  mergeOverlay.classList.add('open');
-  mergeContent.innerHTML='<div class="merge-empty">Loading diff...</div>';
-  fetch('/merge-diff').then(function(r){return r.json()}).then(function(data){
-    if(data.error){
-      mergeContent.innerHTML='<div class="merge-empty">'+esc(data.error)+'</div>';
-      return;
-    }
-    mergeData=data;
-    renderMerge(data);
-  }).catch(function(){
-    mergeContent.innerHTML='<div class="merge-empty">Failed to load diff</div>';
-  });
+  fetch('/merge-open',{method:'POST'})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.error)alert(d.error);
+    }).catch(function(){alert('Failed to open merge')});
 }
-function closeMerge(){mergeOverlay.classList.remove('open');mergeData=null;}
-function parseDiff(text){
-  var files=[],cf=null,ch=null;
-  var lines=(text||'').split('\n');
-  for(var i=0;i<lines.length;i++){
-    var l=lines[i];
-    if(l.startsWith('diff --git')){
-      if(cf)files.push(cf);
-      cf={name:'',hunks:[],headerLines:[l]};ch=null;
-    }else if(cf){
-      if(l.startsWith('--- ')){cf.headerLines.push(l)}
-      else if(l.startsWith('+++ ')){
-        cf.headerLines.push(l);
-        cf.name=l.startsWith('+++ b/')?l.substring(6):l.substring(4);
-      }else if(l.startsWith('@@')){
-        ch={header:l,lines:[],rawLines:[l]};cf.hunks.push(ch);
-      }else if(ch){
-        ch.lines.push(l);ch.rawLines.push(l);
-      }else if(!l.startsWith('index ')&&!l.startsWith('new file')
-        &&!l.startsWith('deleted file')&&!l.startsWith('old mode')
-        &&!l.startsWith('new mode')&&!l.startsWith('Binary')){
-        cf.headerLines.push(l);
-      }
-    }
-  }
-  if(cf)files.push(cf);
-  files.forEach(function(f){
-    var hdr=f.headerLines.join('\n');
-    f.hunks.forEach(function(h){
-      h.patch=hdr+'\n'+h.rawLines.join('\n')+'\n';
-    });
-  });
-  return files;
-}
-function renderMerge(data){
-  var files=parseDiff(data.diff||'');
-  if(!files.length){
-    mergeContent.innerHTML='<div class="merge-toolbar"><h2>No changes</h2>'
-      +'<div class="merge-toolbar-actions">'
-      +'<button class="merge-btn close-btn" onclick="closeMerge()">Close</button>'
-      +'</div></div>'
-      +'<div class="merge-empty">No differences between current branch and '
-      +esc(data.base_branch||'main')+'</div>';
-    return;
-  }
-  var h='<div class="merge-toolbar"><h2>Changes from '+esc(data.base_branch||'main')
-    +' ('+files.length+' file'+(files.length>1?'s':'')+')</h2>'
-    +'<div class="merge-toolbar-actions">'
-    +'<button class="merge-btn accept" onclick="mergeAcceptAll()">Accept All</button>'
-    +'<button class="merge-btn undo" onclick="mergeUndoAll()">Undo All</button>'
-    +'<button class="merge-btn close-btn" onclick="closeMerge()">Close</button>'
-    +'</div></div>';
-  files.forEach(function(f,fi){
-    h+='<div class="merge-file" id="mf-'+fi+'">';
-    h+='<div class="merge-file-header">';
-    h+='<span class="merge-file-name" onclick="openInEditor(this.textContent)">'
-      +esc(f.name)+'</span>';
-    h+='<button class="merge-btn small accept" onclick="mergeAcceptFile('
-      +fi+')">Accept File</button>';
-    h+='<button class="merge-btn small undo" onclick="mergeRevertFile('+fi+')">Undo File</button>';
-    h+='</div>';
-    f.hunks.forEach(function(hk,hi){
-      h+='<div class="merge-hunk" id="mh-'+fi+'-'+hi+'">';
-      h+='<div class="merge-hunk-header">';
-      h+='<span class="merge-hunk-range">'+esc(hk.header)+'</span>';
-      h+='<button class="merge-btn tiny accept" onclick="mergeAcceptHunk('
-        +fi+','+hi+')">Accept</button>';
-      h+='<button class="merge-btn tiny undo" onclick="mergeRevertHunk('
-        +fi+','+hi+')">Undo</button>';
-      h+='</div><div class="merge-lines">';
-      hk.lines.forEach(function(line){
-        if(line.startsWith('+')){h+='<div class="merge-line added">'+esc(line)+'</div>'}
-        else if(line.startsWith('-')){h+='<div class="merge-line removed">'+esc(line)+'</div>'}
-        else{h+='<div class="merge-line context">'+esc(line)+'</div>'}
-      });
-      h+='</div></div>';
-    });
-    h+='</div>';
-  });
-  mergeContent.innerHTML=h;
-}
-function mergeAcceptHunk(fi,hi){
-  var el=document.getElementById('mh-'+fi+'-'+hi);
-  if(el)el.classList.add('accepted');
-}
-function mergeAcceptFile(fi){
-  var el=document.getElementById('mf-'+fi);
-  if(el)el.querySelectorAll('.merge-hunk').forEach(function(h){h.classList.add('accepted')});
-}
-function mergeAcceptAll(){
-  document.querySelectorAll('.merge-hunk').forEach(function(h){h.classList.add('accepted')});
-}
-function mergeRevertHunk(fi,hi){
-  var files=parseDiff((mergeData||{}).diff||'');
-  if(!files[fi]||!files[fi].hunks[hi])return;
-  var patch=files[fi].hunks[hi].patch;
-  fetch('/merge-revert',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({patch:patch})})
-  .then(function(r){return r.json()}).then(function(d){
-    if(d.error){alert('Revert failed: '+d.error);return}
-    var el=document.getElementById('mh-'+fi+'-'+hi);
-    if(el)el.classList.add('reverted');
-  }).catch(function(){alert('Revert failed')});
-}
-function mergeRevertFile(fi){
-  var files=parseDiff((mergeData||{}).diff||'');
-  if(!files[fi])return;
-  var base=(mergeData||{}).base_branch||'main';
-  fetch('/merge-revert',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({file:files[fi].name,base_branch:base})})
-  .then(function(r){return r.json()}).then(function(d){
-    if(d.error){alert('Revert failed: '+d.error);return}
-    openMerge();
-  }).catch(function(){alert('Revert failed')});
-}
-function mergeUndoAll(){
-  if(!confirm('Revert ALL changes back to '+(mergeData||{}).base_branch+'?'))return;
-  fetch('/merge-revert',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({all:true,base_branch:(mergeData||{}).base_branch||'main'})})
-  .then(function(r){return r.json()}).then(function(d){
-    if(d.error){alert('Revert failed: '+d.error);return}
-    openMerge();
-  }).catch(function(){alert('Revert failed')});
-}
-if(mergeOverlay){
-  mergeOverlay.addEventListener('click',function(e){if(e.target===mergeOverlay)closeMerge()});
-}
-document.addEventListener('keydown',function(e){
-  if(e.key==='Escape'&&mergeOverlay&&mergeOverlay.classList.contains('open'))closeMerge();
-});
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
 
@@ -1696,11 +1539,6 @@ def _build_html(title: str, subtitle: str, code_server_url: str = "", work_dir: 
     </div>
   </div>
 </div>
-<div id="merge-overlay">
-  <div id="merge-container">
-    <div id="merge-content"></div>
-  </div>
-</div>
 <script>
 {EVENT_HANDLER_JS}
 {CHATBOT_JS}
@@ -1747,9 +1585,9 @@ def run_chatbot(
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
+    cs_data_dir = str(_KISS_DIR / "code-server-data")
     cs_binary = shutil.which("code-server")
     if cs_binary:
-        cs_data_dir = str(_KISS_DIR / "code-server-data")
         _setup_code_server(cs_data_dir)
         cs_port = 13338
         port_in_use = False
@@ -2097,7 +1935,8 @@ def run_chatbot(
         ))
         return JSONResponse({"models": models_list, "selected": selected_model})
 
-    async def merge_diff(request: Request) -> JSONResponse:
+
+    async def merge_open(request: Request) -> JSONResponse:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--is-inside-work-tree"],
@@ -2116,49 +1955,43 @@ def run_chatbot(
                     capture_output=True, text=True, cwd=actual_work_dir,
                 )
                 if result.returncode != 0:
-                    return JSONResponse({"error": "Neither 'main' nor 'master' branch found"})
+                    return JSONResponse(
+                        {"error": "Neither 'main' nor 'master' branch found"},
+                    )
                 base = "master"
             result = subprocess.run(
-                ["git", "diff", base],
+                ["git", "diff", "--name-only", base],
                 capture_output=True, text=True, cwd=actual_work_dir,
             )
-            return JSONResponse({"diff": result.stdout, "base_branch": base})
-        except Exception as e:
-            return JSONResponse({"error": str(e)})
-
-    async def merge_revert(request: Request) -> JSONResponse:
-        body = await request.json()
-        try:
-            if body.get("all"):
-                base = body.get("base_branch", "main")
-                result = subprocess.run(
-                    ["git", "diff", "--name-only", base],
+            changed = [f for f in result.stdout.strip().split("\n") if f]
+            if not changed:
+                return JSONResponse({"error": "No changes from " + base})
+            merge_dir = Path(cs_data_dir) / "merge-temp"
+            if merge_dir.exists():
+                shutil.rmtree(merge_dir)
+            manifest_files = []
+            for fname in changed:
+                r = subprocess.run(
+                    ["git", "show", f"{base}:{fname}"],
                     capture_output=True, text=True, cwd=actual_work_dir,
                 )
-                files = [f for f in result.stdout.strip().split("\n") if f]
-                for f in files:
-                    subprocess.run(
-                        ["git", "checkout", base, "--", f],
-                        capture_output=True, text=True, cwd=actual_work_dir, check=True,
-                    )
-                return JSONResponse({"status": "reverted"})
-            if "file" in body:
-                base = body.get("base_branch", "main")
-                subprocess.run(
-                    ["git", "checkout", base, "--", body["file"]],
-                    capture_output=True, text=True, cwd=actual_work_dir, check=True,
-                )
-                return JSONResponse({"status": "reverted"})
-            if "patch" in body:
-                subprocess.run(
-                    ["git", "apply", "--reverse"],
-                    input=body["patch"],
-                    capture_output=True, text=True, cwd=actual_work_dir, check=True,
-                )
-                return JSONResponse({"status": "reverted"})
-            return JSONResponse({"error": "Invalid request"}, status_code=400)
-        except subprocess.CalledProcessError as e:
-            return JSONResponse({"error": e.stderr or str(e)})
+                if r.returncode != 0:
+                    continue
+                base_path = merge_dir / fname
+                base_path.parent.mkdir(parents=True, exist_ok=True)
+                base_path.write_text(r.stdout)
+                manifest_files.append({
+                    "name": fname,
+                    "base": str(base_path),
+                    "current": str(Path(actual_work_dir) / fname),
+                })
+            manifest = Path(cs_data_dir) / "pending-merge.json"
+            manifest.write_text(json.dumps({
+                "branch": base, "files": manifest_files,
+            }))
+            return JSONResponse({
+                "status": "opened", "count": len(manifest_files),
+            })
         except Exception as e:
             return JSONResponse({"error": str(e)})
 
@@ -2172,8 +2005,7 @@ def run_chatbot(
         Route("/tasks", tasks),
         Route("/proposed_tasks", proposed_tasks_endpoint),
         Route("/models", models_endpoint),
-        Route("/merge-diff", merge_diff),
-        Route("/merge-revert", merge_revert, methods=["POST"]),
+        Route("/merge-open", merge_open, methods=["POST"]),
     ])
 
     threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
