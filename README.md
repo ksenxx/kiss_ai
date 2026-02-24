@@ -196,11 +196,8 @@ print(f"Result: {result}")
 **Key Features:**
 
 - **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking
-- **Structured Progress Tracking**: Each sub-session reports completed and remaining tasks in JSON format (done/next items), which is deduplicated and passed to subsequent sub-sessions
-- **Retry with Context**: Failed sub-sessions automatically pass structured progress summaries to the next sub-session
 - **Configurable Sub-Sessions**: Set high sub-session counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
-- **Path Access Control**: Enforces read/write permissions on file system paths
 - **Built-in Tools**: Bash, Read, Edit, Write, search_web, and fetch_url tools for file and web operations
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
