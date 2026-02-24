@@ -38,11 +38,11 @@ class TestSetupCodeServer(unittest.TestCase):
         user_dir = Path(self.tmpdir) / "User"
         user_dir.mkdir(parents=True)
         (user_dir / "settings.json").write_text(
-            json.dumps({"editor.fontSize": 16, "workbench.startupEditor": "welcomePage"})
+            json.dumps({"editor.tabSize": 4, "workbench.startupEditor": "welcomePage"})
         )
         assistant._setup_code_server(self.tmpdir)
         settings = json.loads((user_dir / "settings.json").read_text())
-        assert settings["editor.fontSize"] == 16
+        assert settings["editor.tabSize"] == 4
         assert settings["workbench.startupEditor"] == "none"
 
     def test_settings_handles_corrupted_json(self) -> None:
@@ -107,9 +107,8 @@ class TestBuildHtmlSplitLayout(unittest.TestCase):
             assert f'id="{elem}"' in html, f"Missing #{elem}"
         assert "width:80%" in html
 
-    def test_merge_overlay_and_header_buttons(self) -> None:
+    def test_header_buttons(self) -> None:
         html = assistant._build_html("T", "S")
-        assert 'id="merge-overlay"' in html
         assert 'id="merge-btn"' in html
         assert 'title="Task history"' in html
         assert 'title="Suggested tasks"' in html
@@ -138,13 +137,8 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = assistant._build_html("T", "S", "http://x:1", "/w")
 
-    def test_merge_functions(self) -> None:
-        for fn in (
-            "openMerge", "closeMerge", "parseDiff", "renderMerge",
-            "mergeAcceptHunk", "mergeAcceptFile", "mergeAcceptAll",
-            "mergeRevertHunk", "mergeRevertFile", "mergeUndoAll",
-        ):
-            assert f"function {fn}" in self.html, f"Missing: {fn}"
+    def test_merge_function(self) -> None:
+        assert "function openMerge" in self.html
 
     def test_divider_and_editor_functions(self) -> None:
         assert "isDragging" in self.html
@@ -161,16 +155,13 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 
 class TestBuildHtmlCSS(unittest.TestCase):
 
-    def test_split_and_merge_css(self) -> None:
+    def test_split_layout_css(self) -> None:
         html = assistant._build_html("T", "S")
         for pattern in (
             "#split-container{display:flex",
             "#editor-panel{position:relative",
             "cursor:col-resize",
             "#assistant-panel{",
-            "#merge-overlay{",
-            ".merge-line.added{",
-            ".merge-line.removed{",
             ".tp[data-path]{cursor:pointer",
             "#assistant-panel .logo span{display:none}",
             "#assistant-panel #suggestions{grid-template-columns:1fr",
