@@ -234,17 +234,13 @@ _CS_SETTINGS = {
     "workbench.startupEditor": "none",
     "workbench.tips.enabled": False,
     "workbench.welcomePage.walkthroughs.openOnInstall": False,
-    "workbench.welcomePage.experimental.videoTutorials": "off",
     "security.workspace.trust.enabled": False,
     "update.showReleaseNotes": False,
     "workbench.panel.defaultLocation": "bottom",
-    "chat.commandCenter.enabled": False,
-    "chat.setupFromDialog": False,
-    "chat.agent.enabled": False,
-    "github.copilot.chat.welcomeMessage": "never",
-    "editor.fontSize": 11,
-    "terminal.integrated.fontSize": 11,
-    "window.zoomLevel": -1,
+    "editor.fontSize": 13,
+    "terminal.integrated.fontSize": 13,
+    "scm.inputFontSize": 13,
+    "debug.console.fontSize": 13,
     "window.restoreWindows": "all",
     "workbench.editor.restoreViewState": True,
     "files.hotExit": "onExitAndWindowClose",
@@ -708,7 +704,10 @@ header{
 }
 #split-container{display:flex;height:100vh;width:100vw;overflow:hidden}
 #editor-panel{position:relative;overflow:hidden}
-#editor-panel iframe{width:100%;height:100%;border:none}
+#editor-panel iframe{
+  width:125%;height:125%;border:none;
+  transform:scale(0.8);transform-origin:0 0;
+}
 #editor-fallback{
   display:flex;flex-direction:column;align-items:center;justify-content:center;
   height:100%;background:#1e1e1e;color:rgba(255,255,255,0.7);
@@ -888,6 +887,11 @@ header{
   display:grid;grid-template-columns:repeat(3,1fr);
 }
 #assistant-panel .rs b{display:block;font-size:11px}
+#assistant-panel .td{font-size:11px}
+#assistant-panel .sys{font-size:11px}
+#assistant-panel .spinner{font-size:11px}
+#assistant-panel .empty-msg{font-size:11px}
+#assistant-panel .rl{font-size:10px}
 #assistant-panel .merge-empty{font-size:11px}
 #assistant-panel .usage{font-size:11px}
 """
