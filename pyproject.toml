@@ -133,10 +133,6 @@ markers = [
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
-# Exclude run_all_models_test.py (it's a standalone script, not a regular test suite)
-collect_ignore = ["src/kiss/tests/run_all_models_test.py"]
-# Full testing (includes all models):
-#   uv run pytest -v
 
 [tool.coverage.run]
 source = ["src/kiss"]
