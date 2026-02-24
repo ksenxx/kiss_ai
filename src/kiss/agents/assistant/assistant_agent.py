@@ -29,12 +29,7 @@ class AssistantAgent(RelentlessAgent):
                 printer.print(text, type="bash_stream")
 
         stream_cb = _stream if printer else None
-        useful_tools = UsefulTools(
-            base_dir=self.base_dir,
-            readable_paths=[str(p) for p in self.readable_paths],
-            writable_paths=[str(p) for p in self.writable_paths],
-            stream_callback=stream_cb,
-        )
+        useful_tools = UsefulTools(stream_callback=stream_cb)
         bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
         tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool:
@@ -49,9 +44,6 @@ class AssistantAgent(RelentlessAgent):
         max_steps: int | None = None,
         max_budget: float | None = None,
         work_dir: str | None = None,
-        base_dir: str | None = None,
-        readable_paths: list[str] | None = None,
-        writable_paths: list[str] | None = None,
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
@@ -68,9 +60,6 @@ class AssistantAgent(RelentlessAgent):
             max_steps: Maximum steps per sub-session. Defaults to config value.
             max_budget: Maximum budget in USD. Defaults to config value.
             work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-            base_dir: Base directory for path resolution. Defaults to work_dir.
-            readable_paths: Additional paths the agent can read from.
-            writable_paths: Additional paths the agent can write to.
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
@@ -95,9 +84,6 @@ class AssistantAgent(RelentlessAgent):
                 max_steps=max_steps,
                 max_budget=max_budget,
                 work_dir=work_dir,
-                base_dir=base_dir,
-                readable_paths=readable_paths,
-                writable_paths=writable_paths,
                 printer=printer,
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,
