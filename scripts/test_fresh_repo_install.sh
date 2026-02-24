@@ -27,6 +27,5 @@ else
   echo "❌ Unexpected error: no API key detected even after check."
   exit 1
 fi
-uv run assistant
 cd ..
 rm -rf kiss_ai

@@ -15,6 +15,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -66,14 +67,23 @@ def fmt_price(p: float) -> str:
 # ---------------------------------------------------------------------------
 
 def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
-    """Fetch all models from OpenRouter (public API, no auth)."""
+    """Fetch all models from OpenRouter (public API, no auth).
+
+    Models with an expiration_date in the past are filtered out.
+    """
     if verbose:
         print("  Fetching OpenRouter models...")
     data = api_get("https://openrouter.ai/api/v1/models")
+    today = datetime.date.today().isoformat()
     models: dict[str, dict] = {}
+    skipped_deprecated = 0
     for m in data.get("data", []):
         model_id = m.get("id", "")
         if not model_id:
+            continue
+        expiration = m.get("expiration_date")
+        if expiration and expiration <= today:
+            skipped_deprecated += 1
             continue
         pricing = m.get("pricing", {})
         prompt_per_tok = float(pricing.get("prompt") or "0")
@@ -87,7 +97,7 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
             "source": "openrouter",
         }
     if verbose:
-        print(f"    Found {len(models)} models")
+        print(f"    Found {len(models)} models ({skipped_deprecated} deprecated filtered out)")
     return models
 
 
@@ -297,6 +307,42 @@ def test_model_capabilities(
 # ---------------------------------------------------------------------------
 # Diff computation
 # ---------------------------------------------------------------------------
+
+def find_deprecated_models(
+    current: dict[str, dict],
+    openrouter: dict[str, dict],
+    anthropic: dict[str, dict],
+    gemini: dict[str, dict],
+) -> list[dict]:
+    """Identify models in current MODEL_INFO that are deprecated upstream.
+
+    A model is considered deprecated if:
+    - It's an openrouter/ model not present in the fetched OpenRouter list
+      (which already filters out expired models).
+    - It's a claude- model not returned by the Anthropic models API and not an
+      alias (aliases don't have date suffixes and resolve to snapshot versions).
+    - It's a gemini- model not returned by the Gemini models API.
+    """
+    deprecated: list[dict] = []
+
+    for name in current:
+        if name.startswith("openrouter/"):
+            if openrouter and name not in openrouter:
+                base_name = name.split("/")[-1]
+                if ":" in base_name:
+                    continue
+                deprecated.append({"name": name, "reason": "not in OpenRouter API"})
+        elif name.startswith("claude-"):
+            if anthropic and name not in anthropic:
+                has_date = bool(re.search(r"\d{8}$", name))
+                if has_date:
+                    deprecated.append({"name": name, "reason": "not in Anthropic API"})
+        elif name.startswith("gemini-") and not name.startswith("gemini-embedding"):
+            if gemini and name not in gemini:
+                deprecated.append({"name": name, "reason": "not in Gemini API"})
+
+    return deprecated
+
 
 def compute_changes(
     current: dict[str, dict],
@@ -528,19 +574,31 @@ def main() -> None:
     print("=" * 60)
 
     # 1. Load current MODEL_INFO
-    print("\n[1/5] Loading current MODEL_INFO...")
+    print("\n[1/6] Loading current MODEL_INFO...")
     current = get_current_model_info()
     print(f"  {len(current)} models loaded")
 
     # 2. Fetch from vendor APIs
-    print("\n[2/5] Fetching from vendor APIs...")
+    print("\n[2/6] Fetching from vendor APIs...")
     openrouter_models = fetch_openrouter(verbose=args.verbose)
     together_models = fetch_together(verbose=args.verbose)
     gemini_models = fetch_gemini(verbose=args.verbose)
     anthropic_models = fetch_anthropic(verbose=args.verbose)
 
-    # 3. Compute diff
-    print("\n[3/5] Computing changes...")
+    # 3. Detect deprecated models
+    print("\n[3/6] Detecting deprecated models...")
+    deprecated = find_deprecated_models(
+        current, openrouter_models, anthropic_models, gemini_models,
+    )
+    if deprecated:
+        print(f"\n  Deprecated models in MODEL_INFO ({len(deprecated)}):")
+        for dep in deprecated:
+            print(f"    {dep['name']} ({dep['reason']})")
+    else:
+        print("  No deprecated models found")
+
+    # 4. Compute diff
+    print("\n[4/6] Computing changes...")
     updates, new_models = compute_changes(
         current, openrouter_models, together_models, gemini_models, anthropic_models,
     )
@@ -573,9 +631,9 @@ def main() -> None:
         print("\nEverything is up to date!")
         return
 
-    # 4. Test new models
+    # 5. Test new models
     if new_models and not args.skip_test:
-        print(f"\n[4/5] Testing {len(new_models)} new models...")
+        print(f"\n[5/6] Testing {len(new_models)} new models...")
         for nm in new_models:
             caps = test_model_capabilities(nm["name"], verbose=args.verbose)
             nm["gen"] = caps["gen"]
@@ -586,13 +644,13 @@ def main() -> None:
         new_models = [nm for nm in new_models if not nm.get("_skip")]
         print(f"  {len(new_models)} models passed testing")
     elif new_models and args.skip_test:
-        print("\n[4/5] Skipping model testing (--skip-test)")
+        print("\n[5/6] Skipping model testing (--skip-test)")
         for nm in new_models:
             nm["fc"] = True
             nm["gen"] = not nm.get("is_embedding", False)
             nm["emb"] = nm.get("is_embedding", False)
     else:
-        print("\n[4/5] No new models to test")
+        print("\n[5/6] No new models to test")
 
     # Optionally re-test existing models
     if args.test_existing:
@@ -605,8 +663,8 @@ def main() -> None:
                 upd["changes"]["fc"] = caps["fc"]
                 print(f"    {name}: fc changed {cur['fc']} -> {caps['fc']}")
 
-    # 5. Apply changes
-    print("\n[5/5] Applying changes...")
+    # 6. Apply changes
+    print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, current, dry_run=args.dry_run)
 
     print("\nDone!")

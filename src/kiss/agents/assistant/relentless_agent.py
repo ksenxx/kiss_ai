@@ -51,7 +51,7 @@ def finish(success: bool, summary: str) -> str:
     """
     if isinstance(success, str):
         success = success.strip().lower() not in ("false", "0", "no", "")
-    return yaml.dump({"success": bool(success), "summary": summary}, indent=2, sort_keys=False)
+    return str(yaml.dump({"success": bool(success), "summary": summary}, indent=2, sort_keys=False))
 
 
 class RelentlessAgent(Base):

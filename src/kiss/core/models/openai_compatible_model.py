@@ -230,7 +230,11 @@ class OpenAICompatibleModel(Model):
             api_key=self.api_key,
             timeout=1800.0,
         )
-        self.conversation = [{"role": "user", "content": prompt}]
+        self.conversation = []
+        system_instruction = self.model_config.get("system_instruction")
+        if system_instruction:
+            self.conversation.append({"role": "system", "content": system_instruction})
+        self.conversation.append({"role": "user", "content": prompt})
 
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
@@ -362,6 +366,7 @@ class OpenAICompatibleModel(Model):
             and response is the raw API response object.
         """
         kwargs = self.model_config.copy()
+        kwargs.pop("system_instruction", None)
         kwargs.update(
             {
                 "model": self._api_model_name,
@@ -398,6 +403,7 @@ class OpenAICompatibleModel(Model):
         # Standard OpenAI-style native function calling
         tools = self._build_openai_tools_schema(function_map)
         kwargs = self.model_config.copy()
+        kwargs.pop("system_instruction", None)
         kwargs.update(
             {
                 "model": self._api_model_name,
@@ -494,6 +500,7 @@ class OpenAICompatibleModel(Model):
             modified_conversation.insert(0, {"role": "system", "content": tools_prompt})
 
         kwargs = self.model_config.copy()
+        kwargs.pop("system_instruction", None)
         kwargs.update(
             {
                 "model": self._api_model_name,
