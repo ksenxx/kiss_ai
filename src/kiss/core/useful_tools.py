@@ -8,8 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.core.utils import is_subpath
-
 EDIT_SCRIPT = r"""
 #!/usr/bin/env bash
 #
@@ -174,70 +172,11 @@ exit 0
 """
 
 
-SAFE_SPECIAL_PATHS = {
-    "/dev/null",
-    "/dev/zero",
-    "/dev/random",
-    "/dev/urandom",
-    "/dev/stdin",
-    "/dev/stdout",
-    "/dev/stderr",
-    "/dev/tty",
-}
-
-SAFE_SPECIAL_PREFIXES = (
-    "/dev/fd/",
-    "/proc/self/",
-)
-
-
-def _is_safe_special_path(path: str) -> bool:
-    cleaned = path.strip(")'\"`);}]")
-    if cleaned.startswith("/proc/self/root"):
-        return False
-    return cleaned in SAFE_SPECIAL_PATHS or cleaned.startswith(SAFE_SPECIAL_PREFIXES)
-
-
-def _resolve_path(path_str: str) -> str | None:
-    """Resolve a file path to an absolute canonical path for security validation.
-
-    Args:
-        path_str: A file or directory path (can be relative or absolute)
-
-    Returns:
-        The resolved absolute path, or None if the path is invalid
-    """
-    try:
-        path = Path(path_str)
-
-        # Resolve relative paths to absolute paths using current working directory
-        # This is important for security validation of relative paths
-        if not path.is_absolute():
-            path = Path.cwd() / path
-
-        # Resolve to get canonical path (handles .., ., etc.)
-        return str(path.resolve())
-
-    except Exception:
-        return None
-
-
 DISALLOWED_BASH_COMMANDS = {
     ".",
     "env",
     "eval",
     "exec",
-}
-
-INLINE_CODE_FLAGS: dict[str, set[str]] = {
-    "python": {"-c"},
-    "python3": {"-c"},
-    "node": {"-e", "-p", "--eval", "--print"},
-    "ruby": {"-e"},
-    "perl": {"-e"},
-    "bash": {"-c"},
-    "sh": {"-c"},
-    "zsh": {"-c"},
 }
 
 
@@ -267,18 +206,6 @@ def _extract_command_names(command: str) -> list[str]:
             if name:
                 names.append(name)
     return names
-
-
-def _extract_paths_from_code(code: str) -> list[str]:
-    """Extract file paths from an inline code string (e.g. python -c argument)."""
-    paths: set[str] = set()
-    for match in re.finditer(r"""['"]((\.{0,2}/)[^\s'"*?]*)['"]""", code):
-        p = match.group(1)
-        if not _is_safe_special_path(p):
-            resolved = _resolve_path(p)
-            if resolved:
-                paths.add(resolved)
-    return sorted(paths)
 
 
 # Safari browser configuration for web scraping
@@ -518,358 +445,13 @@ def _strip_heredocs(command: str) -> str:
     )
 
 
-def parse_bash_command_paths(command: str) -> tuple[list[str], list[str]]:
-    """Parse a bash command to extract readable and writable directory paths.
-
-    This function analyzes bash commands to determine which directories are
-    being read from and which are being written to.
-
-    Args:
-        command: A bash command string to parse
-
-    Returns:
-        A tuple of (readable_dirs, writable_dirs) where each is a list of directory paths
-
-    """
-    readable_paths: set[str] = set()
-    writable_paths: set[str] = set()
-
-    # EXPANDED: Commands that read files/directories
-    read_commands = {
-        "cat",
-        "cd",
-        "less",
-        "more",
-        "head",
-        "tail",
-        "grep",
-        "find",
-        "ls",
-        "diff",
-        "wc",
-        "sort",
-        "uniq",
-        "cut",
-        "sed",
-        "awk",
-        "od",
-        "hexdump",
-        "file",
-        "stat",
-        "du",
-        "df",
-        "tree",
-        "read",
-        "source",
-        ".",
-        "tar",
-        "zip",
-        "unzip",
-        "gzip",
-        "gunzip",
-        "bzip2",
-        "bunzip2",
-        "python",
-        "python3",
-        "node",
-        "ruby",
-        "perl",
-        "bash",
-        "sh",
-        "zsh",
-        "make",
-        "cmake",
-        "gcc",
-        "g++",
-        "clang",
-        "javac",
-        "java",
-        "cargo",
-        "npm",
-        "yarn",
-        "pip",
-        "go",
-        "rustc",
-        "rsync",
-        # ADDED: Previously untracked commands
-        "strings",
-        "xxd",
-        "nl",
-        "fold",
-        "rev",
-        "pr",
-        "fmt",
-        "expand",
-        "unexpand",
-        "tr",
-        "col",
-        "colrm",
-        "column",
-        "join",
-        "paste",
-        "comm",
-        "cmp",
-        "look",
-        "split",
-        "csplit",
-        "iconv",
-        "base64",
-        "base32",
-        "md5sum",
-        "sha1sum",
-        "sha256sum",
-        "cksum",
-        "sum",
-        "readlink",
-        "realpath",
-        "dirname",
-        "basename",
-        "pathchk",
-    }
-
-    # Commands that write files/directories
-    write_commands = {
-        "touch",
-        "mkdir",
-        "rm",
-        "rmdir",
-        "mv",
-        "cp",
-        "dd",
-        "tee",
-        "install",
-        "chmod",
-        "chown",
-        "chgrp",
-        "ln",
-        "rsync",
-    }
-
-    # Ordered longest-to-shortest to avoid partial matches (e.g., "1>>" before ">")
-    write_redirects = [
-        "2>&1",
-        "&>>",
-        "&>|",
-        ">>|",
-        "1>>",
-        "2>>",
-        ">|",
-        ">>",
-        "&>",
-        "1>",
-        "2>",
-        ">",
-    ]
-
-    try:
-        # Strip heredoc content so body text is not parsed as arguments
-        command = _strip_heredocs(command)
-
-        # Split by command separators (&&, ||, ;) first, then by pipe operators.
-        # Do not split the "|" in redirection operators such as >|, >>|, &>|.
-        segments = re.split(r"&&|\|\||;", command)
-        pipe_parts: list[str] = []
-        for seg in segments:
-            pipe_parts.extend(re.split(r"(?<!>)\|(?!\|)", seg))
-
-        for part in pipe_parts:
-            part = part.strip()
-
-            # Check for output redirection (writing)
-            for redirect in write_redirects:
-                if redirect in part:
-                    # Extract path after redirect
-                    redirect_match = re.search(rf"{re.escape(redirect)}\s*([^\s;&|()<>]+)", part)
-                    if redirect_match:
-                        path = redirect_match.group(1).strip()
-                        path = path.strip("'\"")
-                        if path and not _is_safe_special_path(path):
-                            dir_path = _resolve_path(path)
-                            if dir_path:
-                                writable_paths.add(dir_path)
-
-            # Check for input redirection (reading)
-            input_redirect_match = re.search(r"<\s*([^\s;&|()<>]+)", part)
-            if input_redirect_match:
-                path = input_redirect_match.group(1).strip()
-                path = path.strip("'\"")
-                if path and not _is_safe_special_path(path):
-                    dir_path = _resolve_path(path)
-                    if dir_path:
-                        readable_paths.add(dir_path)
-
-            # Parse the command tokens
-            try:
-                tokens = shlex.split(part)
-            except ValueError:
-                # If shlex fails, do basic split
-                tokens = part.split()
-
-            if not tokens:
-                continue
-
-            # Skip env-var prefix assignments (e.g. FOO=bar cat file)
-            cmd_idx = 0
-            while cmd_idx < len(tokens) and re.match(
-                r"^[A-Za-z_][A-Za-z0-9_]*=.*", tokens[cmd_idx]
-            ):
-                cmd_idx += 1
-            if cmd_idx >= len(tokens):
-                continue
-
-            cmd = tokens[cmd_idx].split("/")[-1]  # Get base command name
-
-            # Process based on command type
-            if cmd in read_commands or cmd in write_commands:
-                # Extract file/directory arguments (skip flags and redirects)
-                paths: list[str] = []
-                i = cmd_idx + 1
-                while i < len(tokens):
-                    token = tokens[i]
-
-                    # Skip flags and their arguments
-                    if token.startswith("-"):
-                        i += 1
-                        # Skip flag argument if it doesn't start with - or /
-                        if (
-                            i < len(tokens)
-                            and not tokens[i].startswith("-")
-                            and not tokens[i].startswith("/")
-                        ):
-                            i += 1
-                        continue
-
-                    # Skip chmod mode arguments (e.g. +x, u+x, u+rwx,g+rx, 755)
-                    chmod_pat = r"^([ugoa]*[+\-=][rwxXstugo]+,?)+$|^\d{3,4}$"
-                    if cmd == "chmod" and re.match(chmod_pat, token):
-                        i += 1
-                        continue
-
-                    # Skip shell operators (safety net for any unsplit separators)
-                    if token in ("&&", "||", ";", "&"):
-                        i += 1
-                        continue
-
-                    # Skip redirect operators and their targets
-                    redirect_ops = [
-                        ">",
-                        ">>",
-                        "<",
-                        "<<",
-                        "<<<",
-                        "&>",
-                        "&>>",
-                        "1>",
-                        "2>",
-                        "2>&1",
-                        ">|",
-                        ">>|",
-                        "&>|",
-                        "1>>",
-                        "2>>",
-                    ]
-                    if token in redirect_ops or token.startswith("<<"):
-                        i += 1
-                        # Skip the redirect target (next token)
-                        if i < len(tokens):
-                            i += 1
-                        continue
-
-                    # Check if it looks like a path
-                    if "/" in token or not any(c in token for c in ["=", "$", "(", ")"]):
-                        token = token.strip("'\"")
-                        if token and not _is_safe_special_path(token):
-                            paths.append(token)
-
-                    i += 1
-
-                # Classify paths based on command
-                if cmd in read_commands:
-                    for path in paths:
-                        dir_path = _resolve_path(path)
-                        if dir_path:
-                            readable_paths.add(dir_path)
-
-                if cmd in write_commands:
-                    # For write commands, typically the last path is written to
-                    if paths:
-                        if cmd in ["cp", "mv", "rsync"]:
-                            # Source(s) are read, destination is written
-                            for path in paths[:-1]:
-                                dir_path = _resolve_path(path)
-                                if dir_path:
-                                    readable_paths.add(dir_path)
-
-                            # Last path is destination
-                            if len(paths) > 0:  # pragma: no branch
-                                dir_path = _resolve_path(paths[-1])
-                                if dir_path:
-                                    writable_paths.add(dir_path)
-                        elif cmd == "dd":
-                            # Special handling for dd command
-                            # Look for of= parameter
-                            for token in tokens:
-                                if token.startswith("of="):
-                                    output_file = token[3:]
-                                    if not _is_safe_special_path(output_file):
-                                        dir_path = _resolve_path(output_file)
-                                        if dir_path:
-                                            writable_paths.add(dir_path)
-                                elif token.startswith("if="):
-                                    input_file = token[3:]
-                                    if not _is_safe_special_path(input_file):
-                                        dir_path = _resolve_path(input_file)
-                                        if dir_path:
-                                            readable_paths.add(dir_path)
-                        else:
-                            # Other write commands
-                            for path in paths:
-                                dir_path = _resolve_path(path)
-                                if dir_path:
-                                    writable_paths.add(dir_path)
-
-            inline_flags = INLINE_CODE_FLAGS.get(cmd)
-            if inline_flags:
-                for j in range(cmd_idx + 1, len(tokens)):
-                    if tokens[j] in inline_flags and j + 1 < len(tokens):
-                        for p in _extract_paths_from_code(tokens[j + 1]):
-                            readable_paths.add(p)
-                        break
-
-    except Exception as e:
-        # If parsing fails completely, return empty lists
-        print(f"Failed to parse command '{command}': {e}")
-        return ([], [])
-
-    # Clean up paths - remove empty strings and '.'
-    readable_dirs = sorted([p for p in readable_paths if p and p != "."])
-    writable_dirs = sorted([p for p in writable_paths if p and p != "."])
-
-    return (readable_dirs, writable_dirs)
-
-
 class UsefulTools:
     """A hardened collection of useful tools with improved security."""
 
     def __init__(
         self,
-        base_dir: str,
-        readable_paths: list[str] | None = None,
-        writable_paths: list[str] | None = None,
         stream_callback: Callable[[str], None] | None = None,
     ) -> None:
-        """Initialize UsefulTools with security-restricted paths.
-
-        Args:
-            base_dir: The base directory for tool operations.
-            readable_paths: Optional list of paths allowed for read operations.
-            writable_paths: Optional list of paths allowed for write operations.
-            stream_callback: Optional callback for streaming Bash output line-by-line.
-        """
-        Path(base_dir).mkdir(parents=True, exist_ok=True)
-        self.base_dir = str(Path(base_dir).resolve())
-        self.readable_paths = [Path(p).resolve() for p in readable_paths or []]
-        self.writable_paths = [Path(p).resolve() for p in writable_paths or []]
         self.stream_callback = stream_callback
 
     def Read(  # noqa: N802
@@ -883,10 +465,8 @@ class UsefulTools:
             file_path: Absolute path to file.
             max_lines: Maximum number of lines to return.
         """
-        resolved = Path(file_path).resolve()
-        if not is_subpath(resolved, self.readable_paths):
-            return f"Error: Access denied for reading {file_path}"
         try:
+            resolved = Path(file_path).resolve()
             text = resolved.read_text()
             lines = text.splitlines(keepends=True)
             if len(lines) > max_lines:
@@ -909,10 +489,8 @@ class UsefulTools:
             file_path: Path to the file to write.
             content: The full content to write to the file.
         """
-        resolved = Path(file_path).resolve()
-        if not is_subpath(resolved, self.writable_paths):
-            return f"Error: Access denied for writing to {file_path}"
         try:
+            resolved = Path(file_path).resolve()
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} bytes to {file_path}"
@@ -940,10 +518,7 @@ class UsefulTools:
             The output of the edit operation.
         """
 
-        # Check if file_path is in writable_paths
         resolved = Path(file_path).resolve()
-        if not is_subpath(resolved, self.writable_paths):
-            return f"Error: Access denied for writing to {file_path}"
 
         # Create a temporary script file
         import tempfile
@@ -1036,23 +611,6 @@ class UsefulTools:
         for command_name in _extract_command_names(command):
             if command_name in DISALLOWED_BASH_COMMANDS:
                 return f"Error: Command '{command_name}' is not allowed in Bash tool"
-
-        # Parse and validate paths
-        readable, writable = parse_bash_command_paths(command)
-
-        for path_str in readable:
-            if _is_safe_special_path(path_str):  # pragma: no cover
-                continue
-            resolved = Path(path_str).resolve()
-            if not is_subpath(resolved, self.readable_paths):
-                return f"Error: Access denied for reading {path_str}"
-
-        for path_str in writable:
-            if _is_safe_special_path(path_str):  # pragma: no cover
-                continue
-            resolved = Path(path_str).resolve()
-            if not is_subpath(resolved, self.writable_paths):
-                return f"Error: Access denied for writing to {path_str}"
 
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)

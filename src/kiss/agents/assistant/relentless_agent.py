@@ -13,7 +13,6 @@ from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.printer import Printer
-from kiss.core.utils import resolve_path
 from kiss.docker.docker_manager import DockerManager
 
 TASK_PROMPT = """# Task
@@ -67,9 +66,6 @@ class RelentlessAgent(Base):
         max_steps: int | None,
         max_budget: float | None,
         work_dir: str | None,
-        base_dir: str | None,
-        readable_paths: list[str] | None,
-        writable_paths: list[str] | None,
         docker_image: str | None,
         config_path: str,
     ) -> None:
@@ -80,13 +76,8 @@ class RelentlessAgent(Base):
         default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
-        self.base_dir = str(Path(base_dir or default_work_dir).resolve())
-        Path(self.base_dir).mkdir(parents=True, exist_ok=True)
+        self.base_dir = self.work_dir
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
-        self.readable_paths = [resolve_path(p, self.base_dir) for p in readable_paths or []]
-        self.writable_paths = [resolve_path(p, self.base_dir) for p in writable_paths or []]
-        self.readable_paths.append(Path(self.work_dir))
-        self.writable_paths.append(Path(self.work_dir))
         self.is_agentic = True
 
         self.max_sub_sessions = (
@@ -169,9 +160,6 @@ class RelentlessAgent(Base):
         max_steps: int | None = None,
         max_budget: float | None = None,
         work_dir: str | None = None,
-        base_dir: str | None = None,
-        readable_paths: list[str] | None = None,
-        writable_paths: list[str] | None = None,
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
@@ -189,9 +177,6 @@ class RelentlessAgent(Base):
             max_steps: Maximum steps per sub-session. Defaults to config value.
             max_budget: Maximum budget in USD. Defaults to config value.
             work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-            base_dir: Base directory for path resolution. Defaults to work_dir.
-            readable_paths: Additional paths the agent can read from.
-            writable_paths: Additional paths the agent can write to.
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
@@ -205,8 +190,7 @@ class RelentlessAgent(Base):
         """
         self._reset(
             model_name, max_sub_sessions, max_steps, max_budget,
-            work_dir, base_dir, readable_paths, writable_paths,
-            docker_image, config_path,
+            work_dir, docker_image, config_path,
         )
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
