@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import shutil
 import socket
 import sqlite3
@@ -284,54 +285,103 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
+  var greenDeco=vscode.window.createTextEditorDecorationType({
+    backgroundColor:'rgba(34,197,94,0.13)',
+    isWholeLine:true,
+    overviewRulerColor:'rgba(34,197,94,0.6)',
+    overviewRulerLane:vscode.OverviewRulerLane.Left
+  });
+  var ms={};
+  var clFire=new vscode.EventEmitter();
+  ctx.subscriptions.push(vscode.languages.registerCodeLensProvider({scheme:'file'},{
+    onDidChangeCodeLenses:clFire.event,
+    provideCodeLenses:function(doc){
+      var s=ms[doc.uri.fsPath];
+      if(!s||!s.hunks.length)return[];
+      var L=[];
+      for(var i=0;i<s.hunks.length;i++){
+        var h=s.hunks[i];
+        if(h.cc<=0)continue;
+        var ln=Math.min(h.cs+h.cc,doc.lineCount-1);
+        var r=new vscode.Range(ln,0,ln,0);
+        var fp=doc.uri.fsPath;
+        L.push(new vscode.CodeLens(r,{title:'\\u2705 Accept',
+          command:'kiss.acceptChange',arguments:[fp,i]}));
+        L.push(new vscode.CodeLens(r,{title:'\\u274c Reject',
+          command:'kiss.rejectChange',arguments:[fp,i]}));
+      }
+      return L;
+    }
+  }));
+  function refreshDeco(fp){
+    vscode.window.visibleTextEditors.forEach(function(ed){
+      if(ed.document.uri.fsPath!==fp)return;
+      var s=ms[fp],ranges=[];
+      if(s)s.hunks.forEach(function(h){
+        if(h.cc>0)ranges.push(new vscode.Range(h.cs,0,h.cs+h.cc-1,99999));
+      });
+      ed.setDecorations(greenDeco,ranges);
+    });
+  }
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptChange',function(fp,idx){
+    var s=ms[fp];if(!s)return;
+    s.hunks.splice(idx,1);
+    if(!s.hunks.length)delete ms[fp];
+    refreshDeco(fp);clFire.fire();
+  }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectChange',async function(fp,idx){
+    var s=ms[fp];if(!s)return;
+    var h=s.hunks[idx];
+    var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
+    if(!ed)return;
+    var baseLines=fs.readFileSync(s.basePath,'utf8').split('\\n');
+    var repl=baseLines.slice(h.bs,h.bs+h.bc);
+    if(h.cc>0){
+      var last=Math.min(h.cs+h.cc-1,ed.document.lineCount-1);
+      var rng=new vscode.Range(h.cs,0,last,ed.document.lineAt(last).text.length);
+      await ed.edit(function(eb){eb.replace(rng,repl.join('\\n'));});
+    }else if(h.bc>0){
+      await ed.edit(function(eb){eb.insert(new vscode.Position(h.cs+1,0),repl.join('\\n')+'\\n');});
+    }
+    var diff=repl.length-h.cc;
+    s.hunks.splice(idx,1);
+    for(var i=idx;i<s.hunks.length;i++)s.hunks[i].cs+=diff;
+    if(!s.hunks.length)delete ms[fp];
+    refreshDeco(fp);clFire.fire();
+  }));
+  ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
+    for(var fp in ms)refreshDeco(fp);
+  }));
   var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
   var iv=setInterval(function(){
     try{
       if(!fs.existsSync(mp))return;
       var data=JSON.parse(fs.readFileSync(mp,'utf8'));
       fs.unlinkSync(mp);
-      openDiffs(data);
+      openMerge(data);
     }catch(e){}
   },800);
   ctx.subscriptions.push({dispose:function(){clearInterval(iv)}});
-}
-async function openDiffs(data){
-  var cfg=vscode.workspace.getConfiguration('diffEditor');
-  await cfg.update('renderSideBySide',false,true);
-  await cfg.update('ignoreTrimWhitespace',false,true);
-  for(var f of (data.files||[])){
-    var left=vscode.Uri.file(f.base);
-    var right=vscode.Uri.file(f.current);
-    await vscode.commands.executeCommand('vscode.diff',left,right,
-      f.name+' ('+data.branch+' \\u2194 current)');
-  }
-  while(true){
-    var act=await vscode.window.showInformationMessage(
-      'Reviewing '+data.files.length+' file(s) vs '+data.branch,
-      'Accept All','Undo Current File');
-    if(act==='Accept All'){
-      for(var g of vscode.window.tabGroups.all){
-        for(var t of [...g.tabs]){
-          if(t.label.indexOf('\\u2194')>=0)
-            await vscode.window.tabGroups.close(t).then(function(){},function(){});
-        }
-      }
-      break;
+  async function openMerge(data){
+    for(var fp in ms){
+      vscode.window.visibleTextEditors.forEach(function(ed){
+        if(ed.document.uri.fsPath===fp)ed.setDecorations(greenDeco,[]);
+      });
     }
-    if(act==='Undo Current File'){
-      var at=vscode.window.tabGroups.activeTabGroup.activeTab;
-      if(at){
-        for(var f of data.files){
-          if(at.label.indexOf(f.name)>=0){
-            fs.writeFileSync(f.current,fs.readFileSync(f.base,'utf8'));
-            vscode.window.showInformationMessage('Reverted '+f.name+' to '+data.branch);
-            break;
-          }
-        }
-      }
-      continue;
+    ms={};
+    for(var f of(data.files||[])){
+      var uri=vscode.Uri.file(f.current);
+      var doc=await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(doc,{preview:false});
+      ms[f.current]={basePath:f.base,hunks:(f.hunks||[]).map(function(h){
+        return{cs:h.cs,cc:h.cc,bs:h.bs,bc:h.bc};
+      })};
+      refreshDeco(f.current);
     }
-    break;
+    clFire.fire();
+    vscode.window.showInformationMessage(
+      'Reviewing '+data.files.length+' file(s) vs '+data.branch
+      +'. Use \\u2705 Accept / \\u274c Reject on each change.');
   }
 }
 module.exports={activate};
@@ -379,6 +429,12 @@ def _setup_code_server(data_dir: str) -> None:
         "engines": {"vscode": "^1.80.0"},
         "activationEvents": ["onStartupFinished"],
         "main": "./extension.js",
+        "contributes": {
+            "commands": [
+                {"command": "kiss.acceptChange", "title": "Accept Change"},
+                {"command": "kiss.rejectChange", "title": "Reject Change"},
+            ],
+        },
     }))
     (ext_dir / "extension.js").write_text(_CS_EXTENSION_JS)
 
@@ -408,7 +464,7 @@ header{
   border-bottom:1px solid rgba(255,255,255,0.06);padding:14px 24px;z-index:50;
   box-shadow:0 1px 12px rgba(0,0,0,0.3);
 }
-.logo{font-size:15px;color:rgba(255,255,255,0.9);font-weight:600;letter-spacing:-0.2px}
+.logo{font-size:12px;color:#4da6ff;font-weight:600;letter-spacing:-0.2px}
 .logo span{
   color:rgba(255,255,255,0.55);font-weight:400;font-size:12px;margin-left:10px;
   max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -1978,10 +2034,28 @@ def run_chatbot(
                 base_path = merge_dir / fname
                 base_path.parent.mkdir(parents=True, exist_ok=True)
                 base_path.write_text(r.stdout)
+                dr = subprocess.run(
+                    ["git", "diff", "--unified=0", base, "--", fname],
+                    capture_output=True, text=True, cwd=actual_work_dir,
+                )
+                hunks: list[dict[str, int]] = []
+                for diff_line in dr.stdout.split("\n"):
+                    hm = re.match(
+                        r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+                        diff_line,
+                    )
+                    if hm:
+                        hunks.append({
+                            "bs": int(hm.group(1)) - 1,
+                            "bc": int(hm.group(2)) if hm.group(2) is not None else 1,
+                            "cs": int(hm.group(3)) - 1,
+                            "cc": int(hm.group(4)) if hm.group(4) is not None else 1,
+                        })
                 manifest_files.append({
                     "name": fname,
                     "base": str(base_path),
                     "current": str(Path(actual_work_dir) / fname),
+                    "hunks": hunks,
                 })
             manifest = Path(cs_data_dir) / "pending-merge.json"
             manifest.write_text(json.dumps({
@@ -2050,7 +2124,7 @@ def main() -> None:
     if mode == "assistant":
         run_chatbot(
             agent_factory=AssistantAgent,
-            title=f"KISS General Assistant: {__version__}",
+            title=f"KISS Assistant: {__version__}",
             subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
             agent_kwargs={"headless": False},
@@ -2058,7 +2132,7 @@ def main() -> None:
     else:
         run_chatbot(
             agent_factory=RelentlessCodingAgent,
-            title=f"KISS Relentless Coding Assistant: {__version__}",
+            title=f"KISS Coding Assistant: {__version__}",
             subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
         )
