@@ -514,8 +514,17 @@ function activate(ctx){
     for(var fp in ms)refreshDeco(fp);
   }));
   var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
+  var op=path.join(home,'.kiss','code-server-data','pending-open.json');
   var iv=setInterval(function(){
     try{
+      if(fs.existsSync(op)){
+        var od=JSON.parse(fs.readFileSync(op,'utf8'));
+        fs.unlinkSync(op);
+        var uri=vscode.Uri.file(od.path);
+        vscode.workspace.openTextDocument(uri).then(function(doc){
+          vscode.window.showTextDocument(doc,{preview:false});
+        });
+      }
       if(!fs.existsSync(mp))return;
       var data=JSON.parse(fs.readFileSync(mp,'utf8'));
       fs.unlinkSync(mp);
@@ -1357,6 +1366,8 @@ document.addEventListener('click',function(e){
 function submitTask(){
   var task=inp.value.trim();
   if(!task||running)return;
+  var fileMatch=task.match(/^@(\S+)$/);
+  if(fileMatch){openInEditor(fileMatch[1]);inp.value='';return}
   running=true;inp.disabled=true;
   btn.style.display='none';
   stopBtn.style.display='inline-flex';
@@ -1615,12 +1626,8 @@ if(divider){
   });
 }
 function openInEditor(path){
-  var frame=document.getElementById('code-server-frame');
-  if(!frame||!frame.dataset.baseUrl)return;
-  var base=frame.dataset.baseUrl;
-  var wd=frame.dataset.workDir||'';
-  var full=path.startsWith('/')?path:(wd+'/'+path);
-  frame.src=base+'/?folder='+encodeURIComponent(wd)+'&goto='+encodeURIComponent(full+':1:1');
+  fetch('/open-file',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({path:path})}).catch(function(){});
 }
 document.addEventListener('click',function(e){
   var el=e.target.closest('[data-path]');
@@ -2222,11 +2229,25 @@ def run_chatbot(
         except Exception as e:
             return JSONResponse({"error": str(e)})
 
+    async def open_file(request: Request) -> JSONResponse:
+        body = await request.json()
+        rel = body.get("path", "").strip()
+        if not rel:
+            return JSONResponse({"error": "No path"}, status_code=400)
+        full = rel if rel.startswith("/") else os.path.join(actual_work_dir, rel)
+        if not os.path.isfile(full):
+            return JSONResponse({"error": "File not found"}, status_code=404)
+        pending = os.path.join(cs_data_dir, "pending-open.json")
+        with open(pending, "w") as f:
+            json.dump({"path": full}, f)
+        return JSONResponse({"status": "ok"})
+
     app = Starlette(routes=[
         Route("/", index),
         Route("/events", events),
         Route("/run", run_task, methods=["POST"]),
         Route("/stop", stop_task, methods=["POST"]),
+        Route("/open-file", open_file, methods=["POST"]),
         Route("/suggestions", suggestions),
         Route("/complete", complete),
         Route("/tasks", tasks),
