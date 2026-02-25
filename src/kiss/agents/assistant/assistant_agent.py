@@ -9,9 +9,9 @@ import yaml
 
 import kiss.agents.assistant.config as _assistant_config  # noqa: F401
 from kiss.agents.assistant.relentless_agent import RelentlessAgent
+from kiss.agents.assistant.useful_tools import UsefulTools
+from kiss.agents.assistant.web_use_tool import WebUseTool
 from kiss.core.printer import Printer
-from kiss.core.useful_tools import UsefulTools
-from kiss.core.web_use_tool import WebUseTool
 
 
 class AssistantAgent(RelentlessAgent):
@@ -48,8 +48,7 @@ class AssistantAgent(RelentlessAgent):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         headless: bool | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -64,8 +63,7 @@ class AssistantAgent(RelentlessAgent):
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
             headless: Whether to run the browser in headless mode. Defaults to config value.
-            print_to_console: Whether to print output to console.
-            print_to_browser: Whether to print output to browser UI.
+            verbose: Whether to print output to console. Defaults to config verbose setting.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -87,8 +85,7 @@ class AssistantAgent(RelentlessAgent):
                 printer=printer,
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,
-                print_to_console=print_to_console,
-                print_to_browser=print_to_browser,
+                verbose=verbose,
                 tools_factory=self._get_tools,
                 config_path="assistant.assistant_agent",
             )
@@ -116,16 +113,10 @@ def main() -> None:
         help="Run browser headless (true/false)",
     )
     parser.add_argument(
-        "--print_to_console",
+        "--verbose",
         type=lambda x: (str(x).lower() == "true"),
         default=True,
         help="Print output to console",
-    )
-    parser.add_argument(
-        "--print_to_browser",
-        type=lambda x: (str(x).lower() == "true"),
-        default=True,
-        help="Print output to browser UI",
     )
     parser.add_argument("--task", type=str, default=None, help="Prompt template/task description")
 
@@ -157,8 +148,7 @@ password 'For AI Assistant.' and read the messages.
             max_budget=args.max_budget,
             work_dir=args.work_dir,
             headless=args.headless,
-            print_to_browser=args.print_to_browser,
-            print_to_console=args.print_to_console,
+            verbose=args.verbose,
         )
     finally:
         os.chdir(old_cwd)

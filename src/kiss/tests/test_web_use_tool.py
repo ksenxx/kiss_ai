@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.web_use_tool import (
+from kiss.agents.assistant.web_use_tool import (
     KISS_PROFILE_DIR,
     WebUseTool,
     _number_interactive_elements,

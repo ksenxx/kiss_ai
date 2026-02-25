@@ -43,7 +43,7 @@ AND coding tools (Bash, Write) to complete this task.
             max_budget=2.0,
             work_dir=work_dir,
             headless=True,
-            print_to_console=True,
+            verbose=True,
         )
     finally:
         os.chdir(old_cwd)
