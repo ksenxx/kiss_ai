@@ -33,7 +33,6 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [KISSAgent API Reference](#-kissagent-api-reference)
 - [GEPA Prompt Optimization](#-using-gepa-for-prompt-optimization)
 - [KISSEvolve Algorithm Discovery](#-using-kissevolve-for-algorithm-discovery)
-- [Multiprocessing](#-multiprocessing)
 - [Docker Manager](#-docker-manager)
 - [Project Structure](#-project-structure)
 - [Versioning](#%EF%B8%8F-versioning)
@@ -344,7 +343,6 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **SWE-bench Dataset Support**: Built-in support for downloading and working with SWE-bench Verified dataset
 - **RAG Support**: Simple retrieval-augmented generation system with in-memory vector store
 - **Useful Agents**: Pre-built utility agents including prompt refinement and general bash execution agents
-- **Multiprocessing Support**: Utilities for parallel execution of functions using multiprocessing
 - **Trajectory Visualization**: Web-based visualizer for viewing agent execution trajectories with modern UI
 
 ## 📦 Developer Installation
@@ -434,54 +432,6 @@ This is where I started building an optimizer for agents. Then I switched to [`a
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
 📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
-
-## ⚡ Multiprocessing
-
-KISS provides utilities for parallel execution of Python functions using multiprocessing. This is useful for running multiple independent tasks concurrently to maximize CPU utilization.
-
-### Basic Usage
-
-```python
-from kiss.multiprocessing import run_functions_in_parallel
-
-def add(a, b):
-    return a + b
-
-def multiply(x, y):
-    return x * y
-
-# Define tasks as (function, arguments) tuples
-tasks = [(add, [1, 2]), (multiply, [3, 4])]
-results = run_functions_in_parallel(tasks)
-print(results)  # [3, 12]
-```
-
-### With Keyword Arguments
-
-```python
-from kiss.multiprocessing import run_functions_in_parallel_with_kwargs
-
-def greet(name, title="Mr."):
-    return f"Hello, {title} {name}!"
-
-functions = [greet, greet]
-args_list = [["Alice"], ["Bob"]]
-kwargs_list = [{"title": "Dr."}, {}]
-
-results = run_functions_in_parallel_with_kwargs(functions, args_list, kwargs_list)
-print(results)  # ["Hello, Dr. Alice!", "Hello, Mr. Bob!"]
-```
-
-### 💻 Checking Available Cores
-
-```python
-from kiss.multiprocessing import get_available_cores
-
-num_cores = get_available_cores()
-print(f"Available CPU cores: {num_cores}")
-```
-
-The multiprocessing utilities automatically scale to the number of available CPU cores, using at most as many workers as there are tasks to avoid unnecessary overhead.
 
 ## 🐳 Docker Manager
 
@@ -616,12 +566,8 @@ kiss/
 │   │       ├── run_swebench.py     # Main runner with CLI support
 │   │       ├── config.py           # Configuration for SWE-bench runs
 │   │       └── README.md           # SWE-bench documentation
-│   ├── multiprocessing/ # Multiprocessing utilities
-│   │   └── multiprocess.py
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
-│   ├── demo/            # Demo scripts
-│   │   └── kiss_demo.py               # Interactive demo with streaming output
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── generate_api_docs.py        # API documentation generator
@@ -760,7 +706,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run pytest src/kiss/tests/ -v` - Run all tests with verbose output
 - `uv run pytest src/kiss/tests/test_kiss_agent_agentic.py -v` - Run agentic agent tests
 - `uv run pytest src/kiss/tests/test_kiss_agent_non_agentic.py -v` - Run non-agentic agent tests
-- `uv run pytest src/kiss/tests/test_multiprocess.py -v` - Run multiprocessing tests
 - `uv run python -m unittest src.kiss.tests.test_docker_manager -v` - Run docker manager tests (unittest)
 - `uv run python -m unittest discover -s src/kiss/tests -v` - Run all tests using unittest
 

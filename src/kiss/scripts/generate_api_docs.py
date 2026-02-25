@@ -385,7 +385,6 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.agents.imo_agent", "kiss.agents.imo_agent.imo_agent",
         "kiss.agents.imo_agent.config",
         "kiss.docker", "kiss.docker.docker_manager",
-        "kiss.multiprocessing", "kiss.multiprocessing.multiprocess",
         "kiss.rag", "kiss.rag.simple_rag",
     ]
     rank = {name: i for i, name in enumerate(order)}

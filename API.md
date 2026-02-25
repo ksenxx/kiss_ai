@@ -21,7 +21,6 @@
       - [`kiss.agents.assistant.web_use_tool`](#kissagentsassistantweb_use_tool)
     - [`kiss.core.utils`](#kisscoreutils)
   - [`kiss.agents`](#kissagents)
-    - [`kiss.agents.kiss`](#kissagentskiss)
     - [`kiss.agents.coding_agents`](#kissagentscoding_agents)
       - [`kiss.agents.coding_agents.relentless_coding_agent`](#kissagentscoding_agentsrelentless_coding_agent)
       - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
@@ -35,7 +34,6 @@
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
-  - [`kiss.multiprocessing`](#kissmultiprocessing)
   - [`kiss.rag`](#kissrag)
 
 </details>
@@ -651,10 +649,6 @@ ______________________________________________________________________
 from kiss.agents import prompt_refiner_agent, get_run_simple_coding_agent, run_bash_task_in_sandboxed_ubuntu_latest
 ```
 
-______________________________________________________________________
-
-#### `kiss.agents.kiss` — *Useful agents for the KISS Agent Framework.*
-
 **`prompt_refiner_agent`** — Refines the prompt template based on the agent's trajectory summary.<br/>`def prompt_refiner_agent(original_prompt_template: str, previous_prompt_template: str, agent_trajectory_summary: str, model_name: str) -> str`
 
 - `original_prompt_template`: The original prompt template.
@@ -663,16 +657,16 @@ ______________________________________________________________________
 - `model_name`: The name of the model to use for the agent.
 - **Returns:** str: The refined prompt template.
 
+**`get_run_simple_coding_agent`** — Return a function that runs a simple coding agent with a test function.<br/>`def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]`
+
+- `test_fn`: The test function to use for the agent.
+- **Returns:** Callable\[..., str\]: A function that runs a simple coding agent with a test function. Accepts keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
+
 **`run_bash_task_in_sandboxed_ubuntu_latest`** — Run a bash task in a sandboxed Ubuntu latest container.<br/>`def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str`
 
 - `task`: The task to run.
 - `model_name`: The name of the model to use for the agent.
 - **Returns:** str: The result of the task.
-
-**`get_run_simple_coding_agent`** — Return a function that runs a simple coding agent with a test function.<br/>`def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]`
-
-- `test_fn`: The test function to use for the agent.
-- **Returns:** Callable\[..., str\]: A function that runs a simple coding agent with a test function. Accepts keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
 
 ______________________________________________________________________
 
@@ -705,8 +699,9 @@ ______________________________________________________________________
 
 **Constructor:** `RelentlessCodingAgent(name: str) -> None`
 
-- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None) -> str`
+- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
+  - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
@@ -743,9 +738,10 @@ ______________________________________________________________________
   - `tools`: List of callable tools available to the agent during execution.
   - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
-- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, config_path: str = 'agent') -> str`
+- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
+  - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
   - `system_instructions`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
@@ -757,7 +753,6 @@ ______________________________________________________________________
   - `docker_image`: Docker image name to run tools inside a container.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `tools_factory`: Callable that returns the list of tools for the agent.
-  - `config_path`: Dot-separated path to config section (e.g. "agent").
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 **`finish`** — Finish execution with status and summary.<br/>`def finish(success: bool, summary: str) -> str`
@@ -773,8 +768,9 @@ ______________________________________________________________________
 
 **Constructor:** `AssistantAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
+  - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
@@ -805,6 +801,8 @@ ______________________________________________________________________
 #### `kiss.agents.assistant.config` — *Configuration for the Assistant Agent.*
 
 ##### `class AssistantAgentConfig(BaseModel)`
+
+##### `class RelentlessAgentConfig(BaseModel)`
 
 ##### `class AssistantConfig(BaseModel)`
 
@@ -992,28 +990,6 @@ from kiss.docker import DockerManager
   - **Returns:** The host port mapped to the container port, or None if not mapped.
 
 - **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
-
-______________________________________________________________________
-
-### `kiss.multiprocessing` — *Parallel execution utilities using multiprocessing.*
-
-```python
-from kiss.multiprocessing import get_available_cores, run_functions_in_parallel, run_functions_in_parallel_with_kwargs
-```
-
-**`get_available_cores`** — Get the number of available CPU cores.<br/>`def get_available_cores() -> int`
-
-**`run_functions_in_parallel`** — Run a list of functions in parallel using multiprocessing.<br/>`def run_functions_in_parallel(tasks: list[tuple[Callable[..., Any], list[Any]]]) -> list[Any]`
-
-- `tasks`: List of tuples, where each tuple contains (function, arguments).
-- **Returns:** List of results from each function, in the same order as the input tasks.
-
-**`run_functions_in_parallel_with_kwargs`** — Run a list of functions in parallel using multiprocessing with support for kwargs.<br/>`def run_functions_in_parallel_with_kwargs(functions: list[Callable[..., Any]], args_list: list[list[Any]] | None = None, kwargs_list: list[dict[str, Any]] | None = None) -> list[Any]`
-
-- `functions`: List of callable functions to execute.
-- `args_list`: Optional list of argument lists for positional arguments.
-- `kwargs_list`: Optional list of keyword argument dictionaries.
-- **Returns:** List of results from each function, in the same order as the input functions.
 
 ______________________________________________________________________
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,12 +20,7 @@ TASK_PROMPT = """# Task
 
 {task_description}
 
-# Rules
-- Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
-- Call finish(success=True, summary="detailed summary of what was accomplished") \
-immediately when task is complete.
-- If detailed-progress.md exists, it contains a detailed summary of the work done so far. \
-Update it when you make large progress.
+# Instructions
 - At step {step_threshold}: finish(success=False, summary="detailed summary of work done so far")
 - Work dir: {work_dir}
 {previous_progress}
@@ -40,6 +36,15 @@ CONTINUATION_PROMPT = """
 - Don't redo completed work.
 """
 
+SUMMARIZER_PROMPT = """
+# Summarizer
+
+{trajectory}
+
+# Instructions
+- Analyze and return a detailed summary of the work done so far as 'result'.
+"""
+
 
 def finish(success: bool, summary: str) -> str:
     """Finish execution with status and summary.
@@ -48,9 +53,8 @@ def finish(success: bool, summary: str) -> str:
         success: True if successful, False otherwise.
         summary: Detailed summary of work done so far.
     """
-    if isinstance(success, str):
-        success = success.strip().lower() not in ("false", "0", "no", "")
-    return str(yaml.dump({"success": bool(success), "summary": summary}, indent=2, sort_keys=False))
+    result: str = yaml.dump({"success": success, "summary": summary}, sort_keys=False)
+    return result
 
 
 class RelentlessAgent(Base):
@@ -62,18 +66,20 @@ class RelentlessAgent(Base):
     def _reset(
         self,
         model_name: str | None,
+        summarizer_model_name: str | None,
         max_sub_sessions: int | None,
         max_steps: int | None,
         max_budget: float | None,
         work_dir: str | None,
         docker_image: str | None,
-        config_path: str,
+        printer: Printer | None = None,
+        verbose: bool | None = None,
     ) -> None:
         global_cfg = config_module.DEFAULT_CONFIG
-        cfg = global_cfg
-        for part in config_path.split("."):
-            cfg = getattr(cfg, part)
-        default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
+        cfg = global_cfg.assistant.relentless_agent
+        default_work_dir = str(
+            Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir"
+        )
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
         self.base_dir = self.work_dir
@@ -81,15 +87,27 @@ class RelentlessAgent(Base):
         self.is_agentic = True
 
         self.max_sub_sessions = (
-            max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
+            max_sub_sessions if max_sub_sessions is not None
+            else cfg.max_sub_sessions
         )
-        self.max_steps = max_steps if max_steps is not None else cfg.max_steps
-        self.max_budget = max_budget if max_budget is not None else cfg.max_budget
-        self.model_name = model_name if model_name is not None else cfg.model_name
+        self.max_steps = (
+            max_steps if max_steps is not None else cfg.max_steps
+        )
+        self.max_budget = (
+            max_budget if max_budget is not None else cfg.max_budget
+        )
+        self.model_name = (
+            model_name if model_name is not None else cfg.model_name
+        )
+        self.summarizer_model_name = (
+            summarizer_model_name if summarizer_model_name is not None
+            else cfg.summarizer_model_name
+        )
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.docker_image = docker_image
         self.docker_manager: DockerManager | None = None
+        self.set_printer(printer, verbose=verbose)
 
     def _docker_bash(self, command: str, description: str) -> str:
         if self.docker_manager is None:
@@ -116,9 +134,9 @@ class RelentlessAgent(Base):
         for trial in range(self.max_sub_sessions):
             executor = KISSAgent(f"{self.name} Trial-{trial}")
             try:
-                model_config = {}
+                model_config: dict[str, str] = {}
                 if self.system_instructions:
-                    model_config["system_instructions"] = self.system_instructions
+                    model_config["system_instruction"] = self.system_instructions
                 result = executor.run(
                     model_name=self.model_name,
                     prompt_template=TASK_PROMPT,
@@ -134,17 +152,33 @@ class RelentlessAgent(Base):
                     model_config=model_config or None,
                     printer=self.printer,
                 )
-            except Exception as e:
-                err_summary = f"{summary}\n# Failure\n- Failed with Error: {e}"
-                result = yaml.dump(
-                    {"success": False, "summary": err_summary},
+            except Exception:
+                summarizer_agent = KISSAgent(f"{self.name} Summarizer")
+                summarizer_result = summarizer_agent.run(
+                    model_name=self.summarizer_model_name,
+                    prompt_template=SUMMARIZER_PROMPT,
+                    is_agentic=False,
+                    arguments={
+                        "trajectory": executor.get_trajectory(),
+                    },
+                )
+                result = yaml.dump({
+                        "success": False,
+                        "summary": summarizer_result,
+                    },
                     sort_keys=False,
                 )
 
             self.budget_used += executor.budget_used
             self.total_tokens_used += executor.total_tokens_used
 
-            payload = yaml.safe_load(result)
+            try:
+                payload = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                try:
+                    payload = yaml.safe_load(result)
+                except Exception:
+                    payload = {}
             if not isinstance(payload, dict):
                 payload = {}
 
@@ -159,6 +193,7 @@ class RelentlessAgent(Base):
     def run(
         self,
         model_name: str | None = None,
+        summarizer_model_name: str | None = None,
         system_instructions: str = "",
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
@@ -170,12 +205,13 @@ class RelentlessAgent(Base):
         docker_image: str | None = None,
         verbose: bool | None = None,
         tools_factory: Callable[[], list[Callable[..., Any]]] | None = None,
-        config_path: str = "agent",
     ) -> str:
         """Run the agent with tools created by tools_factory (called after _reset).
 
         Args:
             model_name: LLM model to use. Defaults to config value.
+            summarizer_model_name: LLM model for summarizing trajectories on failure.
+                Defaults to config value.
             system_instructions: System-level instructions passed to the underlying LLM
                 via model_config. Defaults to empty string (no system instructions).
             prompt_template: Task prompt template with format placeholders.
@@ -188,20 +224,19 @@ class RelentlessAgent(Base):
             docker_image: Docker image name to run tools inside a container.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             tools_factory: Callable that returns the list of tools for the agent.
-            config_path: Dot-separated path to config section (e.g. "agent").
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
         self._reset(
-            model_name, max_sub_sessions, max_steps, max_budget,
-            work_dir, docker_image, config_path,
+            model_name, summarizer_model_name, max_sub_sessions,
+            max_steps, max_budget, work_dir, docker_image,
+            printer, verbose,
         )
         self.system_instructions = system_instructions
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.set_printer(printer, verbose=verbose)
 
         tools = tools_factory() if tools_factory else []
 
