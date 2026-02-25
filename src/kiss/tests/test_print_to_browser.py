@@ -1,4 +1,4 @@
-"""Tests for BrowserPrinter.
+"""Tests for BaseBrowserPrinter.
 
 Tests verify correctness and accuracy of all browser streaming logic.
 Uses real objects with duck-typed attributes (SimpleNamespace) as
@@ -6,15 +6,14 @@ message inputs and real queue subscribers.
 """
 
 import queue
-import time
 import unittest
 from types import SimpleNamespace
 
-from kiss.core.print_to_browser import BrowserPrinter
+from kiss.agents.assistant.browser_ui import BaseBrowserPrinter
 from kiss.core.printer import MAX_RESULT_LEN as _MAX_RESULT_LEN
 
 
-def _subscribe(printer: BrowserPrinter) -> queue.Queue:
+def _subscribe(printer: BaseBrowserPrinter) -> queue.Queue:
     q: queue.Queue = queue.Queue()
     printer._clients.append(q)
     return q
@@ -35,7 +34,7 @@ class TestPrintStreamEvent(unittest.TestCase):
         return SimpleNamespace(event=evt_dict)
 
     def test_text_delta_empty(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         text = p.print(
             self._event(
@@ -50,7 +49,7 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert _drain(q) == []
 
     def test_text_delta_nonempty_does_not_broadcast(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         text = p.print(
             self._event(
@@ -65,7 +64,7 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert _drain(q) == []
 
     def test_thinking_delta_does_not_broadcast(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         text = p.print(
             self._event(
@@ -80,7 +79,7 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert _drain(q) == []
 
     def test_tool_use_stop_invalid_json(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         p._current_block_type = "tool_use"
         p._tool_name = "Bash"
@@ -95,7 +94,7 @@ class TestPrintStreamEvent(unittest.TestCase):
 
 class TestFormatToolCall(unittest.TestCase):
     def test_truncates_long_extra_values(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         p._format_tool_call("Tool", {"extra_key": "x" * 300})
         events = _drain(q)
@@ -105,7 +104,7 @@ class TestFormatToolCall(unittest.TestCase):
         assert len(extras["extra_key"]) <= 204
 
     def test_with_description(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         p._format_tool_call("Bash", {"description": "Run tests", "command": "pytest"})
         events = _drain(q)
@@ -114,7 +113,7 @@ class TestFormatToolCall(unittest.TestCase):
 
 class TestPrintToolResult(unittest.TestCase):
     def test_truncation(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         long = "x" * (_MAX_RESULT_LEN * 2)
         p.print(long, type="tool_result", is_error=False)
@@ -124,7 +123,7 @@ class TestPrintToolResult(unittest.TestCase):
 
 class TestPrintMessageSystem(unittest.TestCase):
     def test_tool_output_empty(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         msg = SimpleNamespace(subtype="tool_output", data={"content": ""})
         p.print(msg, type="message")
@@ -133,7 +132,7 @@ class TestPrintMessageSystem(unittest.TestCase):
 
 class TestPrintMessageUser(unittest.TestCase):
     def test_blocks_without_is_error_skipped(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         block = SimpleNamespace(text="just text")
         msg = SimpleNamespace(content=[block])
@@ -143,41 +142,16 @@ class TestPrintMessageUser(unittest.TestCase):
 
 class TestPrintMessageDispatch(unittest.TestCase):
     def test_unknown_message_type_no_crash(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         msg = SimpleNamespace(unknown_attr="value")
         p.print(msg, type="message")
         assert _drain(q) == []
 
 
-class TestServerLifecycle(unittest.TestCase):
-    def test_events_endpoint_returns_sse_content_type(self):
-        p = BrowserPrinter()
-        p.start(open_browser=False)
-        try:
-            import http.client
-
-            conn = http.client.HTTPConnection("127.0.0.1", p._port, timeout=3)
-            conn.request("GET", "/events")
-            resp = conn.getresponse()
-            content_type = resp.getheader("content-type")
-            assert content_type is not None and "text/event-stream" in content_type
-            conn.close()
-        finally:
-            p.stop()
-            time.sleep(0.5)
-
-    def test_stop_broadcasts_done(self):
-        p = BrowserPrinter()
-        q = _subscribe(p)
-        p.stop()
-        events = _drain(q)
-        assert any(e["type"] == "done" for e in events)
-
-
 class TestPrint(unittest.TestCase):
     def test_print_broadcasts_text_delta(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         p.print("hello world")
         events = _drain(q)
@@ -186,7 +160,7 @@ class TestPrint(unittest.TestCase):
         assert "hello world" in events[0]["text"]
 
     def test_print_empty_no_broadcast(self):
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         p.print("")
         assert _drain(q) == []
@@ -195,7 +169,7 @@ class TestPrint(unittest.TestCase):
 class TestTokenCallback(unittest.TestCase):
     def test_token_callback_broadcasts_text_delta(self):
         import asyncio
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         asyncio.run(p.token_callback("hello"))
         events = _drain(q)
@@ -204,14 +178,14 @@ class TestTokenCallback(unittest.TestCase):
 
     def test_token_callback_empty_string_no_broadcast(self):
         import asyncio
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         asyncio.run(p.token_callback(""))
         assert _drain(q) == []
 
     def test_token_callback_during_thinking_broadcasts_thinking_delta(self):
         import asyncio
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         p._current_block_type = "thinking"
         q = _subscribe(p)
         asyncio.run(p.token_callback("deep thought"))
@@ -221,7 +195,7 @@ class TestTokenCallback(unittest.TestCase):
 
     def test_token_callback_during_text_broadcasts_text_delta(self):
         import asyncio
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         p._current_block_type = "text"
         q = _subscribe(p)
         asyncio.run(p.token_callback("regular"))
@@ -238,7 +212,7 @@ class TestStreamingFlow(unittest.TestCase):
 
     def test_thinking_block_flow(self):
         import asyncio
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         p.print(
             self._event({
@@ -273,7 +247,7 @@ class TestStreamingFlow(unittest.TestCase):
 
     def test_no_double_broadcast(self):
         import asyncio
-        p = BrowserPrinter()
+        p = BaseBrowserPrinter()
         q = _subscribe(p)
         p.print(
             self._event({

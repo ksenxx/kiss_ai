@@ -168,8 +168,7 @@ class RelentlessAgent(Base):
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
         tools_factory: Callable[[], list[Callable[..., Any]]] | None = None,
         config_path: str = "agent",
     ) -> str:
@@ -187,8 +186,7 @@ class RelentlessAgent(Base):
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
-            print_to_console: Whether to print output to console.
-            print_to_browser: Whether to print output to browser UI.
+            verbose: Whether to print output to console. Defaults to config verbose setting.
             tools_factory: Callable that returns the list of tools for the agent.
             config_path: Dot-separated path to config section (e.g. "agent").
 
@@ -203,9 +201,7 @@ class RelentlessAgent(Base):
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
-        self.set_printer(
-            printer, print_to_console=print_to_console, print_to_browser=print_to_browser,
-        )
+        self.set_printer(printer, verbose=verbose)
 
         tools = tools_factory() if tools_factory else []
 

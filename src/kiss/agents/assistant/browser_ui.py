@@ -327,67 +327,6 @@ HTML_HEAD = r"""<!DOCTYPE html>
 """
 
 
-def build_stream_viewer_html(title: str = "KISS Agent", subtitle: str = "Live Stream") -> str:
-    """Build a self-contained HTML page for the SSE-based stream viewer.
-
-    Args:
-        title: Page title and header text.
-        subtitle: Subtitle shown next to the title in the header.
-
-    Returns:
-        str: Complete HTML document string with embedded CSS and JavaScript.
-    """
-    css = BASE_CSS + OUTPUT_CSS + """
-main{flex:1;overflow-y:auto;padding:20px 28px;scroll-behavior:smooth}
-footer{
-  background:var(--surface);border-top:1px solid var(--border);
-  padding:8px 28px;font-size:12px;color:var(--dim);flex-shrink:0;
-  display:flex;justify-content:space-between;
-}
-"""
-    return HTML_HEAD.format(title=title, css=css) + f"""<body>
-<header>
-  <div class="logo">{title}<span>{subtitle}</span></div>
-  <div class="status"><div class="dot running" id="dot"></div><span id="stxt">Running</span></div>
-</header>
-<main id="out"></main>
-<footer>
-  <span id="evcnt">Events: 0</span>
-  <span id="elapsed">Elapsed: 0s</span>
-</footer>
-<script>
-{EVENT_HANDLER_JS}
-var O=document.getElementById('out'),D=document.getElementById('dot'),
-  ST=document.getElementById('stxt'),EC=document.getElementById('evcnt'),
-  EL=document.getElementById('elapsed');
-var ec=0,auto=true,userScrolled=false,scrollRaf=0,state={{thinkEl:null,txtEl:null,bashPanel:null}};
-var t0=Date.now();
-O.addEventListener('scroll',function(){{
-  var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
-  if(!atBottom)userScrolled=true;
-  if(atBottom)userScrolled=false;
-  auto=!userScrolled;
-}});
-function sb(){{if(auto&&!scrollRaf){{scrollRaf=requestAnimationFrame(function(){{
-  O.scrollTop=O.scrollHeight;scrollRaf=0}})}}}}
-setInterval(function(){{
-  var s=Math.floor((Date.now()-t0)/1000),m=Math.floor(s/60);
-  EL.textContent='Elapsed: '+(m>0?m+'m ':'')+s%60+'s';
-}},1000);
-var src=new EventSource('/events');
-src.onmessage=function(e){{
-  var ev;try{{ev=JSON.parse(e.data)}}catch{{return}}
-  ec++;EC.textContent='Events: '+ec;
-  if(ev.type==='done'){{D.classList.add('done');D.classList.remove('running');ST.textContent='Completed';src.close();return}}
-  handleOutputEvent(ev,O,state);
-  sb();
-}};
-src.onerror=function(){{D.classList.add('done');D.classList.remove('running');ST.textContent='Disconnected'}};
-</script>
-</body>
-</html>"""
-
-
 class BaseBrowserPrinter(Printer):
     def __init__(self) -> None:
         self._clients: list[queue.Queue[dict[str, Any]]] = []

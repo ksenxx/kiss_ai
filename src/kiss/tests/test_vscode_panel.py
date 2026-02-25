@@ -268,7 +268,7 @@ class TestFixedPortLogic(unittest.TestCase):
         assert connected
 
     def test_detects_closed_port(self) -> None:
-        from kiss.core.browser_ui import find_free_port
+        from kiss.agents.assistant.browser_ui import find_free_port
         port = find_free_port()
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.3):

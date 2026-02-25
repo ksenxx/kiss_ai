@@ -2,7 +2,7 @@
 
 import unittest
 
-from kiss.core.useful_tools import search_web
+from kiss.agents.assistant.useful_tools import search_web
 
 
 class TestSearchWeb(unittest.TestCase):

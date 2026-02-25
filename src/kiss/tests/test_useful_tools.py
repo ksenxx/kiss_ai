@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 
-from kiss.core.useful_tools import (
+from kiss.agents.assistant.useful_tools import (
     UsefulTools,
     _extract_command_names,
     _extract_leading_command_name,

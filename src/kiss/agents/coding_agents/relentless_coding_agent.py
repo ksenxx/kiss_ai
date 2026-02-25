@@ -14,8 +14,8 @@ import yaml
 
 import kiss.agents.coding_agents.config as _coding_config  # noqa: F401
 from kiss.agents.assistant.relentless_agent import RelentlessAgent
+from kiss.agents.assistant.useful_tools import UsefulTools
 from kiss.core.printer import Printer
-from kiss.core.useful_tools import UsefulTools
 
 
 class RelentlessCodingAgent(RelentlessAgent):
@@ -47,8 +47,7 @@ class RelentlessCodingAgent(RelentlessAgent):
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
     ) -> str:
         """Run the coding agent with file and bash tools.
 
@@ -62,8 +61,7 @@ class RelentlessCodingAgent(RelentlessAgent):
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
-            print_to_console: Whether to print output to console.
-            print_to_browser: Whether to print output to browser UI.
+            verbose: Whether to print output to console. Defaults to config verbose setting.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -78,8 +76,7 @@ class RelentlessCodingAgent(RelentlessAgent):
             printer=printer,
             max_sub_sessions=max_sub_sessions,
             docker_image=docker_image,
-            print_to_console=print_to_console,
-            print_to_browser=print_to_browser,
+            verbose=verbose,
             tools_factory=self._get_tools,
             config_path="coding_agent.relentless_coding_agent",
         )
@@ -229,8 +226,7 @@ normal operation — test with address sanitizer).
             model_name="claude-sonnet-4-5",
             max_steps=15,
             work_dir=work_dir,
-            print_to_browser=True,
-            print_to_console=True,
+            verbose=True,
         )
     finally:
         os.chdir(old_cwd)

@@ -20,8 +20,7 @@ from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.assistant.relentless_agent import RelentlessAgent
-from kiss.core.browser_ui import (
+from kiss.agents.assistant.browser_ui import (
     BASE_CSS,
     EVENT_HANDLER_JS,
     HTML_HEAD,
@@ -29,6 +28,7 @@ from kiss.core.browser_ui import (
     BaseBrowserPrinter,
     find_free_port,
 )
+from kiss.agents.assistant.relentless_agent import RelentlessAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_most_expensive_model
 

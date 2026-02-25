@@ -16,9 +16,8 @@ from yaml.nodes import ScalarNode
 
 from kiss.core import config as config_module
 from kiss.core.models.model_info import get_max_context_length
-from kiss.core.print_to_browser import BrowserPrinter
 from kiss.core.print_to_console import ConsolePrinter
-from kiss.core.printer import MultiPrinter, Printer
+from kiss.core.printer import Printer
 from kiss.core.utils import config_to_dict
 
 
@@ -91,7 +90,6 @@ class Base:
     total_tokens_used: int
     step_count: int
     printer: Printer | None
-    browser_printer: BrowserPrinter | None
 
     def __init__(self, name: str) -> None:
         """Initialize a Base agent instance.
@@ -107,43 +105,22 @@ class Base:
     def set_printer(
         self,
         printer: Printer | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
     ) -> None:
-        """Configure the output printer(s) for this agent.
+        """Configure the output printer for this agent.
 
         Args:
             printer: An existing Printer instance to use directly. If provided,
-                print_to_console and print_to_browser are ignored.
-            print_to_console: Whether to print to the console. Defaults to the
-                agent config value if None.
-            print_to_browser: Whether to stream output to a browser viewer.
-                Defaults to the agent config value if None.
+                verbose is ignored.
+            verbose: Whether to print to the console. If None,
+                uses the verbose config value.
         """
         self.printer: Printer | None = None
-        self.browser_printer: BrowserPrinter | None = None
         if config_module.DEFAULT_CONFIG.agent.verbose:
             if printer:
                 self.printer = printer
-            else:
-                cfg = config_module.DEFAULT_CONFIG.agent
-                to_console = (
-                    print_to_console if print_to_console is not None
-                    else cfg.print_to_console
-                )
-                to_browser = (
-                    print_to_browser if print_to_browser is not None
-                    else cfg.print_to_browser
-                )
-                printers: list[Printer] = []
-                if to_browser:
-                    self.browser_printer = BrowserPrinter()
-                    self.browser_printer.start()
-                    printers.append(self.browser_printer)
-                if to_console:
-                    printers.append(ConsolePrinter())
-                if printers:
-                    self.printer = MultiPrinter(printers)
+            elif verbose is not False:
+                self.printer = ConsolePrinter()
 
 
     def _build_state_dict(self) -> dict[str, Any]:

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote_plus
 
-from kiss.core.web_use_tool import WebUseTool
+from kiss.agents.assistant.web_use_tool import WebUseTool
 
 BROWSER_PROFILE = str(Path.home() / ".kiss" / "browser_profile")
 

@@ -3,7 +3,7 @@
 import re
 import time
 
-from kiss.core.web_use_tool import KISS_PROFILE_DIR, WebUseTool
+from kiss.agents.assistant.web_use_tool import KISS_PROFILE_DIR, WebUseTool
 
 
 def find_id(tree: str, pattern: str) -> int:
