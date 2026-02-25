@@ -268,6 +268,109 @@ def _clear_branch_info(data_dir: str) -> None:
             pass
 
 
+def _has_branch_changes(work_dir: str, original_branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "diff", "--name-only", original_branch],
+        cwd=work_dir, capture_output=True, text=True,
+    )
+    if result.stdout.strip():
+        return True
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=work_dir, capture_output=True, text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def _prepare_merge_view(work_dir: str, data_dir: str, port: int) -> dict[str, Any]:
+    branch_info = _load_branch_info(data_dir)
+    if branch_info.get("original_branch"):
+        base = branch_info["original_branch"]
+    else:
+        base = "main"
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "main"],
+            capture_output=True, text=True, cwd=work_dir,
+        )
+        if result.returncode != 0:
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify", "master"],
+                capture_output=True, text=True, cwd=work_dir,
+            )
+            if result.returncode != 0:
+                return {"error": "Neither 'main' nor 'master' branch found"}
+            base = "master"
+    result = subprocess.run(
+        ["git", "diff", "--name-only", base],
+        capture_output=True, text=True, cwd=work_dir,
+    )
+    changed = [f for f in result.stdout.strip().split("\n") if f]
+    if not changed:
+        return {"error": "No changes from " + base}
+    merge_dir = Path(data_dir) / "merge-temp"
+    if merge_dir.exists():
+        shutil.rmtree(merge_dir)
+    manifest_files = []
+    for fname in changed:
+        r = subprocess.run(
+            ["git", "show", f"{base}:{fname}"],
+            capture_output=True, text=True, cwd=work_dir,
+        )
+        if r.returncode != 0:
+            continue
+        base_path = merge_dir / fname
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        base_path.write_text(r.stdout)
+        dr = subprocess.run(
+            ["git", "diff", "--unified=0", base, "--", fname],
+            capture_output=True, text=True, cwd=work_dir,
+        )
+        hunks: list[dict[str, int]] = []
+        for diff_line in dr.stdout.split("\n"):
+            hm = re.match(
+                r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+                diff_line,
+            )
+            if hm:
+                hunks.append({
+                    "bs": int(hm.group(1)) - 1,
+                    "bc": int(hm.group(2)) if hm.group(2) is not None else 1,
+                    "cs": int(hm.group(3)) - 1,
+                    "cc": int(hm.group(4)) if hm.group(4) is not None else 1,
+                })
+        manifest_files.append({
+            "name": fname,
+            "base": str(base_path),
+            "current": str(Path(work_dir) / fname),
+            "hunks": hunks,
+        })
+    manifest = Path(data_dir) / "pending-merge.json"
+    manifest.write_text(json.dumps({
+        "branch": base, "files": manifest_files,
+        "callback_port": port,
+    }))
+    return {"status": "opened", "count": len(manifest_files)}
+
+
+def _cleanup_temp_branch(work_dir: str, data_dir: str) -> None:
+    branch_info = _load_branch_info(data_dir)
+    if not branch_info:
+        return
+    original = branch_info.get("original_branch", "")
+    temp = branch_info.get("temp_branch", "")
+    if original:
+        subprocess.run(
+            ["git", "checkout", original],
+            cwd=work_dir, capture_output=True,
+        )
+    if temp:
+        subprocess.run(
+            ["git", "branch", "-D", temp],
+            cwd=work_dir, capture_output=True,
+        )
+    _clear_branch_info(data_dir)
+
+
 class _StopRequested(BaseException):
     pass
 
@@ -1855,6 +1958,16 @@ def run_chatbot(
                 refresh_proposed_tasks()
             except Exception:
                 pass
+            try:
+                branch_info = _load_branch_info(cs_data_dir)
+                if branch_info:
+                    original = branch_info.get("original_branch", "")
+                    if original and _has_branch_changes(actual_work_dir, original):
+                        _prepare_merge_view(actual_work_dir, cs_data_dir, port)
+                    else:
+                        _cleanup_temp_branch(actual_work_dir, cs_data_dir)
+            except Exception:
+                pass
 
     def stop_agent() -> bool:
         nonlocal agent_thread
@@ -2065,77 +2178,9 @@ def run_chatbot(
             )
             if result.returncode != 0:
                 return JSONResponse({"error": "Not a git repository"})
-            branch_info = _load_branch_info(cs_data_dir)
-            if branch_info.get("original_branch"):
-                base = branch_info["original_branch"]
-            else:
-                base = "main"
-                result = subprocess.run(
-                    ["git", "rev-parse", "--verify", "main"],
-                    capture_output=True, text=True, cwd=actual_work_dir,
-                )
-                if result.returncode != 0:
-                    result = subprocess.run(
-                        ["git", "rev-parse", "--verify", "master"],
-                        capture_output=True, text=True, cwd=actual_work_dir,
-                    )
-                    if result.returncode != 0:
-                        return JSONResponse(
-                            {"error": "Neither 'main' nor 'master' branch found"},
-                        )
-                    base = "master"
-            result = subprocess.run(
-                ["git", "diff", "--name-only", base],
-                capture_output=True, text=True, cwd=actual_work_dir,
+            return JSONResponse(
+                _prepare_merge_view(actual_work_dir, cs_data_dir, port),
             )
-            changed = [f for f in result.stdout.strip().split("\n") if f]
-            if not changed:
-                return JSONResponse({"error": "No changes from " + base})
-            merge_dir = Path(cs_data_dir) / "merge-temp"
-            if merge_dir.exists():
-                shutil.rmtree(merge_dir)
-            manifest_files = []
-            for fname in changed:
-                r = subprocess.run(
-                    ["git", "show", f"{base}:{fname}"],
-                    capture_output=True, text=True, cwd=actual_work_dir,
-                )
-                if r.returncode != 0:
-                    continue
-                base_path = merge_dir / fname
-                base_path.parent.mkdir(parents=True, exist_ok=True)
-                base_path.write_text(r.stdout)
-                dr = subprocess.run(
-                    ["git", "diff", "--unified=0", base, "--", fname],
-                    capture_output=True, text=True, cwd=actual_work_dir,
-                )
-                hunks: list[dict[str, int]] = []
-                for diff_line in dr.stdout.split("\n"):
-                    hm = re.match(
-                        r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
-                        diff_line,
-                    )
-                    if hm:
-                        hunks.append({
-                            "bs": int(hm.group(1)) - 1,
-                            "bc": int(hm.group(2)) if hm.group(2) is not None else 1,
-                            "cs": int(hm.group(3)) - 1,
-                            "cc": int(hm.group(4)) if hm.group(4) is not None else 1,
-                        })
-                manifest_files.append({
-                    "name": fname,
-                    "base": str(base_path),
-                    "current": str(Path(actual_work_dir) / fname),
-                    "hunks": hunks,
-                })
-            manifest = Path(cs_data_dir) / "pending-merge.json"
-            manifest.write_text(json.dumps({
-                "branch": base, "files": manifest_files,
-                "callback_port": port,
-            }))
-            return JSONResponse({
-                "status": "opened", "count": len(manifest_files),
-            })
         except Exception as e:
             return JSONResponse({"error": str(e)})
 
