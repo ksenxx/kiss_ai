@@ -74,6 +74,7 @@ GENERAL_ASSISTANT_INSTRUCTIONS = """
 - fetch_url(), search_web() to navigate, search, and read web pages.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
+- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 """
 
 RELLENTLESS_CODING_ASSISTANT_INSTRUCTIONS = """
@@ -83,6 +84,7 @@ RELLENTLESS_CODING_ASSISTANT_INSTRUCTIONS = """
 - fetch_url(), search_web() to navigate, search, and read web pages.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
+- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 """
 
 class Base:
