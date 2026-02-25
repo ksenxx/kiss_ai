@@ -116,6 +116,9 @@ class RelentlessAgent(Base):
         for trial in range(self.max_sub_sessions):
             executor = KISSAgent(f"{self.name} Trial-{trial}")
             try:
+                model_config = {}
+                if self.system_instructions:
+                    model_config["system_instructions"] = self.system_instructions
                 result = executor.run(
                     model_name=self.model_name,
                     prompt_template=TASK_PROMPT,
@@ -128,6 +131,7 @@ class RelentlessAgent(Base):
                     tools=all_tools,
                     max_steps=self.max_steps,
                     max_budget=self.max_budget,
+                    model_config=model_config or None,
                     printer=self.printer,
                 )
             except Exception as e:
@@ -155,6 +159,7 @@ class RelentlessAgent(Base):
     def run(
         self,
         model_name: str | None = None,
+        system_instructions: str = "",
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
         max_steps: int | None = None,
@@ -172,6 +177,8 @@ class RelentlessAgent(Base):
 
         Args:
             model_name: LLM model to use. Defaults to config value.
+            system_instructions: System-level instructions passed to the underlying LLM
+                via model_config. Defaults to empty string (no system instructions).
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
             max_steps: Maximum steps per sub-session. Defaults to config value.
@@ -192,6 +199,7 @@ class RelentlessAgent(Base):
             model_name, max_sub_sessions, max_steps, max_budget,
             work_dir, docker_image, config_path,
         )
+        self.system_instructions = system_instructions
         self.prompt_template = prompt_template
         self.arguments = arguments or {}
         self.task_description = prompt_template.format(**self.arguments)
