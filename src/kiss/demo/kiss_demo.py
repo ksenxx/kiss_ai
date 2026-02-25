@@ -34,8 +34,7 @@ def main() -> None:
         tools=[simple_calculator],
         max_steps=20,
         max_budget=1.0,
-        print_to_browser=True,
-        print_to_console=True,
+        verbose=True,
     )
 
 

@@ -198,7 +198,7 @@ print(f"Result: {result}")
 - **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking
 - **Configurable Sub-Sessions**: Set high sub-session counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
-- **Built-in Tools**: Bash, Read, Edit, Write, search_web, and fetch_url tools for file and web operations
+- **Built-in Tools**: Bash, Read, Edit, Write tools for file operations; search_web and fetch_url available for web operations
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
 ## 💬 Browser-Based Assistant
@@ -386,6 +386,9 @@ uv sync --group claude    # Core + Anthropic Claude
 uv sync --group openai    # Core + OpenAI Compatible Models
 uv sync --group gemini    # Core + Google Gemini
 
+# Assistant agent tools (web tools, browser UI)
+uv sync --group assistant
+
 # Docker support (for running agents in isolated containers)
 uv sync --group docker
 
@@ -403,10 +406,11 @@ uv sync --group claude --group dev
 
 | Group | Description | Key Packages |
 |-------|-------------|--------------|
-| `core` | Minimal core module | pydantic, rich, requests, beautifulsoup4, playwright, uvicorn, starlette |
+| `core` | Minimal core module | pydantic, pydantic-settings, pyyaml, rich |
 | `claude` | Core + Anthropic | core + anthropic |
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
+| `assistant` | Agent tools & browser UI | requests, beautifulsoup4, playwright, uvicorn, starlette |
 | `docker` | Docker integration | docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
@@ -549,6 +553,9 @@ kiss/
 │   │   │   ├── assistant_agent.py      # AssistantAgent with coding and browser automation
 │   │   │   ├── assistant.py            # Browser-based assistant UI
 │   │   │   ├── relentless_agent.py     # RelentlessAgent base class
+│   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
+│   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit, search_web, fetch_url
+│   │   │   ├── web_use_tool.py         # WebUseTool class with Playwright-based browser automation
 │   │   │   └── config.py               # Assistant agent configuration
 │   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
@@ -583,14 +590,10 @@ kiss/
 │   │   ├── kiss_agent.py      # KISS agent with native function calling (supports multi-tool execution)
 │   │   ├── printer.py         # Abstract Printer base class and MultiPrinter
 │   │   ├── print_to_console.py # ConsolePrinter: Rich-formatted terminal output
-│   │   ├── print_to_browser.py # BrowserPrinter: SSE streaming to browser UI
-│   │   ├── browser_ui.py      # Browser UI base components and utilities
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
-│   │   ├── useful_tools.py    # UsefulTools class with path-restricted Read, Write, Bash, Edit, search_web, fetch_url
-│   │   ├── web_use_tool.py    # WebUseTool class with Playwright-based browser automation
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface with TokenCallback streaming support
 │   │       ├── gemini_model.py    # Gemini model implementation
@@ -618,7 +621,7 @@ kiss/
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
 │   ├── demo/            # Demo scripts
-│   │   └── kiss_demo.py               # Interactive demo with streaming output to terminal and browser
+│   │   └── kiss_demo.py               # Interactive demo with streaming output
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── generate_api_docs.py        # API documentation generator
@@ -645,7 +648,7 @@ kiss/
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_a_model.py                    # Tests for model implementations
 │   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
-│   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter browser output
+│   │   ├── test_print_to_browser.py         # Tests for BaseBrowserPrinter browser output
 │   │   ├── test_search_web.py
 │   │   ├── test_useful_tools.py
 │   │   ├── test_web_use_tool.py             # Tests for WebUseTool browser automation
@@ -703,9 +706,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `debug`: Enable debug mode (default: False)
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
-  - `use_web`: Automatically add web browsing and search tool if enabled (default: False)
-  - `print_to_console`: Enable ConsolePrinter for Rich terminal output (default: True). Can be overridden per-call via the `print_to_console` parameter on `run()`.
-  - `print_to_browser`: Enable BrowserPrinter for live browser UI output (default: False). Can be overridden per-call via the `print_to_browser` parameter on `run()`.
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
   - `model_name`: Model for task execution (default: "claude-opus-4-6")

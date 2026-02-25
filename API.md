@@ -16,12 +16,12 @@
       - [`kiss.core.models.gemini_model`](#kisscoremodelsgemini_model)
     - [`kiss.core.printer`](#kisscoreprinter)
     - [`kiss.core.print_to_console`](#kisscoreprint_to_console)
-    - [`kiss.core.print_to_browser`](#kisscoreprint_to_browser)
-    - [`kiss.core.browser_ui`](#kisscorebrowser_ui)
-    - [`kiss.core.useful_tools`](#kisscoreuseful_tools)
-    - [`kiss.core.web_use_tool`](#kisscoreweb_use_tool)
+      - [`kiss.agents.assistant.browser_ui`](#kissagentsassistantbrowser_ui)
+      - [`kiss.agents.assistant.useful_tools`](#kissagentsassistantuseful_tools)
+      - [`kiss.agents.assistant.web_use_tool`](#kissagentsassistantweb_use_tool)
     - [`kiss.core.utils`](#kisscoreutils)
   - [`kiss.agents`](#kissagents)
+    - [`kiss.agents.kiss`](#kissagentskiss)
     - [`kiss.agents.coding_agents`](#kissagentscoding_agents)
       - [`kiss.agents.coding_agents.relentless_coding_agent`](#kissagentscoding_agentsrelentless_coding_agent)
       - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
@@ -70,7 +70,7 @@ ______________________________________________________________________
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None) -> str`
 
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -81,8 +81,7 @@ ______________________________________________________________________
   - `max_budget`: The maximum budget to spend. Default is DEFAULT_CONFIG.agent.max_agent_budget.
   - `model_config`: The model configuration to use for the agent. Default is None.
   - `printer`: Optional printer for streaming output. Default is None.
-  - `print_to_console`: Override config to enable/disable console printing. Default is None (uses config).
-  - `print_to_browser`: Override config to enable/disable browser printing. Default is None (uses config).
+  - `verbose`: Whether to print output to console. Default is None (uses config verbose setting).
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
@@ -435,21 +434,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.core.print_to_browser` — *Browser output streaming for KISS agents via SSE.*
-
-##### `class BrowserPrinter(BaseBrowserPrinter)`
-
-**Constructor:** `BrowserPrinter() -> None`
-
-- **start** — Launch a local SSE server and optionally open the browser viewer.<br/>`start(open_browser: bool = True) -> None`
-
-  - `open_browser`: If True, automatically opens the stream viewer in the default web browser.
-
-- **stop** — Broadcast a done event to all clients and shut down the SSE server.<br/>`stop() -> None`
-
-______________________________________________________________________
-
-#### `kiss.core.browser_ui` — *Shared browser UI components for KISS agent viewers.*
+#### `kiss.agents.assistant.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
 ##### `class BaseBrowserPrinter(Printer)`
 
@@ -484,15 +469,9 @@ ______________________________________________________________________
 
 - **Returns:** int: A free port number.
 
-**`build_stream_viewer_html`** — Build a self-contained HTML page for the SSE-based stream viewer.<br/>`def build_stream_viewer_html(title: str = 'KISS Agent', subtitle: str = 'Live Stream') -> str`
-
-- `title`: Page title and header text.
-- `subtitle`: Subtitle shown next to the title in the header.
-- **Returns:** str: Complete HTML document string with embedded CSS and JavaScript.
-
 ______________________________________________________________________
 
-#### `kiss.core.useful_tools` — *Useful tools for agents: file editing, bash execution, web search, and URL fetching.*
+#### `kiss.agents.assistant.useful_tools` — *Useful tools for agents: file editing, bash execution, web search, and URL fetching.*
 
 ##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
@@ -550,7 +529,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.core.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
+#### `kiss.agents.assistant.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
 
 ##### `class WebUseTool` — Browser automation tool using Playwright with zero JS injection.
 
@@ -672,6 +651,10 @@ ______________________________________________________________________
 from kiss.agents import prompt_refiner_agent, get_run_simple_coding_agent, run_bash_task_in_sandboxed_ubuntu_latest
 ```
 
+______________________________________________________________________
+
+#### `kiss.agents.kiss` — *Useful agents for the KISS Agent Framework.*
+
 **`prompt_refiner_agent`** — Refines the prompt template based on the agent's trajectory summary.<br/>`def prompt_refiner_agent(original_prompt_template: str, previous_prompt_template: str, agent_trajectory_summary: str, model_name: str) -> str`
 
 - `original_prompt_template`: The original prompt template.
@@ -680,16 +663,16 @@ from kiss.agents import prompt_refiner_agent, get_run_simple_coding_agent, run_b
 - `model_name`: The name of the model to use for the agent.
 - **Returns:** str: The refined prompt template.
 
-**`get_run_simple_coding_agent`** — Return a function that runs a simple coding agent with a test function.<br/>`def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]`
-
-- `test_fn`: The test function to use for the agent.
-- **Returns:** Callable\[..., str\]: A function that runs a simple coding agent with a test function. Accepts keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
-
 **`run_bash_task_in_sandboxed_ubuntu_latest`** — Run a bash task in a sandboxed Ubuntu latest container.<br/>`def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str`
 
 - `task`: The task to run.
 - `model_name`: The name of the model to use for the agent.
 - **Returns:** str: The result of the task.
+
+**`get_run_simple_coding_agent`** — Return a function that runs a simple coding agent with a test function.<br/>`def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]`
+
+- `test_fn`: The test function to use for the agent.
+- **Returns:** Callable\[..., str\]: A function that runs a simple coding agent with a test function. Accepts keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
 
 ______________________________________________________________________
 
@@ -705,11 +688,10 @@ from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS
 
 - `name`: The name identifier for the agent.
 
-- **set_printer** — Configure the output printer(s) for this agent.<br/>`set_printer(printer: Printer | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> None`
+- **set_printer** — Configure the output printer for this agent.<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
 
-  - `printer`: An existing Printer instance to use directly. If provided, print_to_console and print_to_browser are ignored.
-  - `print_to_console`: Whether to print to the console. Defaults to the agent config value if None.
-  - `print_to_browser`: Whether to stream output to a browser viewer. Defaults to the agent config value if None.
+  - `printer`: An existing Printer instance to use directly. If provided, verbose is ignored.
+  - `verbose`: Whether to print to the console. If None, uses the verbose config value.
 
 - **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
 
@@ -723,7 +705,7 @@ ______________________________________________________________________
 
 **Constructor:** `RelentlessCodingAgent(name: str) -> None`
 
-- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
+- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
@@ -733,8 +715,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `print_to_console`: Whether to print output to console.
-  - `print_to_browser`: Whether to print output to browser UI.
+  - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ______________________________________________________________________
@@ -762,9 +743,10 @@ ______________________________________________________________________
   - `tools`: List of callable tools available to the agent during execution.
   - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
-- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, config_path: str = 'agent') -> str`
+- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, config_path: str = 'agent') -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
+  - `system_instructions`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
@@ -773,8 +755,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `print_to_console`: Whether to print output to console.
-  - `print_to_browser`: Whether to print output to browser UI.
+  - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `tools_factory`: Callable that returns the list of tools for the agent.
   - `config_path`: Dot-separated path to config section (e.g. "agent").
   - **Returns:** YAML string with 'success' and 'summary' keys.
@@ -792,7 +773,7 @@ ______________________________________________________________________
 
 **Constructor:** `AssistantAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, print_to_console: bool | None = None, print_to_browser: bool | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
@@ -803,8 +784,7 @@ ______________________________________________________________________
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
   - `headless`: Whether to run the browser in headless mode. Defaults to config value.
-  - `print_to_console`: Whether to print output to console.
-  - `print_to_browser`: Whether to print output to browser UI.
+  - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ______________________________________________________________________
