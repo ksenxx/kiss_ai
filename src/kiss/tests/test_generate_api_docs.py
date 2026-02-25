@@ -424,7 +424,6 @@ class TestDiscoverModules:
         assert "kiss.agents" in names
         assert "kiss.agents.gepa" in names
         assert "kiss.docker" in names
-        assert "kiss.multiprocessing" in names
         assert "kiss.rag" in names
 
     def test_excludes_deprecated(self) -> None:

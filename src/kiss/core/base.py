@@ -37,44 +37,53 @@ CODING_INSTRUCTIONS = """
 - Each function should do one thing well
 - Use clear, descriptive names
 - NO need to write documentations or comments unless absolutely necessary
+- Public methods MUST have full documentation.
 - Check and test the code you have written
+
+## Testing Requirements
+- Run lint and typecheckers and fix any lint and typecheck errors
+- Generate comprehensive tests so that you achieve 100% branch coverage
+- Tests MUST NOT use mocks, patches, or any form of test doubles
+- Integration tests are HIGHLY encouraged
+- You MUST not add tests that are redundant or duplicate of existing
+  tests or does not add new coverage over existing tests
+- Generate meaningful stress tests for the code if you are
+  optimizing the code for performance
+- Each test should be independent and verify actual behavior
+
+## Use tools when you need to:
+- Look up API documentation or library usage from the internet
+- Find examples of similar implementations
+- Understand existing code in the project
+
+## After you have implemented the task, aggresively and carefully simplify and clean up the code
+ - Remove unnessary object/struct attributes, variables, config variables
+ - Avoid object/struct attribute redirections
+ - Remove unnessary conditional checks
+ - Remove redundant and duplicate code
+ - Remove unnecessary comments
+ - Make sure that the code is still working correctly
+ - Simplify and clean up the test code
 """
 
-# ## Testing Requirements
-# - Run lint and typecheckers and fix any lint and typecheck errors
-# - Generate comprehensive tests so that you achieve 100% branch coverage
-# - Tests MUST NOT use mocks, patches, or any form of test doubles
-# - Integration tests are highly encouraged
-# - You MUST not add tests that are redundant or duplicate of existing
-#   tests or does not add new coverage over existing tests
-# - Generate meaningful stress tests for the code if you are
-#   optimizing the code for performance
-# - Test with real inputs and verify real outputs
-# - Test edge cases: empty inputs, None values, boundary conditions
-# - Test error conditions with actual invalid inputs
-# - Each test should be independent and verify actual behavior
+GENERAL_ASSISTANT_INSTRUCTIONS = """
+# Rules
+- Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
+- Use bounded poll loops, never unbounded waits.
+- Use go_to_url() for browser tool,
+- fetch_url(), search_web() to navigate, search, and read web pages.
+- Call finish(success=True, summary="detailed summary of what was accomplished")
+  immediately when task is complete.
+"""
 
-# ## Code Structure
-# - Main implementation code first
-# - Test code in a separate section using unittest or pytest
-# - Include a __main__ block to run tests
-# - Do not use 'exit' for early termination, rather throw an exception.
-
-# ## Use tools when you need to:
-# - Look up API documentation or library usage
-# - Find examples of similar implementations
-# - Understand existing code in the project
-
-# ## After you have implemented the task, aggresively and carefully simplify and clean up the code
-#  - Remove unnessary object/struct attributes, variables, config variables
-#  - Avoid object/struct attribute redirections
-#  - Remove unnessary conditional checks
-#  - Remove redundant and duplicate code
-#  - Remove unnecessary comments
-#  - Make sure that the code is still working correctly
-#  - Simplify and clean up the test code
-
-
+RELLENTLESS_CODING_ASSISTANT_INSTRUCTIONS = """
+# Rules
+- Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
+- Use bounded poll loops, never unbounded waits.
+- fetch_url(), search_web() to navigate, search, and read web pages.
+- Call finish(success=True, summary="detailed summary of what was accomplished")
+  immediately when task is complete.
+"""
 
 class Base:
     """Base class for all KISS agents with common state management and persistence."""

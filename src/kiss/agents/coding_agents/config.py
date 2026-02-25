@@ -10,6 +10,10 @@ class RelentlessCodingAgentConfig(BaseModel):
         default="claude-opus-4-6",
         description="LLM model to use",
     )
+    summarizer_model_name: str = Field(
+        default="claude-haiku-4-5",
+        description="LLM model to use for summarizing trajectories on failure",
+    )
     max_steps: int = Field(
         default=25,
         description="Maximum steps for the Relentless Coding Agent",
@@ -21,6 +25,10 @@ class RelentlessCodingAgentConfig(BaseModel):
     max_sub_sessions: int = Field(
         default=200,
         description="Maximum number of sub-sessions for auto-continuation",
+    )
+    verbose: bool = Field(
+        default=False,
+        description="Enable verbose output",
     )
 
 

@@ -5,17 +5,14 @@
 
 """KISS agents package with pre-built agent implementations."""
 
-from typing import Any
+from kiss.agents.kiss import (
+    get_run_simple_coding_agent,
+    prompt_refiner_agent,
+    run_bash_task_in_sandboxed_ubuntu_latest,
+)
 
 __all__ = [
     "prompt_refiner_agent",
     "get_run_simple_coding_agent",
     "run_bash_task_in_sandboxed_ubuntu_latest",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    if name in __all__:
-        from kiss.agents import kiss
-        return getattr(kiss, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

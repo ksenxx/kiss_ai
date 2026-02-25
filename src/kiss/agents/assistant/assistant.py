@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import types
+import uuid
 import webbrowser
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -226,6 +227,47 @@ def _scan_files(work_dir: str) -> list[str]:
     return paths
 
 
+def _get_current_branch(work_dir: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, cwd=work_dir,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _save_branch_info(data_dir: str, original_branch: str, temp_branch: str) -> None:
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    (Path(data_dir) / "branch-info.json").write_text(json.dumps({
+        "original_branch": original_branch,
+        "temp_branch": temp_branch,
+    }))
+
+
+def _load_branch_info(data_dir: str) -> dict[str, str]:
+    info_file = Path(data_dir) / "branch-info.json"
+    if info_file.exists():
+        try:
+            data: dict[str, str] = json.loads(info_file.read_text())
+            return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _clear_branch_info(data_dir: str) -> None:
+    info_file = Path(data_dir) / "branch-info.json"
+    if info_file.exists():
+        try:
+            info_file.unlink()
+        except OSError:
+            pass
+
+
 class _StopRequested(BaseException):
     pass
 
@@ -291,6 +333,7 @@ function activate(ctx){
     overviewRulerColor:'rgba(34,197,94,0.6)',
     overviewRulerLane:vscode.OverviewRulerLane.Left
   });
+  var callbackPort=0;
   var ms={};
   var clFire=new vscode.EventEmitter();
   ctx.subscriptions.push(vscode.languages.registerCodeLensProvider({scheme:'file'},{
@@ -327,7 +370,7 @@ function activate(ctx){
     var s=ms[fp];if(!s)return;
     s.hunks.splice(idx,1);
     if(!s.hunks.length)delete ms[fp];
-    refreshDeco(fp);clFire.fire();
+    refreshDeco(fp);clFire.fire();checkAllDone();
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectChange',async function(fp,idx){
     var s=ms[fp];if(!s)return;
@@ -347,8 +390,23 @@ function activate(ctx){
     s.hunks.splice(idx,1);
     for(var i=idx;i<s.hunks.length;i++)s.hunks[i].cs+=diff;
     if(!s.hunks.length)delete ms[fp];
-    refreshDeco(fp);clFire.fire();
+    refreshDeco(fp);clFire.fire();checkAllDone();
   }));
+  function checkAllDone(){
+    if(Object.keys(ms).length>0||!callbackPort)return;
+    var cp=callbackPort;callbackPort=0;
+    vscode.workspace.saveAll(false).then(function(){
+      var http=require('http');
+      var req=http.request({hostname:'127.0.0.1',port:cp,path:'/merge-complete',method:'POST',
+        headers:{'Content-Type':'application/json'}},function(){
+        vscode.window.showInformationMessage('Merge complete! Committed to original branch.');
+      });
+      req.on('error',function(e){
+        vscode.window.showWarningMessage('Failed to complete merge: '+e.message);
+      });
+      req.end();
+    });
+  }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
     for(var fp in ms)refreshDeco(fp);
   }));
@@ -363,6 +421,7 @@ function activate(ctx){
   },800);
   ctx.subscriptions.push({dispose:function(){clearInterval(iv)}});
   async function openMerge(data){
+    callbackPort=data.callback_port||0;
     for(var fp in ms){
       vscode.window.visibleTextEditors.forEach(function(ed){
         if(ed.document.uri.fsPath===fp)ed.setDecorations(greenDeco,[]);
@@ -1758,6 +1817,14 @@ def run_chatbot(
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
             printer.broadcast({"type": "clear"})
+            original_branch = _get_current_branch(actual_work_dir)
+            if original_branch and original_branch != "HEAD":
+                temp_branch = f"kiss-{uuid.uuid4().hex[:8]}"
+                _save_branch_info(cs_data_dir, original_branch, temp_branch)
+                subprocess.run(
+                    ["git", "checkout", "-b", temp_branch],
+                    cwd=actual_work_dir, capture_output=True,
+                )
             agent = agent_factory("Chatbot")
             result = agent.run(
                 prompt_template=task,
@@ -1998,21 +2065,25 @@ def run_chatbot(
             )
             if result.returncode != 0:
                 return JSONResponse({"error": "Not a git repository"})
-            base = "main"
-            result = subprocess.run(
-                ["git", "rev-parse", "--verify", "main"],
-                capture_output=True, text=True, cwd=actual_work_dir,
-            )
-            if result.returncode != 0:
+            branch_info = _load_branch_info(cs_data_dir)
+            if branch_info.get("original_branch"):
+                base = branch_info["original_branch"]
+            else:
+                base = "main"
                 result = subprocess.run(
-                    ["git", "rev-parse", "--verify", "master"],
+                    ["git", "rev-parse", "--verify", "main"],
                     capture_output=True, text=True, cwd=actual_work_dir,
                 )
                 if result.returncode != 0:
-                    return JSONResponse(
-                        {"error": "Neither 'main' nor 'master' branch found"},
+                    result = subprocess.run(
+                        ["git", "rev-parse", "--verify", "master"],
+                        capture_output=True, text=True, cwd=actual_work_dir,
                     )
-                base = "master"
+                    if result.returncode != 0:
+                        return JSONResponse(
+                            {"error": "Neither 'main' nor 'master' branch found"},
+                        )
+                    base = "master"
             result = subprocess.run(
                 ["git", "diff", "--name-only", base],
                 capture_output=True, text=True, cwd=actual_work_dir,
@@ -2060,10 +2131,49 @@ def run_chatbot(
             manifest = Path(cs_data_dir) / "pending-merge.json"
             manifest.write_text(json.dumps({
                 "branch": base, "files": manifest_files,
+                "callback_port": port,
             }))
             return JSONResponse({
                 "status": "opened", "count": len(manifest_files),
             })
+        except Exception as e:
+            return JSONResponse({"error": str(e)})
+
+    async def merge_complete(request: Request) -> JSONResponse:
+        try:
+            branch_info = _load_branch_info(cs_data_dir)
+            if not branch_info:
+                return JSONResponse({"error": "No branch info found"})
+            original_branch = branch_info["original_branch"]
+            temp_branch = branch_info["temp_branch"]
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=actual_work_dir, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "Reviewed agent changes"],
+                cwd=actual_work_dir, capture_output=True,
+            )
+            result = subprocess.run(
+                ["git", "checkout", original_branch],
+                cwd=actual_work_dir, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                return JSONResponse(
+                    {"error": f"Failed to checkout {original_branch}: {result.stderr}"},
+                )
+            result = subprocess.run(
+                ["git", "merge", temp_branch, "-m", "Merge reviewed agent changes"],
+                cwd=actual_work_dir, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                return JSONResponse({"error": f"Merge failed: {result.stderr}"})
+            subprocess.run(
+                ["git", "branch", "-D", temp_branch],
+                cwd=actual_work_dir, capture_output=True,
+            )
+            _clear_branch_info(cs_data_dir)
+            return JSONResponse({"status": "completed", "branch": original_branch})
         except Exception as e:
             return JSONResponse({"error": str(e)})
 
@@ -2078,6 +2188,7 @@ def run_chatbot(
         Route("/proposed_tasks", proposed_tasks_endpoint),
         Route("/models", models_endpoint),
         Route("/merge-open", merge_open, methods=["POST"]),
+        Route("/merge-complete", merge_complete, methods=["POST"]),
     ])
 
     threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
