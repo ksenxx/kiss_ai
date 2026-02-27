@@ -360,9 +360,13 @@ class GeminiModel(Model):
             (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
         """
         if hasattr(response, "usage_metadata") and response.usage_metadata:
-            prompt_tokens = response.usage_metadata.prompt_token_count or 0
-            output_tokens = response.usage_metadata.candidates_token_count or 0
-            return prompt_tokens, output_tokens, 0, 0
+            um = response.usage_metadata
+            prompt_tokens = um.prompt_token_count or 0
+            output_tokens = um.candidates_token_count or 0
+            thoughts_tokens = getattr(um, "thoughts_token_count", 0) or 0
+            output_tokens += thoughts_tokens
+            cached_tokens = getattr(um, "cached_content_token_count", 0) or 0
+            return prompt_tokens - cached_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
