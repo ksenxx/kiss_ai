@@ -102,31 +102,30 @@ class TestSetupCodeServer(unittest.TestCase):
 class TestBuildHtmlSplitLayout(unittest.TestCase):
 
     def test_split_layout_structure(self) -> None:
-        html = assistant._build_html("T", "S")
+        html = assistant._build_html("T")
         for elem in ("split-container", "editor-panel", "divider", "assistant-panel"):
             assert f'id="{elem}"' in html, f"Missing #{elem}"
         assert "width:80%" in html
 
     def test_header_buttons(self) -> None:
-        html = assistant._build_html("T", "S")
-        assert 'id="merge-btn"' in html
+        html = assistant._build_html("T")
         assert 'title="Task history"' in html
         assert 'title="Suggested tasks"' in html
 
     def test_editor_fallback_without_code_server(self) -> None:
-        html = assistant._build_html("T", "S")
+        html = assistant._build_html("T")
         assert 'id="editor-fallback"' in html
         assert "<iframe" not in html
 
     def test_iframe_with_code_server_url(self) -> None:
-        html = assistant._build_html("T", "S", "http://127.0.0.1:9999", "/tmp/work")
+        html = assistant._build_html("T", "http://127.0.0.1:9999", "/tmp/work")
         assert '<iframe id="code-server-frame"' in html
         assert 'data-base-url="http://127.0.0.1:9999"' in html
         assert 'data-work-dir="/tmp/work"' in html
         assert 'id="editor-fallback"' not in html
 
     def test_iframe_folder_url_encoded(self) -> None:
-        html = assistant._build_html("T", "S", "http://x:1", "/path with spaces")
+        html = assistant._build_html("T", "http://x:1", "/path with spaces")
         assert "path%20with%20spaces" in html
 
 
@@ -135,10 +134,11 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.html = assistant._build_html("T", "S", "http://x:1", "/w")
+        cls.html = assistant._build_html("T", "http://x:1", "/w")
 
     def test_merge_function(self) -> None:
-        assert "function openMerge" in self.html
+        assert "function mergeAction" in self.html
+        assert "function mergeCommit" in self.html
 
     def test_divider_and_editor_functions(self) -> None:
         assert "isDragging" in self.html
@@ -156,14 +156,13 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 class TestBuildHtmlCSS(unittest.TestCase):
 
     def test_split_layout_css(self) -> None:
-        html = assistant._build_html("T", "S")
+        html = assistant._build_html("T")
         for pattern in (
             "#split-container{display:flex",
             "#editor-panel{position:relative",
             "cursor:col-resize",
             "#assistant-panel{",
             ".tp[data-path]{cursor:pointer",
-            "#assistant-panel .logo span{display:none}",
             "#assistant-panel #suggestions{grid-template-columns:1fr",
         ):
             assert pattern in html, f"Missing CSS: {pattern}"

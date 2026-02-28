@@ -70,7 +70,6 @@ Last Error: {last_error}
 
 ## Tools
 - plan_task(tasks: str): Define multiple steps (newline separated). Use for complex projects.
-- search_web(query: str): Search the web for information.
 - execute_todo(todo_id: int): Delegate complex logic to a sub-agent.
 - complete_todo(todo_id: int, result: str): Mark a task finished after manual work.
 - run_bash(command: str): Execute shell. Batch multiple commands with &&.
