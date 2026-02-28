@@ -1187,9 +1187,9 @@ function showSpinner(msg){
     _spinnerTimer=null;
     var sp=mkEl('div','spinner');
     sp.id='wait-spinner';
-    sp.textContent=msg||'Thinking ...';
+    sp.textContent=msg||'Waiting ...';
     O.appendChild(sp);sb();
-  },1000);
+  },250);
 }
 function setReady(label){
   running=false;D.classList.remove('running');
@@ -1265,8 +1265,7 @@ function handleEvent(ev){
     }
     handleOutputEvent(ev,target,tState);
     if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
-    if(running&&(t==='tool_call'||t==='tool_result'||t==='thinking_end'
-      ||t==='text_end'||(t==='system_output'&&!state.bashPanel)))showSpinner();
+    if(running)showSpinner();
   }}
   sb();
 }
