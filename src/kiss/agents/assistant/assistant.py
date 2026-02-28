@@ -569,6 +569,7 @@ function activate(ctx){
   }));
   var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
   var op=path.join(home,'.kiss','code-server-data','pending-open.json');
+  var ap=path.join(home,'.kiss','code-server-data','pending-action.json');
   var iv=setInterval(function(){
     try{
       if(fs.existsSync(op)){
@@ -578,6 +579,13 @@ function activate(ctx){
         vscode.workspace.openTextDocument(uri).then(function(doc){
           vscode.window.showTextDocument(doc,{preview:false});
         });
+      }
+      if(fs.existsSync(ap)){
+        var ad=JSON.parse(fs.readFileSync(ap,'utf8'));
+        fs.unlinkSync(ap);
+        if(ad.action==='next')vscode.commands.executeCommand('kiss.nextChange');
+        else if(ad.action==='accept-all')vscode.commands.executeCommand('kiss.acceptAll');
+        else if(ad.action==='reject-all')vscode.commands.executeCommand('kiss.rejectAll');
       }
       if(!fs.existsSync(mp))return;
       var data=JSON.parse(fs.readFileSync(mp,'utf8'));
@@ -716,11 +724,6 @@ header{
   box-shadow:0 1px 12px rgba(0,0,0,0.3);
 }
 .logo{font-size:12px;color:#4da6ff;font-weight:600;letter-spacing:-0.2px}
-.logo span{
-  color:rgba(255,255,255,0.55);font-weight:400;font-size:12px;margin-left:10px;
-  max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  display:inline-block;vertical-align:middle;
-}
 .status{font-size:12px;color:rgba(255,255,255,0.6)}
 .dot{width:7px;height:7px;background:rgba(255,255,255,0.4)}
 .dot.running{background:#22c55e}
@@ -1056,7 +1059,6 @@ header{
 }
 .llm-panel .txt{font-size:10px;line-height:1.5;color:rgba(255,255,255,0.6)}
 .llm-panel .think .cnt{font-size:10px}
-.llm-panel .think .cnt{font-size:10px}
 .bash-panel{
   max-width:820px;margin-left:auto;margin-right:auto;
   background:rgba(0,0,0,0.5);color:rgba(255,255,255,0.55);
@@ -1079,6 +1081,24 @@ header{
   display:block;margin:8px 0;font-size:13px;color:rgba(255,255,255,0.8);
 }
 #editor-fallback p{margin:4px 0;color:rgba(255,255,255,0.5);font-size:13px}
+#merge-toolbar{
+  display:none;position:absolute;bottom:20px;left:50%;transform:translateX(-50%);
+  z-index:100;gap:8px;
+  background:rgba(18,18,20,0.95);backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,0.15);border-radius:12px;
+  padding:8px 16px;
+  box-shadow:0 4px 24px rgba(0,0,0,0.5);
+}
+#merge-toolbar button{
+  background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);
+  border-radius:8px;color:rgba(255,255,255,0.8);font-size:13px;
+  padding:7px 16px;cursor:pointer;transition:all 0.15s;
+  font-family:inherit;white-space:nowrap;
+}
+#merge-toolbar button:hover{
+  background:rgba(88,166,255,0.15);border-color:rgba(88,166,255,0.3);color:#fff;
+}
 #divider{
   width:6px;flex-shrink:0;cursor:col-resize;
   background:rgba(255,255,255,0.06);position:relative;z-index:10;
@@ -1095,11 +1115,9 @@ header{
 }
 .tp[data-path]{cursor:pointer;text-decoration:underline dotted}
 .tp[data-path]:hover{color:rgba(120,180,255,0.8);text-decoration:underline solid}
-.logo span{max-width:150px}
 #assistant-panel{font-size:11px}
 #assistant-panel header{padding:8px 12px}
 #assistant-panel .logo{font-size:11px}
-#assistant-panel .logo span{display:none}
 #assistant-panel .status{font-size:11px}
 #assistant-panel #history-btn,#assistant-panel #proposals-btn{
   font-size:0;padding:5px;border-radius:6px;gap:0;
@@ -1126,15 +1144,12 @@ header{
 #assistant-panel .tp{font-size:11px}
 #assistant-panel .tc{margin:8px 0;border-radius:8px}
 #assistant-panel .tc-h{padding:7px 10px;border-radius:8px 8px 0 0}
-#assistant-panel .tc-b{padding:6px 10px;max-height:200px;font-size:11px}
-#assistant-panel .tr{padding:5px 10px;max-height:150px;font-size:11px}
 #assistant-panel .tc-b{padding:6px 10px;max-height:200px;font-size:10px}
 #assistant-panel .tr{padding:5px 10px;max-height:150px;font-size:10px}
 #assistant-panel .think{padding:8px 12px;margin:8px 0;border-radius:8px}
 #assistant-panel .think .cnt{font-size:10px}
 #assistant-panel .rc{border-radius:10px}
 #assistant-panel .rc-h{padding:10px 14px}
-#assistant-panel .rc-body{padding:10px 14px;max-height:250px;font-size:11px}
 #assistant-panel .rc-body{padding:10px 14px;max-height:250px;font-size:10px}
 #assistant-panel #input-area{padding:0 12px 12px;padding-top:10px}
 #assistant-panel #input-container{padding:8px 10px;border-radius:10px}
@@ -1170,21 +1185,17 @@ header{
 #assistant-panel .llm-panel .txt{font-size:10px}
 #assistant-panel .llm-panel .think .cnt{font-size:10px}
 #assistant-panel .bash-panel{max-height:200px;font-size:10px}
-#assistant-panel .prompt-h{font-size:11px;padding:6px 12px}
-#assistant-panel .prompt-body{font-size:11px;padding:8px 12px}
 #assistant-panel .prompt-h{font-size:10px;padding:6px 12px}
 #assistant-panel .prompt-body{font-size:10px;padding:8px 12px}
 #assistant-panel .rc-h{
   padding:10px 14px;flex-direction:column;align-items:flex-start;gap:6px;
 }
-#assistant-panel .rc-h h3{font-size:11px;margin-bottom:2px}
 #assistant-panel .rc-h h3{font-size:10px;margin-bottom:2px}
 #assistant-panel .rs{
   font-size:10px;gap:0;width:100%;
   display:grid;grid-template-columns:repeat(3,1fr);
 }
 #assistant-panel .rs b{display:block;font-size:11px}
-#assistant-panel .td{font-size:11px}
 #assistant-panel .td{font-size:10px}
 #assistant-panel .sys{font-size:11px}
 #assistant-panel .spinner{font-size:11px}
@@ -1318,6 +1329,8 @@ function handleEvent(ev){
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
   case'proposed_updated':loadProposed();loadWelcome();break;
+  case'merge_started':document.getElementById('merge-toolbar').style.display='flex';break;
+  case'merge_ended':document.getElementById('merge-toolbar').style.display='none';break;
   case'clear':
     O.innerHTML='';state.thinkEl=null;state.txtEl=null;state.bashPanel=null;
     llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};lastToolName='';pendingPanel=false;
@@ -1724,11 +1737,29 @@ document.addEventListener('click',function(e){
   var el=e.target.closest('[data-path]');
   if(el&&el.dataset.path){openInEditor(el.dataset.path);}
 });
+function mergeAction(action){
+  fetch('/merge-action',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:action})}).then(function(r){return r.json()}).then(function(d){
+    if(action==='accept-all'||action==='reject-all'){
+      document.getElementById('merge-toolbar').style.display='none';
+    }
+  }).catch(function(){});
+}
+function mergeCommit(){
+  var btn=document.getElementById('commit-btn');
+  btn.textContent='Committing...';btn.disabled=true;
+  fetch('/commit',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error)alert('Commit failed: '+d.error);
+    else{alert('Committed: '+d.message);document.getElementById('merge-toolbar').style.display='none';}
+    btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;
+  }).catch(function(e){alert('Error: '+e);btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;});
+}
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
 
 
-def _build_html(title: str, subtitle: str, code_server_url: str = "", work_dir: str = "") -> str:
+def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> str:
     font_import = "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');\n"
     css = font_import + BASE_CSS + OUTPUT_CSS + CHATBOT_CSS
 
@@ -1758,6 +1789,12 @@ def _build_html(title: str, subtitle: str, code_server_url: str = "", work_dir: 
 <div id="split-container">
   <div id="editor-panel" style="width:80%;flex-shrink:0">
     {editor_content}
+    <div id="merge-toolbar">
+      <button onclick="mergeAction('next')">&#9654; Next</button>
+      <button onclick="mergeAction('accept-all')">&#10004; Accept All</button>
+      <button onclick="mergeAction('reject-all')">&#10008; Reject All</button>
+      <button id="commit-btn" onclick="mergeCommit()">&#128230; Commit</button>
+    </div>
   </div>
   <div id="divider"></div>
   <div id="assistant-panel">
@@ -1852,7 +1889,6 @@ def _build_html(title: str, subtitle: str, code_server_url: str = "", work_dir: 
 def run_chatbot(
     agent_factory: Callable[[str], RelentlessAgent],
     title: str = "KISS Assistant",
-    subtitle: str = "Interactive Agent",
     work_dir: str | None = None,
     default_model: str = "claude-opus-4-6",
     agent_kwargs: dict[str, Any] | None = None,
@@ -1861,8 +1897,7 @@ def run_chatbot(
 
     Args:
         agent_factory: Callable that takes a name string and returns a RelentlessAgent instance.
-        title: Title displayed in the browser UI header.
-        subtitle: Subtitle displayed in the browser UI header.
+        title: Title displayed in the browser tab.
         work_dir: Working directory for the agent. Defaults to current directory.
         default_model: Default LLM model name for the model selector.
         agent_kwargs: Additional keyword arguments passed to agent.run().
@@ -1927,7 +1962,7 @@ def run_chatbot(
             else:
                 print("Warning: code-server failed to start")
 
-    html_page = _build_html(title, subtitle, code_server_url, actual_work_dir)
+    html_page = _build_html(title, code_server_url, actual_work_dir)
     shutdown_timer: threading.Timer | None = None
 
     def refresh_file_cache() -> None:
@@ -2033,9 +2068,11 @@ def run_chatbot(
                 running = False
                 agent_thread = None
             try:
-                _prepare_merge_view(
+                merge_result = _prepare_merge_view(
                     actual_work_dir, cs_data_dir, pre_hunks, pre_untracked,
                 )
+                if merge_result.get("status") == "opened":
+                    printer.broadcast({"type": "merge_started"})
             except Exception:
                 pass
             refresh_file_cache()
@@ -2258,6 +2295,16 @@ def run_chatbot(
             json.dump({"path": full}, f)
         return JSONResponse({"status": "ok"})
 
+    async def merge_action(request: Request) -> JSONResponse:
+        body = await request.json()
+        action = body.get("action", "")
+        if action not in ("next", "accept-all", "reject-all"):
+            return JSONResponse({"error": "Invalid action"}, status_code=400)
+        pending = os.path.join(cs_data_dir, "pending-action.json")
+        with open(pending, "w") as f:
+            json.dump({"action": action}, f)
+        return JSONResponse({"status": "ok"})
+
     async def commit(request: Request) -> JSONResponse:
         def _do_commit() -> dict[str, str]:
             subprocess.run(["git", "add", "-A"], cwd=actual_work_dir)
@@ -2301,6 +2348,7 @@ def run_chatbot(
         Route("/run", run_task, methods=["POST"]),
         Route("/stop", stop_task, methods=["POST"]),
         Route("/open-file", open_file, methods=["POST"]),
+        Route("/merge-action", merge_action, methods=["POST"]),
         Route("/commit", commit, methods=["POST"]),
         Route("/suggestions", suggestions),
         Route("/complete", complete),
@@ -2358,7 +2406,6 @@ def main() -> None:
         run_chatbot(
             agent_factory=AssistantAgent,
             title=f"KISS Assistant: {__version__}",
-            subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
             agent_kwargs={"headless": False},
         )
@@ -2366,7 +2413,6 @@ def main() -> None:
         run_chatbot(
             agent_factory=RelentlessCodingAgent,
             title=f"KISS Coding Assistant: {__version__}",
-            subtitle=f"Working Directory: {work_dir}",
             work_dir=work_dir,
         )
 
