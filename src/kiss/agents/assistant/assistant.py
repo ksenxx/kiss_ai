@@ -391,6 +391,18 @@ function activate(ctx){
   });
   var ms={};
   var clFire=new vscode.EventEmitter();
+  var nextSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,104);
+  nextSB.text='$(arrow-right) Next';nextSB.command='kiss.nextChange';
+  var acceptAllSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,103);
+  acceptAllSB.text='$(check-all) Accept All';acceptAllSB.command='kiss.acceptAll';
+  var rejectAllSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,102);
+  rejectAllSB.text='$(close-all) Reject All';rejectAllSB.command='kiss.rejectAll';
+  var commitSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,101);
+  commitSB.text='$(git-commit) Commit';commitSB.command='kiss.commitChanges';
+  ctx.subscriptions.push(nextSB,acceptAllSB,rejectAllSB,commitSB);
+  function showMergeButtons(v){
+    [nextSB,acceptAllSB,rejectAllSB,commitSB].forEach(function(b){v?b.show():b.hide()});
+  }
   ctx.subscriptions.push(vscode.languages.registerCodeLensProvider({scheme:'file'},{
     onDidChangeCodeLenses:clFire.event,
     provideCodeLenses:function(doc){
@@ -464,10 +476,92 @@ function activate(ctx){
     if(!s.hunks.length)delete ms[fp];
     refreshDeco(fp);clFire.fire();checkAllDone();
   }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.nextChange',function(){
+    var allH=[];
+    for(var fp in ms)ms[fp].hunks.forEach(function(h){allH.push({fp:fp,h:h})});
+    if(!allH.length)return;
+    var ae=vscode.window.activeTextEditor;
+    var cf=ae?ae.document.uri.fsPath:'',cl=ae?ae.selection.active.line:-1;
+    var found=null;
+    for(var j=0;j<allH.length;j++){
+      var ln=allH[j].h.nc>0?allH[j].h.ns:allH[j].h.os;
+      if(allH[j].fp===cf&&ln>cl){found=allH[j];break;}
+    }
+    if(!found)for(var j=0;j<allH.length;j++){
+      if(allH[j].fp!==cf){found=allH[j];break;}
+    }
+    if(!found)found=allH[0];
+    vscode.workspace.openTextDocument(vscode.Uri.file(found.fp)).then(function(doc){
+      vscode.window.showTextDocument(doc,{preview:false}).then(function(ed){
+        var ln=found.h.nc>0?found.h.ns:found.h.os;
+        ed.revealRange(new vscode.Range(ln,0,ln,0),vscode.TextEditorRevealType.InCenter);
+        ed.selection=new vscode.Selection(ln,0,ln,0);
+      });
+    });
+  }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptAll',async function(){
+    for(var fp of Object.keys(ms)){
+      var s=ms[fp];
+      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
+      if(!ed){
+        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+        ed=await vscode.window.showTextDocument(doc,{preview:false});
+      }
+      for(var i=s.hunks.length-1;i>=0;i--){
+        if(s.hunks[i].oc>0)await delLines(ed,s.hunks[i].os,s.hunks[i].oc);
+      }
+      ed.setDecorations(redDeco,[]);ed.setDecorations(greenDeco,[]);
+    }
+    ms={};clFire.fire();
+    await vscode.workspace.saveAll(false);
+    showMergeButtons(false);
+    vscode.window.showInformationMessage('All changes accepted.');
+  }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectAll',async function(){
+    for(var fp of Object.keys(ms)){
+      var s=ms[fp];
+      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
+      if(!ed){
+        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+        ed=await vscode.window.showTextDocument(doc,{preview:false});
+      }
+      for(var i=s.hunks.length-1;i>=0;i--){
+        if(s.hunks[i].nc>0)await delLines(ed,s.hunks[i].ns,s.hunks[i].nc);
+      }
+      ed.setDecorations(redDeco,[]);ed.setDecorations(greenDeco,[]);
+    }
+    ms={};clFire.fire();
+    await vscode.workspace.saveAll(false);
+    showMergeButtons(false);
+    vscode.window.showInformationMessage('All changes rejected.');
+  }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.commitChanges',async function(){
+    var portFile=path.join(home,'.kiss','assistant-port');
+    var port='';
+    try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
+    if(!port){vscode.window.showErrorMessage('Assistant server not found');return;}
+    commitSB.text='$(loading~spin) Committing...';
+    try{
+      var http=require('http');
+      var body=await new Promise(function(resolve,reject){
+        var req=http.request({hostname:'127.0.0.1',port:parseInt(port),path:'/commit',method:'POST',
+          headers:{'Content-Type':'application/json'}},function(res){
+          var d='';res.on('data',function(c){d+=c});
+          res.on('end',function(){resolve(JSON.parse(d))});
+        });
+        req.on('error',reject);
+        req.write('{}');req.end();
+      });
+      if(body.error)vscode.window.showErrorMessage('Commit failed: '+body.error);
+      else vscode.window.showInformationMessage('Committed: '+body.message);
+    }catch(e){vscode.window.showErrorMessage('Commit error: '+e.message);}
+    commitSB.text='$(git-commit) Commit';
+  }));
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
     vscode.workspace.saveAll(false).then(function(){
       vscode.window.showInformationMessage('All changes reviewed.');
+      showMergeButtons(false);
     });
   }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
@@ -531,6 +625,7 @@ function activate(ctx){
       }
     }
     clFire.fire();
+    showMergeButtons(true);
     vscode.window.showInformationMessage(
       'Reviewing '+data.files.length+' file(s). '
       +'Red = old, Green = new. Use \\u2705 Accept / \\u274c Reject on each change.');
@@ -585,6 +680,10 @@ def _setup_code_server(data_dir: str) -> None:
             "commands": [
                 {"command": "kiss.acceptChange", "title": "Accept Change"},
                 {"command": "kiss.rejectChange", "title": "Reject Change"},
+                {"command": "kiss.nextChange", "title": "Next Change"},
+                {"command": "kiss.acceptAll", "title": "Accept All Changes"},
+                {"command": "kiss.rejectAll", "title": "Reject All Changes"},
+                {"command": "kiss.commitChanges", "title": "Commit Changes"},
             ],
         },
     }))
@@ -2159,12 +2258,50 @@ def run_chatbot(
             json.dump({"path": full}, f)
         return JSONResponse({"status": "ok"})
 
+    async def commit(request: Request) -> JSONResponse:
+        def _do_commit() -> dict[str, str]:
+            subprocess.run(["git", "add", "-A"], cwd=actual_work_dir)
+            diff_stat = subprocess.run(
+                ["git", "diff", "--cached", "--stat"],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            if not diff_stat.stdout.strip():
+                return {"error": "No changes to commit"}
+            diff_detail = subprocess.run(
+                ["git", "diff", "--cached"],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            agent = KISSAgent("Commit Message Generator")
+            message = agent.run(
+                model_name="claude-haiku-4-5",
+                prompt_template=(
+                    "Generate a concise git commit message (1-2 lines) for these changes. "
+                    "Return ONLY the commit message text, no quotes.\n\n{diff}"
+                ),
+                arguments={"diff": diff_detail.stdout[:4000]},
+                is_agentic=False,
+            )
+            message = message.strip().strip('"').strip("'")
+            result = subprocess.run(
+                ["git", "commit", "-m", message],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            if result.returncode != 0:
+                return {"error": result.stderr.strip()}
+            return {"status": "ok", "message": message}
+
+        result = await asyncio.to_thread(_do_commit)
+        if "error" in result:
+            return JSONResponse(result, status_code=400)
+        return JSONResponse(result)
+
     app = Starlette(routes=[
         Route("/", index),
         Route("/events", events),
         Route("/run", run_task, methods=["POST"]),
         Route("/stop", stop_task, methods=["POST"]),
         Route("/open-file", open_file, methods=["POST"]),
+        Route("/commit", commit, methods=["POST"]),
         Route("/suggestions", suggestions),
         Route("/complete", complete),
         Route("/tasks", tasks),
@@ -2178,6 +2315,10 @@ def run_chatbot(
     atexit.register(_cleanup)
 
     port = find_free_port()
+    try:
+        (_KISS_DIR / "assistant-port").write_text(str(port))
+    except OSError:
+        pass
     url = f"http://127.0.0.1:{port}"
     print(f"{title} running at {url}")
     print(f"Work directory: {actual_work_dir}")
