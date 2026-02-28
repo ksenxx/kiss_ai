@@ -5,10 +5,14 @@ from pydantic import BaseModel, Field
 from kiss.core.config_builder import add_config
 
 
-class AssistantAgentConfig(BaseModel):
+class AgentConfig(BaseModel):
     model_name: str = Field(
         default="claude-opus-4-6",
         description="LLM model to use",
+    )
+    summarizer_model_name: str = Field(
+        default="claude-haiku-4-5",
+        description="LLM model to use for summarizing trajectories on failure",
     )
     max_steps: int = Field(
         default=25,
@@ -26,12 +30,24 @@ class AssistantAgentConfig(BaseModel):
         default=False,
         description="Run browser in headless mode",
     )
+    verbose: bool = Field(
+        default=False,
+        description="Enable verbose output",
+    )
+
+
+AssistantAgentConfig = AgentConfig
+RelentlessAgentConfig = AgentConfig
 
 
 class AssistantConfig(BaseModel):
     assistant_agent: AssistantAgentConfig = Field(
         default_factory=AssistantAgentConfig,
         description="Configuration for Assistant Agent",
+    )
+    relentless_agent: RelentlessAgentConfig = Field(
+        default_factory=RelentlessAgentConfig,
+        description="Configuration for Relentless Agent",
     )
 
 

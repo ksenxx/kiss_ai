@@ -17,7 +17,6 @@ from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
-from kiss.core.useful_tools import fetch_url, search_web
 
 if TYPE_CHECKING:  # pragma: no cover
     from kiss.core.printer import Printer
@@ -42,14 +41,12 @@ class KISSAgent(Base):
         max_budget: float | None,
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
     ) -> None:
-        self.set_printer(
-            printer,
-            print_to_console=print_to_console,
-            print_to_browser=print_to_browser,
-        )
+        cfg = config_module.DEFAULT_CONFIG.agent
+        self.model_name = model_name if model_name is not None else cfg.model_name
+        self.verbose = verbose if verbose is not None else cfg.verbose
+        self.set_printer(printer, verbose=self.verbose)
         token_callback = self.printer.token_callback if self.printer else None
 
         self.model = model(model_name, model_config=model_config, token_callback=token_callback)
@@ -65,7 +62,6 @@ class KISSAgent(Base):
             else config_module.DEFAULT_CONFIG.agent.max_agent_budget
         )
         self.function_map: dict[str, Callable[..., Any]] = {}
-        self.model_name = model_name
         self.messages: list[dict[str, Any]] = []
         self.step_count = 0
         self.total_tokens_used = 0
@@ -100,8 +96,7 @@ class KISSAgent(Base):
         max_budget: float | None = None,
         model_config: dict[str, Any] | None = None,
         printer: Printer | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -122,17 +117,16 @@ class KISSAgent(Base):
                 Default is None.
             printer (Printer | None): Optional printer for streaming output.
                 Default is None.
-            print_to_console (bool | None): Override config to enable/disable console printing.
-                Default is None (uses config).
-            print_to_browser (bool | None): Override config to enable/disable browser printing.
-                Default is None (uses config).
+            verbose (bool | None): Whether to print output to console.
+                Default is None (uses config verbose setting).
+
         Returns:
             str: The result of the agent's task.
         """
         try:
             self._reset(
                 model_name, is_agentic, max_steps, max_budget,
-                model_config, printer, print_to_console, print_to_browser,
+                model_config, printer, verbose,
             )
 
             if not self.is_agentic and tools is not None:
@@ -151,9 +145,6 @@ class KISSAgent(Base):
             return self._run_agentic_loop()
 
         finally:
-            if hasattr(self, "printer"):
-                if hasattr(getattr(self, "printer"), "browser_printer"):  # pragma: no cover
-                    getattr(self, "browser_printer").stop()
             self._save()
 
     def _setup_tools(self, tools: list[Callable[..., Any]] | None) -> None:
@@ -172,9 +163,6 @@ class KISSAgent(Base):
 
         if "finish" not in tool_names:
             tools.append(self.finish)
-        if config_module.DEFAULT_CONFIG.agent.use_web and "search_web" not in tool_names:
-            tools.append(fetch_url)
-            tools.append(search_web)
 
         self._add_functions(tools)
 

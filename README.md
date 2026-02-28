@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.1.35-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.1.36-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -33,7 +33,6 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [KISSAgent API Reference](#-kissagent-api-reference)
 - [GEPA Prompt Optimization](#-using-gepa-for-prompt-optimization)
 - [KISSEvolve Algorithm Discovery](#-using-kissevolve-for-algorithm-discovery)
-- [Multiprocessing](#-multiprocessing)
 - [Docker Manager](#-docker-manager)
 - [Project Structure](#-project-structure)
 - [Versioning](#%EF%B8%8F-versioning)
@@ -198,7 +197,7 @@ print(f"Result: {result}")
 - **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking
 - **Configurable Sub-Sessions**: Set high sub-session counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
-- **Built-in Tools**: Bash, Read, Edit, Write, search_web, and fetch_url tools for file and web operations
+- **Built-in Tools**: Bash, Read, Edit, Write tools for file operations; search_web and fetch_url available for web operations
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
 ## 💬 Browser-Based Assistant
@@ -344,7 +343,6 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **SWE-bench Dataset Support**: Built-in support for downloading and working with SWE-bench Verified dataset
 - **RAG Support**: Simple retrieval-augmented generation system with in-memory vector store
 - **Useful Agents**: Pre-built utility agents including prompt refinement and general bash execution agents
-- **Multiprocessing Support**: Utilities for parallel execution of functions using multiprocessing
 - **Trajectory Visualization**: Web-based visualizer for viewing agent execution trajectories with modern UI
 
 ## 📦 Developer Installation
@@ -386,11 +384,14 @@ uv sync --group claude    # Core + Anthropic Claude
 uv sync --group openai    # Core + OpenAI Compatible Models
 uv sync --group gemini    # Core + Google Gemini
 
+# Assistant agent tools (web tools, browser UI)
+uv sync --group assistant
+
 # Docker support (for running agents in isolated containers)
 uv sync --group docker
-
 # Evals dependencies (for running benchmarks)
 uv sync --group evals
+
 
 # Development tools (mypy, ruff, pytest, jupyter, etc.)
 uv sync --group dev
@@ -403,12 +404,13 @@ uv sync --group claude --group dev
 
 | Group | Description | Key Packages |
 |-------|-------------|--------------|
-| `core` | Minimal core module | pydantic, rich, requests, beautifulsoup4, playwright, uvicorn, starlette |
+| `core` | Minimal core module | pydantic, pydantic-settings, pyyaml, rich |
 | `claude` | Core + Anthropic | core + anthropic |
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
-| `docker` | Docker integration | docker |
+| `assistant` | Agent tools & browser UI | requests, beautifulsoup4, playwright, uvicorn, starlette |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
+| `docker` | Docker integration | docker |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
 
 > **Optional Dependencies:** All LLM provider SDKs (`openai`, `anthropic`, `google-genai`) are optional. You can import `kiss.core` and `kiss.agents` without installing all of them. When you try to use a model whose SDK is not installed, KISS raises a clear `KISSError` telling you which package to install.
@@ -430,54 +432,6 @@ This is where I started building an optimizer for agents. Then I switched to [`a
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
 📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
-
-## ⚡ Multiprocessing
-
-KISS provides utilities for parallel execution of Python functions using multiprocessing. This is useful for running multiple independent tasks concurrently to maximize CPU utilization.
-
-### Basic Usage
-
-```python
-from kiss.multiprocessing import run_functions_in_parallel
-
-def add(a, b):
-    return a + b
-
-def multiply(x, y):
-    return x * y
-
-# Define tasks as (function, arguments) tuples
-tasks = [(add, [1, 2]), (multiply, [3, 4])]
-results = run_functions_in_parallel(tasks)
-print(results)  # [3, 12]
-```
-
-### With Keyword Arguments
-
-```python
-from kiss.multiprocessing import run_functions_in_parallel_with_kwargs
-
-def greet(name, title="Mr."):
-    return f"Hello, {title} {name}!"
-
-functions = [greet, greet]
-args_list = [["Alice"], ["Bob"]]
-kwargs_list = [{"title": "Dr."}, {}]
-
-results = run_functions_in_parallel_with_kwargs(functions, args_list, kwargs_list)
-print(results)  # ["Hello, Dr. Alice!", "Hello, Mr. Bob!"]
-```
-
-### 💻 Checking Available Cores
-
-```python
-from kiss.multiprocessing import get_available_cores
-
-num_cores = get_available_cores()
-print(f"Available CPU cores: {num_cores}")
-```
-
-The multiprocessing utilities automatically scale to the number of available CPU cores, using at most as many workers as there are tasks to avoid unnecessary overhead.
 
 ## 🐳 Docker Manager
 
@@ -549,6 +503,9 @@ kiss/
 │   │   │   ├── assistant_agent.py      # AssistantAgent with coding and browser automation
 │   │   │   ├── assistant.py            # Browser-based assistant UI
 │   │   │   ├── relentless_agent.py     # RelentlessAgent base class
+│   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
+│   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit, search_web, fetch_url
+│   │   │   ├── web_use_tool.py         # WebUseTool class with Playwright-based browser automation
 │   │   │   └── config.py               # Assistant agent configuration
 │   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
 │   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
@@ -583,14 +540,10 @@ kiss/
 │   │   ├── kiss_agent.py      # KISS agent with native function calling (supports multi-tool execution)
 │   │   ├── printer.py         # Abstract Printer base class and MultiPrinter
 │   │   ├── print_to_console.py # ConsolePrinter: Rich-formatted terminal output
-│   │   ├── print_to_browser.py # BrowserPrinter: SSE streaming to browser UI
-│   │   ├── browser_ui.py      # Browser UI base components and utilities
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
-│   │   ├── useful_tools.py    # UsefulTools class with path-restricted Read, Write, Bash, Edit, search_web, fetch_url
-│   │   ├── web_use_tool.py    # WebUseTool class with Playwright-based browser automation
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface with TokenCallback streaming support
 │   │       ├── gemini_model.py    # Gemini model implementation
@@ -598,7 +551,6 @@ kiss/
 │   │       ├── anthropic_model.py # Anthropic model implementation
 │   │       └── model_info.py      # Model info: context lengths, pricing, and capabilities
 │   ├── docker/          # Docker integration
-│   │   └── docker_manager.py
 │   ├── evals/            # Benchmark and evaluation integrations
 │   │   ├── algotune/               # AlgoTune benchmark integration
 │   │   │   ├── run_algotune.py     # AlgoTune task evolution
@@ -613,12 +565,9 @@ kiss/
 │   │       ├── run_swebench.py     # Main runner with CLI support
 │   │       ├── config.py           # Configuration for SWE-bench runs
 │   │       └── README.md           # SWE-bench documentation
-│   ├── multiprocessing/ # Multiprocessing utilities
-│   │   └── multiprocess.py
+│   │   └── docker_manager.py
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
-│   ├── demo/            # Demo scripts
-│   │   └── kiss_demo.py               # Interactive demo with streaming output to terminal and browser
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── generate_api_docs.py        # API documentation generator
@@ -628,8 +577,8 @@ kiss/
 │   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_non_agentic.py
-│   │   ├── test_kiss_agent_coverage.py    # Coverage tests for KISSAgent
 │   │   ├── test_gepa_hotpotqa.py
+│   │   ├── test_kiss_agent_coverage.py    # Coverage tests for KISSAgent
 │   │   ├── test_gepa_batched.py           # Tests for GEPA batched wrapper behavior and performance
 │   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
 │   │   ├── test_docker_manager.py
@@ -645,7 +594,7 @@ kiss/
 │   │   ├── test_token_callback.py         # Tests for async token streaming callback
 │   │   ├── test_a_model.py                    # Tests for model implementations
 │   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
-│   │   ├── test_print_to_browser.py         # Tests for BrowserPrinter browser output
+│   │   ├── test_print_to_browser.py         # Tests for BaseBrowserPrinter browser output
 │   │   ├── test_search_web.py
 │   │   ├── test_useful_tools.py
 │   │   ├── test_web_use_tool.py             # Tests for WebUseTool browser automation
@@ -703,9 +652,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `debug`: Enable debug mode (default: False)
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
-  - `use_web`: Automatically add web browsing and search tool if enabled (default: False)
-  - `print_to_console`: Enable ConsolePrinter for Rich terminal output (default: True). Can be overridden per-call via the `print_to_console` parameter on `run()`.
-  - `print_to_browser`: Enable BrowserPrinter for live browser UI output (default: False). Can be overridden per-call via the `print_to_browser` parameter on `run()`.
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
   - `model_name`: Model for task execution (default: "claude-opus-4-6")
@@ -760,7 +706,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run pytest src/kiss/tests/ -v` - Run all tests with verbose output
 - `uv run pytest src/kiss/tests/test_kiss_agent_agentic.py -v` - Run agentic agent tests
 - `uv run pytest src/kiss/tests/test_kiss_agent_non_agentic.py -v` - Run non-agentic agent tests
-- `uv run pytest src/kiss/tests/test_multiprocess.py -v` - Run multiprocessing tests
 - `uv run python -m unittest src.kiss.tests.test_docker_manager -v` - Run docker manager tests (unittest)
 - `uv run python -m unittest discover -s src/kiss/tests -v` - Run all tests using unittest
 
@@ -789,10 +734,10 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 ### Documentation
 
 - `uv run generate-api-docs` - Generate API documentation
-
 ### AlgoTune
 
 - `uv run algotune` - Run the AlgoTune benchmark
+
 
 ### Cleanup
 

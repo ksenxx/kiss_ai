@@ -16,9 +16,8 @@ from yaml.nodes import ScalarNode
 
 from kiss.core import config as config_module
 from kiss.core.models.model_info import get_max_context_length
-from kiss.core.print_to_browser import BrowserPrinter
 from kiss.core.print_to_console import ConsolePrinter
-from kiss.core.printer import MultiPrinter, Printer
+from kiss.core.printer import Printer
 from kiss.core.utils import config_to_dict
 
 
@@ -38,44 +37,53 @@ CODING_INSTRUCTIONS = """
 - Each function should do one thing well
 - Use clear, descriptive names
 - NO need to write documentations or comments unless absolutely necessary
+- Public methods MUST have full documentation.
 - Check and test the code you have written
+
+## Testing Requirements
+- Run lint and typecheckers and fix any lint and typecheck errors
+- Generate comprehensive tests so that you achieve 100% branch coverage
+- Tests MUST NOT use mocks, patches, or any form of test doubles
+- Integration tests are HIGHLY encouraged
+- You MUST not add tests that are redundant or duplicate of existing
+  tests or does not add new coverage over existing tests
+- Generate meaningful stress tests for the code if you are
+  optimizing the code for performance
+- Each test should be independent and verify actual behavior
+
+## Use tools when you need to:
+- Look up API documentation or library usage from the internet
+- Find examples of similar implementations
+- Understand existing code in the project
+
+## After you have implemented the task, aggresively and carefully simplify and clean up the code
+ - Remove unnessary object/struct attributes, variables, config variables
+ - Avoid object/struct attribute redirections
+ - Remove unnessary conditional checks
+ - Remove redundant and duplicate code
+ - Remove unnecessary comments
+ - Make sure that the code is still working correctly
+ - Simplify and clean up the test code
 """
 
-# ## Testing Requirements
-# - Run lint and typecheckers and fix any lint and typecheck errors
-# - Generate comprehensive tests so that you achieve 100% branch coverage
-# - Tests MUST NOT use mocks, patches, or any form of test doubles
-# - Integration tests are highly encouraged
-# - You MUST not add tests that are redundant or duplicate of existing
-#   tests or does not add new coverage over existing tests
-# - Generate meaningful stress tests for the code if you are
-#   optimizing the code for performance
-# - Test with real inputs and verify real outputs
-# - Test edge cases: empty inputs, None values, boundary conditions
-# - Test error conditions with actual invalid inputs
-# - Each test should be independent and verify actual behavior
+GENERAL_ASSISTANT_INSTRUCTIONS = """
+# Rules
+- Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
+- Use bounded poll loops, never unbounded waits.
+- Use go_to_url() for browser tool.
+- Call finish(success=True, summary="detailed summary of what was accomplished")
+  immediately when task is complete.
+- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
+"""
 
-# ## Code Structure
-# - Main implementation code first
-# - Test code in a separate section using unittest or pytest
-# - Include a __main__ block to run tests
-# - Do not use 'exit' for early termination, rather throw an exception.
-
-# ## Use tools when you need to:
-# - Look up API documentation or library usage
-# - Find examples of similar implementations
-# - Understand existing code in the project
-
-# ## After you have implemented the task, aggresively and carefully simplify and clean up the code
-#  - Remove unnessary object/struct attributes, variables, config variables
-#  - Avoid object/struct attribute redirections
-#  - Remove unnessary conditional checks
-#  - Remove redundant and duplicate code
-#  - Remove unnecessary comments
-#  - Make sure that the code is still working correctly
-#  - Simplify and clean up the test code
-
-
+RELLENTLESS_CODING_ASSISTANT_INSTRUCTIONS = """
+# Rules
+- Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
+- Use bounded poll loops, never unbounded waits.
+- Call finish(success=True, summary="detailed summary of what was accomplished")
+  immediately when task is complete.
+- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
+"""
 
 class Base:
     """Base class for all KISS agents with common state management and persistence."""
@@ -91,7 +99,6 @@ class Base:
     total_tokens_used: int
     step_count: int
     printer: Printer | None
-    browser_printer: BrowserPrinter | None
 
     def __init__(self, name: str) -> None:
         """Initialize a Base agent instance.
@@ -107,43 +114,22 @@ class Base:
     def set_printer(
         self,
         printer: Printer | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
     ) -> None:
-        """Configure the output printer(s) for this agent.
+        """Configure the output printer for this agent.
 
         Args:
             printer: An existing Printer instance to use directly. If provided,
-                print_to_console and print_to_browser are ignored.
-            print_to_console: Whether to print to the console. Defaults to the
-                agent config value if None.
-            print_to_browser: Whether to stream output to a browser viewer.
-                Defaults to the agent config value if None.
+                verbose is ignored.
+            verbose: Whether to print to the console. If None,
+                uses the verbose config value.
         """
         self.printer: Printer | None = None
-        self.browser_printer: BrowserPrinter | None = None
         if config_module.DEFAULT_CONFIG.agent.verbose:
             if printer:
                 self.printer = printer
-            else:
-                cfg = config_module.DEFAULT_CONFIG.agent
-                to_console = (
-                    print_to_console if print_to_console is not None
-                    else cfg.print_to_console
-                )
-                to_browser = (
-                    print_to_browser if print_to_browser is not None
-                    else cfg.print_to_browser
-                )
-                printers: list[Printer] = []
-                if to_browser:
-                    self.browser_printer = BrowserPrinter()
-                    self.browser_printer.start()
-                    printers.append(self.browser_printer)
-                if to_console:
-                    printers.append(ConsolePrinter())
-                if printers:
-                    self.printer = MultiPrinter(printers)
+            elif verbose is not False:
+                self.printer = ConsolePrinter()
 
 
     def _build_state_dict(self) -> dict[str, Any]:
