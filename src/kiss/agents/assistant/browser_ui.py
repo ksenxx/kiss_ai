@@ -95,12 +95,18 @@ OUTPUT_CSS = r"""
 .tc-b pre{margin:4px 0;white-space:pre-wrap;word-break:break-word}
 .diff-old{
   color:var(--red);background:rgba(248,81,73,.08);
-  padding:2px 6px;border-radius:3px;display:block;margin:2px 0;
+  padding:1px 6px;display:block;white-space:pre-wrap;word-break:break-word;
 }
 .diff-new{
   color:var(--green);background:rgba(63,185,80,.08);
-  padding:2px 6px;border-radius:3px;display:block;margin:2px 0;
+  padding:1px 6px;display:block;white-space:pre-wrap;word-break:break-word;
 }
+.diff-ctx{
+  color:var(--dim);padding:1px 6px;display:block;opacity:0.5;
+  white-space:pre-wrap;word-break:break-word;
+}
+.diff-hl-del{background:rgba(248,81,73,.3);border-radius:2px;padding:0 1px}
+.diff-hl-add{background:rgba(63,185,80,.3);border-radius:2px;padding:0 1px}
 .extra{color:var(--dim);margin:2px 0}
 .tr{
   padding:8px 14px;margin:6px 0;
@@ -203,6 +209,54 @@ function toggleThink(el){
   p.querySelector('.cnt').classList.toggle('hidden');
   el.querySelector('.arrow').classList.toggle('collapsed');
 }
+function lineDiff(a,b){
+  var al=a.split('\n'),bl=b.split('\n'),m=al.length,n=bl.length;
+  var dp=[];
+  for(var i=0;i<=m;i++){dp[i]=new Array(n+1);dp[i][0]=0;}
+  for(var j=0;j<=n;j++)dp[0][j]=0;
+  for(var i=1;i<=m;i++)for(var j=1;j<=n;j++)
+    dp[i][j]=al[i-1]===bl[j-1]?dp[i-1][j-1]+1:Math.max(dp[i-1][j],dp[i][j-1]);
+  var ops=[],i=m,j=n;
+  while(i>0||j>0){
+    if(i>0&&j>0&&al[i-1]===bl[j-1]){ops.unshift({t:'=',o:al[--i],n:bl[--j]});}
+    else if(j>0&&(i===0||dp[i][j-1]>=dp[i-1][j])){ops.unshift({t:'+',n:bl[--j]});}
+    else{ops.unshift({t:'-',o:al[--i]});}
+  }
+  return ops;
+}
+function hlInline(oldL,newL){
+  var mn=Math.min(oldL.length,newL.length),pre=0,suf=0;
+  while(pre<mn&&oldL[pre]===newL[pre])pre++;
+  while(suf<mn-pre&&oldL[oldL.length-1-suf]===newL[newL.length-1-suf])suf++;
+  var pf=oldL.substring(0,pre),sf=suf?oldL.substring(oldL.length-suf):'';
+  return{
+    o:esc(pf)+'<span class="diff-hl-del">'+esc(oldL.substring(pre,oldL.length-suf))+'</span>'+esc(sf),
+    n:esc(pf)+'<span class="diff-hl-add">'+esc(newL.substring(pre,newL.length-suf))+'</span>'+esc(sf)
+  };
+}
+function renderDiff(oldStr,newStr){
+  var ops=lineDiff(oldStr,newStr),html='',i=0;
+  while(i<ops.length){
+    var dels=[],adds=[];
+    while(i<ops.length&&ops[i].t==='-'){dels.push(ops[i++]);}
+    while(i<ops.length&&ops[i].t==='+'){adds.push(ops[i++]);}
+    if(dels.length||adds.length){
+      var pairs=Math.min(dels.length,adds.length);
+      for(var p=0;p<pairs;p++){
+        var h=hlInline(dels[p].o,adds[p].n);
+        html+='<div class="diff-old">- '+h.o+'</div>';
+        html+='<div class="diff-new">+ '+h.n+'</div>';
+      }
+      for(var p=pairs;p<dels.length;p++)
+        html+='<div class="diff-old">- '+esc(dels[p].o)+'</div>';
+      for(var p=pairs;p<adds.length;p++)
+        html+='<div class="diff-new">+ '+esc(adds[p].n)+'</div>';
+      continue;
+    }
+    html+='<div class="diff-ctx">  '+esc(ops[i].o)+'</div>';i++;
+  }
+  return html;
+}
 function handleOutputEvent(ev,O,state){
   var t=ev.type;
   switch(t){
@@ -244,8 +298,12 @@ function handleOutputEvent(ev,O,state){
       var lc=ev.lang?'language-'+esc(ev.lang):'';
       b+='<pre><code class="'+lc+'">'+esc(ev.content)+'</code></pre>';
     }
-    if(ev.old_string!==undefined)b+='<div class="diff-old">- '+esc(ev.old_string)+'</div>';
-    if(ev.new_string!==undefined)b+='<div class="diff-new">+ '+esc(ev.new_string)+'</div>';
+    if(ev.old_string!==undefined&&ev.new_string!==undefined){
+      b+=renderDiff(ev.old_string,ev.new_string);
+    }else{
+      if(ev.old_string!==undefined)b+='<div class="diff-old">- '+esc(ev.old_string)+'</div>';
+      if(ev.new_string!==undefined)b+='<div class="diff-new">+ '+esc(ev.new_string)+'</div>';
+    }
     if(ev.extras){for(var k in ev.extras)
       b+='<div class="extra">'+esc(k)+': '+esc(ev.extras[k])+'</div>'}
     var body=b||'<em style="color:var(--dim)">No arguments</em>';
