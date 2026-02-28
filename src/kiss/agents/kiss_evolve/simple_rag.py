@@ -29,7 +29,7 @@ class SimpleRAG:
 
     Example:
         ```python
-        from kiss.rag import SimpleRAG
+        from kiss.agents.kiss_evolve import SimpleRAG
         from kiss.core.models import OpenAIModel
 
         # Initialize RAG system with a model
