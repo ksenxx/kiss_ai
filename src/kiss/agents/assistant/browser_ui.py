@@ -53,8 +53,8 @@ OUTPUT_CSS = r"""
 .ev{margin-bottom:6px;animation:fadeIn .15s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 .think{
-  border-left:3px solid var(--cyan);padding:10px 16px;margin:10px 0;
-  background:rgba(121,192,255,.04);border-radius:0 8px 8px 0;
+  padding:10px 16px;margin:10px 0;
+  background:rgba(121,192,255,.04);border-radius:8px;
   max-height:200px;overflow-y:auto;
 }
 .think .lbl{
@@ -101,12 +101,12 @@ OUTPUT_CSS = r"""
 }
 .extra{color:var(--dim);margin:2px 0}
 .tr{
-  border-left:3px solid var(--green);padding:8px 14px;margin:6px 0;
-  border-radius:0 8px 8px 0;font-family:'SF Mono','Fira Code',monospace;
+  padding:8px 14px;margin:6px 0;
+  border-radius:8px;font-family:'SF Mono','Fira Code',monospace;
   font-size:12px;max-height:200px;overflow-y:auto;
   white-space:pre-wrap;word-break:break-word;background:rgba(63,185,80,.04);
 }
-.tr.err{border-left-color:var(--red);background:rgba(248,81,73,.04)}
+.tr.err{background:rgba(248,81,73,.04)}
 .tr .rl{
   font-size:11px;font-weight:600;text-transform:uppercase;
   letter-spacing:.06em;margin-bottom:4px;

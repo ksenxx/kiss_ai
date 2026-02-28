@@ -591,16 +591,15 @@ header{
 .ev,.txt,.spinner,.empty-msg,.user-msg{max-width:820px;margin-left:auto;margin-right:auto}
 .user-msg{
   background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
-  border-left:2px solid rgba(210,155,34,0.5);
   border-radius:14px;padding:14px 20px;margin:20px auto 16px;
   font-size:14.5px;line-height:1.6;color:rgba(255,255,255,0.88);
 }
 .txt{
   font-size:14.5px;line-height:1.75;color:rgba(255,255,255,0.82);padding:8px 14px;
-  border-left:2px solid rgba(255,255,255,0.08);margin:6px auto;
+  margin:6px auto;
 }
 .think{
-  border-left:2px solid rgba(168,130,255,0.4);border:1px solid rgba(168,130,255,0.12);
+  border:1px solid rgba(168,130,255,0.12);
   background:rgba(168,130,255,0.03);border-radius:10px;margin:12px auto;
   padding:12px 16px;
 }
@@ -621,11 +620,11 @@ header{
 .tp{font-size:12px;color:rgba(120,180,255,0.45)}
 .td{color:rgba(255,255,255,0.3)}
 .tr{
-  border:1px solid rgba(34,197,94,0.15);border-left:2px solid rgba(34,197,94,0.5);
-  background:rgba(34,197,94,0.02);border-radius:0 10px 10px 0;
+  border:1px solid rgba(34,197,94,0.15);
+  background:rgba(34,197,94,0.02);border-radius:10px;
 }
 .tr.err{
-  border-color:rgba(248,81,73,0.15);border-left-color:rgba(248,81,73,0.5);
+  border-color:rgba(248,81,73,0.15);
   background:rgba(248,81,73,0.02);
 }
 .rc{
