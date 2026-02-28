@@ -1201,7 +1201,8 @@ function handleEvent(ev){
   var t=ev.type;
   if(t==='thinking_start'||t==='thinking_delta'||t==='text_delta'
     ||t==='tool_call'||t==='tool_result'||t==='system_output'
-    ||t==='task_done'||t==='task_error'||t==='task_stopped')removeSpinner();
+    ||t==='task_done'||t==='task_error'||t==='task_stopped'
+    ||t==='prompt')removeSpinner();
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
   case'proposed_updated':loadProposed();loadWelcome();break;
