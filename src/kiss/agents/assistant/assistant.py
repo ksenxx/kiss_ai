@@ -627,7 +627,12 @@ def run_chatbot(
     url = f"http://127.0.0.1:{port}"
     print(f"{title} running at {url}")
     print(f"Work directory: {actual_work_dir}")
-    webbrowser.open(url)
+
+    def _open_browser() -> None:
+        time.sleep(2)
+        webbrowser.open(url)
+
+    threading.Thread(target=_open_browser, daemon=True).start()
     import logging
     logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)
     config = uvicorn.Config(
