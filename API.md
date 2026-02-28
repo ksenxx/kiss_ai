@@ -511,20 +511,6 @@ ______________________________________________________________________
   - `max_output_chars`: Maximum characters in output before truncation.
   - **Returns:** The output of the command.
 
-**`fetch_url`** — Fetch and extract text content from a URL using BeautifulSoup.<br/>`def fetch_url(url: str, headers: dict[str, str], max_characters: int = 10000, timeout_seconds: float = 10.0) -> str`
-
-- `url`: The URL to fetch.
-- `headers`: HTTP headers to use for the request.
-- `max_characters`: Maximum number of characters to return.
-- `timeout_seconds`: Request timeout in seconds.
-- **Returns:** Extracted text content from the page.
-
-**`search_web`** — Perform a web search and return the top search results with page contents. Tries DuckDuckGo first (more reliable for automated access), then falls back to Startpage if needed. Uses Playwright headless browser with Safari/WebKit to render JavaScript and avoid bot detection.<br/>`def search_web(query: str, max_results: int = 10) -> str`
-
-- `query`: The search query.
-- `max_results`: Maximum number of results to fetch content for. Defaults to 5.
-- **Returns:** A string containing titles, links, and page contents of the top search results.
-
 ______________________________________________________________________
 
 #### `kiss.agents.assistant.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
@@ -787,11 +773,10 @@ ______________________________________________________________________
 
 #### `kiss.agents.assistant.assistant` — *Browser-based chatbot for RelentlessAgent-based agents.*
 
-**`run_chatbot`** — Run a browser-based chatbot UI for any RelentlessAgent-based agent.<br/>`def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', subtitle: str = 'Interactive Agent', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None`
+**`run_chatbot`** — Run a browser-based chatbot UI for any RelentlessAgent-based agent.<br/>`def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None`
 
 - `agent_factory`: Callable that takes a name string and returns a RelentlessAgent instance.
-- `title`: Title displayed in the browser UI header.
-- `subtitle`: Subtitle displayed in the browser UI header.
+- `title`: Title displayed in the browser tab.
 - `work_dir`: Working directory for the agent. Defaults to current directory.
 - `default_model`: Default LLM model name for the model selector.
 - `agent_kwargs`: Additional keyword arguments passed to agent.run().
