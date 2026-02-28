@@ -2200,8 +2200,16 @@ def run_chatbot(
 
     async def merge_status(request: Request) -> JSONResponse:
         branch_info = _load_branch_info(cs_data_dir)
-        pending = bool(branch_info and branch_info.get("original_branch"))
-        return JSONResponse({"pending": pending})
+        if not branch_info or not branch_info.get("temp_branch"):
+            return JSONResponse({"pending": False})
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", branch_info["temp_branch"]],
+            cwd=actual_work_dir, capture_output=True,
+        )
+        if result.returncode != 0:
+            _clear_branch_info(cs_data_dir)
+            return JSONResponse({"pending": False})
+        return JSONResponse({"pending": True})
 
     async def merge_complete(request: Request) -> JSONResponse:
         try:
