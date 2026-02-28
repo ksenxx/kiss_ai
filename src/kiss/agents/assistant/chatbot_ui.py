@@ -887,7 +887,7 @@ function handleEvent(ev){
   case'proposed_updated':loadProposed();loadWelcome();break;
   case'theme_changed':applyTheme(ev);break;
   case'merge_started':document.getElementById('merge-toolbar').style.display='flex';break;
-  case'merge_ended':document.getElementById('merge-toolbar').style.display='none';break;
+  case'merge_ended':document.getElementById('merge-toolbar').style.display='none';inp.focus();break;
   case'clear':
     O.innerHTML='';state=mkS();
     llmPanel=null;llmPanelState=mkS();lastToolName='';pendingPanel=false;
