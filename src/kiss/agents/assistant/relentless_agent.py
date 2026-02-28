@@ -82,9 +82,7 @@ class RelentlessAgent(Base):
         )
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
-        self.base_dir = self.work_dir
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
-        self.is_agentic = True
 
         self.max_sub_sessions = (
             max_sub_sessions if max_sub_sessions is not None
@@ -234,9 +232,7 @@ class RelentlessAgent(Base):
             printer, verbose,
         )
         self.system_instructions = system_instructions
-        self.prompt_template = prompt_template
-        self.arguments = arguments or {}
-        self.task_description = prompt_template.format(**self.arguments)
+        self.task_description = prompt_template.format(**(arguments or {}))
 
         tools = tools_factory() if tools_factory else []
 

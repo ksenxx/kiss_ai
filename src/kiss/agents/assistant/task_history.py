@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
 
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.json"
 PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
 MODEL_USAGE_FILE = _KISS_DIR / "model_usage.json"
 MAX_HISTORY = 1000
+
+
+def _ensure_kiss_dir() -> None:
+    _KISS_DIR.mkdir(parents=True, exist_ok=True)
 
 SAMPLE_TASKS = [
     {"task": "run 'uv run check' and fix", "result": ""},
@@ -104,7 +107,7 @@ def _save_history(entries: list[dict[str, str]]) -> None:
     global _history_cache
     _history_cache = entries[:MAX_HISTORY]
     try:
-        _KISS_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_kiss_dir()
         HISTORY_FILE.write_text(json.dumps(_history_cache, indent=2))
     except OSError:
         pass
@@ -130,7 +133,7 @@ def _load_proposals() -> list[str]:
 
 def _save_proposals(proposals: list[str]) -> None:
     try:
-        _KISS_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_kiss_dir()
         PROPOSALS_FILE.write_text(json.dumps(proposals))
     except OSError:
         pass
@@ -162,7 +165,7 @@ def _record_model_usage(model: str) -> None:
     usage[model] = int(usage.get(model, 0)) + 1
     usage["_last"] = model
     try:
-        _KISS_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_kiss_dir()
         MODEL_USAGE_FILE.write_text(json.dumps(usage))
     except OSError:
         pass
@@ -187,7 +190,10 @@ def _init_task_history_md() -> Path:
 
 
 def _append_task_to_md(task: str, result: str) -> None:
-    path = _init_task_history_md()
+    path = _get_task_history_md_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("# Task History\n\n")
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     entry = f"## [{timestamp}] {task}\n\n### Result\n\n{result}\n\n---\n\n"
     with path.open("a") as f:

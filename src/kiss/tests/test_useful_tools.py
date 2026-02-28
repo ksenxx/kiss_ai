@@ -105,13 +105,13 @@ class TestUsefulTools:
         assert "Error:" in result
         assert "not unique" in result
 
-    def test_multi_edit(self, tools):
+    def test_edit_replace_all(self, tools):
         ut, test_dir = tools
-        f = test_dir / "multi_edit.txt"
-        f.write_text("foo bar")
-        result = ut.MultiEdit(str(f), "foo", "baz")
+        f = test_dir / "replace_all.txt"
+        f.write_text("foo bar foo")
+        result = ut.Edit(str(f), "foo", "baz", replace_all=True)
         assert "Successfully replaced" in result
-        assert f.read_text() == "baz bar"
+        assert f.read_text() == "baz bar baz"
 
     def test_read_success(self, tools):
         ut, test_dir = tools
