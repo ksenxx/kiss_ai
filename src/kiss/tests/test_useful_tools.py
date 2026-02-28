@@ -3,11 +3,7 @@
 import os
 import shutil
 import tempfile
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
@@ -15,11 +11,7 @@ from kiss.agents.assistant.useful_tools import (
     UsefulTools,
     _extract_command_names,
     _extract_leading_command_name,
-    _extract_search_results,
-    _render_page_with_playwright,
     _strip_heredocs,
-    fetch_url,
-    search_web,
 )
 
 
@@ -36,151 +28,6 @@ def temp_test_dir():
 @pytest.fixture
 def tools(temp_test_dir):
     return UsefulTools(), temp_test_dir
-
-
-@pytest.fixture
-def http_server():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            if self.path == "/notfound":
-                self.send_response(404)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b"<html><body>Not found</body></html>")
-                return
-            if self.path == "/slow":
-                time.sleep(0.2)
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b"<html><main>Slow content</main></html>")
-                return
-            if self.path == "/empty":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b"<html><body></body></html>")
-                return
-            if self.path == "/article":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(
-                    b"<html><body><script>var x=1;</script>"
-                    b"<nav>Nav</nav><article>Article content here</article></body></html>"
-                )
-                return
-            if self.path == "/long":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                body = "A" * 200
-                self.wfile.write(f"<html><main>{body}</main></html>".encode())
-                return
-            if self.path == "/role-main":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(
-                    b'<html><body><div role="main">Role main content</div></body></html>'
-                )
-                return
-            if self.path == "/id-content":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(
-                    b'<html><body><div id="content">ID content area</div></body></html>'
-                )
-                return
-            if self.path == "/class-content":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(
-                    b'<html><body><div class="main-wrapper">Class content area</div></body></html>'
-                )
-                return
-            if self.path == "/body-only":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b"<html><body>Body only content</body></html>")
-                return
-            if self.path == "/no-body":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b"<p>Bare paragraph</p>")
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"<html><main>Hello from server</main></html>")
-
-        def log_message(self, format, *args):  # noqa: A002
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        thread.join()
-
-
-class TestSearchResultExtraction:
-    def test_skips_invalid_and_blocked_domains(self):
-        from bs4 import BeautifulSoup
-
-        html = """
-        <html><body>
-            <a class="r" href="https://example.com">Good Result</a>
-            <a class="r" href="https://youtube.com/watch?v=123">YouTube</a>
-            <a class="r" href="/relative/path">Relative</a>
-            <a class="r" href="http://example.net"></a>
-        </body></html>
-        """
-        soup = BeautifulSoup(html, "html.parser")
-        results = _extract_search_results(soup, "a.r", max_results=10)
-        assert results == [("Good Result", "https://example.com")]
-
-    def test_max_results_limit(self):
-        from bs4 import BeautifulSoup
-
-        html = """
-        <html><body>
-            <a class="r" href="https://a.com">A</a>
-            <a class="r" href="https://b.com">B</a>
-            <a class="r" href="https://c.com">C</a>
-        </body></html>
-        """
-        soup = BeautifulSoup(html, "html.parser")
-        results = _extract_search_results(soup, "a.r", max_results=1)
-        assert len(results) == 1
-        assert results[0] == ("A", "https://a.com")
-
-    def test_href_list_value(self):
-        from bs4 import BeautifulSoup
-
-        html = '<html><body><a class="r" href="https://example.com">Link</a></body></html>'
-        soup = BeautifulSoup(html, "html.parser")
-        link_tag = cast(Any, soup.find("a"))
-        link_tag["href"] = ["https://first.com", "https://second.com"]
-        results = _extract_search_results(soup, "a.r", max_results=10)
-        assert results == [("Link", "https://first.com")]
-
-    def test_href_empty_list(self):
-        from bs4 import BeautifulSoup
-
-        html = '<html><body><a class="r" href="https://example.com">Link</a></body></html>'
-        soup = BeautifulSoup(html, "html.parser")
-        link_tag = cast(Any, soup.find("a"))
-        link_tag["href"] = []
-        results = _extract_search_results(soup, "a.r", max_results=10)
-        assert results == []
 
 
 class TestUsefulTools:
@@ -307,83 +154,6 @@ class TestUsefulTools:
         subdir.mkdir()
         result = ut.Write(str(subdir), "content")
         assert "Error:" in result
-
-
-class TestFetchUrl:
-    def test_http_error(self, http_server):
-        result = fetch_url(f"{http_server}/notfound", {"User-Agent": "Test Agent"})
-        assert "Failed to fetch content: HTTP 404" in result
-
-    def test_timeout(self, http_server):
-        headers = {"User-Agent": "Test Agent"}
-        result = fetch_url(f"{http_server}/slow", headers, timeout_seconds=0.01)
-        assert result == "Failed to fetch content: Request timed out."
-
-    def test_invalid_headers(self):
-        result = fetch_url("http://example.com", 1, timeout_seconds=0.1)  # type: ignore[arg-type]
-        assert result.startswith("Failed to fetch content:")
-
-    def test_success_main_tag(self, http_server):
-        result = fetch_url(f"{http_server}/", {"User-Agent": "Test"})
-        assert "Hello from server" in result
-
-    def test_article_tag_with_script_removed(self, http_server):
-        result = fetch_url(f"{http_server}/article", {"User-Agent": "Test"})
-        assert "Article content here" in result
-        assert "var x" not in result
-
-    def test_truncation(self, http_server):
-        result = fetch_url(f"{http_server}/long", {"User-Agent": "Test"}, max_characters=50)
-        assert "... [truncated]" in result
-
-    def test_empty_content(self, http_server):
-        result = fetch_url(f"{http_server}/empty", {"User-Agent": "Test"})
-        assert result == "No readable content found."
-
-    def test_request_exception_connection(self):
-        result = fetch_url("http://invalid.invalid:1", {"User-Agent": "Test"}, timeout_seconds=5)
-        assert result.startswith("Failed to fetch content:")
-
-    def test_role_main(self, http_server):
-        result = fetch_url(f"{http_server}/role-main", {"User-Agent": "Test"})
-        assert "Role main content" in result
-
-    def test_id_content(self, http_server):
-        result = fetch_url(f"{http_server}/id-content", {"User-Agent": "Test"})
-        assert "ID content area" in result
-
-    def test_class_content(self, http_server):
-        result = fetch_url(f"{http_server}/class-content", {"User-Agent": "Test"})
-        assert "Class content area" in result
-
-    def test_body_only(self, http_server):
-        result = fetch_url(f"{http_server}/body-only", {"User-Agent": "Test"})
-        assert "Body only content" in result
-
-    def test_no_body_fallback(self, http_server):
-        result = fetch_url(f"{http_server}/no-body", {"User-Agent": "Test"})
-        assert "Bare paragraph" in result
-
-
-class TestRenderPageWithPlaywright:
-    def test_render_basic_page(self, http_server):
-        html = _render_page_with_playwright(http_server + "/")
-        assert "Hello from server" in html
-
-    def test_render_with_wait_selector(self, http_server):
-        html = _render_page_with_playwright(http_server + "/article", wait_selector="article")
-        assert "Article content" in html
-
-    def test_render_with_invalid_wait_selector(self, http_server):
-        html = _render_page_with_playwright(http_server + "/", wait_selector="#nonexistent-element")
-        assert "Hello from server" in html
-
-
-class TestSearchWeb:
-    def test_search_web_real(self):
-        result = search_web("python programming language", max_results=1)
-        assert isinstance(result, str)
-        assert len(result) > 0
 
 
 class TestExtractLeadingCommandName:

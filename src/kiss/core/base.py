@@ -70,8 +70,7 @@ GENERAL_ASSISTANT_INSTRUCTIONS = """
 # Rules
 - Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
 - Use bounded poll loops, never unbounded waits.
-- Use go_to_url() for browser tool,
-- fetch_url(), search_web() to navigate, search, and read web pages.
+- Use go_to_url() for browser tool.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
@@ -81,7 +80,6 @@ RELLENTLESS_CODING_ASSISTANT_INSTRUCTIONS = """
 # Rules
 - Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
 - Use bounded poll loops, never unbounded waits.
-- fetch_url(), search_web() to navigate, search, and read web pages.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**

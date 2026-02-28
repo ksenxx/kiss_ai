@@ -827,7 +827,7 @@ header{
   margin-top:10px;padding-top:10px;
   border-top:1px solid rgba(255,255,255,0.04);
 }
-#model-picker{position:relative}
+#model-picker{position:relative;display:flex;align-items:center;gap:4px}
 #model-btn{
   background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
   border:1px solid rgba(255,255,255,0.08);border-radius:8px;
@@ -1826,7 +1826,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
       <div id="input-container">
         <div id="input-wrap">
           <div id="ghost-overlay"></div>
-          <textarea id="task-input" placeholder="Ask anything\u2026" rows="1"
+          <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="1"
             autocomplete="off"></textarea>
           <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
@@ -1840,25 +1840,25 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
                 stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
               <span id="model-label">Loading\u2026</span>
             </button>
+            <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </button>
+            <button id="proposals-btn" onclick="toggleSidebar('proposals')" title="Suggested tasks">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+              </svg>
+            </button>
             <div id="model-dropdown">
               <input type="text" id="model-search"
                 placeholder="Search models\u2026" autocomplete="off"/>
               <div id="model-list"></div>
             </div>
           </div>
-          <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-            </svg>
-          </button>
-          <button id="proposals-btn" onclick="toggleSidebar('proposals')" title="Suggested tasks">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
-              <path d="M2 12l10 5 10-5"/>
-            </svg>
-          </button>
           <div id="input-actions">
             <button id="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
