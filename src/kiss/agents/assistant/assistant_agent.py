@@ -23,6 +23,7 @@ class AssistantAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
+        self.verbose: bool = False
 
     def _get_tools(self) -> list:
         printer = self.printer
