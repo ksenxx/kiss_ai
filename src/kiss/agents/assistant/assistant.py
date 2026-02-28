@@ -381,6 +381,10 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
+  var greenDeco=vscode.window.createTextEditorDecorationType({
+    backgroundColor:'rgba(34,197,94,0.13)',
+    isWholeLine:true
+  });
   var ms={};
   var clFire=new vscode.EventEmitter();
   ctx.subscriptions.push(vscode.languages.registerCodeLensProvider({scheme:'file'},{
@@ -403,11 +407,21 @@ function activate(ctx){
       return L;
     }
   }));
+  function refreshDeco(fp){
+    vscode.window.visibleTextEditors.forEach(function(ed){
+      if(ed.document.uri.fsPath!==fp)return;
+      var s=ms[fp],ranges=[];
+      if(s)s.hunks.forEach(function(h){
+        if(h.cc>0)ranges.push(new vscode.Range(h.cs,0,h.cs+h.cc-1,99999));
+      });
+      ed.setDecorations(greenDeco,ranges);
+    });
+  }
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptChange',function(fp,idx){
     var s=ms[fp];if(!s)return;
     s.hunks.splice(idx,1);
     if(!s.hunks.length)delete ms[fp];
-    clFire.fire();checkAllDone();
+    refreshDeco(fp);clFire.fire();checkAllDone();
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectChange',async function(fp,idx){
     var s=ms[fp];if(!s)return;
@@ -427,7 +441,7 @@ function activate(ctx){
     s.hunks.splice(idx,1);
     for(var i=idx;i<s.hunks.length;i++)s.hunks[i].cs+=diff;
     if(!s.hunks.length)delete ms[fp];
-    clFire.fire();checkAllDone();
+    refreshDeco(fp);clFire.fire();checkAllDone();
   }));
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
@@ -435,6 +449,9 @@ function activate(ctx){
       vscode.window.showInformationMessage('All changes reviewed.');
     });
   }
+  ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
+    for(var fp in ms)refreshDeco(fp);
+  }));
   var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
   var op=path.join(home,'.kiss','code-server-data','pending-open.json');
   var iv=setInterval(function(){
@@ -455,19 +472,27 @@ function activate(ctx){
   },800);
   ctx.subscriptions.push({dispose:function(){clearInterval(iv)}});
   async function openMerge(data){
+    for(var fp in ms){
+      vscode.window.visibleTextEditors.forEach(function(ed){
+        if(ed.document.uri.fsPath===fp)ed.setDecorations(greenDeco,[]);
+      });
+    }
     ms={};
     for(var f of(data.files||[])){
       var baseUri=vscode.Uri.file(f.base);
       var currentUri=vscode.Uri.file(f.current);
-      await vscode.commands.executeCommand('vscode.diff',baseUri,currentUri,f.name+' (Changes)');
+      await vscode.commands.executeCommand('vscode.diff',baseUri,currentUri,f.name+' (Diff)');
+      var doc=await vscode.workspace.openTextDocument(currentUri);
+      await vscode.window.showTextDocument(doc,{preview:false});
       ms[f.current]={basePath:f.base,hunks:(f.hunks||[]).map(function(h){
         return{cs:h.cs,cc:h.cc,bs:h.bs,bc:h.bc};
       })};
+      refreshDeco(f.current);
     }
     clFire.fire();
     vscode.window.showInformationMessage(
-      'Reviewing '+data.files.length+' file(s) vs '+data.branch
-      +'. Use \\u2705 Accept / \\u274c Reject on each change.');
+      'Reviewing '+data.files.length+' file(s). '
+      +'Use \\u2705 Accept / \\u274c Reject here, or see the Diff tab for full comparison.');
   }
 }
 module.exports={activate};
