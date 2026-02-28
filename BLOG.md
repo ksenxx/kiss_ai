@@ -291,6 +291,7 @@ KISS includes first-class support:
 uv run src/kiss/evals/swe_agent_verified/run_swebench.py \
     --swebench_verified.model gemini-3-flash-preview \
     --swebench_verified.instance_id "django__django-11099"
+# SWE-bench integration (see project documentation for setup)
 ```
 
 The agent:
@@ -422,9 +423,9 @@ kiss/
 │   └── models/            # OpenAI, Anthropic, Gemini, Together, OpenRouter
 ├── agents/         # Pre-built agents and optimization frameworks
 │   ├── gepa/              # Genetic-Pareto prompt evolution
-│   └── kiss_evolve/       # Evolutionary algorithm discovery
 ├── evals/          # Benchmark integrations
 │   └── swe_agent_verified/# SWE-bench benchmark integration
+│   └── kiss_evolve/       # Evolutionary algorithm discovery
 ├── docker/         # Container management
 ├── rag/            # Simple retrieval-augmented generation
 └── viz_trajectory/ # Web-based trajectory visualizer

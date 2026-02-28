@@ -7,11 +7,14 @@ import tempfile
 
 import yaml
 
-import kiss.agents.assistant.config as _assistant_config  # noqa: F401
+import kiss.agents.assistant.config  # noqa: F401
 from kiss.agents.assistant.relentless_agent import RelentlessAgent
+from kiss.agents.assistant.task_history import _get_task_history_md_path
+from kiss.agents.assistant.useful_tools import UsefulTools
+from kiss.agents.assistant.web_use_tool import WebUseTool
+from kiss.core import config as config_module
+from kiss.core.base import CODING_INSTRUCTIONS, GENERAL_ASSISTANT_INSTRUCTIONS
 from kiss.core.printer import Printer
-from kiss.core.useful_tools import UsefulTools
-from kiss.core.web_use_tool import WebUseTool
 
 
 class AssistantAgent(RelentlessAgent):
@@ -20,6 +23,7 @@ class AssistantAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
+        self.verbose: bool = False
 
     def _get_tools(self) -> list:
         printer = self.printer
@@ -36,9 +40,40 @@ class AssistantAgent(RelentlessAgent):
             tools.extend(self.web_use_tool.get_tools())
         return tools
 
+    def _reset(
+        self,
+        model_name: str | None,
+        summarizer_model_name: str | None,
+        max_sub_sessions: int | None,
+        max_steps: int | None,
+        max_budget: float | None,
+        work_dir: str | None,
+        docker_image: str | None,
+        printer: Printer | None = None,
+        verbose: bool | None = None,
+    ) -> None:
+        cfg = config_module.DEFAULT_CONFIG.assistant.assistant_agent
+        super()._reset(
+            model_name=model_name if model_name is not None else cfg.model_name,
+            summarizer_model_name=(
+                summarizer_model_name if summarizer_model_name is not None
+                else cfg.summarizer_model_name
+            ),
+            max_sub_sessions=(
+                max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
+            ),
+            max_steps=max_steps if max_steps is not None else cfg.max_steps,
+            max_budget=max_budget if max_budget is not None else cfg.max_budget,
+            work_dir=work_dir or ".",
+            docker_image=docker_image,
+            printer=printer,
+            verbose=verbose if verbose is not None else cfg.verbose,
+        )
+
     def run(  # type: ignore[override]
         self,
         model_name: str | None = None,
+        summarizer_model_name: str | None = None,
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
         max_steps: int | None = None,
@@ -48,13 +83,14 @@ class AssistantAgent(RelentlessAgent):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         headless: bool | None = None,
-        print_to_console: bool | None = None,
-        print_to_browser: bool | None = None,
+        verbose: bool | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
         Args:
             model_name: LLM model to use. Defaults to config value.
+            summarizer_model_name: LLM model for summarizing trajectories on failure.
+                Defaults to config value.
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
             max_steps: Maximum steps per sub-session. Defaults to config value.
@@ -64,33 +100,40 @@ class AssistantAgent(RelentlessAgent):
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
             headless: Whether to run the browser in headless mode. Defaults to config value.
-            print_to_console: Whether to print output to console.
-            print_to_browser: Whether to print output to browser UI.
+            verbose: Whether to print output to console. Defaults to config verbose setting.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        from kiss.core import config as config_module
-
         cfg = config_module.DEFAULT_CONFIG.assistant.assistant_agent
         actual_headless = headless if headless is not None else cfg.headless
         self.web_use_tool = WebUseTool(headless=actual_headless)
 
         try:
+            self._reset(
+                model_name, summarizer_model_name, max_sub_sessions,
+                max_steps, max_budget, work_dir, docker_image, printer, verbose,
+            )
+            history_path = _get_task_history_md_path()
+            system_instructions = (
+                GENERAL_ASSISTANT_INSTRUCTIONS
+                + "\n\n" + CODING_INSTRUCTIONS
+                + f"\nTask History File: {history_path}\n"
+            )
             return super().run(
-                model_name=model_name,
+                model_name=self.model_name,
+                summarizer_model_name=self.summarizer_model_name,
+                system_instructions=system_instructions,
                 prompt_template=prompt_template,
                 arguments=arguments,
-                max_steps=max_steps,
-                max_budget=max_budget,
-                work_dir=work_dir,
-                printer=printer,
-                max_sub_sessions=max_sub_sessions,
-                docker_image=docker_image,
-                print_to_console=print_to_console,
-                print_to_browser=print_to_browser,
+                max_steps=self.max_steps,
+                max_budget=self.max_budget,
+                work_dir=self.work_dir,
+                printer=self.printer,
+                max_sub_sessions=self.max_sub_sessions,
+                docker_image=self.docker_image,
+                verbose=self.verbose,
                 tools_factory=self._get_tools,
-                config_path="assistant.assistant_agent",
             )
         finally:
             if self.web_use_tool:
@@ -106,6 +149,9 @@ def main() -> None:
     parser.add_argument(
         "--model_name", type=str, default="claude-sonnet-4-6", help="LLM model name"
     )
+    parser.add_argument(
+        "--summarizer_model_name", type=str, default="claude-haiku-4-5", help="LLM model name"
+    )
     parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
     parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
     parser.add_argument("--work_dir", type=str, default=None, help="Working directory")
@@ -116,16 +162,10 @@ def main() -> None:
         help="Run browser headless (true/false)",
     )
     parser.add_argument(
-        "--print_to_console",
+        "--verbose",
         type=lambda x: (str(x).lower() == "true"),
         default=True,
         help="Print output to console",
-    )
-    parser.add_argument(
-        "--print_to_browser",
-        type=lambda x: (str(x).lower() == "true"),
-        default=True,
-        help="Print output to browser UI",
     )
     parser.add_argument("--task", type=str, default=None, help="Prompt template/task description")
 
@@ -153,12 +193,12 @@ password 'For AI Assistant.' and read the messages.
         result = agent.run(
             prompt_template=task_description,
             model_name=args.model_name,
+            summarizer_model_name=args.summarizer_model_name,
             max_steps=args.max_steps,
             max_budget=args.max_budget,
             work_dir=args.work_dir,
             headless=args.headless,
-            print_to_browser=args.print_to_browser,
-            print_to_console=args.print_to_console,
+            verbose=args.verbose,
         )
     finally:
         os.chdir(old_cwd)

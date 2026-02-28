@@ -69,9 +69,6 @@ class AgentConfig(BaseModel):
     global_max_budget: float = Field(
         default=200.0, description="Maximum budget for the global agent"
     )
-    use_web: bool = Field(default=False, description="Use web browsing and search")
-    print_to_console: bool = Field(default=True, description="Print to console")
-    print_to_browser: bool = Field(default=False, description="Print to browser")
 
 
 class DockerConfig(BaseModel):

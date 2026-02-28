@@ -53,9 +53,9 @@ OUTPUT_CSS = r"""
 .ev{margin-bottom:6px;animation:fadeIn .15s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 .think{
-  border-left:3px solid var(--cyan);padding:10px 16px;margin:10px 0;
-  background:rgba(121,192,255,.04);border-radius:0 8px 8px 0;
-  max-height:200px;overflow-y:auto;
+  padding:10px 16px;margin:10px 0;
+  border:1px solid var(--border);border-radius:8px;
+  background:rgba(121,192,255,.04);max-height:200px;overflow-y:auto;
 }
 .think .lbl{
   font-size:11px;font-weight:600;text-transform:uppercase;
@@ -65,7 +65,7 @@ OUTPUT_CSS = r"""
 .think .lbl .arrow{transition:transform .2s;display:inline-block}
 .think .lbl .arrow.collapsed{transform:rotate(-90deg)}
 .think .cnt{
-  font-size:13px;color:var(--dim);font-style:italic;
+  font-size:11px;color:var(--dim);font-style:italic;
   white-space:pre-wrap;word-break:break-word;
 }
 .think .cnt.hidden{display:none}
@@ -84,29 +84,36 @@ OUTPUT_CSS = r"""
 .tc-h .chv.open{transform:rotate(90deg)}
 .tn{font-weight:600;font-size:13px;color:var(--accent)}
 .tp{font-size:12px;color:var(--cyan);font-family:'SF Mono','Fira Code',monospace}
-.td{font-size:12px;color:var(--dim);font-style:italic}
+.td{font-size:11px;color:var(--dim);font-style:italic}
 .tc-b{
   padding:10px 14px;max-height:300px;overflow-y:auto;
-  font-family:'SF Mono','Fira Code',monospace;font-size:12px;line-height:1.5;
+  font-family:'SF Mono','Fira Code',monospace;font-size:11px;line-height:1.5;
 }
 .tc-b.hide{display:none}
 .tc-b pre{margin:4px 0;white-space:pre-wrap;word-break:break-word}
 .diff-old{
   color:var(--red);background:rgba(248,81,73,.08);
-  padding:2px 6px;border-radius:3px;display:block;margin:2px 0;
+  padding:1px 6px;display:block;white-space:pre-wrap;word-break:break-word;
 }
 .diff-new{
   color:var(--green);background:rgba(63,185,80,.08);
-  padding:2px 6px;border-radius:3px;display:block;margin:2px 0;
+  padding:1px 6px;display:block;white-space:pre-wrap;word-break:break-word;
 }
+.diff-ctx{
+  color:var(--dim);padding:1px 6px;display:block;opacity:0.5;
+  white-space:pre-wrap;word-break:break-word;
+}
+.diff-hl-del{background:rgba(248,81,73,.3);border-radius:2px;padding:0 1px}
+.diff-hl-add{background:rgba(63,185,80,.3);border-radius:2px;padding:0 1px}
 .extra{color:var(--dim);margin:2px 0}
 .tr{
-  border-left:3px solid var(--green);padding:8px 14px;margin:6px 0;
-  border-radius:0 8px 8px 0;font-family:'SF Mono','Fira Code',monospace;
-  font-size:12px;max-height:200px;overflow-y:auto;
+  padding:8px 14px;margin:6px 0;
+  border:1px solid var(--border);border-radius:8px;
+  font-family:'SF Mono','Fira Code',monospace;
+  font-size:11px;max-height:200px;overflow-y:auto;
   white-space:pre-wrap;word-break:break-word;background:rgba(63,185,80,.04);
 }
-.tr.err{border-left-color:var(--red);background:rgba(248,81,73,.04)}
+.tr.err{background:rgba(248,81,73,.04);border-color:rgba(248,81,73,.2)}
 .tr .rl{
   font-size:11px;font-weight:600;text-transform:uppercase;
   letter-spacing:.06em;margin-bottom:4px;
@@ -114,32 +121,32 @@ OUTPUT_CSS = r"""
 .tr .rl.ok{color:var(--green)}
 .tr .rl.fail{color:var(--red)}
 .rc{
-  border:2px solid var(--green);border-radius:10px;
+  border:1px solid var(--green);border-radius:8px;
   margin:20px 0;overflow:hidden;background:var(--surface);
 }
 .rc-h{
   padding:14px 20px;background:rgba(63,185,80,.08);
   display:flex;align-items:center;justify-content:space-between;
 }
-.rc-h h3{color:var(--green);font-size:15px;font-weight:600}
+.rc-h h3{color:var(--green);font-size:14px;font-weight:600}
 .rs{font-size:12px;color:var(--dim);display:flex;gap:18px}
 .rs b{color:var(--text);font-weight:500}
 .rc-body{
-  padding:16px 20px;font-size:14px;max-height:400px;overflow-y:auto;
+  padding:16px 20px;font-size:13px;max-height:400px;overflow-y:auto;
   word-break:break-word;line-height:1.7;
 }
 .rc-body.pre{white-space:pre-wrap}
 .prompt{
-  border:1px solid var(--cyan);border-radius:8px;margin:10px 0;
+  border:1px solid var(--border);border-radius:8px;margin:10px 0;
   overflow:hidden;background:var(--surface);
 }
 .prompt-h{
   padding:8px 16px;background:rgba(121,192,255,.08);
-  font-size:12px;font-weight:600;color:var(--cyan);
+  font-size:11px;font-weight:600;color:var(--cyan);
   text-transform:uppercase;letter-spacing:.04em;
 }
 .prompt-body{
-  padding:12px 16px;font-size:14px;white-space:pre-wrap;
+  padding:12px 16px;font-size:13px;white-space:pre-wrap;
   word-break:break-word;line-height:1.6;max-height:400px;overflow-y:auto;
 }
 .sys{
@@ -147,15 +154,15 @@ OUTPUT_CSS = r"""
   white-space:pre-wrap;word-break:break-word;padding:2px 0;
 }
 .bash-panel{
-  background:#08080a;border:1px solid rgba(255,255,255,0.06);
-  border-radius:6px;margin:2px 0 8px;padding:10px 12px;
+  background:#08080a;border:1px solid var(--border);
+  border-radius:8px;margin:2px 0 8px;padding:10px 12px;
   max-height:300px;overflow-y:auto;
   font-family:'SF Mono','Fira Code','Cascadia Code',monospace;
-  font-size:10px;line-height:1.5;color:rgba(255,255,255,0.65);
+  font-size:8px;line-height:1.5;color:rgba(255,255,255,0.65);
   white-space:pre-wrap;word-break:break-word;
 }
 .usage{
-  border:1px solid var(--border);border-radius:4px;margin:6px 0;
+  border:1px solid var(--border);border-radius:8px;margin:6px 0;
   padding:4px 12px;background:var(--surface);font-size:11px;
   color:var(--dim);font-style:italic;
   font-family:'SF Mono','Fira Code',monospace;
@@ -196,6 +203,56 @@ function toggleThink(el){
   p.querySelector('.cnt').classList.toggle('hidden');
   el.querySelector('.arrow').classList.toggle('collapsed');
 }
+function lineDiff(a,b){
+  var al=a.split('\n'),bl=b.split('\n'),m=al.length,n=bl.length;
+  var dp=[];
+  for(var i=0;i<=m;i++){dp[i]=new Array(n+1);dp[i][0]=0;}
+  for(var j=0;j<=n;j++)dp[0][j]=0;
+  for(var i=1;i<=m;i++)for(var j=1;j<=n;j++)
+    dp[i][j]=al[i-1]===bl[j-1]?dp[i-1][j-1]+1:Math.max(dp[i-1][j],dp[i][j-1]);
+  var ops=[],i=m,j=n;
+  while(i>0||j>0){
+    if(i>0&&j>0&&al[i-1]===bl[j-1]){ops.unshift({t:'=',o:al[--i],n:bl[--j]});}
+    else if(j>0&&(i===0||dp[i][j-1]>=dp[i-1][j])){ops.unshift({t:'+',n:bl[--j]});}
+    else{ops.unshift({t:'-',o:al[--i]});}
+  }
+  return ops;
+}
+function hlInline(oldL,newL){
+  var mn=Math.min(oldL.length,newL.length),pre=0,suf=0;
+  while(pre<mn&&oldL[pre]===newL[pre])pre++;
+  while(suf<mn-pre&&oldL[oldL.length-1-suf]===newL[newL.length-1-suf])suf++;
+  var pf=oldL.substring(0,pre),sf=suf?oldL.substring(oldL.length-suf):'';
+  return{
+    o:esc(pf)+'<span class="diff-hl-del">'+esc(oldL.substring(pre,oldL.length-suf))
+      +'</span>'+esc(sf),
+    n:esc(pf)+'<span class="diff-hl-add">'+esc(newL.substring(pre,newL.length-suf))
+      +'</span>'+esc(sf)
+  };
+}
+function renderDiff(oldStr,newStr){
+  var ops=lineDiff(oldStr,newStr),html='',i=0;
+  while(i<ops.length){
+    var dels=[],adds=[];
+    while(i<ops.length&&ops[i].t==='-'){dels.push(ops[i++]);}
+    while(i<ops.length&&ops[i].t==='+'){adds.push(ops[i++]);}
+    if(dels.length||adds.length){
+      var pairs=Math.min(dels.length,adds.length);
+      for(var p=0;p<pairs;p++){
+        var h=hlInline(dels[p].o,adds[p].n);
+        html+='<div class="diff-old">- '+h.o+'</div>';
+        html+='<div class="diff-new">+ '+h.n+'</div>';
+      }
+      for(var p=pairs;p<dels.length;p++)
+        html+='<div class="diff-old">- '+esc(dels[p].o)+'</div>';
+      for(var p=pairs;p<adds.length;p++)
+        html+='<div class="diff-new">+ '+esc(adds[p].n)+'</div>';
+      continue;
+    }
+    html+='<div class="diff-ctx">  '+esc(ops[i].o)+'</div>';i++;
+  }
+  return html;
+}
 function handleOutputEvent(ev,O,state){
   var t=ev.type;
   switch(t){
@@ -228,7 +285,8 @@ function handleOutputEvent(ev,O,state){
     state.bashPanel=null;state.bashRaf=0;
     var c=mkEl('div','ev tc');
     var h='<span class="chv open">\u25B6</span><span class="tn">'+esc(ev.name)+'</span>';
-    if(ev.path)h+='<span class="tp"> '+esc(ev.path)+'</span>';
+    if(ev.path){var ep=esc(ev.path).replace(/"/g,'&quot;');
+      h+='<span class="tp" data-path="'+ep+'"> '+esc(ev.path)+'</span>';}
     if(ev.description)h+='<span class="td"> '+esc(ev.description)+'</span>';
     var b='';
     if(ev.command)b+='<pre><code class="language-bash">'+esc(ev.command)+'</code></pre>';
@@ -236,8 +294,12 @@ function handleOutputEvent(ev,O,state){
       var lc=ev.lang?'language-'+esc(ev.lang):'';
       b+='<pre><code class="'+lc+'">'+esc(ev.content)+'</code></pre>';
     }
-    if(ev.old_string!==undefined)b+='<div class="diff-old">- '+esc(ev.old_string)+'</div>';
-    if(ev.new_string!==undefined)b+='<div class="diff-new">+ '+esc(ev.new_string)+'</div>';
+    if(ev.old_string!==undefined&&ev.new_string!==undefined){
+      b+=renderDiff(ev.old_string,ev.new_string);
+    }else{
+      if(ev.old_string!==undefined)b+='<div class="diff-old">- '+esc(ev.old_string)+'</div>';
+      if(ev.new_string!==undefined)b+='<div class="diff-new">+ '+esc(ev.new_string)+'</div>';
+    }
     if(ev.extras){for(var k in ev.extras)
       b+='<div class="extra">'+esc(k)+': '+esc(ev.extras[k])+'</div>'}
     var body=b||'<em style="color:var(--dim)">No arguments</em>';
@@ -288,10 +350,11 @@ function handleOutputEvent(ev,O,state){
       rb+=esc((ev.text||'(no result)').replace(/\n{3,}/g,'\n\n').trim());
     }
     rc.innerHTML='<div class="rc-h"><h3>Result</h3><div class="rs">'
-      +'Steps: <b>'+(ev.step_count||0)+'</b>'
-      +' &nbsp; Tokens: <b>'+(ev.total_tokens||0)+'</b>'
-      +' &nbsp; Cost: <b>'+(ev.cost||'N/A')+'</b>'
-      +'</div></div><div class="rc-body'+(usePre?' pre':'')+'">'+rb+'</div>';
+      +'<span>Steps <b>'+(ev.step_count||0)+'</b></span>'
+      +'<span>Tokens <b>'+(ev.total_tokens||0)+'</b></span>'
+      +'<span>Cost <b>'+(ev.cost||'N/A')+'</b></span>'
+      +'</div></div><div class="rc-body'
+      +(usePre?' pre':'')+'">'+rb+'</div>';
     if(typeof hljs!=='undefined')rc.querySelectorAll('pre code').forEach(
       function(bl){hljs.highlightElement(bl)});
     O.appendChild(rc);break}
@@ -323,67 +386,6 @@ HTML_HEAD = r"""<!DOCTYPE html>
 </style>
 </head>
 """
-
-
-def build_stream_viewer_html(title: str = "KISS Agent", subtitle: str = "Live Stream") -> str:
-    """Build a self-contained HTML page for the SSE-based stream viewer.
-
-    Args:
-        title: Page title and header text.
-        subtitle: Subtitle shown next to the title in the header.
-
-    Returns:
-        str: Complete HTML document string with embedded CSS and JavaScript.
-    """
-    css = BASE_CSS + OUTPUT_CSS + """
-main{flex:1;overflow-y:auto;padding:20px 28px;scroll-behavior:smooth}
-footer{
-  background:var(--surface);border-top:1px solid var(--border);
-  padding:8px 28px;font-size:12px;color:var(--dim);flex-shrink:0;
-  display:flex;justify-content:space-between;
-}
-"""
-    return HTML_HEAD.format(title=title, css=css) + f"""<body>
-<header>
-  <div class="logo">{title}<span>{subtitle}</span></div>
-  <div class="status"><div class="dot running" id="dot"></div><span id="stxt">Running</span></div>
-</header>
-<main id="out"></main>
-<footer>
-  <span id="evcnt">Events: 0</span>
-  <span id="elapsed">Elapsed: 0s</span>
-</footer>
-<script>
-{EVENT_HANDLER_JS}
-var O=document.getElementById('out'),D=document.getElementById('dot'),
-  ST=document.getElementById('stxt'),EC=document.getElementById('evcnt'),
-  EL=document.getElementById('elapsed');
-var ec=0,auto=true,userScrolled=false,scrollRaf=0,state={{thinkEl:null,txtEl:null,bashPanel:null}};
-var t0=Date.now();
-O.addEventListener('scroll',function(){{
-  var atBottom=O.scrollTop+O.clientHeight>=O.scrollHeight-80;
-  if(!atBottom)userScrolled=true;
-  if(atBottom)userScrolled=false;
-  auto=!userScrolled;
-}});
-function sb(){{if(auto&&!scrollRaf){{scrollRaf=requestAnimationFrame(function(){{
-  O.scrollTop=O.scrollHeight;scrollRaf=0}})}}}}
-setInterval(function(){{
-  var s=Math.floor((Date.now()-t0)/1000),m=Math.floor(s/60);
-  EL.textContent='Elapsed: '+(m>0?m+'m ':'')+s%60+'s';
-}},1000);
-var src=new EventSource('/events');
-src.onmessage=function(e){{
-  var ev;try{{ev=JSON.parse(e.data)}}catch{{return}}
-  ec++;EC.textContent='Events: '+ec;
-  if(ev.type==='done'){{D.classList.add('done');D.classList.remove('running');ST.textContent='Completed';src.close();return}}
-  handleOutputEvent(ev,O,state);
-  sb();
-}};
-src.onerror=function(){{D.classList.add('done');D.classList.remove('running');ST.textContent='Disconnected'}};
-</script>
-</body>
-</html>"""
 
 
 class BaseBrowserPrinter(Printer):
@@ -452,6 +454,10 @@ class BaseBrowserPrinter(Printer):
                 self._clients.remove(cq)
             except ValueError:
                 pass
+
+    def has_clients(self) -> bool:
+        with self._lock:
+            return bool(self._clients)
 
     def _broadcast_result(
         self, text: str, step_count: int = 0, total_tokens: int = 0, cost: str = "N/A",

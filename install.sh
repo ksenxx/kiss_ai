@@ -1,5 +1,10 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# Install code-server for the embedded VS Code editor
+if ! command -v code-server &>/dev/null; then
+  curl -fsSL https://code-server.dev/install.sh | sh
+fi
+
 git clone https://github.com/ksenxx/kiss_ai.git
 cd kiss_ai
 

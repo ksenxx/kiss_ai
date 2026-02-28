@@ -22,7 +22,7 @@ class TestNonAgenticGeneration(unittest.TestCase):
             model_name=TEST_MODEL,
             prompt_template="Reply with exactly: HELLO",
             is_agentic=False,
-            print_to_console=False,
+            verbose=False,
         )
         self.assertIsInstance(result, str)
         self.assertTrue(len(result) > 0)
@@ -33,7 +33,7 @@ class TestNonAgenticGeneration(unittest.TestCase):
             model_name=TEST_MODEL,
             prompt_template="Reply with exactly: HELLO",
             is_agentic=False,
-            print_to_console=True,
+            verbose=True,
         )
         self.assertIsInstance(result, str)
         self.assertTrue(len(result) > 0)
@@ -51,7 +51,7 @@ class TestAgenticFinish(unittest.TestCase):
             tools=[simple_calculator],
             is_agentic=True,
             max_steps=5,
-            print_to_console=True,
+            verbose=True,
         )
         self.assertIsInstance(result, str)
 
@@ -75,7 +75,7 @@ class TestMaxStepsExceeded(unittest.TestCase):
                 is_agentic=True,
                 max_steps=2,
                 max_budget=1.0,
-                print_to_console=False,
+                verbose=False,
             )
         self.assertIn("steps", str(ctx.exception).lower())
 
@@ -98,7 +98,7 @@ class TestBudgetExceeded(unittest.TestCase):
                 is_agentic=True,
                 max_steps=50,
                 max_budget=0.0001,
-                print_to_console=False,
+                verbose=False,
             )
         except KISSError as e:
             self.assertIn("budget", str(e).lower())
@@ -123,7 +123,7 @@ class TestBudgetExceeded(unittest.TestCase):
                     is_agentic=True,
                     max_steps=10,
                     max_budget=100.0,
-                    print_to_console=False,
+                    verbose=False,
                 )
             self.assertIn("global budget", str(ctx.exception).lower())
         finally:
@@ -133,42 +133,6 @@ class TestBudgetExceeded(unittest.TestCase):
 
 @requires_gemini_api_key
 class TestSetupToolsWebBranch(unittest.TestCase):
-    def test_web_tools_added_when_enabled(self) -> None:
-        original = config_module.DEFAULT_CONFIG.agent.use_web
-        try:
-            config_module.DEFAULT_CONFIG.agent.use_web = True
-            agent = KISSAgent("WebTools")
-            agent.run(
-                model_name=TEST_MODEL,
-                prompt_template="Call finish immediately with result='ok'.",
-                tools=[],
-                is_agentic=True,
-                max_steps=5,
-                print_to_console=False,
-            )
-            self.assertIn("fetch_url", agent.function_map)
-            self.assertIn("search_web", agent.function_map)
-        finally:
-            config_module.DEFAULT_CONFIG.agent.use_web = original
-
-    def test_web_tools_not_added_when_disabled(self) -> None:
-        original = config_module.DEFAULT_CONFIG.agent.use_web
-        try:
-            config_module.DEFAULT_CONFIG.agent.use_web = False
-            agent = KISSAgent("NoWebTools")
-            agent.run(
-                model_name=TEST_MODEL,
-                prompt_template="Call finish immediately with result='ok'.",
-                tools=[],
-                is_agentic=True,
-                max_steps=5,
-                print_to_console=False,
-            )
-            self.assertNotIn("fetch_url", agent.function_map)
-            self.assertNotIn("search_web", agent.function_map)
-        finally:
-            config_module.DEFAULT_CONFIG.agent.use_web = original
-
     def test_custom_finish_tool_not_overridden(self) -> None:
         def finish(result: str) -> str:
             """Finish the task with the given result.
@@ -181,21 +145,16 @@ class TestSetupToolsWebBranch(unittest.TestCase):
             """
             return f"custom:{result}"
 
-        original = config_module.DEFAULT_CONFIG.agent.use_web
-        try:
-            config_module.DEFAULT_CONFIG.agent.use_web = False
-            agent = KISSAgent("CustomFinish")
-            result = agent.run(
-                model_name=TEST_MODEL,
-                prompt_template="Call finish with result='hello'.",
-                tools=[finish],
-                is_agentic=True,
-                max_steps=5,
-                print_to_console=False,
-            )
-            self.assertIn("custom:", result)
-        finally:
-            config_module.DEFAULT_CONFIG.agent.use_web = original
+        agent = KISSAgent("CustomFinish")
+        result = agent.run(
+            model_name=TEST_MODEL,
+            prompt_template="Call finish with result='hello'.",
+            tools=[finish],
+            is_agentic=True,
+            max_steps=5,
+            verbose=False,
+        )
+        self.assertIn("custom:", result)
 
 
 @requires_gemini_api_key
@@ -240,7 +199,7 @@ class TestMultipleToolCalls(unittest.TestCase):
             tools=[add, multiply],
             is_agentic=True,
             max_steps=5,
-            print_to_console=True,
+            verbose=True,
         )
         self.assertIn("5", result)
         self.assertIn("20", result)
@@ -278,7 +237,7 @@ class TestToolExecutionError(unittest.TestCase):
             tools=[strict_tool],
             is_agentic=True,
             max_steps=5,
-            print_to_console=False,
+            verbose=False,
         )
         self.assertIsInstance(result, str)
 

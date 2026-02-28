@@ -73,23 +73,16 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
     "mdformat>=1.0.0",
-    "jupyter>=1.1.1",
-    "notebook>=7.5.3",
     "nbconvert>=7.17.0",
     "types-requests>=2.32.4.20260107",
 ]
 
-# Minimal dependencies for kiss.core module only (no model SDKs)
+# Minimal dependencies for kiss.core module only
 core = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "pyyaml>=6.0.0",
     "rich>=14.2.0",
-    "requests>=2.28.0",
-    "beautifulsoup4>=4.12.0",
-    "playwright>=1.40.0",
-    "uvicorn>=0.30.0",
-    "starlette>=0.38.0",
 ]
 
 # Core + Anthropic Claude support
@@ -110,17 +103,17 @@ gemini = [
     "google-genai>=0.30.0",
 ]
 
-docker = [
-    "docker>=7.0.0",
+# Dependencies for kiss.agents.assistant (web tools, browser UI)
+assistant = [
+    "requests>=2.28.0",
+    "beautifulsoup4>=4.12.0",
+    "playwright>=1.40.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.38.0",
 ]
 
-# Evals dependencies (for running benchmarks in src/kiss/evals)
-evals = [
-    "datasets>=2.0.0",
-    "swebench>=1.0.0",
-    "orjson>=3.9.0",
-    "scipy>=1.11.0",
-    "scikit-learn>=1.3.0",
+docker = [
+    "docker>=7.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -200,10 +193,6 @@ disallow_untyped_defs = false
 module = "kiss.viz_trajectory.*"
 disallow_untyped_defs = false
 
-[[tool.mypy.overrides]]
-module = "kiss.evals.algotune.*"
-disallow_untyped_defs = false
-
 [tool.ruff]
 line-length = 100
 target-version = "py313"
@@ -224,6 +213,4 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
-algotune = "kiss.evals.algotune.run_algotune:main"
-notebook = "kiss.scripts.notebook:main"
 assistant = "kiss.agents.assistant.assistant:main"
