@@ -170,32 +170,29 @@ def _save_proposals(proposals: list[str]) -> None:
         pass
 
 
-def _load_model_usage() -> dict[str, int]:
+def _read_model_usage_file() -> dict:
     if MODEL_USAGE_FILE.exists():
         try:
             data = json.loads(MODEL_USAGE_FILE.read_text())
             if isinstance(data, dict):
-                return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float))}
+                return data
         except (json.JSONDecodeError, OSError):
             pass
     return {}
 
 
+def _load_model_usage() -> dict[str, int]:
+    raw = _read_model_usage_file()
+    return {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float))}
+
+
 def _load_last_model() -> str:
-    if MODEL_USAGE_FILE.exists():
-        try:
-            data = json.loads(MODEL_USAGE_FILE.read_text())
-            if isinstance(data, dict):
-                last = data.get("_last")
-                if isinstance(last, str):
-                    return last
-        except (json.JSONDecodeError, OSError):
-            pass
-    return ""
+    last = _read_model_usage_file().get("_last")
+    return last if isinstance(last, str) else ""
 
 
 def _record_model_usage(model: str) -> None:
-    usage: dict[str, int | str] = dict(_load_model_usage())
+    usage = _read_model_usage_file()
     usage[model] = int(usage.get(model, 0)) + 1
     usage["_last"] = model
     try:
@@ -654,8 +651,11 @@ module.exports={activate};
 """
 
 
-def _setup_code_server(data_dir: str) -> None:
-    """Pre-configure code-server user data: settings, state DB, and cleanup extension."""
+def _setup_code_server(data_dir: str) -> bool:
+    """Pre-configure code-server user data: settings, state DB, and cleanup extension.
+
+    Returns True if the extension.js was updated (code-server needs restart).
+    """
     user_dir = Path(data_dir) / "User"
     user_dir.mkdir(parents=True, exist_ok=True)
 
@@ -706,7 +706,10 @@ def _setup_code_server(data_dir: str) -> None:
             ],
         },
     }))
-    (ext_dir / "extension.js").write_text(_CS_EXTENSION_JS)
+    ext_file = ext_dir / "extension.js"
+    old_content = ext_file.read_text() if ext_file.exists() else ""
+    ext_file.write_text(_CS_EXTENSION_JS)
+    return old_content != _CS_EXTENSION_JS
 
 
 def _model_vendor_order(name: str) -> int:
@@ -1179,7 +1182,6 @@ header{
 #assistant-panel .think{padding:8px 12px;margin:8px 0;border-radius:8px}
 #assistant-panel .think .cnt{font-size:10px}
 #assistant-panel .rc{border-radius:10px}
-#assistant-panel .rc-h{padding:10px 14px}
 #assistant-panel .rc-body{padding:10px 14px;max-height:250px;font-size:10px}
 #assistant-panel #input-area{padding:0 12px 12px;padding-top:10px}
 #assistant-panel #input-container{padding:8px 10px;border-radius:10px}
@@ -1213,7 +1215,6 @@ header{
 #assistant-panel .followup-bar{padding:8px 12px;margin:10px 0 6px;border-radius:8px}
 #assistant-panel .llm-panel{padding:8px 10px;margin:6px 0;border-radius:8px}
 #assistant-panel .llm-panel .txt{font-size:10px}
-#assistant-panel .llm-panel .think .cnt{font-size:10px}
 #assistant-panel .bash-panel{max-height:200px;font-size:10px}
 #assistant-panel .prompt-h{font-size:10px;padding:6px 12px}
 #assistant-panel .prompt-body{font-size:10px;padding:8px 12px}
@@ -1488,7 +1489,6 @@ var rl=document.getElementById('recent-list');
 var pl=document.getElementById('proposed-list');
 var histSearch=document.getElementById('history-search');
 var allTasks=[];
-var modelBtn=document.getElementById('model-btn');
 var modelLabel=document.getElementById('model-label');
 var modelDD=document.getElementById('model-dropdown');
 var modelSearch=document.getElementById('model-search');
@@ -1498,14 +1498,15 @@ var sidebar=document.getElementById('sidebar');
 var sidebarOverlay=document.getElementById('sidebar-overlay');
 var suggestionsEl=document.getElementById('suggestions');
 var running=false,_scrollLock=false;
-var scrollRaf=0,state={thinkEl:null,txtEl:null,bashPanel:null};
+var scrollRaf=0,state=mkS();
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
 var acTimer=null,histIdx=-1,histCache=[];
 var lastToolName='',llmPanel=null,pendingPanel=false;
-var llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};
+var llmPanelState=mkS();
 var ghostEl=document.getElementById('ghost-overlay');
 var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
 var ghostCache={q:'',s:''};
+function mkS(){return{thinkEl:null,txtEl:null,bashPanel:null}}
 inp.addEventListener('input',function(){
   this.style.height='auto';
   this.style.height=Math.min(this.scrollHeight,200)+'px';
@@ -1600,11 +1601,12 @@ function handleEvent(ev){
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
   case'proposed_updated':loadProposed();loadWelcome();break;
+  case'theme_changed':applyTheme(ev);break;
   case'merge_started':document.getElementById('merge-toolbar').style.display='flex';break;
   case'merge_ended':document.getElementById('merge-toolbar').style.display='none';break;
   case'clear':
-    O.innerHTML='';state.thinkEl=null;state.txtEl=null;state.bashPanel=null;
-    llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};lastToolName='';pendingPanel=false;
+    O.innerHTML='';state=mkS();
+    llmPanel=null;llmPanelState=mkS();lastToolName='';pendingPanel=false;
     _scrollLock=false;showSpinner();break;
   case'task_done':{
     var el=t0?Math.floor((Date.now()-t0)/1000):0;
@@ -1633,13 +1635,13 @@ function handleEvent(ev){
   default:{
     if(t==='tool_call'){
       lastToolName=ev.name||'';
-      llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};pendingPanel=false;
+      llmPanel=null;llmPanelState=mkS();pendingPanel=false;
     }
     if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
     if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
       llmPanel=mkEl('div','llm-panel');
       O.appendChild(llmPanel);
-      llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};pendingPanel=false;
+      llmPanelState=mkS();pendingPanel=false;
     }
     var target=O,tState=state;
     if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
@@ -1765,8 +1767,8 @@ clearBtn.addEventListener('click',function(){
     +'<p>Describe a task and the agent will work on it</p>'
     +'<div id="suggestions"></div></div>';
   suggestionsEl=document.getElementById('suggestions');
-  state={thinkEl:null,txtEl:null,bashPanel:null};
-  llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};
+  state=mkS();
+  llmPanel=null;llmPanelState=mkS();
   lastToolName='';pendingPanel=false;_scrollLock=false;
   loadWelcome();inp.value='';inp.focus();
 });
@@ -2030,34 +2032,35 @@ function hexToRgb(h){
   var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
   return r+','+g+','+b;
 }
-function loadTheme(){
-  fetch('/theme').then(function(r){return r.json()}).then(function(t){
-    var p=document.getElementById('assistant-panel')||document.body;
-    var map={
-      '--bg':t.bg,'--surface':t.bg2,'--surface2':t.bg2,
-      '--text':t.fg,'--accent':t.accent,'--border':t.border,
-      '--green':t.green,'--red':t.red,'--purple':t.purple,'--cyan':t.cyan,
-      '--input-bg':t.inputBg
-    };
-    for(var k in map){
-      if(!map[k])continue;
-      p.style.setProperty(k,map[k]);
-    }
-    var rgbMap={
-      '--bg-rgb':t.bg,'--bg2-rgb':t.bg2,'--fg-rgb':t.fg,
-      '--accent-rgb':t.accent,'--border-rgb':t.border,
-      '--green-rgb':t.green,'--red-rgb':t.red,
-      '--purple-rgb':t.purple,'--cyan-rgb':t.cyan
-    };
-    for(var k in rgbMap){
-      if(!rgbMap[k])continue;
-      p.style.setProperty(k,hexToRgb(rgbMap[k]));
-    }
-    document.body.style.setProperty('--bg',t.bg);
-    document.body.style.setProperty('background',t.bg);
-  }).catch(function(){});
+function applyTheme(t){
+  var p=document.getElementById('assistant-panel')||document.body;
+  var map={
+    '--bg':t.bg,'--surface':t.bg2,'--surface2':t.bg2,
+    '--text':t.fg,'--accent':t.accent,'--border':t.border,
+    '--green':t.green,'--red':t.red,'--purple':t.purple,'--cyan':t.cyan,
+    '--input-bg':t.inputBg
+  };
+  for(var k in map){
+    if(!map[k])continue;
+    p.style.setProperty(k,map[k]);
+  }
+  var rgbMap={
+    '--bg-rgb':t.bg,'--bg2-rgb':t.bg2,'--fg-rgb':t.fg,
+    '--accent-rgb':t.accent,'--border-rgb':t.border,
+    '--green-rgb':t.green,'--red-rgb':t.red,
+    '--purple-rgb':t.purple,'--cyan-rgb':t.cyan
+  };
+  for(var k in rgbMap){
+    if(!rgbMap[k])continue;
+    p.style.setProperty(k,hexToRgb(rgbMap[k]));
+  }
+  document.body.style.setProperty('--bg',t.bg);
+  document.body.style.setProperty('background',t.bg);
 }
-loadTheme();setInterval(loadTheme,15000);
+function loadTheme(){
+  fetch('/theme').then(function(r){return r.json()}).then(applyTheme).catch(function(){});
+}
+loadTheme();setInterval(loadTheme,3000);
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
 
@@ -2227,7 +2230,7 @@ def run_chatbot(
     cs_data_dir = str(_KISS_DIR / "code-server-data")
     cs_binary = shutil.which("code-server")
     if cs_binary:
-        _setup_code_server(cs_data_dir)
+        ext_changed = _setup_code_server(cs_data_dir)
         cs_port = 13338
         port_in_use = False
         try:
@@ -2235,6 +2238,20 @@ def run_chatbot(
                 port_in_use = True
         except (ConnectionRefusedError, OSError):
             pass
+        if port_in_use and ext_changed:
+            print("Extension updated, restarting code-server...")
+            try:
+                result = subprocess.run(
+                    ["lsof", "-ti", f":{cs_port}", "-sTCP:LISTEN"],
+                    capture_output=True, text=True,
+                )
+                for pid_str in result.stdout.strip().split("\n"):
+                    if pid_str.strip():
+                        os.kill(int(pid_str.strip()), 15)
+                time.sleep(1.5)
+            except Exception:
+                pass
+            port_in_use = False
         if port_in_use:
             code_server_url = f"http://127.0.0.1:{cs_port}"
             print(f"Reusing existing code-server at {code_server_url}")
@@ -2332,6 +2349,30 @@ def run_chatbot(
                 })
         except Exception:
             pass
+
+    def _watch_theme_file() -> None:
+        theme_file = _KISS_DIR / "vscode-theme.json"
+        last_mtime = 0.0
+        try:
+            if theme_file.exists():
+                last_mtime = theme_file.stat().st_mtime
+        except OSError:
+            pass
+        while not shutting_down.is_set():
+            try:
+                if theme_file.exists():
+                    mtime = theme_file.stat().st_mtime
+                    if mtime > last_mtime:
+                        last_mtime = mtime
+                        data = json.loads(theme_file.read_text())
+                        kind = data.get("kind", "dark")
+                        colors = _THEME_PRESETS.get(kind, _THEME_PRESETS["dark"])
+                        printer.broadcast({"type": "theme_changed", **colors})
+            except (OSError, json.JSONDecodeError):
+                pass
+            shutting_down.wait(1.0)
+
+    threading.Thread(target=_watch_theme_file, daemon=True).start()
 
     def run_agent_thread(task: str, model_name: str) -> None:
         nonlocal running, agent_thread
