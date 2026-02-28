@@ -97,7 +97,7 @@ def _load_history() -> list[dict[str, str]]:
         except (json.JSONDecodeError, OSError):
             pass
     _save_history(SAMPLE_TASKS)
-    return entries
+    return _history_cache
 
 
 def _save_history(entries: list[dict[str, str]]) -> None:
