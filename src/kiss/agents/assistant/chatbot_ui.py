@@ -768,13 +768,13 @@ var inp=document.getElementById('task-input');
 var btn=document.getElementById('send-btn');
 var stopBtn=document.getElementById('stop-btn');
 var clearBtn=document.getElementById('clear-btn');
-var ac=document.getElementById('autocomplete');
+var ac=document.getElementById('autocomplete'); //autocomplete and proposals
 var rl=document.getElementById('recent-list');
 var pl=document.getElementById('proposed-list');
 var histSearch=document.getElementById('history-search');
 var allTasks=[];
 var modelLabel=document.getElementById('model-label');
-var modelDD=document.getElementById('model-dropdown');
+var modelDD=document.getElementById('model-dropdown'); //autocomplete and proposals
 var modelSearch=document.getElementById('model-search');
 var modelList=document.getElementById('model-list');
 var allModels=[],selectedModel='',modelDDIdx=-1;
@@ -1156,11 +1156,11 @@ function updateGhost(){
     +'<span class="gs">'+esc(ghostSuggest)+'</span>';
 }
 function acceptGhost(){
-  inp.value+=ghostSuggest;
+  inp.value+=ghostSuggest; //autocomplete and proposals
   clearGhost();inp.focus();
 }
 function fetchGhost(){
-  var q=inp.value;
+  var q=inp.value; //autocomplete and proposals //autocomplete and proposals
   if(!q.trim()||q.trim().length<2){clearGhost();return}
   if(ghostCache.q&&q.startsWith(ghostCache.q)&&ghostCache.s){
     var extra=q.substring(ghostCache.q.length);
@@ -1183,8 +1183,8 @@ function fetchGhost(){
 }
 function cycleHistory(dir){
   if(!histCache.length){
-    fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
-      histCache=tasks.map(function(t){return typeof t==='string'?t:(t.task||'')});
+    fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){//autocomplete and proposals
+      histCache=tasks.map(function(t){return typeof t==='string'?t:(t.task||'')});//autocomplete and proposals
       doHistCycle(dir);
     });return;
   }
