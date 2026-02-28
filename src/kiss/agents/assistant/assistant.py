@@ -551,6 +551,9 @@ def run_chatbot(
     async def merge_action(request: Request) -> JSONResponse:
         body = await request.json()
         action = body.get("action", "")
+        if action == "all-done":
+            printer.broadcast({"type": "merge_ended"})
+            return JSONResponse({"status": "ok"})
         if action not in ("next", "accept-all", "reject-all"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
         pending = os.path.join(cs_data_dir, "pending-action.json")
