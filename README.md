@@ -734,10 +734,10 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 ### Documentation
 
 - `uv run generate-api-docs` - Generate API documentation
+
 ### AlgoTune
 
 - `uv run algotune` - Run the AlgoTune benchmark
-
 
 ### Cleanup
 
