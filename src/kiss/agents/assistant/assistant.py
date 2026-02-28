@@ -1175,16 +1175,21 @@ function startTimer(){
   },1000);
 }
 function stopTimer(){if(timerIv){clearInterval(timerIv);timerIv=null;}}
+var _spinnerTimer=null;
 function removeSpinner(){
+  if(_spinnerTimer){clearTimeout(_spinnerTimer);_spinnerTimer=null;}
   var sp=document.getElementById('wait-spinner');
   if(sp)sp.remove();
 }
 function showSpinner(msg){
   removeSpinner();
-  var sp=mkEl('div','spinner');
-  sp.id='wait-spinner';
-  sp.textContent=msg||'Waiting ...';
-  O.appendChild(sp);sb();
+  _spinnerTimer=setTimeout(function(){
+    _spinnerTimer=null;
+    var sp=mkEl('div','spinner');
+    sp.id='wait-spinner';
+    sp.textContent=msg||'Thinking ...';
+    O.appendChild(sp);sb();
+  },1000);
 }
 function setReady(label){
   running=false;D.classList.remove('running');
