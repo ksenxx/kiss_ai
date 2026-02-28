@@ -105,7 +105,7 @@ class TestUsefulTools:
         assert "Error:" in result
         assert "not unique" in result
 
-    def test_edit_replace_all(self, tools):
+    def test_edit_replace_all_different_content(self, tools):
         ut, test_dir = tools
         f = test_dir / "replace_all.txt"
         f.write_text("foo bar foo")

@@ -34,7 +34,6 @@
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
-  - [`kiss.rag`](#kissrag)
 
 </details>
 
@@ -452,6 +451,8 @@ ______________________________________________________________________
 
   - `cq`: The client queue to remove.
 
+- **has_clients**<br/>`has_clients() -> bool`
+
 - **print** — Render content by broadcasting SSE events to connected browser clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
@@ -486,15 +487,6 @@ ______________________________________________________________________
   - `content`: The full content to write to the file.
 
 - **Edit** — Performs precise string replacements in files with exact matching.<br/>`Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str`
-
-  - `file_path`: Absolute path to the file to modify.
-  - `old_string`: Exact text to find and replace.
-  - `new_string`: Replacement text, must differ from old_string.
-  - `replace_all`: If True, replace all occurrences.
-  - `timeout_seconds`: Timeout in seconds for the edit command.
-  - **Returns:** The output of the edit operation.
-
-- **MultiEdit** — Performs precise string replacements in files with exact matching.<br/>`MultiEdit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str`
 
   - `file_path`: Absolute path to the file to modify.
   - `old_string`: Exact text to find and replace.
@@ -785,9 +777,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.assistant.config` — *Configuration for the Assistant Agent.*
 
-##### `class AssistantAgentConfig(BaseModel)`
-
-##### `class RelentlessAgentConfig(BaseModel)`
+##### `class AgentConfig(BaseModel)`
 
 ##### `class AssistantConfig(BaseModel)`
 
@@ -869,7 +859,7 @@ ______________________________________________________________________
 #### `kiss.agents.kiss_evolve` — *KISSEvolve: Evolutionary Algorithm Discovery using LLMs.*
 
 ```python
-from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve
+from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve, SimpleRAG
 ```
 
 ##### `class CodeVariant` — Represents a code variant in the evolutionary population.
@@ -930,6 +920,47 @@ from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve
 
   - **Returns:** Dictionary containing: - size: Total population size - avg_fitness: Average fitness across all variants - best_fitness: Maximum fitness value - worst_fitness: Minimum fitness value
 
+##### `class SimpleRAG` — Simple and elegant RAG system for document storage and retrieval.
+
+**Constructor:** `SimpleRAG(model_name: str, metric: str = 'cosine', embedding_model_name: str | None = None)`
+
+- `model_name`: Model name to use for the LLM provider.
+
+- `metric`: Distance metric to use - "cosine" or "l2" (default: "cosine").
+
+- `embedding_model_name`: Optional specific model name for embeddings. If None, uses model_name or provider default.
+
+- **add_documents** — Add documents to the vector store.<br/>`add_documents(documents: list[dict[str, Any]], batch_size: int = 100) -> None`
+
+  - `documents`: List of document dictionaries. Each document should have: - "id": Unique identifier (str) - "text": Document text content (str) - "metadata": Optional metadata dictionary (dict)
+  - `batch_size`: Number of documents to process in each batch (default: 100).
+  - **Returns:** None.
+
+- **query** — Query similar documents from the collection.<br/>`query(query_text: str, top_k: int = 5, filter_fn: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]`
+
+  - `query_text`: Query text to search for.
+  - `top_k`: Number of top results to return (default: 5).
+  - `filter_fn`: Optional filter function that takes a document dict and returns bool.
+  - **Returns:** List of dictionaries containing: - "id": Document ID - "text": Document text - "metadata": Document metadata - "score": Similarity score (higher is better for cosine, lower for L2)
+
+- **delete_documents** — Delete documents from the collection by their IDs.<br/>`delete_documents(document_ids: list[str]) -> None`
+
+  - `document_ids`: List of document IDs to delete.
+  - **Returns:** None.
+
+- **get_collection_stats** — Get statistics about the collection.<br/>`get_collection_stats() -> dict[str, Any]`
+
+  - **Returns:** Dictionary containing collection statistics.
+
+- **clear_collection** — Clear all documents from the collection.<br/>`clear_collection() -> None`
+
+  - **Returns:** None.
+
+- **get_document** — Get a document by its ID.<br/>`get_document(document_id: str) -> dict[str, Any] | None`
+
+  - `document_id`: Document ID to retrieve.
+  - **Returns:** Document dictionary or None if not found.
+
 ______________________________________________________________________
 
 #### `kiss.agents.kiss_evolve.config` — *KISSEvolve-specific configuration that extends the main KISS config.*
@@ -975,54 +1006,5 @@ from kiss.docker import DockerManager
   - **Returns:** The host port mapped to the container port, or None if not mapped.
 
 - **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
-
-______________________________________________________________________
-
-### `kiss.rag` — *Simple RAG system for retrieval-augmented generation.*
-
-```python
-from kiss.rag import SimpleRAG
-```
-
-#### `class SimpleRAG` — Simple and elegant RAG system for document storage and retrieval.
-
-**Constructor:** `SimpleRAG(model_name: str, metric: str = 'cosine', embedding_model_name: str | None = None)`
-
-- `model_name`: Model name to use for the LLM provider.
-
-- `metric`: Distance metric to use - "cosine" or "l2" (default: "cosine").
-
-- `embedding_model_name`: Optional specific model name for embeddings. If None, uses model_name or provider default.
-
-- **add_documents** — Add documents to the vector store.<br/>`add_documents(documents: list[dict[str, Any]], batch_size: int = 100) -> None`
-
-  - `documents`: List of document dictionaries. Each document should have: - "id": Unique identifier (str) - "text": Document text content (str) - "metadata": Optional metadata dictionary (dict)
-  - `batch_size`: Number of documents to process in each batch (default: 100).
-  - **Returns:** None.
-
-- **query** — Query similar documents from the collection.<br/>`query(query_text: str, top_k: int = 5, filter_fn: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]`
-
-  - `query_text`: Query text to search for.
-  - `top_k`: Number of top results to return (default: 5).
-  - `filter_fn`: Optional filter function that takes a document dict and returns bool.
-  - **Returns:** List of dictionaries containing: - "id": Document ID - "text": Document text - "metadata": Document metadata - "score": Similarity score (higher is better for cosine, lower for L2)
-
-- **delete_documents** — Delete documents from the collection by their IDs.<br/>`delete_documents(document_ids: list[str]) -> None`
-
-  - `document_ids`: List of document IDs to delete.
-  - **Returns:** None.
-
-- **get_collection_stats** — Get statistics about the collection.<br/>`get_collection_stats() -> dict[str, Any]`
-
-  - **Returns:** Dictionary containing collection statistics.
-
-- **clear_collection** — Clear all documents from the collection.<br/>`clear_collection() -> None`
-
-  - **Returns:** None.
-
-- **get_document** — Get a document by its ID.<br/>`get_document(document_id: str) -> dict[str, Any] | None`
-
-  - `document_id`: Document ID to retrieve.
-  - **Returns:** Document dictionary or None if not found.
 
 ______________________________________________________________________
