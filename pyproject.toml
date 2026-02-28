@@ -118,15 +118,6 @@ docker = [
     "docker>=7.0.0",
 ]
 
-# Evals dependencies (for running benchmarks in src/kiss/evals)
-evals = [
-    "datasets>=2.0.0",
-    "swebench>=1.0.0",
-    "orjson>=3.9.0",
-    "scipy>=1.11.0",
-    "scikit-learn>=1.3.0",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["src/kiss/tests"]
 python_files = ["test_*.py"]
@@ -204,10 +195,6 @@ disallow_untyped_defs = false
 module = "kiss.viz_trajectory.*"
 disallow_untyped_defs = false
 
-[[tool.mypy.overrides]]
-module = "kiss.evals.algotune.*"
-disallow_untyped_defs = false
-
 [tool.ruff]
 line-length = 100
 target-version = "py313"
@@ -228,6 +215,5 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
-algotune = "kiss.evals.algotune.run_algotune:main"
 notebook = "kiss.scripts.notebook:main"
 assistant = "kiss.agents.assistant.assistant:main"

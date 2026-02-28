@@ -89,20 +89,7 @@ def test_imports() -> bool:
         print(f"✗ Failed to import/create AgentEvolver: {e}")
         tests_failed += 1
 
-    # Test 4: ARVO agent imports
-    try:
-        from kiss.evals.arvo_agent.arvo_agent import (  # noqa: F401
-            find_vulnerability,
-            get_all_arvo_tags,
-        )
-
-        print("✓ ARVO agent imports successful")
-        tests_passed += 1
-    except Exception as e:
-        print(f"✗ Failed to import ARVO agent: {e}")
-        tests_failed += 1
-
-    # Test 9: SimpleRAG
+    # Test 4: SimpleRAG
     try:
         from kiss.rag import SimpleRAG  # noqa: F401
 
