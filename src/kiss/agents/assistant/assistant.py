@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 import types
-import uuid
 import webbrowser
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -227,143 +226,104 @@ def _scan_files(work_dir: str) -> list[str]:
     return paths
 
 
-def _get_current_branch(work_dir: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, cwd=work_dir,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _save_branch_info(data_dir: str, original_branch: str, temp_branch: str) -> None:
-    Path(data_dir).mkdir(parents=True, exist_ok=True)
-    (Path(data_dir) / "branch-info.json").write_text(json.dumps({
-        "original_branch": original_branch,
-        "temp_branch": temp_branch,
-    }))
-
-
-def _load_branch_info(data_dir: str) -> dict[str, str]:
-    info_file = Path(data_dir) / "branch-info.json"
-    if info_file.exists():
-        try:
-            data: dict[str, str] = json.loads(info_file.read_text())
-            return data
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-
-def _clear_branch_info(data_dir: str) -> None:
-    info_file = Path(data_dir) / "branch-info.json"
-    if info_file.exists():
-        try:
-            info_file.unlink()
-        except OSError:
-            pass
-
-
-def _update_branch_summary(data_dir: str, summary: str) -> None:
-    info_file = Path(data_dir) / "branch-info.json"
-    if info_file.exists():
-        try:
-            data = json.loads(info_file.read_text())
-            data["agent_summary"] = summary
-            info_file.write_text(json.dumps(data))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-
-def _has_uncommitted_changes(work_dir: str) -> bool:
+def _capture_git_hunks(work_dir: str) -> dict[str, list[tuple[int, int]]]:
     result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=work_dir, capture_output=True, text=True,
-    )
-    return bool(result.stdout.strip())
-
-
-def _prepare_merge_view(work_dir: str, data_dir: str, port: int) -> dict[str, Any]:
-    subprocess.run(["git", "add", "-A"], cwd=work_dir, capture_output=True)
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "HEAD"],
+        ["git", "diff", "-U0", "HEAD", "--no-color"],
         capture_output=True, text=True, cwd=work_dir,
     )
-    changed = [f for f in result.stdout.strip().split("\n") if f]
-    if not changed:
-        subprocess.run(
-            ["git", "reset", "--quiet"], cwd=work_dir, capture_output=True,
-        )
-        return {"error": "No changes from baseline"}
-    branch_info = _load_branch_info(data_dir)
-    label = branch_info.get("original_branch", "HEAD")
+    hunks: dict[str, list[tuple[int, int]]] = {}
+    current_file = ""
+    for line in result.stdout.split("\n"):
+        dm = re.match(r"^diff --git a/.* b/(.*)", line)
+        if dm:
+            current_file = dm.group(1)
+            continue
+        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        if hm and current_file:
+            hunks.setdefault(current_file, []).append(
+                (int(hm.group(1)), int(hm.group(2)) if hm.group(2) is not None else 1)
+            )
+    return hunks
+
+
+def _capture_untracked(work_dir: str) -> set[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        capture_output=True, text=True, cwd=work_dir,
+    )
+    return {line.strip() for line in result.stdout.split("\n") if line.strip()}
+
+
+def _prepare_merge_view(
+    work_dir: str,
+    data_dir: str,
+    pre_hunks: dict[str, list[tuple[int, int]]],
+    pre_untracked: set[str],
+) -> dict[str, Any]:
+    post_result = subprocess.run(
+        ["git", "diff", "-U0", "HEAD", "--no-color"],
+        capture_output=True, text=True, cwd=work_dir,
+    )
+    file_hunks: dict[str, list[dict[str, int]]] = {}
+    current_file = ""
+    for line in post_result.stdout.split("\n"):
+        dm = re.match(r"^diff --git a/.* b/(.*)", line)
+        if dm:
+            current_file = dm.group(1)
+            continue
+        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        if hm and current_file:
+            bs = int(hm.group(1))
+            bc = int(hm.group(2)) if hm.group(2) is not None else 1
+            cs = int(hm.group(3))
+            cc = int(hm.group(4)) if hm.group(4) is not None else 1
+            file_hunks.setdefault(current_file, []).append({
+                "bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc,
+            })
+    for fname in list(file_hunks):
+        pre = set(pre_hunks.get(fname, []))
+        filtered = [h for h in file_hunks[fname] if (h["bs"] + 1, h["bc"]) not in pre]
+        if filtered:
+            file_hunks[fname] = filtered
+        else:
+            del file_hunks[fname]
+    new_files = _capture_untracked(work_dir) - pre_untracked
+    for fname in new_files:
+        fpath = Path(work_dir) / fname
+        try:
+            if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
+                continue
+            line_count = len(fpath.read_text().splitlines())
+            if line_count:
+                file_hunks[fname] = [{"bs": 0, "bc": 0, "cs": 0, "cc": line_count}]
+        except (OSError, UnicodeDecodeError):
+            pass
+    if not file_hunks:
+        return {"error": "No changes"}
     merge_dir = Path(data_dir) / "merge-temp"
     if merge_dir.exists():
         shutil.rmtree(merge_dir)
     manifest_files = []
-    for fname in changed:
+    for fname, hunks in file_hunks.items():
+        current_path = Path(work_dir) / fname
         base_path = merge_dir / fname
         base_path.parent.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run(
+        base_result = subprocess.run(
             ["git", "show", f"HEAD:{fname}"],
             capture_output=True, text=True, cwd=work_dir,
         )
-        base_path.write_text(r.stdout if r.returncode == 0 else "")
-        dr = subprocess.run(
-            ["git", "diff", "--cached", "--unified=0", "HEAD", "--", fname],
-            capture_output=True, text=True, cwd=work_dir,
-        )
-        hunks: list[dict[str, int]] = []
-        for diff_line in dr.stdout.split("\n"):
-            hm = re.match(
-                r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
-                diff_line,
-            )
-            if hm:
-                hunks.append({
-                    "bs": int(hm.group(1)) - 1,
-                    "bc": int(hm.group(2)) if hm.group(2) is not None else 1,
-                    "cs": int(hm.group(3)) - 1,
-                    "cc": int(hm.group(4)) if hm.group(4) is not None else 1,
-                })
+        base_path.write_text(base_result.stdout if base_result.returncode == 0 else "")
         manifest_files.append({
             "name": fname,
             "base": str(base_path),
-            "current": str(Path(work_dir) / fname),
+            "current": str(current_path),
             "hunks": hunks,
         })
-    subprocess.run(
-        ["git", "reset", "--quiet"], cwd=work_dir, capture_output=True,
-    )
     manifest = Path(data_dir) / "pending-merge.json"
     manifest.write_text(json.dumps({
-        "branch": label, "files": manifest_files,
-        "callback_port": port,
+        "branch": "HEAD", "files": manifest_files,
     }))
     return {"status": "opened", "count": len(manifest_files)}
-
-
-def _cleanup_temp_branch(work_dir: str, data_dir: str) -> None:
-    branch_info = _load_branch_info(data_dir)
-    if not branch_info:
-        return
-    original = branch_info.get("original_branch", "")
-    temp = branch_info.get("temp_branch", "")
-    if original:
-        subprocess.run(
-            ["git", "checkout", original],
-            cwd=work_dir, capture_output=True,
-        )
-    if temp:
-        subprocess.run(
-            ["git", "branch", "-D", temp],
-            cwd=work_dir, capture_output=True,
-        )
-    _clear_branch_info(data_dir)
 
 
 class _StopRequested(BaseException):
@@ -431,7 +391,6 @@ function activate(ctx){
     overviewRulerColor:'rgba(34,197,94,0.6)',
     overviewRulerLane:vscode.OverviewRulerLane.Left
   });
-  var callbackPort=0;
   var ms={};
   var clFire=new vscode.EventEmitter();
   ctx.subscriptions.push(vscode.languages.registerCodeLensProvider({scheme:'file'},{
@@ -493,8 +452,7 @@ function activate(ctx){
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
     vscode.workspace.saveAll(false).then(function(){
-      vscode.window.showInformationMessage(
-        'All changes reviewed. Use Commit button.');
+      vscode.window.showInformationMessage('All changes reviewed.');
     });
   }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
@@ -520,7 +478,6 @@ function activate(ctx){
   },800);
   ctx.subscriptions.push({dispose:function(){clearInterval(iv)}});
   async function openMerge(data){
-    callbackPort=data.callback_port||0;
     for(var fp in ms){
       vscode.window.visibleTextEditors.forEach(function(ed){
         if(ed.document.uri.fsPath===fp)ed.setDecorations(greenDeco,[]);
@@ -1091,17 +1048,6 @@ header{
 #assistant-panel .empty-msg{font-size:11px}
 #assistant-panel .rl{font-size:10px}
 #assistant-panel .usage{font-size:11px}
-@keyframes blinkRed{0%,100%{opacity:1}50%{opacity:0.3}}
-#commit-btn{
-  display:none;background:rgba(248,81,73,0.15);color:#f85149;
-  border:1px solid rgba(248,81,73,0.3);border-radius:8px;
-  padding:5px 12px;font-size:12px;font-family:inherit;font-weight:600;
-  cursor:pointer;align-items:center;gap:6px;
-  animation:blinkRed 1.2s ease-in-out infinite;
-}
-#commit-btn:hover{background:rgba(248,81,73,0.3);border-color:rgba(248,81,73,0.5)}
-#commit-btn.visible{display:flex}
-#assistant-panel #commit-btn{font-size:11px;padding:4px 8px;border-radius:6px}
 """
 
 CHATBOT_JS = r"""
@@ -1135,8 +1081,6 @@ var llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};
 var ghostEl=document.getElementById('ghost-overlay');
 var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
 var ghostCache={q:'',s:''};
-var commitBtn=document.getElementById('commit-btn');
-var mergePending=false;
 inp.addEventListener('input',function(){
   this.style.height='auto';
   this.style.height=Math.min(this.scrollHeight,200)+'px';
@@ -1202,10 +1146,10 @@ function setReady(label){
   running=false;D.classList.remove('running');
   stopTimer();removeSpinner();
   ST.textContent=label||'Ready';
-  if(!mergePending)inp.disabled=false;
+  inp.disabled=false;
   btn.style.display='';
   stopBtn.style.display='none';
-  if(!mergePending)inp.focus();
+  inp.focus();
 }
 function connectSSE(){
   if(evtSrc)evtSrc.close();
@@ -1228,13 +1172,7 @@ function handleEvent(ev){
   case'clear':
     O.innerHTML='';state.thinkEl=null;state.txtEl=null;state.bashPanel=null;
     llmPanel=null;llmPanelState={thinkEl:null,txtEl:null,bashPanel:null};lastToolName='';pendingPanel=false;
-    _scrollLock=false;mergePending=false;commitBtn.classList.remove('visible');
-    showSpinner();break;
-  case'merge_pending':
-    mergePending=true;commitBtn.classList.add('visible');inp.disabled=true;break;
-  case'merge_done':
-    mergePending=false;commitBtn.classList.remove('visible');
-    if(!running)inp.disabled=false;break;
+    _scrollLock=false;showSpinner();break;
   case'task_done':{
     var el=t0?Math.floor((Date.now()-t0)/1000):0;
     var em=Math.floor(el/60);
@@ -1638,22 +1576,7 @@ document.addEventListener('click',function(e){
   var el=e.target.closest('[data-path]');
   if(el&&el.dataset.path){openInEditor(el.dataset.path);}
 });
-function commitChanges(){
-  fetch('/merge-complete',{method:'POST'})
-    .then(function(r){return r.json()})
-    .then(function(d){
-      if(d.error)alert(d.error);
-    }).catch(function(){alert('Failed to commit')});
-}
-function checkMergeStatus(){
-  fetch('/merge-status').then(function(r){return r.json()})
-    .then(function(d){
-      if(d.pending){
-        mergePending=true;commitBtn.classList.add('visible');inp.disabled=true;
-      }
-    }).catch(function(){});
-}
-connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();checkMergeStatus();inp.focus();
+connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
 
 
@@ -1757,8 +1680,6 @@ def _build_html(title: str, subtitle: str, code_server_url: str = "", work_dir: 
               <div id="model-list"></div>
             </div>
           </div>
-          <button id="commit-btn" onclick="commitChanges()"
-            title="Commit reviewed changes">Commit</button>
           <div id="input-actions">
             <button id="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
@@ -1930,28 +1851,14 @@ def run_chatbot(
 
     def run_agent_thread(task: str, model_name: str) -> None:
         nonlocal running, agent_thread
-        agent_result = ""
+        pre_hunks: dict[str, list[tuple[int, int]]] = {}
+        pre_untracked: set[str] = set()
         try:
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
             printer.broadcast({"type": "clear"})
-            _cleanup_temp_branch(actual_work_dir, cs_data_dir)
-            original_branch = _get_current_branch(actual_work_dir)
-            if original_branch and original_branch != "HEAD":
-                temp_branch = f"kiss-{uuid.uuid4().hex[:8]}"
-                _save_branch_info(cs_data_dir, original_branch, temp_branch)
-                subprocess.run(
-                    ["git", "checkout", "-b", temp_branch],
-                    cwd=actual_work_dir, capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "add", "-A"],
-                    cwd=actual_work_dir, capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "commit", "--allow-empty", "-m", "kiss: baseline"],
-                    cwd=actual_work_dir, capture_output=True,
-                )
+            pre_hunks = _capture_git_hunks(actual_work_dir)
+            pre_untracked = _capture_untracked(actual_work_dir)
             agent = agent_factory("Chatbot")
             result = agent.run(
                 prompt_template=task,
@@ -1960,12 +1867,11 @@ def run_chatbot(
                 model_name=model_name,
                 **(agent_kwargs or {}),
             )
-            agent_result = result or ""
-            _set_latest_result(agent_result)
+            _set_latest_result(result or "")
             printer.broadcast({"type": "task_done"})
             threading.Thread(
                 target=generate_followup,
-                args=(task, agent_result),
+                args=(task, result or ""),
                 daemon=True,
             ).start()
         except _StopRequested:
@@ -1979,16 +1885,9 @@ def run_chatbot(
                 running = False
                 agent_thread = None
             try:
-                branch_info = _load_branch_info(cs_data_dir)
-                if branch_info and branch_info.get("original_branch"):
-                    if _has_uncommitted_changes(actual_work_dir):
-                        _update_branch_summary(cs_data_dir, agent_result)
-                        _prepare_merge_view(
-                            actual_work_dir, cs_data_dir, port,
-                        )
-                        printer.broadcast({"type": "merge_pending"})
-                    else:
-                        _cleanup_temp_branch(actual_work_dir, cs_data_dir)
+                _prepare_merge_view(
+                    actual_work_dir, cs_data_dir, pre_hunks, pre_untracked,
+                )
             except Exception:
                 pass
             refresh_file_cache()
@@ -2198,60 +2097,6 @@ def run_chatbot(
         return JSONResponse({"models": models_list, "selected": selected_model})
 
 
-    async def merge_status(request: Request) -> JSONResponse:
-        branch_info = _load_branch_info(cs_data_dir)
-        if not branch_info or not branch_info.get("temp_branch"):
-            return JSONResponse({"pending": False})
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", branch_info["temp_branch"]],
-            cwd=actual_work_dir, capture_output=True,
-        )
-        if result.returncode != 0:
-            _clear_branch_info(cs_data_dir)
-            return JSONResponse({"pending": False})
-        return JSONResponse({"pending": True})
-
-    async def merge_complete(request: Request) -> JSONResponse:
-        try:
-            branch_info = _load_branch_info(cs_data_dir)
-            if not branch_info:
-                return JSONResponse({"error": "No branch info found"})
-            original_branch = branch_info["original_branch"]
-            temp_branch = branch_info["temp_branch"]
-            summary = branch_info.get("agent_summary", "").strip()
-            commit_msg = summary[:200] if summary else "Agent changes"
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=actual_work_dir, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=actual_work_dir, capture_output=True,
-            )
-            result = subprocess.run(
-                ["git", "checkout", original_branch],
-                cwd=actual_work_dir, capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                return JSONResponse(
-                    {"error": f"Failed to checkout {original_branch}: {result.stderr}"},
-                )
-            result = subprocess.run(
-                ["git", "merge", temp_branch, "-m", commit_msg],
-                cwd=actual_work_dir, capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                return JSONResponse({"error": f"Merge failed: {result.stderr}"})
-            subprocess.run(
-                ["git", "branch", "-D", temp_branch],
-                cwd=actual_work_dir, capture_output=True,
-            )
-            _clear_branch_info(cs_data_dir)
-            printer.broadcast({"type": "merge_done"})
-            return JSONResponse({"status": "completed", "branch": original_branch})
-        except Exception as e:
-            return JSONResponse({"error": str(e)})
-
     async def open_file(request: Request) -> JSONResponse:
         body = await request.json()
         rel = body.get("path", "").strip()
@@ -2276,8 +2121,6 @@ def run_chatbot(
         Route("/tasks", tasks),
         Route("/proposed_tasks", proposed_tasks_endpoint),
         Route("/models", models_endpoint),
-        Route("/merge-complete", merge_complete, methods=["POST"]),
-        Route("/merge-status", merge_status),
     ])
 
     threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
