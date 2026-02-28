@@ -65,7 +65,7 @@ OUTPUT_CSS = r"""
 .think .lbl .arrow{transition:transform .2s;display:inline-block}
 .think .lbl .arrow.collapsed{transform:rotate(-90deg)}
 .think .cnt{
-  font-size:13px;color:var(--dim);font-style:italic;
+  font-size:11px;color:var(--dim);font-style:italic;
   white-space:pre-wrap;word-break:break-word;
 }
 .think .cnt.hidden{display:none}
@@ -85,9 +85,11 @@ OUTPUT_CSS = r"""
 .tn{font-weight:600;font-size:13px;color:var(--accent)}
 .tp{font-size:12px;color:var(--cyan);font-family:'SF Mono','Fira Code',monospace}
 .td{font-size:12px;color:var(--dim);font-style:italic}
+.td{font-size:11px;color:var(--dim);font-style:italic}
 .tc-b{
   padding:10px 14px;max-height:300px;overflow-y:auto;
   font-family:'SF Mono','Fira Code',monospace;font-size:12px;line-height:1.5;
+  font-family:'SF Mono','Fira Code',monospace;font-size:11px;line-height:1.5;
 }
 .tc-b.hide{display:none}
 .tc-b pre{margin:4px 0;white-space:pre-wrap;word-break:break-word}
@@ -104,6 +106,7 @@ OUTPUT_CSS = r"""
   padding:8px 14px;margin:6px 0;
   border-radius:8px;font-family:'SF Mono','Fira Code',monospace;
   font-size:12px;max-height:200px;overflow-y:auto;
+  font-size:11px;max-height:200px;overflow-y:auto;
   white-space:pre-wrap;word-break:break-word;background:rgba(63,185,80,.04);
 }
 .tr.err{background:rgba(248,81,73,.04)}
@@ -122,10 +125,12 @@ OUTPUT_CSS = r"""
   display:flex;align-items:center;justify-content:space-between;
 }
 .rc-h h3{color:var(--green);font-size:15px;font-weight:600}
+.rc-h h3{color:var(--green);font-size:14px;font-weight:600}
 .rs{font-size:12px;color:var(--dim);display:flex;gap:18px}
 .rs b{color:var(--text);font-weight:500}
 .rc-body{
   padding:16px 20px;font-size:14px;max-height:400px;overflow-y:auto;
+  padding:16px 20px;font-size:13px;max-height:400px;overflow-y:auto;
   word-break:break-word;line-height:1.7;
 }
 .rc-body.pre{white-space:pre-wrap}
@@ -136,10 +141,12 @@ OUTPUT_CSS = r"""
 .prompt-h{
   padding:8px 16px;background:rgba(121,192,255,.08);
   font-size:12px;font-weight:600;color:var(--cyan);
+  font-size:11px;font-weight:600;color:var(--cyan);
   text-transform:uppercase;letter-spacing:.04em;
 }
 .prompt-body{
   padding:12px 16px;font-size:14px;white-space:pre-wrap;
+  padding:12px 16px;font-size:13px;white-space:pre-wrap;
   word-break:break-word;line-height:1.6;max-height:400px;overflow-y:auto;
 }
 .sys{
@@ -151,7 +158,7 @@ OUTPUT_CSS = r"""
   border-radius:6px;margin:2px 0 8px;padding:10px 12px;
   max-height:300px;overflow-y:auto;
   font-family:'SF Mono','Fira Code','Cascadia Code',monospace;
-  font-size:10px;line-height:1.5;color:rgba(255,255,255,0.65);
+  font-size:8px;line-height:1.5;color:rgba(255,255,255,0.65);
   white-space:pre-wrap;word-break:break-word;
 }
 .usage{
