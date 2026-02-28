@@ -147,6 +147,11 @@ function activate(ctx){
         0,0,ll.range.end.line,ll.text.length),'');});
     }
   }
+  function afterHunkAction(fp){
+    refreshDeco(fp);clFire.fire();
+    if(Object.keys(ms).length>0)vscode.commands.executeCommand('kiss.nextChange');
+    else checkAllDone();
+  }
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptChange',async function(fp,idx){
     var s=ms[fp];if(!s)return;
     var h=s.hunks[idx];
@@ -159,7 +164,7 @@ function activate(ctx){
       for(var i=idx;i<s.hunks.length;i++){s.hunks[i].os-=rm;s.hunks[i].ns-=rm;}
     }else{s.hunks.splice(idx,1);}
     if(!s.hunks.length)delete ms[fp];
-    refreshDeco(fp);clFire.fire();checkAllDone();
+    afterHunkAction(fp);
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectChange',async function(fp,idx){
     var s=ms[fp];if(!s)return;
@@ -173,7 +178,7 @@ function activate(ctx){
       for(var i=idx;i<s.hunks.length;i++){s.hunks[i].os-=rm;s.hunks[i].ns-=rm;}
     }else{s.hunks.splice(idx,1);}
     if(!s.hunks.length)delete ms[fp];
-    refreshDeco(fp);clFire.fire();checkAllDone();
+    afterHunkAction(fp);
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.nextChange',function(){
     var allH=[];
@@ -261,6 +266,19 @@ function activate(ctx){
     vscode.workspace.saveAll(false).then(function(){
       vscode.window.showInformationMessage('All changes reviewed.');
       showMergeButtons(false);
+      try{
+        var portFile=path.join(home,'.kiss','assistant-port');
+        var port=fs.readFileSync(portFile,'utf8').trim();
+        if(port){
+          var http=require('http');
+          var req=http.request({hostname:'127.0.0.1',port:parseInt(port),
+            path:'/merge-action',method:'POST',
+            headers:{'Content-Type':'application/json'}},function(){});
+          req.on('error',function(){});
+          req.write(JSON.stringify({action:'all-done'}));
+          req.end();
+        }
+      }catch(e){}
     });
   }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
