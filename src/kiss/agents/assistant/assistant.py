@@ -957,6 +957,7 @@ header{
 }
 .llm-panel .txt{font-size:10px;line-height:1.5;color:rgba(255,255,255,0.6)}
 .llm-panel .think .cnt{font-size:10px}
+.llm-panel .think .cnt{font-size:10px}
 .bash-panel{
   max-width:820px;margin-left:auto;margin-right:auto;
   background:rgba(0,0,0,0.5);color:rgba(255,255,255,0.55);
@@ -1028,11 +1029,14 @@ header{
 #assistant-panel .tc-h{padding:7px 10px;border-radius:8px 8px 0 0}
 #assistant-panel .tc-b{padding:6px 10px;max-height:200px;font-size:11px}
 #assistant-panel .tr{padding:5px 10px;max-height:150px;font-size:11px}
+#assistant-panel .tc-b{padding:6px 10px;max-height:200px;font-size:10px}
+#assistant-panel .tr{padding:5px 10px;max-height:150px;font-size:10px}
 #assistant-panel .think{padding:8px 12px;margin:8px 0;border-radius:8px}
 #assistant-panel .think .cnt{font-size:10px}
 #assistant-panel .rc{border-radius:10px}
 #assistant-panel .rc-h{padding:10px 14px}
 #assistant-panel .rc-body{padding:10px 14px;max-height:250px;font-size:11px}
+#assistant-panel .rc-body{padding:10px 14px;max-height:250px;font-size:10px}
 #assistant-panel #input-area{padding:0 12px 12px;padding-top:10px}
 #assistant-panel #input-container{padding:8px 10px;border-radius:10px}
 #assistant-panel #input-wrap{gap:4px}
@@ -1069,16 +1073,20 @@ header{
 #assistant-panel .bash-panel{max-height:200px;font-size:10px}
 #assistant-panel .prompt-h{font-size:11px;padding:6px 12px}
 #assistant-panel .prompt-body{font-size:11px;padding:8px 12px}
+#assistant-panel .prompt-h{font-size:10px;padding:6px 12px}
+#assistant-panel .prompt-body{font-size:10px;padding:8px 12px}
 #assistant-panel .rc-h{
   padding:10px 14px;flex-direction:column;align-items:flex-start;gap:6px;
 }
 #assistant-panel .rc-h h3{font-size:11px;margin-bottom:2px}
+#assistant-panel .rc-h h3{font-size:10px;margin-bottom:2px}
 #assistant-panel .rs{
   font-size:10px;gap:0;width:100%;
   display:grid;grid-template-columns:repeat(3,1fr);
 }
 #assistant-panel .rs b{display:block;font-size:11px}
 #assistant-panel .td{font-size:11px}
+#assistant-panel .td{font-size:10px}
 #assistant-panel .sys{font-size:11px}
 #assistant-panel .spinner{font-size:11px}
 #assistant-panel .empty-msg{font-size:11px}
