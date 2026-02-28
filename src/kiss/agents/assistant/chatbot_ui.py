@@ -123,9 +123,10 @@ header{
   box-shadow:0 0 0 1px rgba(88,166,255,0.12),0 0 30px rgba(88,166,255,0.1),
     0 8px 40px rgba(0,0,0,0.35);
 }
-#input-wrap{position:relative;display:flex;align-items:flex-start;gap:8px}
+#input-wrap{display:flex;align-items:flex-start;gap:8px}
+#input-text-wrap{position:relative;flex:1;min-width:0}
 #task-input{
-  flex:1;min-width:0;background:transparent;border:none;
+  width:100%;background:transparent;border:none;padding:0;margin:0;
   color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
   resize:none;outline:none;line-height:1.5;
   max-height:200px;min-height:24px;
@@ -141,7 +142,7 @@ header{
   z-index:0;
 }
 .gm{visibility:hidden;white-space:pre-wrap}
-.gs{color:rgba(255,255,255,0.22);font-style:italic}
+.gs{color:rgba(255,255,255,0.35)}
 #input-footer{
   display:flex;justify-content:space-between;align-items:center;
   margin-top:10px;padding-top:10px;
@@ -606,7 +607,7 @@ body{background:var(--bg)}
 }
 #assistant-panel #task-input{color:var(--text)}
 #assistant-panel #task-input::placeholder{color:rgba(var(--fg-rgb),0.3)}
-#assistant-panel .gs{color:rgba(var(--fg-rgb),0.25)}
+#assistant-panel .gs{color:rgba(var(--fg-rgb),0.4)}
 #assistant-panel #input-footer{border-top:1px solid rgba(var(--fg-rgb),0.06)}
 #assistant-panel #model-btn{
   background:rgba(var(--fg-rgb),0.04);color:rgba(var(--fg-rgb),0.5);
@@ -801,7 +802,7 @@ inp.addEventListener('input',function(){
   } else {
     hideAC();
     if(ghostTimer2)clearTimeout(ghostTimer2);
-    ghostTimer2=setTimeout(fetchGhost,500);
+    ghostTimer2=setTimeout(fetchGhost,200);
   }
 });
 var sidebarHistSec=document.getElementById('sidebar-history-sec');
@@ -1160,7 +1161,7 @@ function acceptGhost(){
 }
 function fetchGhost(){
   var q=inp.value;
-  if(!q.trim()||q.trim().length<3){clearGhost();return}
+  if(!q.trim()||q.trim().length<2){clearGhost();return}
   if(ghostCache.q&&q.startsWith(ghostCache.q)&&ghostCache.s){
     var extra=q.substring(ghostCache.q.length);
     if(ghostCache.s.startsWith(extra)){
@@ -1420,9 +1421,11 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
       <div id="autocomplete"></div>
       <div id="input-container">
         <div id="input-wrap">
-          <div id="ghost-overlay"></div>
-          <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="1"
-            autocomplete="off"></textarea>
+          <div id="input-text-wrap">
+            <div id="ghost-overlay"></div>
+            <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="1"
+              autocomplete="off"></textarea>
+          </div>
           <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6"
