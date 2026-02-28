@@ -106,7 +106,13 @@ def _normalize_history_entry(raw: Any) -> dict[str, str]:
     return {"task": str(raw), "result": ""}
 
 
+_history_cache: list[dict[str, str]] | None = None
+
+
 def _load_history() -> list[dict[str, str]]:
+    global _history_cache
+    if _history_cache is not None:
+        return _history_cache
     if HISTORY_FILE.exists():
         try:
             data = json.loads(HISTORY_FILE.read_text())
@@ -119,6 +125,7 @@ def _load_history() -> list[dict[str, str]]:
                     if task_str not in seen:
                         seen.add(task_str)
                         result.append(entry)
+                _history_cache = result
                 return result
         except (json.JSONDecodeError, OSError):
             pass
@@ -128,9 +135,11 @@ def _load_history() -> list[dict[str, str]]:
 
 
 def _save_history(entries: list[dict[str, str]]) -> None:
+    global _history_cache
+    _history_cache = entries[:MAX_HISTORY]
     try:
         _KISS_DIR.mkdir(parents=True, exist_ok=True)
-        HISTORY_FILE.write_text(json.dumps(entries[:MAX_HISTORY], indent=2))
+        HISTORY_FILE.write_text(json.dumps(_history_cache, indent=2))
     except OSError:
         pass
 
@@ -226,12 +235,12 @@ def _scan_files(work_dir: str) -> list[str]:
     return paths
 
 
-def _capture_git_hunks(work_dir: str) -> dict[str, list[tuple[int, int]]]:
+def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]]]:
     result = subprocess.run(
         ["git", "diff", "-U0", "HEAD", "--no-color"],
         capture_output=True, text=True, cwd=work_dir,
     )
-    hunks: dict[str, list[tuple[int, int]]] = {}
+    hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
     for line in result.stdout.split("\n"):
         dm = re.match(r"^diff --git a/.* b/(.*)", line)
@@ -240,9 +249,12 @@ def _capture_git_hunks(work_dir: str) -> dict[str, list[tuple[int, int]]]:
             continue
         hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
         if hm and current_file:
-            hunks.setdefault(current_file, []).append(
-                (int(hm.group(1)), int(hm.group(2)) if hm.group(2) is not None else 1)
-            )
+            hunks.setdefault(current_file, []).append((
+                int(hm.group(1)),
+                int(hm.group(2)) if hm.group(2) is not None else 1,
+                int(hm.group(3)),
+                int(hm.group(4)) if hm.group(4) is not None else 1,
+            ))
     return hunks
 
 
@@ -257,36 +269,20 @@ def _capture_untracked(work_dir: str) -> set[str]:
 def _prepare_merge_view(
     work_dir: str,
     data_dir: str,
-    pre_hunks: dict[str, list[tuple[int, int]]],
+    pre_hunks: dict[str, list[tuple[int, int, int, int]]],
     pre_untracked: set[str],
 ) -> dict[str, Any]:
-    post_result = subprocess.run(
-        ["git", "diff", "-U0", "HEAD", "--no-color"],
-        capture_output=True, text=True, cwd=work_dir,
-    )
+    post_hunks = _parse_diff_hunks(work_dir)
     file_hunks: dict[str, list[dict[str, int]]] = {}
-    current_file = ""
-    for line in post_result.stdout.split("\n"):
-        dm = re.match(r"^diff --git a/.* b/(.*)", line)
-        if dm:
-            current_file = dm.group(1)
-            continue
-        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
-        if hm and current_file:
-            bs = int(hm.group(1))
-            bc = int(hm.group(2)) if hm.group(2) is not None else 1
-            cs = int(hm.group(3))
-            cc = int(hm.group(4)) if hm.group(4) is not None else 1
-            file_hunks.setdefault(current_file, []).append({
-                "bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc,
-            })
-    for fname in list(file_hunks):
-        pre = set(pre_hunks.get(fname, []))
-        filtered = [h for h in file_hunks[fname] if (h["bs"] + 1, h["bc"]) not in pre]
+    for fname, hunks in post_hunks.items():
+        pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
+        filtered = [
+            {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
+            for bs, bc, cs, cc in hunks
+            if (bs, bc) not in pre
+        ]
         if filtered:
             file_hunks[fname] = filtered
-        else:
-            del file_hunks[fname]
     new_files = _capture_untracked(work_dir) - pre_untracked
     for fname in new_files:
         fpath = Path(work_dir) / fname
@@ -1177,7 +1173,7 @@ function handleEvent(ev){
     var el=t0?Math.floor((Date.now()-t0)/1000):0;
     var em=Math.floor(el/60);
     setReady('Done ('+(em>0?em+'m ':'')+el%60+'s)');
-    loadTasks();loadProposed();break}
+    loadTasks();break}
   case'followup_suggestion':{
     var fu=mkEl('div','followup-bar');
     fu.title=ev.text;
@@ -1851,13 +1847,13 @@ def run_chatbot(
 
     def run_agent_thread(task: str, model_name: str) -> None:
         nonlocal running, agent_thread
-        pre_hunks: dict[str, list[tuple[int, int]]] = {}
+        pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
         try:
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
             printer.broadcast({"type": "clear"})
-            pre_hunks = _capture_git_hunks(actual_work_dir)
+            pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
             agent = agent_factory("Chatbot")
             result = agent.run(
