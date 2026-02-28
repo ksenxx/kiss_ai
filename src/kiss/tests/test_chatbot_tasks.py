@@ -12,11 +12,13 @@ def _use_temp_history():
     original = assistant.HISTORY_FILE
     tmp = Path(tempfile.mktemp(suffix=".json"))
     assistant.HISTORY_FILE = tmp
+    assistant._history_cache = None
     return original, tmp
 
 
 def _restore_history(original: Path, tmp: Path) -> None:
     assistant.HISTORY_FILE = original
+    assistant._history_cache = None
     if tmp.exists():
         tmp.unlink()
 
@@ -34,11 +36,7 @@ class TestHistoryFileOps(unittest.TestCase):
 
     def test_load_empty_history(self) -> None:
         loaded = assistant._load_history()
-        expected = [
-            assistant._normalize_history_entry(t)
-            for t in assistant.SAMPLE_TASKS
-        ]
-        assert loaded == expected
+        assert loaded == assistant.SAMPLE_TASKS
         assert self.tmp.exists()
 
     def test_save_and_load_history(self) -> None:
@@ -49,20 +47,12 @@ class TestHistoryFileOps(unittest.TestCase):
     def test_load_corrupted_file(self) -> None:
         self.tmp.write_text("not json")
         loaded = assistant._load_history()
-        expected = [
-            assistant._normalize_history_entry(t)
-            for t in assistant.SAMPLE_TASKS
-        ]
-        assert loaded == expected
+        assert loaded == assistant.SAMPLE_TASKS
 
     def test_load_non_list_json(self) -> None:
         self.tmp.write_text('{"key": "value"}')
         loaded = assistant._load_history()
-        expected = [
-            assistant._normalize_history_entry(t)
-            for t in assistant.SAMPLE_TASKS
-        ]
-        assert loaded == expected
+        assert loaded == assistant.SAMPLE_TASKS
 
     def test_save_truncates_to_max(self) -> None:
         tasks = [_entry(f"task{i}") for i in range(assistant.MAX_HISTORY + 200)]
