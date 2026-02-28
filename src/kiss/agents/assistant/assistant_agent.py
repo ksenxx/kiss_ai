@@ -9,6 +9,7 @@ import yaml
 
 import kiss.agents.assistant.config  # noqa: F401
 from kiss.agents.assistant.relentless_agent import RelentlessAgent
+from kiss.agents.assistant.task_history import _get_task_history_md_path
 from kiss.agents.assistant.useful_tools import UsefulTools
 from kiss.agents.assistant.web_use_tool import WebUseTool
 from kiss.core import config as config_module
@@ -117,10 +118,16 @@ class AssistantAgent(RelentlessAgent):
                 model_name, summarizer_model_name, max_sub_sessions,
                 max_steps, max_budget, work_dir, docker_image, printer, verbose,
             )
+            history_path = _get_task_history_md_path()
+            system_instructions = (
+                GENERAL_ASSISTANT_INSTRUCTIONS
+                + "\n\n" + CODING_INSTRUCTIONS
+                + f"\nTask History File: {history_path}\n"
+            )
             return super().run(
                 model_name=self.model_name,
                 summarizer_model_name=self.summarizer_model_name,
-                system_instructions=GENERAL_ASSISTANT_INSTRUCTIONS + "\n\n" + CODING_INSTRUCTIONS,
+                system_instructions=system_instructions,
                 prompt_template=prompt_template,
                 arguments=arguments,
                 max_steps=self.max_steps,

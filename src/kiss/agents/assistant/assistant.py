@@ -31,6 +31,8 @@ from kiss.agents.assistant.relentless_agent import RelentlessAgent
 from kiss.agents.assistant.task_history import (
     _KISS_DIR,
     _add_task,
+    _append_task_to_md,
+    _init_task_history_md,
     _load_history,
     _load_last_model,
     _load_model_usage,
@@ -98,6 +100,8 @@ def run_chatbot(
     selected_model = (
         _load_last_model() or default_model or get_most_expensive_model() or "claude-opus-4-6"
     )
+
+    _init_task_history_md()
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
@@ -267,6 +271,7 @@ def run_chatbot(
                 **(agent_kwargs or {}),
             )
             _set_latest_result(result or "")
+            _append_task_to_md(task, result or "")
             printer.broadcast({"type": "task_done"})
             threading.Thread(
                 target=generate_followup,
@@ -275,9 +280,11 @@ def run_chatbot(
             ).start()
         except _StopRequested:
             _set_latest_result("(stopped)")
+            _append_task_to_md(task, "(stopped)")
             printer.broadcast({"type": "task_stopped"})
         except Exception as e:
             _set_latest_result(f"(error: {e})")
+            _append_task_to_md(task, f"(error: {e})")
             printer.broadcast({"type": "task_error", "text": str(e)})
         finally:
             with running_lock:
