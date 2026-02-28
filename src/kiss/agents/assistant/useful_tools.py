@@ -6,7 +6,6 @@ import subprocess
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 EDIT_SCRIPT = r"""
 #!/usr/bin/env bash

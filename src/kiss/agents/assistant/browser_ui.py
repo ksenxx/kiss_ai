@@ -224,8 +224,10 @@ function hlInline(oldL,newL){
   while(suf<mn-pre&&oldL[oldL.length-1-suf]===newL[newL.length-1-suf])suf++;
   var pf=oldL.substring(0,pre),sf=suf?oldL.substring(oldL.length-suf):'';
   return{
-    o:esc(pf)+'<span class="diff-hl-del">'+esc(oldL.substring(pre,oldL.length-suf))+'</span>'+esc(sf),
-    n:esc(pf)+'<span class="diff-hl-add">'+esc(newL.substring(pre,newL.length-suf))+'</span>'+esc(sf)
+    o:esc(pf)+'<span class="diff-hl-del">'+esc(oldL.substring(pre,oldL.length-suf))
+      +'</span>'+esc(sf),
+    n:esc(pf)+'<span class="diff-hl-add">'+esc(newL.substring(pre,newL.length-suf))
+      +'</span>'+esc(sf)
   };
 }
 function renderDiff(oldStr,newStr){

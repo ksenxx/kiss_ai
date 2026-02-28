@@ -14,7 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import kiss.agents.assistant.assistant as assistant
+import kiss.agents.assistant.chatbot_ui as chatbot_ui
+import kiss.agents.assistant.code_server as code_server
 
 
 class TestSetupCodeServer(unittest.TestCase):
@@ -26,13 +27,13 @@ class TestSetupCodeServer(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_all_settings_keys_present(self) -> None:
-        assistant._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
         settings = json.loads(
             (Path(self.tmpdir) / "User" / "settings.json").read_text()
         )
-        for key in assistant._CS_SETTINGS:
+        for key in code_server._CS_SETTINGS:
             assert key in settings, f"Missing setting: {key}"
-            assert settings[key] == assistant._CS_SETTINGS[key]
+            assert settings[key] == code_server._CS_SETTINGS[key]
 
     def test_settings_preserve_existing_keys(self) -> None:
         user_dir = Path(self.tmpdir) / "User"
@@ -40,7 +41,7 @@ class TestSetupCodeServer(unittest.TestCase):
         (user_dir / "settings.json").write_text(
             json.dumps({"editor.tabSize": 4, "workbench.startupEditor": "welcomePage"})
         )
-        assistant._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
         settings = json.loads((user_dir / "settings.json").read_text())
         assert settings["editor.tabSize"] == 4
         assert settings["workbench.startupEditor"] == "none"
@@ -49,34 +50,34 @@ class TestSetupCodeServer(unittest.TestCase):
         user_dir = Path(self.tmpdir) / "User"
         user_dir.mkdir(parents=True)
         (user_dir / "settings.json").write_text("not valid json{{{")
-        assistant._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
         settings = json.loads((user_dir / "settings.json").read_text())
         assert settings["workbench.startupEditor"] == "none"
 
     def test_state_db_has_all_entries(self) -> None:
-        assistant._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
         db_path = Path(self.tmpdir) / "User" / "globalStorage" / "state.vscdb"
         with sqlite3.connect(str(db_path)) as conn:
             rows = dict(conn.execute("SELECT key, value FROM ItemTable").fetchall())
-        for key, value in assistant._CS_STATE_ENTRIES:
+        for key, value in code_server._CS_STATE_ENTRIES:
             assert key in rows, f"Missing state entry: {key}"
             assert rows[key] == value
 
     def test_state_db_idempotent(self) -> None:
-        assistant._setup_code_server(self.tmpdir)
-        assistant._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
         db_path = Path(self.tmpdir) / "User" / "globalStorage" / "state.vscdb"
         with sqlite3.connect(str(db_path)) as conn:
             keys = [r[0] for r in conn.execute("SELECT key FROM ItemTable").fetchall()]
         assert len(keys) == len(set(keys))
 
     def test_extension_files(self) -> None:
-        assistant._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
         ext_dir = Path(self.tmpdir) / "extensions" / "kiss-init"
         pkg = json.loads((ext_dir / "package.json").read_text())
         assert pkg["name"] == "kiss-init"
         assert "onStartupFinished" in pkg["activationEvents"]
-        assert (ext_dir / "extension.js").read_text() == assistant._CS_EXTENSION_JS
+        assert (ext_dir / "extension.js").read_text() == code_server._CS_EXTENSION_JS
 
     def test_cleans_chat_sessions_preserves_other_files(self) -> None:
         ws = Path(self.tmpdir) / "User" / "workspaceStorage" / "abc123"
@@ -86,46 +87,46 @@ class TestSetupCodeServer(unittest.TestCase):
             d = ws / sub
             d.mkdir()
             (d / "session.json").write_text("{}")
-        assistant._setup_code_server(self.tmpdir)
+        code_server._setup_code_server(self.tmpdir)
         assert (ws / "meta.json").exists()
         assert not (ws / "chatSessions").exists()
         assert not (ws / "chatEditingSessions").exists()
 
     def test_constants_well_formed(self) -> None:
-        json.dumps(assistant._CS_SETTINGS)
-        for key, value in assistant._CS_STATE_ENTRIES:
+        json.dumps(code_server._CS_SETTINGS)
+        for key, value in code_server._CS_STATE_ENTRIES:
             assert isinstance(key, str) and isinstance(value, str)
-        assert "function activate" in assistant._CS_EXTENSION_JS
-        assert "module.exports={activate}" in assistant._CS_EXTENSION_JS
+        assert "function activate" in code_server._CS_EXTENSION_JS
+        assert "module.exports={activate}" in code_server._CS_EXTENSION_JS
 
 
 class TestBuildHtmlSplitLayout(unittest.TestCase):
 
     def test_split_layout_structure(self) -> None:
-        html = assistant._build_html("T")
+        html = chatbot_ui._build_html("T")
         for elem in ("split-container", "editor-panel", "divider", "assistant-panel"):
             assert f'id="{elem}"' in html, f"Missing #{elem}"
         assert "width:80%" in html
 
     def test_header_buttons(self) -> None:
-        html = assistant._build_html("T")
+        html = chatbot_ui._build_html("T")
         assert 'title="Task history"' in html
         assert 'title="Suggested tasks"' in html
 
     def test_editor_fallback_without_code_server(self) -> None:
-        html = assistant._build_html("T")
+        html = chatbot_ui._build_html("T")
         assert 'id="editor-fallback"' in html
         assert "<iframe" not in html
 
     def test_iframe_with_code_server_url(self) -> None:
-        html = assistant._build_html("T", "http://127.0.0.1:9999", "/tmp/work")
+        html = chatbot_ui._build_html("T", "http://127.0.0.1:9999", "/tmp/work")
         assert '<iframe id="code-server-frame"' in html
         assert 'data-base-url="http://127.0.0.1:9999"' in html
         assert 'data-work-dir="/tmp/work"' in html
         assert 'id="editor-fallback"' not in html
 
     def test_iframe_folder_url_encoded(self) -> None:
-        html = assistant._build_html("T", "http://x:1", "/path with spaces")
+        html = chatbot_ui._build_html("T", "http://x:1", "/path with spaces")
         assert "path%20with%20spaces" in html
 
 
@@ -134,7 +135,7 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.html = assistant._build_html("T", "http://x:1", "/w")
+        cls.html = chatbot_ui._build_html("T", "http://x:1", "/w")
 
     def test_merge_function(self) -> None:
         assert "function mergeAction" in self.html
@@ -156,7 +157,7 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 class TestBuildHtmlCSS(unittest.TestCase):
 
     def test_split_layout_css(self) -> None:
-        html = assistant._build_html("T")
+        html = chatbot_ui._build_html("T")
         for pattern in (
             "#split-container{display:flex",
             "#editor-panel{position:relative",
