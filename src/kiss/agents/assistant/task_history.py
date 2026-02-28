@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -179,3 +180,23 @@ def _add_task(task: str) -> None:
     history = [e for e in _load_history() if e["task"] != task]
     history.insert(0, {"task": task, "result": ""})
     _save_history(history[:MAX_HISTORY])
+
+
+def _get_task_history_md_path() -> Path:
+    from kiss.core import config as config_module
+    return Path(config_module.DEFAULT_CONFIG.agent.artifact_dir).parent / "TASK_HISTORY.md"
+
+
+def _init_task_history_md() -> Path:
+    path = _get_task_history_md_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Task History\n\n")
+    return path
+
+
+def _append_task_to_md(task: str, result: str) -> None:
+    path = _init_task_history_md()
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"## [{timestamp}] {task}\n\n### Result\n\n{result}\n\n---\n\n"
+    with path.open("a") as f:
+        f.write(entry)
