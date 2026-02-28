@@ -74,12 +74,6 @@ SAMPLE_TASKS = [
 ]
 
 
-def _normalize_history_entry(raw: Any) -> dict[str, str]:
-    if isinstance(raw, dict) and "task" in raw:
-        return {"task": str(raw["task"]), "result": str(raw.get("result", ""))}
-    return {"task": str(raw), "result": ""}
-
-
 _history_cache: list[dict[str, str]] | None = None
 
 
@@ -94,17 +88,15 @@ def _load_history() -> list[dict[str, str]]:
                 seen: set[str] = set()
                 result: list[dict[str, str]] = []
                 for t in data[:MAX_HISTORY]:
-                    entry = _normalize_history_entry(t)
-                    task_str = entry["task"]
+                    task_str = t["task"]
                     if task_str not in seen:
                         seen.add(task_str)
-                        result.append(entry)
+                        result.append(t)
                 _history_cache = result
                 return result
         except (json.JSONDecodeError, OSError):
             pass
-    entries = [_normalize_history_entry(t) for t in SAMPLE_TASKS]
-    _save_history(entries)
+    _save_history(SAMPLE_TASKS)
     return entries
 
 
