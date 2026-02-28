@@ -197,7 +197,7 @@ print(f"Result: {result}")
 - **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking
 - **Configurable Sub-Sessions**: Set high sub-session counts (e.g., 200+) for truly relentless execution
 - **Docker Support**: Optional isolated execution via Docker containers
-- **Built-in Tools**: Bash, Read, Edit, Write tools for file operations; search_web and fetch_url available for web operations
+- **Built-in Tools**: Bash, Read, Edit, Write tools for file operations
 - **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
 
 ## 💬 Browser-Based Assistant
@@ -504,7 +504,7 @@ kiss/
 │   │   │   ├── assistant.py            # Browser-based assistant UI
 │   │   │   ├── relentless_agent.py     # RelentlessAgent base class
 │   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
-│   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit, search_web, fetch_url
+│   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit
 │   │   │   ├── web_use_tool.py         # WebUseTool class with Playwright-based browser automation
 │   │   │   └── config.py               # Assistant agent configuration
 │   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
@@ -595,7 +595,7 @@ kiss/
 │   │   ├── test_a_model.py                    # Tests for model implementations
 │   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
 │   │   ├── test_print_to_browser.py         # Tests for BaseBrowserPrinter browser output
-│   │   ├── test_search_web.py
+
 │   │   ├── test_useful_tools.py
 │   │   ├── test_web_use_tool.py             # Tests for WebUseTool browser automation
 │   │   ├── test_chatbot_tasks.py            # Tests for assistant task handling
