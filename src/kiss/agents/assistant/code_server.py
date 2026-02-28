@@ -352,6 +352,8 @@ def _setup_code_server(data_dir: str) -> bool:
         existing = json.loads(settings_file.read_text()) if settings_file.exists() else {}
     except (json.JSONDecodeError, OSError):
         existing = {}
+    if "workbench.colorTheme" not in existing:
+        existing["workbench.colorTheme"] = "Default Dark Modern"
     existing.update(_CS_SETTINGS)
     settings_file.write_text(json.dumps(existing, indent=2))
 
