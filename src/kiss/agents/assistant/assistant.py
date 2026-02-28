@@ -39,11 +39,11 @@ MODEL_USAGE_FILE = _KISS_DIR / "model_usage.json"
 MAX_HISTORY = 1000
 
 SAMPLE_TASKS = [
-    {"task": "run 'uv run check --clean' and fix", "result": ""},
+    {"task": "run 'uv run check' and fix", "result": ""},
     {
         "task": (
             "plan a trip to Yosemite over the weekend based on"
-            " road closures, warnings, hotel availability"
+            " warnings and hotel availability"
         ),
         "result": "",
     },
@@ -57,7 +57,7 @@ SAMPLE_TASKS = [
     {
         "task": (
             "run <<command>> in the background, monitor output,"
-            " fix errors, and optimize the code iteratively"
+            " fix errors, and optimize the code iteratively. "
         ),
         "result": "",
     },
@@ -1082,18 +1082,18 @@ header{
 }
 #editor-fallback p{margin:4px 0;color:rgba(255,255,255,0.5);font-size:13px}
 #merge-toolbar{
-  display:none;position:absolute;bottom:20px;left:50%;transform:translateX(-50%);
-  z-index:100;gap:8px;
+  display:none;position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+  z-index:100;gap:4px;
   background:rgba(18,18,20,0.95);backdrop-filter:blur(12px);
   -webkit-backdrop-filter:blur(12px);
-  border:1px solid rgba(255,255,255,0.15);border-radius:12px;
-  padding:8px 16px;
+  border:1px solid rgba(255,255,255,0.15);border-radius:8px;
+  padding:4px 8px;
   box-shadow:0 4px 24px rgba(0,0,0,0.5);
 }
 #merge-toolbar button{
   background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);
-  border-radius:8px;color:rgba(255,255,255,0.8);font-size:13px;
-  padding:7px 16px;cursor:pointer;transition:all 0.15s;
+  border-radius:4px;color:rgba(255,255,255,0.8);font-size:10px;
+  padding:3px 8px;cursor:pointer;transition:all 0.15s;
   font-family:inherit;white-space:nowrap;
 }
 #merge-toolbar button:hover{
