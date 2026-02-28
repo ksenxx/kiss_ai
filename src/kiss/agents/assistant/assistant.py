@@ -381,6 +381,10 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
+  var redDeco=vscode.window.createTextEditorDecorationType({
+    backgroundColor:'rgba(248,81,73,0.15)',
+    isWholeLine:true
+  });
   var greenDeco=vscode.window.createTextEditorDecorationType({
     backgroundColor:'rgba(34,197,94,0.13)',
     isWholeLine:true
@@ -395,8 +399,8 @@ function activate(ctx){
       var L=[];
       for(var i=0;i<s.hunks.length;i++){
         var h=s.hunks[i];
-        if(h.cc<=0)continue;
-        var ln=Math.min(h.cs+h.cc,doc.lineCount-1);
+        var endLn=h.nc>0?h.ns+h.nc:h.os+h.oc;
+        var ln=Math.min(endLn,doc.lineCount-1);
         var r=new vscode.Range(ln,0,ln,0);
         var fp=doc.uri.fsPath;
         L.push(new vscode.CodeLens(r,{title:'\\u2705 Accept',
@@ -410,36 +414,53 @@ function activate(ctx){
   function refreshDeco(fp){
     vscode.window.visibleTextEditors.forEach(function(ed){
       if(ed.document.uri.fsPath!==fp)return;
-      var s=ms[fp],ranges=[];
+      var s=ms[fp],reds=[],greens=[];
       if(s)s.hunks.forEach(function(h){
-        if(h.cc>0)ranges.push(new vscode.Range(h.cs,0,h.cs+h.cc-1,99999));
+        if(h.oc>0)reds.push(new vscode.Range(h.os,0,h.os+h.oc-1,99999));
+        if(h.nc>0)greens.push(new vscode.Range(h.ns,0,h.ns+h.nc-1,99999));
       });
-      ed.setDecorations(greenDeco,ranges);
+      ed.setDecorations(redDeco,reds);
+      ed.setDecorations(greenDeco,greens);
     });
   }
-  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptChange',function(fp,idx){
+  async function delLines(ed,start,count){
+    if(count<=0)return;
+    var end=start+count;
+    if(end<ed.document.lineCount){
+      await ed.edit(function(eb){eb.delete(new vscode.Range(start,0,end,0));});
+    }else if(start>0){
+      var p=ed.document.lineAt(start-1),l=ed.document.lineAt(ed.document.lineCount-1);
+      await ed.edit(function(eb){eb.delete(new vscode.Range(start-1,p.text.length,l.range.end.line,l.text.length));});
+    }else{
+      var ll=ed.document.lineAt(ed.document.lineCount-1);
+      await ed.edit(function(eb){eb.replace(new vscode.Range(0,0,ll.range.end.line,ll.text.length),'');});
+    }
+  }
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptChange',async function(fp,idx){
     var s=ms[fp];if(!s)return;
-    s.hunks.splice(idx,1);
+    var h=s.hunks[idx];
+    if(h.oc>0){
+      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
+      if(!ed)return;
+      await delLines(ed,h.os,h.oc);
+      var rm=h.oc;
+      s.hunks.splice(idx,1);
+      for(var i=idx;i<s.hunks.length;i++){s.hunks[i].os-=rm;s.hunks[i].ns-=rm;}
+    }else{s.hunks.splice(idx,1);}
     if(!s.hunks.length)delete ms[fp];
     refreshDeco(fp);clFire.fire();checkAllDone();
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectChange',async function(fp,idx){
     var s=ms[fp];if(!s)return;
     var h=s.hunks[idx];
-    var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
-    if(!ed)return;
-    var baseLines=fs.readFileSync(s.basePath,'utf8').split('\\n');
-    var repl=baseLines.slice(h.bs,h.bs+h.bc);
-    if(h.cc>0){
-      var last=Math.min(h.cs+h.cc-1,ed.document.lineCount-1);
-      var rng=new vscode.Range(h.cs,0,last,ed.document.lineAt(last).text.length);
-      await ed.edit(function(eb){eb.replace(rng,repl.join('\\n'));});
-    }else if(h.bc>0){
-      await ed.edit(function(eb){eb.insert(new vscode.Position(h.cs+1,0),repl.join('\\n')+'\\n');});
-    }
-    var diff=repl.length-h.cc;
-    s.hunks.splice(idx,1);
-    for(var i=idx;i<s.hunks.length;i++)s.hunks[i].cs+=diff;
+    if(h.nc>0){
+      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
+      if(!ed)return;
+      await delLines(ed,h.ns,h.nc);
+      var rm=h.nc;
+      s.hunks.splice(idx,1);
+      for(var i=idx;i<s.hunks.length;i++){s.hunks[i].os-=rm;s.hunks[i].ns-=rm;}
+    }else{s.hunks.splice(idx,1);}
     if(!s.hunks.length)delete ms[fp];
     refreshDeco(fp);clFire.fire();checkAllDone();
   }));
@@ -474,25 +495,45 @@ function activate(ctx){
   async function openMerge(data){
     for(var fp in ms){
       vscode.window.visibleTextEditors.forEach(function(ed){
-        if(ed.document.uri.fsPath===fp)ed.setDecorations(greenDeco,[]);
+        if(ed.document.uri.fsPath===fp){
+          ed.setDecorations(redDeco,[]);
+          ed.setDecorations(greenDeco,[]);
+        }
       });
     }
     ms={};
     for(var f of(data.files||[])){
-      var baseUri=vscode.Uri.file(f.base);
       var currentUri=vscode.Uri.file(f.current);
-      await vscode.commands.executeCommand('vscode.diff',baseUri,currentUri,f.name+' (Diff)');
       var doc=await vscode.workspace.openTextDocument(currentUri);
-      await vscode.window.showTextDocument(doc,{preview:false});
-      ms[f.current]={basePath:f.base,hunks:(f.hunks||[]).map(function(h){
+      var ed=await vscode.window.showTextDocument(doc,{preview:false});
+      var baseLines=fs.readFileSync(f.base,'utf8').split('\\n');
+      var hunks=(f.hunks||[]).map(function(h){
         return{cs:h.cs,cc:h.cc,bs:h.bs,bc:h.bc};
-      })};
+      });
+      hunks.sort(function(a,b){return a.cs-b.cs});
+      var offset=0,processed=[];
+      for(var i=0;i<hunks.length;i++){
+        var h=hunks[i];
+        var old=h.bc>0?baseLines.slice(h.bs,h.bs+h.bc):[];
+        if(old.length>0){
+          var il=h.cs+offset;
+          var txt=old.join('\\n')+'\\n';
+          await ed.edit(function(eb){eb.insert(new vscode.Position(il,0),txt);});
+        }
+        processed.push({os:h.cs+offset,oc:old.length,ns:h.cs+offset+old.length,nc:h.cc});
+        offset+=old.length;
+      }
+      ms[f.current]={basePath:f.base,hunks:processed};
       refreshDeco(f.current);
+      if(processed.length>0){
+        ed.revealRange(new vscode.Range(processed[0].os,0,processed[0].os,0),
+          vscode.TextEditorRevealType.InCenter);
+      }
     }
     clFire.fire();
     vscode.window.showInformationMessage(
       'Reviewing '+data.files.length+' file(s). '
-      +'Use \\u2705 Accept / \\u274c Reject here, or see the Diff tab for full comparison.');
+      +'Red = old, Green = new. Use \\u2705 Accept / \\u274c Reject on each change.');
   }
 }
 module.exports={activate};
