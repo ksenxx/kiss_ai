@@ -389,9 +389,9 @@ uv sync --group assistant
 
 # Docker support (for running agents in isolated containers)
 uv sync --group docker
-
 # Evals dependencies (for running benchmarks)
 uv sync --group evals
+
 
 # Development tools (mypy, ruff, pytest, jupyter, etc.)
 uv sync --group dev
@@ -409,8 +409,8 @@ uv sync --group claude --group dev
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
 | `assistant` | Agent tools & browser UI | requests, beautifulsoup4, playwright, uvicorn, starlette |
-| `docker` | Docker integration | docker |
 | `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
+| `docker` | Docker integration | docker |
 | `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
 
 > **Optional Dependencies:** All LLM provider SDKs (`openai`, `anthropic`, `google-genai`) are optional. You can import `kiss.core` and `kiss.agents` without installing all of them. When you try to use a model whose SDK is not installed, KISS raises a clear `KISSError` telling you which package to install.
@@ -551,7 +551,6 @@ kiss/
 │   │       ├── anthropic_model.py # Anthropic model implementation
 │   │       └── model_info.py      # Model info: context lengths, pricing, and capabilities
 │   ├── docker/          # Docker integration
-│   │   └── docker_manager.py
 │   ├── evals/            # Benchmark and evaluation integrations
 │   │   ├── algotune/               # AlgoTune benchmark integration
 │   │   │   ├── run_algotune.py     # AlgoTune task evolution
@@ -566,6 +565,7 @@ kiss/
 │   │       ├── run_swebench.py     # Main runner with CLI support
 │   │       ├── config.py           # Configuration for SWE-bench runs
 │   │       └── README.md           # SWE-bench documentation
+│   │   └── docker_manager.py
 │   ├── rag/             # RAG (Retrieval-Augmented Generation)
 │   │   └── simple_rag.py # Simple RAG system with in-memory vector store
 │   ├── scripts/         # Utility scripts
@@ -577,8 +577,8 @@ kiss/
 │   │   ├── conftest.py              # Pytest configuration and fixtures
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_non_agentic.py
-│   │   ├── test_kiss_agent_coverage.py    # Coverage tests for KISSAgent
 │   │   ├── test_gepa_hotpotqa.py
+│   │   ├── test_kiss_agent_coverage.py    # Coverage tests for KISSAgent
 │   │   ├── test_gepa_batched.py           # Tests for GEPA batched wrapper behavior and performance
 │   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
 │   │   ├── test_docker_manager.py
@@ -734,10 +734,10 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 ### Documentation
 
 - `uv run generate-api-docs` - Generate API documentation
-
 ### AlgoTune
 
 - `uv run algotune` - Run the AlgoTune benchmark
+
 
 ### Cleanup
 
