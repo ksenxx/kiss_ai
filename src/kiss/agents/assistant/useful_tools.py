@@ -7,6 +7,18 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+
+def _truncate_output(output: str, max_chars: int) -> str:
+    if len(output) <= max_chars:
+        return output
+    half = max_chars // 2
+    return (
+        output[:half]
+        + f"\n\n... [truncated {len(output) - max_chars} chars] ...\n\n"
+        + output[-half:]
+    )
+
+
 EDIT_SCRIPT = r"""
 #!/usr/bin/env bash
 #
@@ -342,28 +354,6 @@ class UsefulTools:
             except Exception:  # pragma: no cover
                 pass
 
-    def MultiEdit(  # noqa: N802
-        self,
-        file_path: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool = False,
-        timeout_seconds: float = 30,
-    ) -> str:
-        """Performs precise string replacements in files with exact matching.
-
-        Args:
-            file_path: Absolute path to the file to modify.
-            old_string: Exact text to find and replace.
-            new_string: Replacement text, must differ from old_string.
-            replace_all: If True, replace all occurrences.
-            timeout_seconds: Timeout in seconds for the edit command.
-
-        Returns:
-            The output of the edit operation.
-        """
-        return self.Edit(file_path, old_string, new_string, replace_all, timeout_seconds)
-
     def Bash(  # noqa: N802
         self,
         command: str,
@@ -400,15 +390,7 @@ class UsefulTools:
                 text=True,
                 timeout=timeout_seconds,
             )
-            output = result.stdout
-            if len(output) > max_output_chars:
-                half = max_output_chars // 2
-                output = (
-                    output[:half]
-                    + f"\n\n... [truncated {len(output) - max_output_chars} chars] ...\n\n"
-                    + output[-half:]
-                )
-            return output
+            return _truncate_output(result.stdout, max_output_chars)
         except subprocess.TimeoutExpired:
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
@@ -454,11 +436,4 @@ class UsefulTools:
         if process.returncode != 0:
             return f"Error: {subprocess.CalledProcessError(process.returncode, command)}"
 
-        if len(output) > max_output_chars:
-            half = max_output_chars // 2
-            output = (
-                output[:half]
-                + f"\n\n... [truncated {len(output) - max_output_chars} chars] ...\n\n"
-                + output[-half:]
-            )
-        return output
+        return _truncate_output(output, max_output_chars)

@@ -42,14 +42,16 @@ from kiss.agents.assistant.task_history import (
     _set_latest_result,
 )
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_most_expensive_model
+from kiss.core.models.model_info import (
+    _OPENAI_PREFIXES,
+    MODEL_INFO,
+    get_available_models,
+    get_most_expensive_model,
+)
 
 
 class _StopRequested(BaseException):
     pass
-
-
-_OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "codex", "computer-use")
 
 
 def _model_vendor_order(name: str) -> int:
@@ -331,17 +333,15 @@ def run_chatbot(
                 cs_proc.kill()
 
     def _do_shutdown() -> None:
-        with printer._lock:
-            if printer._clients:
-                return
+        if printer.has_clients():
+            return
         _cleanup()
         os._exit(0)
 
     def _schedule_shutdown() -> None:
         nonlocal shutdown_timer
-        with printer._lock:
-            if printer._clients:
-                return
+        if printer.has_clients():
+            return
         if shutdown_timer is not None:
             shutdown_timer.cancel()
         shutdown_timer = threading.Timer(1.0, _do_shutdown)

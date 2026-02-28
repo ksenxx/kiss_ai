@@ -455,6 +455,10 @@ class BaseBrowserPrinter(Printer):
             except ValueError:
                 pass
 
+    def has_clients(self) -> bool:
+        with self._lock:
+            return bool(self._clients)
+
     def _broadcast_result(
         self, text: str, step_count: int = 0, total_tokens: int = 0, cost: str = "N/A",
     ) -> None:

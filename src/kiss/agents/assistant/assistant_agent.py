@@ -51,26 +51,23 @@ class AssistantAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        global_cfg = config_module.DEFAULT_CONFIG
-        cfg = global_cfg.assistant.assistant_agent
-        self.verbose = verbose if verbose is not None else cfg.verbose
-        self.model_name = model_name if model_name is not None else cfg.model_name
-        self.summarizer_model_name = (
-            summarizer_model_name if summarizer_model_name is not None
-            else cfg.summarizer_model_name
+        cfg = config_module.DEFAULT_CONFIG.assistant.assistant_agent
+        super()._reset(
+            model_name=model_name if model_name is not None else cfg.model_name,
+            summarizer_model_name=(
+                summarizer_model_name if summarizer_model_name is not None
+                else cfg.summarizer_model_name
+            ),
+            max_sub_sessions=(
+                max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
+            ),
+            max_steps=max_steps if max_steps is not None else cfg.max_steps,
+            max_budget=max_budget if max_budget is not None else cfg.max_budget,
+            work_dir=work_dir or ".",
+            docker_image=docker_image,
+            printer=printer,
+            verbose=verbose if verbose is not None else cfg.verbose,
         )
-        self.max_sub_sessions = (
-            max_sub_sessions if max_sub_sessions is not None
-            else cfg.max_sub_sessions
-        )
-        self.max_steps = max_steps if max_steps is not None else cfg.max_steps
-        self.max_budget = max_budget if max_budget is not None else cfg.max_budget
-        self.work_dir = work_dir or "."
-        self.docker_image = docker_image
-        self.docker_manager = None
-        self.budget_used: float = 0.0
-        self.total_tokens_used: int = 0
-        self.set_printer(printer, verbose=self.verbose)
 
     def run(  # type: ignore[override]
         self,
@@ -107,8 +104,6 @@ class AssistantAgent(RelentlessAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        from kiss.core import config as config_module
-
         cfg = config_module.DEFAULT_CONFIG.assistant.assistant_agent
         actual_headless = headless if headless is not None else cfg.headless
         self.web_use_tool = WebUseTool(headless=actual_headless)
