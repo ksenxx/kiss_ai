@@ -16,7 +16,7 @@ from kiss.agents.kiss_evolve.novelty_prompts import INNOVATION_INSTRUCTIONS
 from kiss.core import config as config_module
 from kiss.core.models.model import Model
 from kiss.core.utils import get_config_value
-from kiss.rag.simple_rag import SimpleRAG
+from kiss.agents.kiss_evolve.simple_rag import SimpleRAG
 
 
 @dataclass

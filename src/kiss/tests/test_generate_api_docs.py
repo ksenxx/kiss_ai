@@ -326,11 +326,11 @@ class TestHeadingDepth:
 
 class TestSortModules:
     def test_known_order(self) -> None:
-        m1 = ModuleDoc(name="kiss.rag", doc="", all_exports=None)
+        m1 = ModuleDoc(name="kiss.docker", doc="", all_exports=None)
         m2 = ModuleDoc(name="kiss.core", doc="", all_exports=None)
         m3 = ModuleDoc(name="kiss", doc="", all_exports=None)
         result = _sort_modules([m1, m2, m3])
-        assert [m.name for m in result] == ["kiss", "kiss.core", "kiss.rag"]
+        assert [m.name for m in result] == ["kiss", "kiss.core", "kiss.docker"]
 
     def test_unknown_modules_at_end(self) -> None:
         m1 = ModuleDoc(name="kiss", doc="", all_exports=None)
@@ -424,7 +424,7 @@ class TestDiscoverModules:
         assert "kiss.agents" in names
         assert "kiss.agents.gepa" in names
         assert "kiss.docker" in names
-        assert "kiss.rag" in names
+        assert "kiss.agents.kiss_evolve" in names
 
     def test_excludes_deprecated(self) -> None:
         modules = discover_modules()
