@@ -54,8 +54,8 @@ OUTPUT_CSS = r"""
 @keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 .think{
   padding:10px 16px;margin:10px 0;
-  background:rgba(121,192,255,.04);border-radius:8px;
-  max-height:200px;overflow-y:auto;
+  border:1px solid var(--border);border-radius:8px;
+  background:rgba(121,192,255,.04);max-height:200px;overflow-y:auto;
 }
 .think .lbl{
   font-size:11px;font-weight:600;text-transform:uppercase;
@@ -110,12 +110,12 @@ OUTPUT_CSS = r"""
 .extra{color:var(--dim);margin:2px 0}
 .tr{
   padding:8px 14px;margin:6px 0;
-  border-radius:8px;font-family:'SF Mono','Fira Code',monospace;
-  font-size:12px;max-height:200px;overflow-y:auto;
+  border:1px solid var(--border);border-radius:8px;
+  font-family:'SF Mono','Fira Code',monospace;
   font-size:11px;max-height:200px;overflow-y:auto;
   white-space:pre-wrap;word-break:break-word;background:rgba(63,185,80,.04);
 }
-.tr.err{background:rgba(248,81,73,.04)}
+.tr.err{background:rgba(248,81,73,.04);border-color:rgba(248,81,73,.2)}
 .tr .rl{
   font-size:11px;font-weight:600;text-transform:uppercase;
   letter-spacing:.06em;margin-bottom:4px;
@@ -123,7 +123,7 @@ OUTPUT_CSS = r"""
 .tr .rl.ok{color:var(--green)}
 .tr .rl.fail{color:var(--red)}
 .rc{
-  border:2px solid var(--green);border-radius:10px;
+  border:1px solid var(--green);border-radius:8px;
   margin:20px 0;overflow:hidden;background:var(--surface);
 }
 .rc-h{
@@ -141,7 +141,7 @@ OUTPUT_CSS = r"""
 }
 .rc-body.pre{white-space:pre-wrap}
 .prompt{
-  border:1px solid var(--cyan);border-radius:8px;margin:10px 0;
+  border:1px solid var(--border);border-radius:8px;margin:10px 0;
   overflow:hidden;background:var(--surface);
 }
 .prompt-h{
@@ -160,15 +160,15 @@ OUTPUT_CSS = r"""
   white-space:pre-wrap;word-break:break-word;padding:2px 0;
 }
 .bash-panel{
-  background:#08080a;border:1px solid rgba(255,255,255,0.06);
-  border-radius:6px;margin:2px 0 8px;padding:10px 12px;
+  background:#08080a;border:1px solid var(--border);
+  border-radius:8px;margin:2px 0 8px;padding:10px 12px;
   max-height:300px;overflow-y:auto;
   font-family:'SF Mono','Fira Code','Cascadia Code',monospace;
   font-size:8px;line-height:1.5;color:rgba(255,255,255,0.65);
   white-space:pre-wrap;word-break:break-word;
 }
 .usage{
-  border:1px solid var(--border);border-radius:4px;margin:6px 0;
+  border:1px solid var(--border);border-radius:8px;margin:6px 0;
   padding:4px 12px;background:var(--surface);font-size:11px;
   color:var(--dim);font-style:italic;
   font-family:'SF Mono','Fira Code',monospace;
