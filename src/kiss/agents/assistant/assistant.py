@@ -447,11 +447,30 @@ def run_chatbot(
         with proposed_lock:
             return JSONResponse(list(proposed_tasks))
 
+    def _fast_complete(raw_query: str, query: str) -> str:
+        query_lower = query.lower()
+        for entry in _load_history():
+            task = entry.get("task", "")
+            if task.lower().startswith(query_lower) and len(task) > len(query):
+                return task[len(query):]
+        words = raw_query.split()
+        last_word = words[-1] if words else ""
+        if last_word and len(last_word) >= 2:
+            lw_lower = last_word.lower()
+            for path in file_cache:
+                if path.lower().startswith(lw_lower) and len(path) > len(last_word):
+                    return path[len(last_word):]
+        return ""
+
     async def complete(request: Request) -> JSONResponse:
         raw_query = request.query_params.get("q", "")
         query = raw_query.strip()
-        if not query or len(query) < 3:
+        if not query or len(query) < 2:
             return JSONResponse({"suggestion": ""})
+
+        fast = _fast_complete(raw_query, query)
+        if fast:
+            return JSONResponse({"suggestion": fast})
 
         def _generate() -> str:
             history = _load_history()
