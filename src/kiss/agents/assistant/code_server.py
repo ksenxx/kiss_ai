@@ -25,6 +25,9 @@ _CS_SETTINGS = {
     "window.restoreWindows": "all",
     "workbench.editor.restoreViewState": True,
     "files.hotExit": "onExitAndWindowClose",
+    "git.repositoryScanMaxDepth": 0,
+    "git.autoRepositoryDetection": False,
+    "git.openRepositoryInParentFolders": "never",
 }
 
 _CS_STATE_ENTRIES = [
