@@ -381,6 +381,17 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
+  function writeTheme(){
+    var k=vscode.window.activeColorTheme.kind;
+    var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
+    try{
+      var d=path.join(home,'.kiss');
+      if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});
+      fs.writeFileSync(path.join(d,'vscode-theme.json'),JSON.stringify({kind:s}));
+    }catch(e){}
+  }
+  writeTheme();
+  ctx.subscriptions.push(vscode.window.onDidChangeActiveColorTheme(function(){writeTheme()}));
   var redDeco=vscode.window.createTextEditorDecorationType({
     backgroundColor:'rgba(248,81,73,0.15)',
     isWholeLine:true
@@ -711,6 +722,29 @@ def _model_vendor_order(name: str) -> int:
         return 4
     return 5
 
+
+_THEME_PRESETS: dict[str, dict[str, str]] = {
+    "dark": {
+        "bg": "#1e1e1e", "bg2": "#252526", "fg": "#d4d4d4",
+        "accent": "#3794ff", "border": "#3c3c3c", "inputBg": "#313131",
+        "green": "#23d18b", "red": "#f14c4c", "purple": "#b180d7", "cyan": "#29b8db",
+    },
+    "light": {
+        "bg": "#ffffff", "bg2": "#f3f3f3", "fg": "#333333",
+        "accent": "#005fb8", "border": "#d4d4d4", "inputBg": "#ffffff",
+        "green": "#388a34", "red": "#cd3131", "purple": "#7e57c2", "cyan": "#0598bc",
+    },
+    "hcDark": {
+        "bg": "#000000", "bg2": "#0a0a0a", "fg": "#ffffff",
+        "accent": "#3794ff", "border": "#6fc3df", "inputBg": "#0a0a0a",
+        "green": "#23d18b", "red": "#f48771", "purple": "#b180d7", "cyan": "#29b8db",
+    },
+    "hcLight": {
+        "bg": "#ffffff", "bg2": "#f0f0f0", "fg": "#000000",
+        "accent": "#0f4a85", "border": "#0f4a85", "inputBg": "#ffffff",
+        "green": "#1b7d2c", "red": "#b5200d", "purple": "#5e3a8a", "cyan": "#0f4a85",
+    },
+}
 
 CHATBOT_CSS = r"""
 body{
@@ -1198,6 +1232,247 @@ header{
 #assistant-panel .empty-msg{font-size:11px}
 #assistant-panel .rl{font-size:10px}
 #assistant-panel .usage{font-size:11px}
+"""
+
+CHATBOT_THEME_CSS = r"""
+body,#assistant-panel{
+  --bg:#1e1e1e;--surface:#252526;--surface2:#2d2d2d;--border:#3c3c3c;
+  --text:#d4d4d4;--dim:#858585;--accent:#3794ff;--green:#23d18b;
+  --red:#f14c4c;--yellow:#d29922;--cyan:#29b8db;--purple:#b180d7;
+  --bg-rgb:30,30,30;--bg2-rgb:37,37,38;--fg-rgb:212,212,212;
+  --accent-rgb:55,148,255;--border-rgb:60,60,60;--green-rgb:35,209,139;
+  --red-rgb:241,76,76;--purple-rgb:177,128,215;--cyan-rgb:41,184,219;
+  --input-bg:#313131;
+}
+body{background:var(--bg)}
+#assistant-panel{background:var(--bg)}
+#assistant-panel header{
+  background:rgba(var(--bg2-rgb),0.92);
+  border-bottom:1px solid var(--border);
+  box-shadow:0 1px 8px rgba(0,0,0,0.2);
+}
+#assistant-panel .logo{color:var(--accent)}
+#assistant-panel .status{color:rgba(var(--fg-rgb),0.5)}
+#assistant-panel .dot{background:rgba(var(--fg-rgb),0.35)}
+#assistant-panel .dot.running{background:var(--green)}
+#assistant-panel .user-msg{
+  background:rgba(var(--fg-rgb),0.04);
+  border:1px solid rgba(var(--fg-rgb),0.08);
+  color:rgba(var(--fg-rgb),0.9);
+}
+#assistant-panel .txt{color:rgba(var(--fg-rgb),0.85)}
+#assistant-panel .think{
+  border:1px solid rgba(var(--purple-rgb),0.15);
+  background:rgba(var(--purple-rgb),0.04);
+}
+#assistant-panel .think .lbl{color:rgba(var(--purple-rgb),0.8)}
+#assistant-panel .think .cnt{color:rgba(var(--fg-rgb),0.4)}
+#assistant-panel .tc{
+  border:1px solid var(--border);
+  background:rgba(var(--accent-rgb),0.02);
+}
+#assistant-panel .tc:hover{
+  box-shadow:0 2px 16px rgba(var(--accent-rgb),0.06);
+  border-color:rgba(var(--accent-rgb),0.25);
+}
+#assistant-panel .tc-h{
+  background:rgba(var(--accent-rgb),0.04);
+  border-bottom:1px solid rgba(var(--accent-rgb),0.08);
+}
+#assistant-panel .tc-h:hover{background:rgba(var(--accent-rgb),0.07)}
+#assistant-panel .tn{color:var(--accent)}
+#assistant-panel .tp{color:rgba(var(--cyan-rgb),0.7)}
+#assistant-panel .td{color:rgba(var(--fg-rgb),0.35)}
+#assistant-panel .tr{
+  border:1px solid rgba(var(--green-rgb),0.2);
+  background:rgba(var(--green-rgb),0.03);
+}
+#assistant-panel .tr.err{
+  border-color:rgba(var(--red-rgb),0.2);
+  background:rgba(var(--red-rgb),0.03);
+}
+#assistant-panel .rc{
+  border:1px solid rgba(var(--green-rgb),0.25);
+  background:rgba(var(--green-rgb),0.02);
+}
+#assistant-panel .rc-h{
+  background:rgba(var(--green-rgb),0.06);
+  border-bottom:1px solid rgba(var(--green-rgb),0.12);
+}
+#assistant-panel .usage{
+  border:1px solid var(--border);background:rgba(var(--fg-rgb),0.02);
+  color:rgba(var(--fg-rgb),0.35);
+}
+#assistant-panel .spinner{color:rgba(var(--fg-rgb),0.4)}
+#assistant-panel .spinner::before{
+  border-color:var(--border);border-top-color:rgba(var(--accent-rgb),0.7);
+}
+#assistant-panel #input-area{
+  background:linear-gradient(transparent,rgba(var(--bg-rgb),0.95) 50%);
+}
+#assistant-panel #input-container{
+  background:var(--input-bg);
+  border:1px solid var(--border);
+  box-shadow:0 0 0 1px rgba(var(--fg-rgb),0.02),0 4px 24px rgba(0,0,0,0.25);
+}
+#assistant-panel #input-container:focus-within{
+  border-color:rgba(var(--accent-rgb),0.5);
+  box-shadow:0 0 0 1px rgba(var(--accent-rgb),0.15),0 0 20px rgba(var(--accent-rgb),0.08),
+    0 4px 24px rgba(0,0,0,0.25);
+}
+#assistant-panel #task-input{color:var(--text)}
+#assistant-panel #task-input::placeholder{color:rgba(var(--fg-rgb),0.3)}
+#assistant-panel .gs{color:rgba(var(--fg-rgb),0.25)}
+#assistant-panel #input-footer{border-top:1px solid rgba(var(--fg-rgb),0.06)}
+#assistant-panel #model-btn{
+  background:rgba(var(--fg-rgb),0.04);color:rgba(var(--fg-rgb),0.5);
+  border:1px solid var(--border);
+}
+#assistant-panel #model-btn:hover{
+  border-color:rgba(var(--fg-rgb),0.2);color:rgba(var(--fg-rgb),0.7);
+}
+#assistant-panel #model-dropdown{
+  background:rgba(var(--bg2-rgb),0.97);
+  border:1px solid var(--border);box-shadow:0 -4px 24px rgba(0,0,0,0.4);
+}
+#assistant-panel #model-search{
+  border-bottom:1px solid rgba(var(--fg-rgb),0.08);color:rgba(var(--fg-rgb),0.8);
+}
+#assistant-panel #model-search::placeholder{color:rgba(var(--fg-rgb),0.3)}
+#assistant-panel .model-item{
+  border-bottom:1px solid rgba(var(--fg-rgb),0.03);color:rgba(var(--fg-rgb),0.6);
+}
+#assistant-panel .model-item:hover,#assistant-panel .model-item.sel{
+  background:rgba(var(--accent-rgb),0.1);
+}
+#assistant-panel .model-item.active{color:var(--accent)}
+#assistant-panel .model-cost{color:rgba(var(--fg-rgb),0.25)}
+#assistant-panel .model-group-hdr{
+  color:rgba(var(--fg-rgb),0.3);background:rgba(var(--bg2-rgb),0.97);
+  border-bottom:1px solid rgba(var(--fg-rgb),0.05);
+}
+#assistant-panel #send-btn{
+  background:rgba(var(--accent-rgb),0.18);color:var(--accent);
+}
+#assistant-panel #send-btn:hover{
+  background:rgba(var(--accent-rgb),0.35);color:#fff;
+  box-shadow:0 0 12px rgba(var(--accent-rgb),0.2);
+}
+#assistant-panel #stop-btn{
+  background:rgba(var(--red-rgb),0.12);color:var(--red);
+  border:1px solid rgba(var(--red-rgb),0.2);
+}
+#assistant-panel #stop-btn:hover{
+  background:rgba(var(--red-rgb),0.25);
+  box-shadow:0 0 12px rgba(var(--red-rgb),0.15);
+}
+#assistant-panel #clear-btn{color:rgba(var(--fg-rgb),0.25)}
+#assistant-panel #clear-btn:hover{color:rgba(var(--fg-rgb),0.6)}
+#assistant-panel #autocomplete{
+  background:rgba(var(--bg2-rgb),0.97);border:1px solid var(--border);
+  box-shadow:0 -4px 24px rgba(0,0,0,0.4);
+}
+#assistant-panel .ac-section{
+  color:rgba(var(--fg-rgb),0.25);background:rgba(var(--bg2-rgb),0.97);
+  border-bottom:1px solid rgba(var(--fg-rgb),0.04);
+}
+#assistant-panel .ac-item{border-bottom:1px solid rgba(var(--fg-rgb),0.03)}
+#assistant-panel .ac-item:hover,#assistant-panel .ac-item.sel{
+  background:rgba(var(--accent-rgb),0.1);
+}
+#assistant-panel .ac-text{color:rgba(var(--fg-rgb),0.6)}
+#assistant-panel .ac-hl{color:var(--accent)}
+#assistant-panel .ac-hint{
+  color:rgba(var(--fg-rgb),0.25);background:rgba(var(--fg-rgb),0.06);
+}
+#assistant-panel .ac-footer{
+  color:rgba(var(--fg-rgb),0.2);border-top:1px solid rgba(var(--fg-rgb),0.05);
+  background:rgba(var(--fg-rgb),0.02);
+}
+#assistant-panel .ac-footer kbd{
+  background:rgba(var(--fg-rgb),0.08);color:rgba(var(--fg-rgb),0.3);
+}
+#assistant-panel #welcome h2{color:var(--text)}
+#assistant-panel #welcome p{color:rgba(var(--fg-rgb),0.45)}
+#assistant-panel .suggestion-chip{
+  background:rgba(var(--fg-rgb),0.03);
+  border:1px solid rgba(var(--fg-rgb),0.07);color:rgba(var(--fg-rgb),0.7);
+}
+#assistant-panel .suggestion-chip:hover{
+  background:rgba(var(--fg-rgb),0.07);
+  border-color:rgba(var(--fg-rgb),0.15);color:rgba(var(--fg-rgb),0.9);
+  box-shadow:0 4px 20px rgba(0,0,0,0.25);
+}
+#assistant-panel .chip-label.recent{color:rgba(var(--accent-rgb),0.75)}
+#assistant-panel .chip-label.suggested{color:rgba(var(--purple-rgb),0.75)}
+#assistant-panel #sidebar{
+  background:rgba(var(--bg2-rgb),0.97);border-left:1px solid var(--border);
+}
+#assistant-panel #sidebar-overlay{background:rgba(0,0,0,0.35)}
+#assistant-panel #history-btn,#assistant-panel #proposals-btn{
+  color:rgba(var(--fg-rgb),0.35);
+}
+#assistant-panel #history-btn:hover,#assistant-panel #proposals-btn:hover{
+  color:rgba(var(--fg-rgb),0.6);
+}
+#assistant-panel #sidebar-close{color:rgba(var(--fg-rgb),0.35)}
+#assistant-panel #sidebar-close:hover{
+  color:rgba(var(--fg-rgb),0.7);background:rgba(var(--fg-rgb),0.06);
+}
+#assistant-panel .sidebar-hdr{color:rgba(var(--fg-rgb),0.3)}
+#assistant-panel .sidebar-item{
+  background:rgba(var(--fg-rgb),0.02);border:1px solid rgba(var(--fg-rgb),0.05);
+  color:rgba(var(--fg-rgb),0.5);
+}
+#assistant-panel .sidebar-item:hover{
+  border-color:rgba(var(--fg-rgb),0.12);background:rgba(var(--fg-rgb),0.05);
+  color:rgba(var(--fg-rgb),0.8);
+}
+#assistant-panel .sidebar-empty{color:rgba(var(--fg-rgb),0.25)}
+#assistant-panel #history-search{
+  background:rgba(var(--fg-rgb),0.04);border:1px solid var(--border);
+  color:rgba(var(--fg-rgb),0.8);
+}
+#assistant-panel #history-search:focus{border-color:rgba(var(--accent-rgb),0.5)}
+#assistant-panel #history-search::placeholder{color:rgba(var(--fg-rgb),0.3)}
+#assistant-panel .followup-bar{
+  background:rgba(var(--purple-rgb),0.05);
+  border:1px solid rgba(var(--purple-rgb),0.18);
+}
+#assistant-panel .followup-bar:hover{
+  background:rgba(var(--purple-rgb),0.1);
+  border-color:rgba(var(--purple-rgb),0.3);
+  box-shadow:0 4px 16px rgba(var(--purple-rgb),0.08);
+}
+#assistant-panel .fu-label{color:rgba(var(--purple-rgb),0.75)}
+#assistant-panel .fu-text{color:rgba(var(--fg-rgb),0.7)}
+#assistant-panel .llm-panel{
+  border:1px solid rgba(var(--accent-rgb),0.15);
+  background:rgba(var(--accent-rgb),0.03);
+}
+#assistant-panel .llm-panel .txt{color:rgba(var(--fg-rgb),0.6)}
+#assistant-panel .bash-panel{
+  background:rgba(0,0,0,0.35);color:rgba(var(--fg-rgb),0.6);
+  border-color:var(--border);
+}
+#divider{background:var(--border)}
+#divider:hover,#divider.active{background:var(--accent)}
+#editor-fallback{background:var(--bg);color:rgba(var(--fg-rgb),0.7)}
+#merge-toolbar{
+  background:rgba(var(--bg2-rgb),0.95);border:1px solid var(--border);
+  box-shadow:0 4px 24px rgba(0,0,0,0.4);
+}
+#merge-toolbar button{
+  background:rgba(var(--fg-rgb),0.08);border:1px solid rgba(var(--fg-rgb),0.12);
+  color:rgba(var(--fg-rgb),0.8);
+}
+#merge-toolbar button:hover{
+  background:rgba(var(--accent-rgb),0.15);
+  border-color:rgba(var(--accent-rgb),0.3);color:#fff;
+}
+#assistant-panel .prompt-h{
+  background:rgba(var(--cyan-rgb),0.08);color:var(--cyan);
+}
 """
 
 CHATBOT_JS = r"""
@@ -1751,13 +2026,45 @@ function mergeCommit(){
     btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;
   }).catch(function(e){alert('Error: '+e);btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;});
 }
+function hexToRgb(h){
+  var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
+  return r+','+g+','+b;
+}
+function loadTheme(){
+  fetch('/theme').then(function(r){return r.json()}).then(function(t){
+    var p=document.getElementById('assistant-panel')||document.body;
+    var map={
+      '--bg':t.bg,'--surface':t.bg2,'--surface2':t.bg2,
+      '--text':t.fg,'--accent':t.accent,'--border':t.border,
+      '--green':t.green,'--red':t.red,'--purple':t.purple,'--cyan':t.cyan,
+      '--input-bg':t.inputBg
+    };
+    for(var k in map){
+      if(!map[k])continue;
+      p.style.setProperty(k,map[k]);
+    }
+    var rgbMap={
+      '--bg-rgb':t.bg,'--bg2-rgb':t.bg2,'--fg-rgb':t.fg,
+      '--accent-rgb':t.accent,'--border-rgb':t.border,
+      '--green-rgb':t.green,'--red-rgb':t.red,
+      '--purple-rgb':t.purple,'--cyan-rgb':t.cyan
+    };
+    for(var k in rgbMap){
+      if(!rgbMap[k])continue;
+      p.style.setProperty(k,hexToRgb(rgbMap[k]));
+    }
+    document.body.style.setProperty('--bg',t.bg);
+    document.body.style.setProperty('background',t.bg);
+  }).catch(function(){});
+}
+loadTheme();setInterval(loadTheme,15000);
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
 
 
 def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> str:
     font_import = "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');\n"
-    css = font_import + BASE_CSS + OUTPUT_CSS + CHATBOT_CSS
+    css = font_import + BASE_CSS + OUTPUT_CSS + CHATBOT_CSS + CHATBOT_THEME_CSS
 
     if code_server_url:
         import urllib.parse
@@ -2276,6 +2583,17 @@ def run_chatbot(
         return JSONResponse({"models": models_list, "selected": selected_model})
 
 
+    async def theme(request: Request) -> JSONResponse:
+        theme_file = _KISS_DIR / "vscode-theme.json"
+        kind = "dark"
+        if theme_file.exists():
+            try:
+                data = json.loads(theme_file.read_text())
+                kind = data.get("kind", "dark")
+            except (json.JSONDecodeError, OSError):
+                pass
+        return JSONResponse(_THEME_PRESETS.get(kind, _THEME_PRESETS["dark"]))
+
     async def open_file(request: Request) -> JSONResponse:
         body = await request.json()
         rel = body.get("path", "").strip()
@@ -2349,6 +2667,7 @@ def run_chatbot(
         Route("/tasks", tasks),
         Route("/proposed_tasks", proposed_tasks_endpoint),
         Route("/models", models_endpoint),
+        Route("/theme", theme),
     ])
 
     threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
