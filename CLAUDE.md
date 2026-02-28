@@ -1,49 +1,34 @@
 ## Code Style Guidelines
-
-- Write simple, readable code with minimal indirection
-- Avoid unnecessary object attributes and local variables
-- No redundant abstractions or duplicate code
+- Write simple, clean, and readable code with minimal indirection
+- Avoid unnecessary object attributes and local variables and config variables
+- No redundant abstractions or duplicate code and config code
 - Each function should do one thing well
 - Use clear, descriptive names
 - NO need to write documentations or comments unless absolutely necessary
-- NO bloat or over-engineering of the system
-- Minimize tight coupling between different files by coming up with the simplest and necessary APIs only.
+- Public methods MUST have full documentation.
+- Check and test the code you have written
 
 ## Testing Requirements
-
 - Run lint and typecheckers and fix any lint and typecheck errors
 - Generate comprehensive tests so that you achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, or any form of test doubles
-- Integration tests are highly encouraged
+- Integration tests are HIGHLY encouraged
 - You MUST not add tests that are redundant or duplicate of existing
   tests or does not add new coverage over existing tests
 - Generate meaningful stress tests for the code if you are
   optimizing the code for performance
-- Test with real inputs and verify real outputs
-- Test edge cases: empty inputs, None values, boundary conditions
-- Test error conditions with actual invalid inputs
 - Each test should be independent and verify actual behavior
-- Simplify and clean up the test code
-- Play Devil's advocate when you test--try to break the system in all possible ways.
 
 ## Use tools when you need to:
-
-- Look up API documentation or library usage
+- Look up API documentation or library usage from the internet
 - Find examples of similar implementations
-- Understand existing code in the project and learn the patterns
+- Understand existing code in the project
 
-# Editing and Fixing Instructions
-
-- For any change or bug fix, pause and think what would be the simle, elegant, and minimal changes.
-- Find root causes of a bug and fix it, rather that applying a hacky, temporary fix.
-- Do not over-engineer the fixes
-
-## After you have implemented a task, aggresively and carefully simplify and clean up the code
-
-- Remove unnessary object/struct attributes, variables, config variables
-- Avoid object/struct attribute redirections
-- Remove unnessary conditional checks
-- Remove redundant and duplicate code
-- Remove unnecessary comments except for function and method documentations
-- Make sure that the code is still working correctly
-- use 'uv run' to run any program
+## After you have implemented the task, aggresively and carefully simplify and clean up the code
+ - Remove unnessary object/struct attributes, variables, config variables
+ - Avoid object/struct attribute redirections
+ - Remove unnessary conditional checks
+ - Remove redundant and duplicate code
+ - Remove unnecessary comments
+ - Make sure that the code is still working correctly
+ - Simplify and clean up the test code
