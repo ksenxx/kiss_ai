@@ -9,6 +9,7 @@
 import argparse
 import sys
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -243,7 +244,11 @@ def main():
     print(f"Artifact directory: {ARTIFACT_DIR}")
     print(f"Server running at {url}")
 
-    threading.Timer(1.0, webbrowser.open, args=[url]).start()
+    def _open_browser() -> None:
+        time.sleep(2)
+        webbrowser.open(url)
+
+    threading.Thread(target=_open_browser, daemon=True).start()
     app.run(host=args.host, port=args.port, debug=False)
 
 
