@@ -18,7 +18,7 @@ _CS_SETTINGS = {
     "security.workspace.trust.enabled": False,
     "update.showReleaseNotes": False,
     "workbench.panel.defaultLocation": "bottom",
-    "editor.fontSize": 13,
+    "editor.fontSize": None,
     "terminal.integrated.fontSize": 13,
     "scm.inputFontSize": 13,
     "debug.console.fontSize": 13,
