@@ -1677,7 +1677,7 @@ def _build_html(title: str, subtitle: str, code_server_url: str = "", work_dir: 
       </div>
     </div>
     <header>
-      <div class="logo">{title}<span>{subtitle}</span></div>
+      <div class="logo">Sorcar</div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
         <div class="status"><div class="dot" id="dot"></div><span id="stxt">Ready</span></div>
         <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
