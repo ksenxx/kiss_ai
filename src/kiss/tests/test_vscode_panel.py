@@ -46,6 +46,23 @@ class TestSetupCodeServer(unittest.TestCase):
         assert settings["editor.tabSize"] == 4
         assert settings["workbench.startupEditor"] == "none"
 
+    def test_first_run_sets_dark_modern_theme(self) -> None:
+        code_server._setup_code_server(self.tmpdir)
+        settings = json.loads(
+            (Path(self.tmpdir) / "User" / "settings.json").read_text()
+        )
+        assert settings["workbench.colorTheme"] == "Default Dark Modern"
+
+    def test_preserves_existing_color_theme(self) -> None:
+        user_dir = Path(self.tmpdir) / "User"
+        user_dir.mkdir(parents=True)
+        (user_dir / "settings.json").write_text(
+            json.dumps({"workbench.colorTheme": "Monokai"})
+        )
+        code_server._setup_code_server(self.tmpdir)
+        settings = json.loads((user_dir / "settings.json").read_text())
+        assert settings["workbench.colorTheme"] == "Monokai"
+
     def test_settings_handles_corrupted_json(self) -> None:
         user_dir = Path(self.tmpdir) / "User"
         user_dir.mkdir(parents=True)
