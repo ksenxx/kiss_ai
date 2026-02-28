@@ -992,12 +992,11 @@ header{
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
 #history-btn,#proposals-btn{
-  background:none;border:1px solid rgba(255,255,255,0.15);border-radius:8px;
-  color:rgba(255,255,255,0.6);font-size:12px;cursor:pointer;
-  padding:5px 12px;transition:all 0.15s;display:flex;align-items:center;gap:6px;
+  background:none;border:none;
+  color:rgba(255,255,255,0.3);cursor:pointer;
+  padding:4px;transition:color 0.15s;display:flex;align-items:center;
 }
-#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.85);border-color:rgba(255,255,255,0.3)}
-#history-btn svg,#proposals-btn svg{opacity:0.85}
+#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.6)}
 #sidebar-close{
   position:absolute;top:16px;right:16px;background:none;border:none;
   color:rgba(255,255,255,0.3);font-size:20px;cursor:pointer;
@@ -1119,10 +1118,7 @@ header{
 #assistant-panel header{padding:8px 12px}
 #assistant-panel .logo{font-size:11px}
 #assistant-panel .status{font-size:11px}
-#assistant-panel #history-btn,#assistant-panel #proposals-btn{
-  font-size:0;padding:5px;border-radius:6px;gap:0;
-}
-#assistant-panel #history-btn svg,#assistant-panel #proposals-btn svg{width:13px;height:13px}
+#assistant-panel #history-btn svg,#assistant-panel #proposals-btn svg{width:12px;height:12px}
 #assistant-panel #welcome{padding:20px 14px}
 #assistant-panel #welcome h2{font-size:17px;margin-bottom:3px;letter-spacing:-0.3px}
 #assistant-panel #welcome p{font-size:11px;margin-bottom:14px}
