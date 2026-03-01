@@ -136,9 +136,6 @@ class RelentlessAgent(Base):
         for trial in range(self.max_sub_sessions):
             executor = KISSAgent(f"{self.name} Trial-{trial}")
             try:
-                model_config: dict[str, str] = {}
-                if self.system_instructions:
-                    model_config["system_instruction"] = self.system_instructions
                 result = executor.run(
                     model_name=self.model_name,
                     prompt_template=TASK_PROMPT,
@@ -148,10 +145,10 @@ class RelentlessAgent(Base):
                         "step_threshold": str(self.max_steps - 2),
                         "work_dir": self.work_dir,
                     },
+                    system_prompt=self.system_instructions,
                     tools=all_tools,
                     max_steps=self.max_steps,
                     max_budget=self.max_budget,
-                    model_config=model_config or None,
                     printer=self.printer,
                     attachments=attachments if trial == 0 else None,
                 )

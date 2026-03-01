@@ -335,17 +335,6 @@ class AnthropicModel(Model):
 
         self.conversation.append({"role": "user", "content": tool_results_blocks})
 
-    def add_message_to_conversation(self, role: str, content: str) -> None:
-        """Adds a message to the conversation state.
-
-        Args:
-            role: The role of the message sender (e.g., 'user', 'assistant').
-            content: The message content.
-        """
-        if role == "user" and self.usage_info_for_messages:
-            content = f"{content}\n\n{self.usage_info_for_messages}"
-        self.conversation.append({"role": role, "content": content})
-
     def extract_input_output_token_counts_from_response(
         self, response: Any
     ) -> tuple[int, int, int, int]:
