@@ -10,7 +10,6 @@ import queue
 import shutil
 import socket
 import subprocess
-import sys
 import threading
 import time
 import types
@@ -103,7 +102,10 @@ def run_chatbot(
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
     selected_model = (
-        _load_last_model() or default_model or get_most_expensive_model() or "claude-opus-4-6"
+        default_model
+        or _load_last_model()
+        or get_most_expensive_model()
+        or "claude-opus-4-6"
     )
 
     _init_task_history_md()
@@ -691,11 +693,23 @@ def run_chatbot(
 
 def main() -> None:
     """Launch the KISS chatbot UI in assistant or coding mode based on KISS_MODE env var."""
+    import argparse
+
     from kiss._version import __version__
     from kiss.agents.assistant.assistant_agent import AssistantAgent
     from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 
-    work_dir = str(Path(sys.argv[1]).resolve()) if len(sys.argv) > 1 else os.getcwd()
+    parser = argparse.ArgumentParser(description="KISS Assistant")
+    parser.add_argument(
+        "work_dir", nargs="?", default=os.getcwd(),
+        help="Working directory for the agent",
+    )
+    parser.add_argument(
+        "--model_name", default="claude-opus-4-6",
+        help="Default LLM model name",
+    )
+    args = parser.parse_args()
+    work_dir = str(Path(args.work_dir).resolve())
 
     mode = os.environ.get("KISS_MODE", "assistant").lower()
     if mode == "assistant":
@@ -703,6 +717,7 @@ def main() -> None:
             agent_factory=AssistantAgent,
             title=f"KISS Assistant: {__version__}",
             work_dir=work_dir,
+            default_model=args.model_name,
             agent_kwargs={"headless": False},
         )
     else:
@@ -710,6 +725,7 @@ def main() -> None:
             agent_factory=RelentlessCodingAgent,
             title=f"KISS Coding Assistant: {__version__}",
             work_dir=work_dir,
+            default_model=args.model_name,
         )
 
 
