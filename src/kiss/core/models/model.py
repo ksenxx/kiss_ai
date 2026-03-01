@@ -111,7 +111,6 @@ class Model(ABC):
     def __init__(
         self,
         model_name: str,
-        model_description: str = "",
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
     ):
@@ -119,12 +118,10 @@ class Model(ABC):
 
         Args:
             model_name: The name/identifier of the model.
-            model_description: Optional description of the model.
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional async callback invoked with each streamed text token.
         """
         self.model_name = model_name
-        self.model_description = model_description
         self.model_config = model_config or {}
         self.token_callback = token_callback
         self.usage_info_for_messages: str = ""
@@ -202,18 +199,43 @@ class Model(ABC):
         """
         pass
 
-    @abstractmethod
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
         """Adds function results to the conversation state.
 
+        Matches results to tool calls by index from the last assistant message.
+
         Args:
             function_results: List of tuples containing (function_name, result_dict).
         """
-        pass
+        tool_calls: list[dict[str, str]] = []
+        for msg in reversed(self.conversation):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                tool_calls = [
+                    {"name": tc["function"]["name"], "id": tc["id"]}
+                    for tc in msg["tool_calls"]
+                ]
+                break
 
-    @abstractmethod
+        for i, (func_name, result_dict) in enumerate(function_results):
+            result_content = result_dict.get("result", str(result_dict))
+            if self.usage_info_for_messages:
+                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
+
+            if i < len(tool_calls):
+                tool_call_id = tool_calls[i]["id"]
+            else:
+                tool_call_id = f"call_{func_name}_{i}"
+
+            self.conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result_content,
+                }
+            )
+
     def add_message_to_conversation(self, role: str, content: str) -> None:
         """Adds a message to the conversation state.
 
@@ -221,7 +243,9 @@ class Model(ABC):
             role: The role of the message sender (e.g., 'user', 'assistant').
             content: The message content.
         """
-        pass
+        if role == "user" and self.usage_info_for_messages:
+            content = f"{content}\n\n{self.usage_info_for_messages}"
+        self.conversation.append({"role": role, "content": content})
 
     @abstractmethod
     def extract_input_output_token_counts_from_response(
