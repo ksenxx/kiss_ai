@@ -15,7 +15,7 @@ from typing import Any
 from openai import OpenAI
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model, TokenCallback
+from kiss.core.models.model import Attachment, Model, TokenCallback
 
 # DeepSeek R1 reasoning models use <think>...</think> tags for chain-of-thought
 # These models need text-based tool calling instead of native function calling
@@ -219,11 +219,12 @@ class OpenAICompatibleModel(Model):
 
     __repr__ = __str__
 
-    def initialize(self, prompt: str) -> None:
+    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
 
         Args:
             prompt: The initial user prompt to start the conversation.
+            attachments: Optional list of file attachments (images, PDFs) to include.
         """
         self.client = OpenAI(
             base_url=self.base_url,
@@ -234,7 +235,23 @@ class OpenAICompatibleModel(Model):
         system_instruction = self.model_config.get("system_instruction")
         if system_instruction:
             self.conversation.append({"role": "system", "content": system_instruction})
-        self.conversation.append({"role": "user", "content": prompt})
+        content: str | list[dict[str, Any]] = prompt
+        if attachments:
+            parts: list[dict[str, Any]] = []
+            for att in attachments:
+                if att.mime_type.startswith("image/"):
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": att.to_data_url()},
+                    })
+                elif att.mime_type == "application/pdf":
+                    parts.append({
+                        "type": "file",
+                        "file": {"file_data": att.to_data_url()},
+                    })
+            parts.append({"type": "text", "text": prompt})
+            content = parts
+        self.conversation.append({"role": "user", "content": content})
 
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.

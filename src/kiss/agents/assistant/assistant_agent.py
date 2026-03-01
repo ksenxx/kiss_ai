@@ -14,6 +14,7 @@ from kiss.agents.assistant.useful_tools import UsefulTools
 from kiss.agents.assistant.web_use_tool import WebUseTool
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, GENERAL_ASSISTANT_INSTRUCTIONS
+from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 
 
@@ -84,6 +85,7 @@ class AssistantAgent(RelentlessAgent):
         docker_image: str | None = None,
         headless: bool | None = None,
         verbose: bool | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -101,6 +103,7 @@ class AssistantAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             headless: Whether to run the browser in headless mode. Defaults to config value.
             verbose: Whether to print output to console. Defaults to config verbose setting.
+            attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -134,6 +137,7 @@ class AssistantAgent(RelentlessAgent):
                 docker_image=self.docker_image,
                 verbose=self.verbose,
                 tools_factory=self._get_tools,
+                attachments=attachments,
             )
         finally:
             if self.web_use_tool:

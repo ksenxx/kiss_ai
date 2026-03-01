@@ -193,6 +193,31 @@ header{
   border-bottom:1px solid rgba(255,255,255,0.04);
   position:sticky;top:0;z-index:1;
 }
+#upload-btn{
+  background:none;color:rgba(255,255,255,0.3);border:none;
+  width:32px;height:32px;cursor:pointer;flex-shrink:0;
+  transition:color 0.15s;display:flex;align-items:center;justify-content:center;
+  padding:0;border-radius:50%;
+}
+#upload-btn:hover{color:rgba(255,255,255,0.7);background:rgba(255,255,255,0.05)}
+#upload-btn svg{width:16px;height:16px}
+#upload-btn:disabled{opacity:0.2;cursor:not-allowed}
+#file-chips{
+  display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;max-width:820px;margin-left:auto;margin-right:auto;
+}
+#file-chips:empty{display:none;margin-bottom:0}
+.file-chip{
+  display:inline-flex;align-items:center;gap:5px;
+  background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.15);
+  border-radius:8px;padding:4px 10px;font-size:11px;color:rgba(88,166,255,0.8);
+}
+.file-chip img{width:24px;height:24px;border-radius:4px;object-fit:cover}
+.file-chip .fc-icon{font-size:14px;opacity:0.6}
+.file-chip .fc-rm{
+  cursor:pointer;color:rgba(255,255,255,0.3);font-size:14px;margin-left:2px;
+  transition:color 0.15s;
+}
+.file-chip .fc-rm:hover{color:rgba(248,81,73,0.8)}
 #input-actions{display:flex;gap:8px;align-items:center}
 #send-btn{
   background:rgba(88,166,255,0.15);color:rgba(88,166,255,0.9);border:none;
@@ -789,6 +814,41 @@ var llmPanelState=mkS();
 var ghostEl=document.getElementById('ghost-overlay');
 var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
 var ghostCache={q:'',s:''};
+var fileInput=document.getElementById('file-input');
+var uploadBtn=document.getElementById('upload-btn');
+var fileChips=document.getElementById('file-chips');
+var pendingFiles=[];
+uploadBtn.addEventListener('click',function(){if(!running)fileInput.click()});
+fileInput.addEventListener('change',function(){
+  Array.from(this.files||[]).forEach(function(f){
+    var reader=new FileReader();
+    reader.onload=function(){
+      var b64=reader.result.split(',')[1];
+      pendingFiles.push({name:f.name,mime_type:f.type,data:b64,url:reader.result});
+      renderFileChips();
+    };
+    reader.readAsDataURL(f);
+  });
+  this.value='';
+});
+function renderFileChips(){
+  fileChips.innerHTML='';
+  pendingFiles.forEach(function(f,i){
+    var chip=document.createElement('span');chip.className='file-chip';
+    if(f.mime_type.startsWith('image/')){
+      var img=document.createElement('img');img.src=f.url;chip.appendChild(img);
+    }else{
+      var icon=document.createElement('span');
+      icon.className='fc-icon';icon.textContent='\ud83d\udcc4';
+      chip.appendChild(icon);
+    }
+    var label=document.createElement('span');label.textContent=f.name;chip.appendChild(label);
+    var rm=document.createElement('span');rm.className='fc-rm';rm.textContent='\u00d7';
+    rm.onclick=function(){pendingFiles.splice(i,1);renderFileChips()};
+    chip.appendChild(rm);
+    fileChips.appendChild(chip);
+  });
+}
 function mkS(){return{thinkEl:null,txtEl:null,bashPanel:null}}
 inp.addEventListener('input',function(){
   this.style.height='auto';
@@ -1033,13 +1093,17 @@ function submitTask(){
   stopBtn.style.display='inline-flex';
   D.classList.add('running');hideAC();startTimer();
   inp.style.height='auto';
+  var payload={task:task,model:selectedModel};
+  if(pendingFiles.length>0){
+    payload.attachments=pendingFiles.map(function(f){return{mime_type:f.mime_type,data:f.data}});
+  }
   fetch('/run',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({task:task,model:selectedModel})
+    body:JSON.stringify(payload)
   }).then(function(r){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
-    inp.value='';loadModels();
+    inp.value='';pendingFiles=[];renderFileChips();loadModels();
   }).catch(function(){setReady('Error');alert('Network error')});
 }
 btn.addEventListener('click',submitTask);
@@ -1053,7 +1117,58 @@ clearBtn.addEventListener('click',function(){
   state=mkS();
   llmPanel=null;llmPanelState=mkS();
   lastToolName='';pendingPanel=false;_scrollLock=false;
+  pendingFiles=[];renderFileChips();
   loadWelcome();inp.value='';inp.focus();
+});
+var inputContainer=document.getElementById('input-container');
+['dragenter','dragover'].forEach(function(ev){inputContainer.addEventListener(ev,function(e){
+  e.preventDefault();e.stopPropagation();inputContainer.style.borderColor='rgba(88,166,255,0.5)';
+})});
+['dragleave','drop'].forEach(function(ev){inputContainer.addEventListener(ev,function(e){
+  e.preventDefault();e.stopPropagation();inputContainer.style.borderColor='';
+})});
+inputContainer.addEventListener('drop',function(e){
+  if(running)return;
+  var files=e.dataTransfer&&e.dataTransfer.files;
+  if(!files)return;
+  Array.from(files).forEach(function(f){
+    var ok=['image/jpeg','image/png','image/gif','image/webp','application/pdf'];
+    if(ok.indexOf(f.type)<0)return;
+    var reader=new FileReader();
+    reader.onload=function(){
+      var b64=reader.result.split(',')[1];
+      pendingFiles.push({name:f.name,mime_type:f.type,data:b64,url:reader.result});
+      renderFileChips();
+    };
+    reader.readAsDataURL(f);
+  });
+});
+inputContainer.addEventListener('paste',function(e){
+  if(running)return;
+  var items=e.clipboardData&&e.clipboardData.items;
+  if(!items)return;
+  var dominated=false;
+  var ok=[
+    'image/jpeg','image/png','image/gif','image/webp',
+    'application/pdf'
+  ];
+  Array.from(items).forEach(function(item){
+    if(ok.indexOf(item.type)<0)return;
+    var file=item.getAsFile();if(!file)return;
+    dominated=true;
+    var reader=new FileReader();
+    reader.onload=function(){
+      var b64=reader.result.split(',')[1];
+      var name=file.name||('pasted.'+item.type.split('/')[1]);
+      pendingFiles.push({
+        name:name,mime_type:item.type,data:b64,
+        url:reader.result
+      });
+      renderFileChips();
+    };
+    reader.readAsDataURL(file);
+  });
+  if(dominated)e.preventDefault();
 });
 inp.addEventListener('keydown',function(e){
   if(ac.style.display==='block'){
@@ -1417,12 +1532,23 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
     <div id="input-area">
       <div id="autocomplete"></div>
       <div id="input-container">
+        <div id="file-chips"></div>
         <div id="input-wrap">
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="1"
               autocomplete="off"></textarea>
           </div>
+          <input type="file" id="file-input" multiple
+            accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
+            style="display:none"/>
+          <button id="upload-btn" title="Attach files">
+            <svg viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"
+            ><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49
+            -8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2
+            2 0 01-2.83-2.83l8.49-8.48"/></svg></button>
           <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6"

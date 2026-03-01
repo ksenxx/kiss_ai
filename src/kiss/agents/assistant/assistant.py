@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import queue
@@ -254,8 +255,19 @@ def run_chatbot(
 
     threading.Thread(target=_watch_theme_file, daemon=True).start()
 
-    def run_agent_thread(task: str, model_name: str) -> None:
+    def run_agent_thread(
+        task: str, model_name: str, attachments: list | None = None,
+    ) -> None:
         nonlocal running, agent_thread
+        from kiss.core.models.model import Attachment
+
+        parsed_attachments: list[Attachment] | None = None
+        if attachments:
+            parsed_attachments = []
+            for att in attachments:
+                data = base64.b64decode(att["data"])
+                parsed_attachments.append(Attachment(data=data, mime_type=att["mime_type"]))
+
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
         try:
@@ -270,6 +282,7 @@ def run_chatbot(
                 work_dir=actual_work_dir,
                 printer=printer,
                 model_name=model_name,
+                attachments=parsed_attachments,
                 **(agent_kwargs or {}),
             )
             _set_latest_result(result or "")
@@ -384,13 +397,16 @@ def run_chatbot(
         body = await request.json()
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
+        attachments = body.get("attachments")
         selected_model = model
         if not task:
             with running_lock:
                 running = False
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
-        t = threading.Thread(target=run_agent_thread, args=(task, model), daemon=True)
+        t = threading.Thread(
+            target=run_agent_thread, args=(task, model, attachments), daemon=True,
+        )
         with running_lock:
             agent_thread = t
         t.start()

@@ -13,7 +13,7 @@ from google import genai
 from google.genai import types
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model, TokenCallback
+from kiss.core.models.model import Attachment, Model, TokenCallback
 
 
 class GeminiModel(Model):
@@ -38,15 +38,19 @@ class GeminiModel(Model):
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
 
-    def initialize(self, prompt: str) -> None:
+    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
 
         Args:
             prompt: The initial user prompt to start the conversation.
+            attachments: Optional list of file attachments (images, PDFs) to include.
         """
         self.client = genai.Client(api_key=self.api_key)
-        self.conversation = [{"role": "user", "content": prompt}]
-        self._thought_signatures = {}  # Reset thought signatures for new conversation
+        msg: dict[str, Any] = {"role": "user", "content": prompt}
+        if attachments:
+            msg["attachments"] = attachments
+        self.conversation = [msg]
+        self._thought_signatures = {}
 
     def _convert_conversation_to_gemini_contents(self) -> list[types.Content]:
         """Converts the internal conversation format to Gemini contents.
@@ -64,6 +68,8 @@ class GeminiModel(Model):
             if role == "user":
                 gemini_role = "user"
                 if isinstance(content, str):
+                    for att in msg.get("attachments", []):
+                        parts.append(types.Part.from_bytes(data=att.data, mime_type=att.mime_type))
                     parts.append(types.Part.from_text(text=content))
 
             elif role == "assistant":
