@@ -1,10 +1,10 @@
-"""Repo agent that optimizes agent code using RelentlessCodingAgent."""
+"""Repo agent that optimizes agent code using AssistantAgent."""
 
 from __future__ import annotations
 
 import argparse
 
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+from kiss.agents.assistant.assistant_agent import AssistantAgent
 
 DEFAULT_MODEL = "claude-opus-4-6"
 
@@ -37,7 +37,7 @@ code after the optimization is complete.
 def main() -> None:
     """Run the repo optimizer that iteratively runs a command and optimizes code."""
     parser = argparse.ArgumentParser(
-        description="Optimize a repository using RelentlessCodingAgent"
+        description="Optimize a repository using AssistantAgent"
     )
     parser.add_argument("--command", help="Command to run")
     parser.add_argument("--metrics", help="Metrics to optimize")
@@ -50,11 +50,12 @@ def main() -> None:
     work_dir = args.work_dir
 
     task = TASK_TEMPLATE.format(command=command, metrics=metrics, work_dir=work_dir)
-    agent = RelentlessCodingAgent("RepoOptimizer")
+    agent = AssistantAgent("RepoOptimizer")
     result = agent.run(
         prompt_template=task,
         model_name=DEFAULT_MODEL,
-        work_dir=work_dir
+        work_dir=work_dir,
+        headless=True,
     )
     print(result)
 

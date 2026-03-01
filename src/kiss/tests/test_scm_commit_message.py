@@ -37,7 +37,8 @@ class TestGitSettingsEnabled(unittest.TestCase):
         assert _CS_SETTINGS["git.autoRepositoryDetection"] is True
 
     def test_git_scan_max_depth_nonzero(self) -> None:
-        assert _CS_SETTINGS["git.repositoryScanMaxDepth"] >= 1
+        depth = _CS_SETTINGS["git.repositoryScanMaxDepth"]
+        assert isinstance(depth, int) and depth >= 1
 
     def test_git_open_repository_in_parent_folders(self) -> None:
         assert _CS_SETTINGS["git.openRepositoryInParentFolders"] == "always"
