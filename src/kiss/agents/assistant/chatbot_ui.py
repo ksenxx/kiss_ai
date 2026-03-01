@@ -132,7 +132,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   width:100%;background:transparent;border:none;padding:0;margin:0;
   color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
   resize:none;outline:none;line-height:1.5;
-  max-height:200px;min-height:24px;
+  max-height:50vh;min-height:24px;overflow-y:hidden;
   position:relative;z-index:1;
 }
 #task-input::placeholder{color:rgba(255,255,255,0.28)}
@@ -943,7 +943,8 @@ function recordFileUsage(path){
 function mkS(){return{thinkEl:null,txtEl:null,bashPanel:null}}
 inp.addEventListener('input',function(){
   this.style.height='auto';
-  this.style.height=Math.min(this.scrollHeight,200)+'px';
+  this.style.height=this.scrollHeight+'px';
+  this.style.overflowY=this.scrollHeight>this.clientHeight?'auto':'hidden';
   histIdx=-1;
   clearGhost();
   if(getAtCtx()){
@@ -1199,7 +1200,7 @@ function submitTask(){
   btn.style.display='none';
   stopBtn.style.display='inline-flex';
   D.classList.add('running');hideAC();startTimer();
-  inp.style.height='auto';
+  inp.style.height='auto';inp.style.overflowY='hidden';
   pendingUserMsg={text:task,images:pendingFiles.filter(function(f){
     return f.mime_type.startsWith('image/');
   }).map(function(f){return f.url})};
