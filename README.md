@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.1.41-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.1.40-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -67,9 +67,9 @@ python -m kiss.agents.assistant.assistant
 
 # How it started?  What is "it"?
 
-I created KISS in 18 days, which is a stupidly simple agentic framework, during my winter vacation of 2025.  I started with the quest "What is possible (with AI)?" "What is possible by 49 a year old UC Berkeley SE/PL Professor in 70 days using modern AI?" after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html)".  Since then KISS has evolved into the IDE called KISS Sorcar (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs locally as an IDE and in the chatbox on the right you can give any natural language command to it. The good part is that it is **completely free** and **open-source** with **no monthly subscription**.  It **codes really well** and **works pretty fast**.  It is **embedded in a browser** and uses **full-fledged vscode**.  I provide support and maintain the framework with long-term commitment.  **Marius Momeu**, my incoming postdoc, will soon join the team.  The project embodies the best software engineering practices that I have learned over the last 30 years.  I will write them up once I get time, but in the meantime read the code and see what is possible? You will find some sample commands when you run the `curl` command above after setting your ANTROPIC_API_KEY (best model for Sorkar), GEMINI_API_KEY (required for autocomplete support in KISS Sorcar).  
+I created KISS in 18 days, which is a stupidly simple agentic framework, during my winter vacation of 2025.  I started with the quest "What is possible (with AI)?" "What is possible by 49 a year old UC Berkeley SWE/PL Professor in 70 days using modern AI?" after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html)".  Since then KISS has evolved into the IDE called **KISS Sorcar** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs locally as an IDE and in the chatbox on the right you can give any natural language command to it. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**.  It **codes really well** and **works pretty fast**.  It is **embedded in a browser** and uses **full-fledged vscode**.  I provide support and maintain the framework with long-term commitment.  I do not accept pull request for the [core](src/kiss/core) and the agents in [assistant](src/kiss/agents/) because KISS Sorcar can it better if you send me a note on what features you need.   **Marius Momeu**, my incoming postdoc, will soon join the team.  The project embodies the best software engineering practices that I have learned over the last 30 years.  I will write them up once I get time, but in the meantime please read the code and see "what is possible?" You will find some sample commands when you run the `curl` command above after setting your `ANTROPIC_API_KEY` (best model for Sorkar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`.  Now I use KISS Sorcar to develop itself.  I am rapidly adding features to KISS Sorcar using KISS Sorcar.  So stay tuned for feature updates regularly including a safe version of openclaw added to PC Sorcar in 2 weeks.
 
-**Now I ask the question "what is possible?".  #whatispossible #KISSSorcar
+**Now I ask the question "what is possible?".**  #whatispossible #KISSSorcar
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
