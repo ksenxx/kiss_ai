@@ -451,7 +451,7 @@ class TestDiscoverModules:
         assert "finish" in func_names
 
         relentless_mod = next(
-            m for m in modules if m.name == "kiss.agents.assistant.relentless_agent"
+            m for m in modules if m.name == "kiss.core.relentless_agent"
         )
         func_names2 = [f.name for f in relentless_mod.functions]
         assert "finish" in func_names2

@@ -1,26 +1,27 @@
-"""Repo agent that solves tasks in the current project root using RelentlessCodingAgent."""
+"""Repo agent that solves tasks in the current project root using AssistantAgent."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+from kiss.agents.assistant.assistant_agent import AssistantAgent
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 
 
 def main() -> None:
-    """Run a RelentlessCodingAgent on the project root with a task from CLI args or stdin."""
+    """Run an AssistantAgent on the project root with a task from CLI args or stdin."""
     task = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("Enter task: ")
     if not task.strip():
         raise ValueError("No task provided")
 
-    agent = RelentlessCodingAgent("RepoAgent")
+    agent = AssistantAgent("RepoAgent")
     result = agent.run(
         prompt_template=task,
         model_name="claude-opus-4-6",
-        work_dir=PROJECT_ROOT
+        work_dir=PROJECT_ROOT,
+        headless=True,
     )
     print(result)
 

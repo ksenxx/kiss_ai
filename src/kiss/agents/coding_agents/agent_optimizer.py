@@ -1,14 +1,14 @@
-"""Repo agent that optimizes agent code using RelentlessCodingAgent."""
+"""Repo agent that optimizes agent code using AssistantAgent."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+from kiss.agents.assistant.assistant_agent import AssistantAgent
 
 DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
-DEFAULT_AGENT_CODE = "src/kiss/agents/coding_agents/relentless_coding_agent.py"
+DEFAULT_AGENT_CODE = "src/kiss/agents/assistant/assistant_agent.py"
 DEFAULT_MODEL = "claude-opus-4-6"
 
 # Once the command succeeds and solves the task successfully,
@@ -79,7 +79,7 @@ to the problems in any possible way.
 
 def main() -> None:
     """Run the agent optimizer that iteratively improves agent code for speed and cost."""
-    parser = argparse.ArgumentParser(description="Optimize an agent using RelentlessCodingAgent")
+    parser = argparse.ArgumentParser(description="Optimize an agent using AssistantAgent")
     parser.add_argument("--project-root", default=DEFAULT_PROJECT_ROOT,
                         help=f"Project root directory (default: {DEFAULT_PROJECT_ROOT})")
     parser.add_argument("--agent-code", default=DEFAULT_AGENT_CODE,
@@ -89,11 +89,12 @@ def main() -> None:
     args = parser.parse_args()
 
     task = TASK_TEMPLATE.format(agent_code=args.agent_code)
-    agent = RelentlessCodingAgent("RepoOptimizer")
+    agent = AssistantAgent("RepoOptimizer")
     result = agent.run(
         prompt_template=task,
         model_name=args.model,
-        work_dir=args.project_root
+        work_dir=args.project_root,
+        headless=True,
     )
     print(result)
 

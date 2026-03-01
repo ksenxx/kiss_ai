@@ -214,7 +214,7 @@ class KISSAgent(Base):
                             cost=cost,
                         )
                     return result
-            except (KISSError, RuntimeError) as e:  # pragma: no cover
+            except Exception as e:
                 content = f"Failed to get response from Model: {e}.\nPlease try again.\n"
                 self.model.add_message_to_conversation("user", content)
                 self._add_message("user", content)
@@ -240,15 +240,16 @@ class KISSAgent(Base):
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
 
-        if not function_calls:  # pragma: no cover
+        if not function_calls:
             self._add_message(
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
-            self._add_message(
-                "user",
+            retry_msg = (
                 "**Your response MUST have at least one function call. "
-                "Your response has 0 function calls.**",
+                "Your response has 0 function calls.**"
             )
+            self._add_message("user", retry_msg)
+            self.model.add_message_to_conversation("user", retry_msg)
             return None
 
         if self.printer:
