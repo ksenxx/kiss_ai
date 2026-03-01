@@ -172,6 +172,33 @@ def _record_model_usage(model: str) -> None:
         pass
 
 
+FILE_USAGE_FILE = _KISS_DIR / "file_usage.json"
+
+
+def _load_file_usage() -> dict[str, int]:
+    """Load file access frequency counts."""
+    if FILE_USAGE_FILE.exists():
+        try:
+            data = json.loads(FILE_USAGE_FILE.read_text())
+            if isinstance(data, dict):
+                return {str(k): int(v) for k, v in data.items()
+                        if isinstance(v, (int, float))}
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _record_file_usage(path: str) -> None:
+    """Increment the access count for a file path."""
+    usage = _load_file_usage()
+    usage[path] = usage.get(path, 0) + 1
+    try:
+        _ensure_kiss_dir()
+        FILE_USAGE_FILE.write_text(json.dumps(usage))
+    except OSError:
+        pass
+
+
 def _add_task(task: str) -> None:
     history = [e for e in _load_history() if e["task"] != task]
     history.insert(0, {"task": task, "result": ""})
