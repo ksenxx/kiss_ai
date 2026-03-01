@@ -260,6 +260,39 @@ function activate(ctx){
     showMergeButtons(false);
     vscode.window.showInformationMessage('All changes rejected.');
   }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.generateCommitMessage',async function(){
+    var portFile=path.join(home,'.kiss','assistant-port');
+    var port='';
+    try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
+    if(!port){vscode.window.showErrorMessage('Assistant server not found');return;}
+    var gitExt=vscode.extensions.getExtension('vscode.git');
+    if(!gitExt){vscode.window.showErrorMessage('Git extension not found');return;}
+    var git=gitExt.exports.getAPI(1);
+    if(!git.repositories.length){vscode.window.showErrorMessage('No git repository found');return;}
+    git.repositories[0].inputBox.value='Generating commit message...';
+    try{
+      var http=require('http');
+      var body=await new Promise(function(resolve,reject){
+        var req=http.request({hostname:'127.0.0.1',port:parseInt(port),path:'/generate-commit-message',method:'POST',
+          headers:{'Content-Type':'application/json'}},function(res){
+          var d='';res.on('data',function(c){d+=c});
+          res.on('end',function(){resolve(JSON.parse(d))});
+        });
+        req.on('error',reject);
+        req.write('{}');req.end();
+      });
+      if(body.error){
+        git.repositories[0].inputBox.value='';
+        vscode.window.showErrorMessage('Generate failed: '+body.error);
+      }else{
+        git.repositories[0].inputBox.value=body.message;
+        vscode.commands.executeCommand('workbench.view.scm');
+      }
+    }catch(e){
+      git.repositories[0].inputBox.value='';
+      vscode.window.showErrorMessage('Generate error: '+e.message);
+    }
+  }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.commitChanges',async function(){
     var portFile=path.join(home,'.kiss','assistant-port');
     var port='';
@@ -449,7 +482,13 @@ def _setup_code_server(data_dir: str) -> bool:
                 {"command": "kiss.acceptAll", "title": "Accept All Changes"},
                 {"command": "kiss.rejectAll", "title": "Reject All Changes"},
                 {"command": "kiss.commitChanges", "title": "Commit Changes"},
+                {"command": "kiss.generateCommitMessage", "title": "Generate Commit Message", "icon": "$(sparkle)"},
             ],
+            "menus": {
+                "scm/inputBox": [
+                    {"command": "kiss.generateCommitMessage", "group": "navigation", "when": "scmProvider == git"},
+                ],
+            },
         },
     }))
     ext_file = ext_dir / "extension.js"

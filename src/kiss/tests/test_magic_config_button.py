@@ -1,52 +1,43 @@
-"""Tests for the magic commit message button feature."""
+"""Tests that the magic commit message button was removed from chatbot UI."""
 
 import unittest
 
 from kiss.agents.assistant.chatbot_ui import _build_html
 
 
-class TestMagicButtonHTML(unittest.TestCase):
-    def test_html_contains_magic_button(self) -> None:
+class TestMagicButtonRemoved(unittest.TestCase):
+    def test_html_does_not_contain_magic_button(self) -> None:
         html = _build_html("Test", "", "/tmp")
-        assert 'id="magic-btn"' in html
+        assert 'id="magic-btn"' not in html
 
-    def test_html_magic_button_has_title(self) -> None:
+    def test_html_no_magic_button_title(self) -> None:
         html = _build_html("Test", "", "/tmp")
-        assert 'title="Generate commit message"' in html
+        assert 'title="Generate commit message"' not in html
 
-    def test_html_magic_button_has_svg_icon(self) -> None:
+    def test_html_no_magic_btn_css(self) -> None:
         html = _build_html("Test", "", "/tmp")
-        start = html.index('id="magic-btn"')
-        end = html.index("</button>", start)
-        snippet = html[start:end]
-        assert "<svg" in snippet
-        assert "<path" in snippet
+        assert "#magic-btn{" not in html
+        assert "#magic-btn " not in html
 
-    def test_html_contains_magic_btn_css(self) -> None:
+    def test_html_no_magic_btn_js_handler(self) -> None:
         html = _build_html("Test", "", "/tmp")
-        assert "#magic-btn{" in html or "#magic-btn " in html
+        assert "magicBtn" not in html
 
-    def test_html_contains_magic_btn_js_handler(self) -> None:
+    def test_html_no_magic_spin_animation(self) -> None:
         html = _build_html("Test", "", "/tmp")
-        assert "generate-commit-message" in html
+        assert "magicSpin" not in html
+        assert "#magic-btn.loading" not in html
 
-    def test_html_magic_button_before_upload_button(self) -> None:
+    def test_upload_button_still_present(self) -> None:
         html = _build_html("Test", "", "/tmp")
-        magic_pos = html.index('id="magic-btn"')
-        upload_pos = html.index('id="upload-btn"')
-        assert magic_pos < upload_pos
+        assert 'id="upload-btn"' in html
 
-    def test_magic_btn_loading_animation_css(self) -> None:
-        html = _build_html("Test", "", "/tmp")
-        assert "magicSpin" in html
-        assert "#magic-btn.loading" in html
-
-    def test_html_does_not_reference_old_config_message_in_js(self) -> None:
+    def test_generate_commit_message_not_in_chatbot_js(self) -> None:
         html = _build_html("Test", "", "/tmp")
         js_start = html.index("<script>")
         js_end = html.index("</script>")
         js_section = html[js_start:js_end]
-        assert "generate-config-message" not in js_section
+        assert "generate-commit-message" not in js_section
 
 
 if __name__ == "__main__":
