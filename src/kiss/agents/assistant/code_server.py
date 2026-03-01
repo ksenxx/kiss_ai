@@ -25,9 +25,9 @@ _CS_SETTINGS = {
     "window.restoreWindows": "all",
     "workbench.editor.restoreViewState": True,
     "files.hotExit": "onExitAndWindowClose",
-    "git.repositoryScanMaxDepth": 0,
-    "git.autoRepositoryDetection": False,
-    "git.openRepositoryInParentFolders": "never",
+    "git.repositoryScanMaxDepth": 1,
+    "git.autoRepositoryDetection": True,
+    "git.openRepositoryInParentFolders": "always",
     "chat.editor.enabled": False,
     "chat.commandCenter.enabled": False,
     "chat.experimental.offerSetup": False,
@@ -308,6 +308,7 @@ function activate(ctx){
   var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
   var op=path.join(home,'.kiss','code-server-data','pending-open.json');
   var ap=path.join(home,'.kiss','code-server-data','pending-action.json');
+  var sp=path.join(home,'.kiss','code-server-data','pending-scm-message.json');
   var iv=setInterval(function(){
     try{
       if(fs.existsSync(op)){
@@ -324,6 +325,18 @@ function activate(ctx){
         if(ad.action==='next')vscode.commands.executeCommand('kiss.nextChange');
         else if(ad.action==='accept-all')vscode.commands.executeCommand('kiss.acceptAll');
         else if(ad.action==='reject-all')vscode.commands.executeCommand('kiss.rejectAll');
+      }
+      if(fs.existsSync(sp)){
+        var sd=JSON.parse(fs.readFileSync(sp,'utf8'));
+        fs.unlinkSync(sp);
+        var gitExt=vscode.extensions.getExtension('vscode.git');
+        if(gitExt){
+          var git=gitExt.exports.getAPI(1);
+          if(git.repositories.length>0){
+            git.repositories[0].inputBox.value=sd.message;
+            vscode.commands.executeCommand('workbench.view.scm');
+          }
+        }
       }
       if(!fs.existsSync(mp))return;
       var data=JSON.parse(fs.readFileSync(mp,'utf8'));
@@ -426,6 +439,7 @@ def _setup_code_server(data_dir: str) -> bool:
         "name": "kiss-init", "version": "0.0.1", "publisher": "kiss",
         "engines": {"vscode": "^1.80.0"},
         "activationEvents": ["onStartupFinished"],
+        "extensionDependencies": ["vscode.git"],
         "main": "./extension.js",
         "contributes": {
             "commands": [
