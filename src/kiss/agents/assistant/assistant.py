@@ -43,6 +43,7 @@ from kiss.agents.assistant.task_history import (
     _save_proposals,
     _set_latest_result,
 )
+from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import (
     _OPENAI_PREFIXES,
@@ -648,6 +649,104 @@ def run_chatbot(
             _record_file_usage(path)
         return JSONResponse({"status": "ok"})
 
+    async def generate_commit_message(request: Request) -> JSONResponse:
+        """Generate a git commit message from current diff and fill the SCM input."""
+        def _generate() -> dict[str, str]:
+            diff_result = subprocess.run(
+                ["git", "diff"], capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            cached_result = subprocess.run(
+                ["git", "diff", "--cached"], capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            untracked = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            diff_text = (diff_result.stdout + cached_result.stdout).strip()
+            untracked_files = untracked.stdout.strip()
+            if not diff_text and not untracked_files:
+                return {"error": "No changes detected"}
+            context_parts = []
+            if diff_text:
+                context_parts.append(f"Diff:\n{diff_text[:4000]}")
+            if untracked_files:
+                context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
+            context = "\n\n".join(context_parts)
+            agent = KISSAgent("Commit Message Generator")
+            try:
+                message = agent.run(
+                    model_name="claude-haiku-4-5",
+                    prompt_template=(
+                        "Generate a nicely formatted, informative git commit message for "
+                        "these changes. Use conventional commit format with a clear subject "
+                        "line (type: description) and optionally a body with bullet points "
+                        "for multiple changes. Return ONLY the commit message text, no "
+                        "quotes or markdown fences.\n\n{context}"
+                    ),
+                    arguments={"context": context},
+                    is_agentic=False,
+                )
+                msg = message.strip().strip('"').strip("'")
+                scm_pending = os.path.join(cs_data_dir, "pending-scm-message.json")
+                with open(scm_pending, "w") as f:
+                    json.dump({"message": msg}, f)
+                return {"message": msg}
+            except Exception as e:
+                return {"error": str(e)}
+
+        result = await asyncio.to_thread(_generate)
+        if "error" in result:
+            return JSONResponse(result, status_code=400)
+        return JSONResponse(result)
+
+    async def generate_config_message(request: Request) -> JSONResponse:
+        body = await request.json()
+        model = body.get("model", selected_model)
+
+        def _generate() -> dict[str, str]:
+            cfg = config_module.DEFAULT_CONFIG
+            history = _load_history()
+            info_parts = [
+                f"Work directory: {actual_work_dir}",
+                f"Selected model: {model}",
+                f"Max steps: {cfg.assistant.assistant_agent.max_steps}",
+                f"Max budget: ${cfg.assistant.assistant_agent.max_budget:.2f}",
+                f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
+                f"Headless browser: {cfg.assistant.assistant_agent.headless}",
+                f"Code-server: {'running' if code_server_url else 'not available'}",
+                f"Tasks completed: {len(history)}",
+            ]
+            recent = [e["task"] for e in history[:5]] if history else []
+            if recent:
+                info_parts.append("Recent tasks: " + "; ".join(recent))
+            config_info = "\n".join(info_parts)
+
+            agent = KISSAgent("Config Message Generator")
+            try:
+                result = agent.run(
+                    model_name="gemini-2.0-flash",
+                    prompt_template=(
+                        "You are a helpful assistant. Given the following configuration "
+                        "information about a coding assistant environment, generate a "
+                        "short, nicely formatted, informative status message that a "
+                        "developer would find useful. Include key details like the "
+                        "model, work directory, budget, and recent activity. "
+                        "Keep it concise (3-5 lines) and use emoji for visual appeal. "
+                        "Return ONLY the message text, no quotes or markdown fences.\n\n"
+                        "Configuration:\n{config_info}"
+                    ),
+                    arguments={"config_info": config_info},
+                    is_agentic=False,
+                )
+                return {"message": result.strip()}
+            except Exception as e:
+                return {"error": str(e)}
+
+        result = await asyncio.to_thread(_generate)
+        if "error" in result:
+            return JSONResponse(result, status_code=500)
+        return JSONResponse(result)
+
     app = Starlette(routes=[
         Route("/", index),
         Route("/events", events),
@@ -657,6 +756,10 @@ def run_chatbot(
         Route("/merge-action", merge_action, methods=["POST"]),
         Route("/commit", commit, methods=["POST"]),
         Route("/record-file-usage", record_file_usage_endpoint,
+              methods=["POST"]),
+        Route("/generate-commit-message", generate_commit_message,
+              methods=["POST"]),
+        Route("/generate-config-message", generate_config_message,
               methods=["POST"]),
         Route("/suggestions", suggestions),
         Route("/complete", complete),
