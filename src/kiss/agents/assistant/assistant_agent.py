@@ -24,7 +24,6 @@ class AssistantAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
-        self.verbose: bool = False
 
     def _get_tools(self) -> list:
         printer = self.printer
@@ -113,10 +112,6 @@ class AssistantAgent(RelentlessAgent):
         self.web_use_tool = WebUseTool(headless=actual_headless)
 
         try:
-            self._reset(
-                model_name, summarizer_model_name, max_sub_sessions,
-                max_steps, max_budget, work_dir, docker_image, printer, verbose,
-            )
             history_path = _get_task_history_md_path()
             system_instructions = (
                 GENERAL_ASSISTANT_INSTRUCTIONS
@@ -124,18 +119,18 @@ class AssistantAgent(RelentlessAgent):
                 + f"\nTask History File: {history_path}\n"
             )
             return super().run(
-                model_name=self.model_name,
-                summarizer_model_name=self.summarizer_model_name,
+                model_name=model_name,
+                summarizer_model_name=summarizer_model_name,
                 system_instructions=system_instructions,
                 prompt_template=prompt_template,
                 arguments=arguments,
-                max_steps=self.max_steps,
-                max_budget=self.max_budget,
-                work_dir=self.work_dir,
-                printer=self.printer,
-                max_sub_sessions=self.max_sub_sessions,
-                docker_image=self.docker_image,
-                verbose=self.verbose,
+                max_steps=max_steps,
+                max_budget=max_budget,
+                work_dir=work_dir or ".",
+                printer=printer,
+                max_sub_sessions=max_sub_sessions,
+                docker_image=docker_image,
+                verbose=verbose,
                 tools_factory=self._get_tools,
                 attachments=attachments,
             )
@@ -200,7 +195,7 @@ password 'For AI Assistant.' and read the messages.
             summarizer_model_name=args.summarizer_model_name,
             max_steps=args.max_steps,
             max_budget=args.max_budget,
-            work_dir=args.work_dir,
+            work_dir=work_dir,
             headless=args.headless,
             verbose=args.verbose,
         )
