@@ -76,15 +76,6 @@ GENERAL_ASSISTANT_INSTRUCTIONS = """
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 """
 
-RELLENTLESS_CODING_ASSISTANT_INSTRUCTIONS = """
-# Rules
-- Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
-- Use bounded poll loops, never unbounded waits.
-- Call finish(success=True, summary="detailed summary of what was accomplished")
-  immediately when task is complete.
-- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
-"""
-
 class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
