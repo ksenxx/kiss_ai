@@ -47,22 +47,29 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Assistant
 
-Install from PyPI with pip and launch the web based interface to interact with KISS. You must provide at least one of API keys.:
-
-```bash
 export ANTHROPIC_API_KEY="your-key-here" # Recommended
-export GEMINI_API_KEY="your-key-here" # Optional
+export GEMINI_API_KEY="your-key-here" # used for auto-complete support
 export OPENAI_API_KEY="your-key-here" # Optional
 export OPENROUTER_API_KEY="your-key-here" # Optional
 export TOGETHER_API_KEY="your-key-here" # Optional
 
+Install from PyPI with pip and launch the web based interface to interact with KISS. You must provide at least one of API keys.:
+
+```bash
+# To install for development
+curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
+
+
 # To install as a library
 pip install kiss-agent-framework
 python -m kiss.agents.assistant.assistant
-
-# To install for development
-curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
 ```
+
+# How it started?  What is "it"?
+
+I created KISS in 18 days, which is a stupidly simple agentic framework, during my winter vacation of 2025.  I started with the quest "What is possible (with AI)?" "What is possible by 49 a year old UC Berkeley SE/PL Professor in 70 days using modern AI?" after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html)".  Since then KISS has evolved into the IDE called KISS Sorcar (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs locally as an IDE and in the chatbox on the right you can give any natural language command to it. The good part is that it is **completely free** and **open-source** with **no monthly subscription**.  It **codes really well** and **works pretty fast**.  It is **embedded in a browser** and uses **full-fledged vscode**.  I provide support and maintain the framework with long-term commitment.  **Marius Momeu**, my incoming postdoc, will soon join the team.  The project embodies the best software engineering practices that I have learned over the last 30 years.  I will write them up once I get time, but in the meantime read the code and see what is possible? You will find some sample commands when you run the `curl` command above after setting your ANTROPIC_API_KEY (best model for Sorkar), GEMINI_API_KEY (required for autocomplete support in KISS Sorcar).  
+
+**Now I ask the question "what is possible?".  #whatispossible #KISSSorcar
 
 ## 🎯 The Problem with AI Agent Frameworks Today
 
@@ -209,13 +216,17 @@ KISS includes a browser-based assistant UI for interacting with agents. It provi
 uv run assistant
 
 # Or with a custom working directory
-uv run assistant --work-dir ./my-project
+uv run assistant ./my-project
+
+# Or with a specific default model
+uv run assistant --model_name "gemini-2.5-pro"
 ```
 
 The assistant features:
 
 - **Real-time streaming**: See agent thinking, tool calls, and results as they happen
 - **Task history**: Previously submitted tasks are saved and available via autocomplete
+- **Multimodal input**: Attach images (JPEG, PNG, GIF, WebP) and PDFs via upload, drag-and-drop, or paste
 - **Modern UI**: Dark theme with collapsible sections for tool calls and thinking
 
 ## 🔧 Using Repo Optimizer
@@ -339,8 +350,8 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Token Streaming**: Real-time token streaming via async callback for all providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter), including thinking/reasoning tokens and tool execution output
 - **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
 - **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
+- **Multimodal Support**: Attach images (JPEG, PNG, GIF, WebP) and PDFs to prompts across all model providers
 - **Self-Evolution**: Framework for agents to evolve and refine other multi agents
-- **SWE-bench Dataset Support**: Built-in support for downloading and working with SWE-bench Verified dataset
 - **RAG Support**: Simple retrieval-augmented generation system with in-memory vector store
 - **Useful Agents**: Pre-built utility agents including prompt refinement and general bash execution agents
 - **Trajectory Visualization**: Web-based visualizer for viewing agent execution trajectories with modern UI
@@ -389,11 +400,8 @@ uv sync --group assistant
 
 # Docker support (for running agents in isolated containers)
 uv sync --group docker
-# Evals dependencies (for running benchmarks)
-uv sync --group evals
 
-
-# Development tools (mypy, ruff, pytest, jupyter, etc.)
+# Development tools (mypy, ruff, pytest, etc.)
 uv sync --group dev
 
 # Combine multiple groups as needed
@@ -408,10 +416,9 @@ uv sync --group claude --group dev
 | `claude` | Core + Anthropic | core + anthropic |
 | `openai` | Core + OpenAI | core + openai |
 | `gemini` | Core + Google | core + google-genai |
-| `assistant` | Agent tools & browser UI | requests, beautifulsoup4, playwright, uvicorn, starlette |
-| `evals` | Benchmark running | datasets, swebench, orjson, scipy, scikit-learn |
+| `assistant` | Agent tools & browser UI | playwright, uvicorn, starlette |
 | `docker` | Docker integration | docker |
-| `dev` | Development tools | mypy, ruff, pyright, pytest, jupyter, notebook |
+| `dev` | Development tools | mypy, ruff, pyright, pytest, pytest-cov, mdformat |
 
 > **Optional Dependencies:** All LLM provider SDKs (`openai`, `anthropic`, `google-genai`) are optional. You can import `kiss.core` and `kiss.agents` without installing all of them. When you try to use a model whose SDK is not installed, KISS raises a clear `KISSError` telling you which package to install.
 
@@ -504,110 +511,84 @@ kiss/
 │   │   │   ├── assistant.py            # Browser-based assistant UI
 │   │   │   ├── relentless_agent.py     # RelentlessAgent base class
 │   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
+│   │   │   ├── chatbot_ui.py           # Chatbot UI templates: CSS, JavaScript, HTML
+│   │   │   ├── code_server.py          # Code-server setup and git diff/merge utilities
+│   │   │   ├── task_history.py         # Task history, proposals, and file usage persistence
 │   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit
-│   │   │   ├── web_use_tool.py         # WebUseTool class with Playwright-based browser automation
+│   │   │   ├── web_use_tool.py         # WebUseTool with Playwright-based browser automation
 │   │   │   └── config.py               # Assistant agent configuration
-│   │   ├── create_and_optimize_agent/  # Agent evolution and improvement
-│   │   │   ├── agent_evolver.py        # Evolutionary agent optimization
-│   │   │   ├── improver_agent.py       # Agent improvement through generations
-│   │   │   ├── config.py               # Agent creator configuration
-│   │   │   ├── BLOG.md                 # Blog post about agent evolution
-│   │   │   └── README.md               # Agent creator documentation
+│   │   ├── coding_agents/          # Coding agents for software development tasks
+│   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
+│   │   │   ├── repo_optimizer.py          # Iterative code optimizer
+│   │   │   ├── repo_agent.py              # Repo-level task agent
+│   │   │   ├── agent_optimizer.py         # Meta-optimizer for agent source code
+│   │   │   ├── config.py                  # Coding agent configuration
+│   │   │   └── BLOG.md                    # Blog post about self-optimization
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
 │   │   │   ├── gepa.py
-│   │   │   ├── config.py           # GEPA configuration
-│   │   │   └── README.md           # GEPA documentation
+│   │   │   ├── config.py
+│   │   │   └── README.md
 │   │   ├── kiss_evolve/            # KISSEvolve evolutionary algorithm discovery
 │   │   │   ├── kiss_evolve.py
 │   │   │   ├── novelty_prompts.py  # Prompts for novelty-based evolution
-│   │   │   ├── config.py           # KISSEvolve configuration
-│   │   │   └── README.md           # KISSEvolve documentation
-│   │   ├── coding_agents/          # Coding agents for software development tasks
-│   │   │   ├── relentless_coding_agent.py # Single-agent system with smart auto-continuation
-│   │   │   ├── repo_optimizer.py          # Iterative code optimizer using RelentlessCodingAgent
-│   │   │   ├── repo_agent.py              # Repo-level task agent using RelentlessCodingAgent
-│   │   │   ├── agent_optimizer.py         # Meta-optimizer that optimizes agent source code
-│   │   │   ├── config.py                  # Coding agent configuration (RelentlessCodingAgent)
-│   │   │   └── BLOG.md                    # Blog post about self-optimization
-│   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent system
-│   │   │   ├── agent_evolver.py       # Agent evolution logic
-│   │   │   ├── multi_agent.py         # Multi-agent orchestration
-│   │   │   ├── config.py              # Configuration
-│   │   │   └── README.md              # Documentation
+│   │   │   ├── simple_rag.py       # Simple RAG with in-memory vector store
+│   │   │   ├── config.py
+│   │   │   └── README.md
+│   │   ├── create_and_optimize_agent/  # Agent evolution (deprecated)
+│   │   │   ├── agent_evolver.py
+│   │   │   ├── improver_agent.py
+│   │   │   ├── config.py
+│   │   │   └── README.md
+│   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent (deprecated)
+│   │   │   ├── agent_evolver.py
+│   │   │   ├── multi_agent.py
+│   │   │   ├── config.py
+│   │   │   └── README.md
 │   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   ├── core/            # Core framework components
-│   │   ├── base.py            # Base class with common functionality for all KISS agents
-│   │   ├── kiss_agent.py      # KISS agent with native function calling (supports multi-tool execution)
+│   │   ├── base.py            # Base class with common functionality
+│   │   ├── kiss_agent.py      # KISS agent with native function calling
 │   │   ├── printer.py         # Abstract Printer base class and MultiPrinter
 │   │   ├── print_to_console.py # ConsolePrinter: Rich-formatted terminal output
 │   │   ├── config.py          # Configuration
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
-│   │   ├── utils.py           # Utility functions (finish, resolve_path, is_subpath, etc.)
+│   │   ├── utils.py           # Utility functions
 │   │   └── models/            # Model implementations
-│   │       ├── model.py           # Model interface with TokenCallback streaming support
+│   │       ├── model.py           # Model interface with Attachment support
 │   │       ├── gemini_model.py    # Gemini model implementation
-│   │       ├── openai_compatible_model.py # OpenAI-compatible API model (OpenAI, Together AI, OpenRouter)
+│   │       ├── openai_compatible_model.py # OpenAI-compatible API model
 │   │       ├── anthropic_model.py # Anthropic model implementation
-│   │       └── model_info.py      # Model info: context lengths, pricing, and capabilities
+│   │       └── model_info.py      # Model info: pricing, context, capabilities
 │   ├── docker/          # Docker integration
-│   ├── evals/            # Benchmark and evaluation integrations
-│   │   ├── algotune/               # AlgoTune benchmark integration
-│   │   │   ├── run_algotune.py     # AlgoTune task evolution
-│   │   │   └── config.py           # AlgoTune configuration
-│   │   ├── arvo_agent/             # ARVO vulnerability detection agent
-│   │   │   ├── arvo_agent.py       # Arvo-based vulnerability detector
-│   │   │   └── arvo_tags.json      # Docker image tags for Arvo
-│   │   ├── hotpotqa/               # HotPotQA benchmark integration
-│   │   │   ├── hotpotqa_benchmark.py # HotPotQA benchmark runner
-│   │   │   └── README.md           # HotPotQA documentation
-│   │   └── swe_agent_verified/     # SWE-bench Verified benchmark integration
-│   │       ├── run_swebench.py     # Main runner with CLI support
-│   │       ├── config.py           # Configuration for SWE-bench runs
-│   │       └── README.md           # SWE-bench documentation
 │   │   └── docker_manager.py
-│   ├── rag/             # RAG (Retrieval-Augmented Generation)
-│   │   └── simple_rag.py # Simple RAG system with in-memory vector store
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── generate_api_docs.py        # API documentation generator
-│   │   ├── notebook.py                 # Jupyter notebook launcher and utilities
 │   │   └── update_models.py            # Model info updater script
 │   ├── tests/           # Test suite
-│   │   ├── conftest.py              # Pytest configuration and fixtures
+│   │   ├── conftest.py
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_non_agentic.py
-│   │   ├── test_gepa_hotpotqa.py
-│   │   ├── test_kiss_agent_coverage.py    # Coverage tests for KISSAgent
-│   │   ├── test_gepa_batched.py           # Tests for GEPA batched wrapper behavior and performance
-│   │   ├── test_gepa_progress_callback.py # Tests for GEPA progress callbacks
-│   │   ├── test_docker_manager.py
-│   │   ├── test_model_implementations.py  # Integration tests for model implementations
-│   │   ├── run_all_models_test.py # Comprehensive tests for all models
-│   │   ├── test_multiprocess.py
-│   │   ├── test_internal.py
-│   │   ├── test_core_branch_coverage.py   # Branch coverage tests for core components
-│   │   ├── test_gemini_model_internals.py # Tests for Gemini model internals
-│   │   ├── test_generate_api_docs.py      # Tests for API docs generator
-│   │   ├── test_cli_options.py            # Tests for CLI option parsing
-│   │   ├── test_evolver_progress_callback.py # Tests for AgentEvolver progress callbacks
-│   │   ├── test_token_callback.py         # Tests for async token streaming callback
-│   │   ├── test_a_model.py                    # Tests for model implementations
-│   │   ├── test_print_to_console.py         # Tests for ConsolePrinter output
-│   │   ├── test_print_to_browser.py         # Tests for BaseBrowserPrinter browser output
-
+│   │   ├── test_kiss_agent_coverage.py
+│   │   ├── test_multimodal.py              # Multimodal (image/PDF) attachment tests
+│   │   ├── test_file_usage.py              # File usage tracking and @ picker tests
+│   │   ├── test_model_implementations.py
+│   │   ├── test_core_branch_coverage.py
+│   │   ├── test_gepa_batched.py
+│   │   ├── test_gepa_progress_callback.py
+│   │   ├── test_a_model.py
+│   │   ├── test_gemini_model_internals.py
+│   │   ├── test_token_callback.py
 │   │   ├── test_useful_tools.py
-│   │   ├── test_web_use_tool.py             # Tests for WebUseTool browser automation
-│   │   ├── test_chatbot_tasks.py            # Tests for assistant task handling
-│   │   ├── integration_test_assistant_agent.py  # Integration tests for AssistantAgent
-│   │   ├── integration_test_gmail_login.py      # Integration tests for Gmail login
-│   │   ├── integration_test_google_search.py    # Integration tests for Google search
-│   │   └── integration_test_web_use_tool.py     # Integration tests for WebUseTool
+│   │   ├── test_web_use_tool.py
+│   │   ├── test_chatbot_tasks.py
+│   │   └── integration_test_*.py       # Integration tests
 │   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
-│       ├── README.md                    # Trajectory visualizer documentation
-│       └── templates/                   # HTML templates for the visualizer
+│       ├── README.md
+│       └── templates/
 │           └── index.html
 ├── scripts/             # Repository-level scripts
 │   └── release.sh       # Release script
@@ -696,7 +677,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 ### Development
 
 - `uv sync` - Install all dependencies (full installation)
-- `uv sync --group dev` - Install dev tools (mypy, ruff, pytest, jupyter, etc.)
+- `uv sync --group dev` - Install dev tools (mypy, ruff, pyright, pytest, etc.)
 - `uv sync --group <name>` - Install specific dependency group (see [Selective Installation](#selective-installation-dependency-groups))
 - `uv build` - Build the project package
 
@@ -718,26 +699,15 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 - `uv run mypy src/` - Type check with mypy (python_version: 3.13)
 - `uv run pyright src/` - Type check with pyright (alternative to mypy, stricter checking)
 
-### Notebook
-
-- `uv run notebook --test` - Test all imports and basic functionality
-- `uv run notebook --lab` - Open the tutorial notebook in JupyterLab (recommended)
-- `uv run notebook --run` - Open the tutorial notebook in Jupyter Notebook
-- `uv run notebook --execute` - Execute notebook cells and update outputs in place
-- `uv run notebook --convert` - Convert notebook to Python script
-
 ### Assistant
 
 - `uv run assistant` - Launch the browser-based assistant UI (coding + browser automation)
-- `uv run assistant --work-dir ./my-project` - Launch with custom working directory
+- `uv run assistant ./my-project` - Launch with custom working directory
+- `uv run assistant --model_name "gemini-2.5-pro"` - Launch with a specific default model
 
 ### Documentation
 
 - `uv run generate-api-docs` - Generate API documentation
-
-### AlgoTune
-
-- `uv run algotune` - Run the AlgoTune benchmark
 
 ### Cleanup
 
@@ -822,7 +792,7 @@ The framework provides embedding generation capabilities through the `get_embedd
   - Usage: `model.get_embedding(text, embedding_model="text-embedding-004")`
 - **Anthropic Models**: Embeddings not supported (raises `NotImplementedError`)
 
-Embeddings are primarily used by the `SimpleRAG` system for document retrieval. When using `SimpleRAG`, ensure you use an OpenAI, Together AI, or Gemini model that supports embeddings.
+Embeddings are primarily used by the `SimpleRAG` system (`src/kiss/agents/kiss_evolve/simple_rag.py`) for document retrieval. When using `SimpleRAG`, ensure you use an OpenAI, Together AI, or Gemini model that supports embeddings.
 
 ## 🤗 Contributing
 
