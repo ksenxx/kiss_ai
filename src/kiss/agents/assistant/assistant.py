@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import queue
@@ -33,10 +34,12 @@ from kiss.agents.assistant.task_history import (
     _add_task,
     _append_task_to_md,
     _init_task_history_md,
+    _load_file_usage,
     _load_history,
     _load_last_model,
     _load_model_usage,
     _load_proposals,
+    _record_file_usage,
     _record_model_usage,
     _save_proposals,
     _set_latest_result,
@@ -254,8 +257,19 @@ def run_chatbot(
 
     threading.Thread(target=_watch_theme_file, daemon=True).start()
 
-    def run_agent_thread(task: str, model_name: str) -> None:
+    def run_agent_thread(
+        task: str, model_name: str, attachments: list | None = None,
+    ) -> None:
         nonlocal running, agent_thread
+        from kiss.core.models.model import Attachment
+
+        parsed_attachments: list[Attachment] | None = None
+        if attachments:
+            parsed_attachments = []
+            for att in attachments:
+                data = base64.b64decode(att["data"])
+                parsed_attachments.append(Attachment(data=data, mime_type=att["mime_type"]))
+
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
         try:
@@ -270,6 +284,7 @@ def run_chatbot(
                 work_dir=actual_work_dir,
                 printer=printer,
                 model_name=model_name,
+                attachments=parsed_attachments,
                 **(agent_kwargs or {}),
             )
             _set_latest_result(result or "")
@@ -384,13 +399,16 @@ def run_chatbot(
         body = await request.json()
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
+        attachments = body.get("attachments")
         selected_model = model
         if not task:
             with running_lock:
                 running = False
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
-        t = threading.Thread(target=run_agent_thread, args=(task, model), daemon=True)
+        t = threading.Thread(
+            target=run_agent_thread, args=(task, model, attachments), daemon=True,
+        )
         with running_lock:
             agent_thread = t
         t.start()
@@ -406,14 +424,21 @@ def run_chatbot(
         mode = request.query_params.get("mode", "general")
         if mode == "files":
             q = query.lower()
-            results: list[dict[str, str]] = []
+            usage = _load_file_usage()
+            frequent: list[dict[str, str]] = []
+            rest: list[dict[str, str]] = []
             for path in file_cache:
                 if not q or q in path.lower():
                     ptype = "dir" if path.endswith("/") else "file"
-                    results.append({"type": ptype, "text": path})
-                    if len(results) >= 20:
-                        break
-            return JSONResponse(results)
+                    item = {"type": ptype, "text": path}
+                    if usage.get(path, 0) > 0:
+                        frequent.append(item)
+                    else:
+                        rest.append(item)
+            frequent.sort(key=lambda m: -usage.get(m["text"], 0))
+            for f in frequent:
+                f["type"] = "frequent_" + f["type"]
+            return JSONResponse((frequent + rest)[:20])
         if not query:
             return JSONResponse([])
         q_lower = query.lower()
@@ -496,8 +521,6 @@ def run_chatbot(
                 s = result.strip().strip('"').strip("'")
                 if s.lower().startswith(query.lower()):
                     s = s[len(query):]
-                if s and not s[0].isspace() and raw_query and not raw_query[-1].isspace():
-                    s = " " + s
                 return s
             except Exception:
                 return ""
@@ -598,6 +621,15 @@ def run_chatbot(
             return JSONResponse(result, status_code=400)
         return JSONResponse(result)
 
+    async def record_file_usage_endpoint(
+        request: Request,
+    ) -> JSONResponse:
+        body = await request.json()
+        path = body.get("path", "").strip()
+        if path:
+            _record_file_usage(path)
+        return JSONResponse({"status": "ok"})
+
     app = Starlette(routes=[
         Route("/", index),
         Route("/events", events),
@@ -606,6 +638,8 @@ def run_chatbot(
         Route("/open-file", open_file, methods=["POST"]),
         Route("/merge-action", merge_action, methods=["POST"]),
         Route("/commit", commit, methods=["POST"]),
+        Route("/record-file-usage", record_file_usage_endpoint,
+              methods=["POST"]),
         Route("/suggestions", suggestions),
         Route("/complete", complete),
         Route("/tasks", tasks),

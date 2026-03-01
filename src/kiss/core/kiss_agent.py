@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -68,12 +69,18 @@ class KISSAgent(Base):
         self.budget_used = 0.0
         self.run_start_timestamp = int(time.time())
 
-    def _set_prompt(self, prompt_template: str, arguments: dict[str, str] | None = None) -> None:
+    def _set_prompt(
+        self,
+        prompt_template: str,
+        arguments: dict[str, str] | None = None,
+        attachments: list[Attachment] | None = None,
+    ) -> None:
         """Sets the prompt for the agent.
 
         Args:
             prompt_template: The template string for the prompt with placeholders.
             arguments: Optional dictionary of arguments to substitute into the template.
+            attachments: Optional list of file attachments (images, PDFs) to include.
         """
         assert self.model is not None
         self.arguments = dict(arguments) if arguments is not None else {}
@@ -81,7 +88,7 @@ class KISSAgent(Base):
         full_prompt = self.prompt_template.format(**self.arguments)
 
         self._add_message("user", full_prompt)
-        self.model.initialize(full_prompt)
+        self.model.initialize(full_prompt, attachments=attachments)
         if self.printer:
             self.printer.print(full_prompt, type="prompt")
 
@@ -97,6 +104,7 @@ class KISSAgent(Base):
         model_config: dict[str, Any] | None = None,
         printer: Printer | None = None,
         verbose: bool | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -119,6 +127,8 @@ class KISSAgent(Base):
                 Default is None.
             verbose (bool | None): Whether to print output to console.
                 Default is None (uses config verbose setting).
+            attachments (list[Attachment] | None): Optional file attachments (images, PDFs)
+                to include in the initial prompt. Default is None.
 
         Returns:
             str: The result of the agent's task.
@@ -135,7 +145,7 @@ class KISSAgent(Base):
                     f"{self.name} with id {self.id}."
                 )
             self._setup_tools(tools)
-            self._set_prompt(prompt_template, arguments)
+            self._set_prompt(prompt_template, arguments, attachments=attachments)
 
             # Non-agentic mode: single generation, no tool loop
             if not self.is_agentic:

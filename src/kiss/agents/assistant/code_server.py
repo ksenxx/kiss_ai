@@ -67,6 +67,17 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
+  function syncCodeLensFontSize(){
+    var cfg=vscode.workspace.getConfiguration('editor');
+    var sz=cfg.get('fontSize')||14;
+    if(cfg.get('codeLensFontSize')!==sz){
+      cfg.update('codeLensFontSize',sz,vscode.ConfigurationTarget.Global);
+    }
+  }
+  syncCodeLensFontSize();
+  ctx.subscriptions.push(vscode.workspace.onDidChangeConfiguration(function(e){
+    if(e.affectsConfiguration('editor.fontSize'))syncCodeLensFontSize();
+  }));
   function writeTheme(){
     var k=vscode.window.activeColorTheme.kind;
     var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
