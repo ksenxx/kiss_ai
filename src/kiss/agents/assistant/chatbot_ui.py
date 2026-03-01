@@ -265,7 +265,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   animation:acSlideUp 0.15s ease;
 }
 .ac-section{
-  padding:7px 16px 5px;font-size:9.5px;font-weight:700;
+  padding:4px 16px 2px;font-size:9.5px;font-weight:700;
   text-transform:uppercase;letter-spacing:0.08em;
   color:rgba(255,255,255,0.22);
   background:rgba(16,16,18,0.98);
@@ -273,9 +273,9 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   position:sticky;top:0;z-index:1;
 }
 .ac-item{
-  padding:7px 16px;cursor:pointer;font-size:13px;
+  padding:3px 16px;cursor:pointer;font-size:13px;
   border-bottom:1px solid rgba(255,255,255,0.02);
-  display:flex;align-items:center;gap:10px;
+  display:flex;align-items:center;gap:6px;
   transition:background 0.1s,border-color 0.1s;
   border-left:2px solid transparent;
 }
@@ -286,13 +286,13 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   border-left-color:rgba(88,166,255,0.7);
 }
 .ac-icon{
-  flex-shrink:0;width:20px;height:20px;
+  flex-shrink:0;width:16px;height:16px;
   display:flex;align-items:center;justify-content:center;
-  border-radius:5px;
+  border-radius:4px;
   background:rgba(255,255,255,0.04);
-  color:rgba(255,255,255,0.4);font-size:12px;
+  color:rgba(255,255,255,0.4);font-size:11px;
 }
-.ac-icon svg{width:13px;height:13px;stroke:currentColor;fill:none;
+.ac-icon svg{width:11px;height:11px;stroke:currentColor;fill:none;
   stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .ac-item.sel .ac-icon{
   background:rgba(88,166,255,0.12);
@@ -324,7 +324,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   border-color:rgba(88,166,255,0.12);
 }
 .ac-footer{
-  padding:6px 16px;font-size:10px;color:rgba(255,255,255,0.13);
+  padding:3px 16px;font-size:10px;color:rgba(255,255,255,0.13);
   border-top:1px solid rgba(255,255,255,0.04);
   display:flex;gap:14px;
   background:rgba(16,16,18,0.98);
@@ -558,14 +558,14 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel .sidebar-item{font-size:11px;padding:7px 10px;border-radius:8px;margin-bottom:4px}
 #assistant-panel .sidebar-empty{font-size:11px}
 #assistant-panel #sidebar-close{font-size:17px}
-#assistant-panel .ac-item{font-size:11px;padding:5px 12px}
-#assistant-panel .ac-icon{width:17px;height:17px;border-radius:4px}
-#assistant-panel .ac-icon svg{width:11px;height:11px}
-#assistant-panel .ac-text{font-size:11px}
-#assistant-panel .ac-section{font-size:8px;padding:5px 12px 3px}
-#assistant-panel .ac-hint{font-size:8px;padding:1px 5px}
-#assistant-panel .ac-footer{font-size:9px;padding:4px 12px}
-#assistant-panel .ac-footer kbd{font-size:8px}
+#assistant-panel .ac-item{font-size:9px;padding:2px 12px;gap:4px}
+#assistant-panel .ac-icon{width:14px;height:14px;border-radius:3px}
+#assistant-panel .ac-icon svg{width:10px;height:10px}
+#assistant-panel .ac-text{font-size:9px}
+#assistant-panel .ac-section{font-size:6px;padding:2px 12px 1px}
+#assistant-panel .ac-hint{font-size:6px;padding:1px 5px}
+#assistant-panel .ac-footer{font-size:7px;padding:2px 12px}
+#assistant-panel .ac-footer kbd{font-size:6px}
 #assistant-panel .fu-label{font-size:9px}
 #assistant-panel .fu-text{font-size:11px}
 #assistant-panel .followup-bar{padding:8px 12px;margin:10px 0 6px;border-radius:8px}
