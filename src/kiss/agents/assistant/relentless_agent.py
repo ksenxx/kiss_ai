@@ -61,9 +61,6 @@ def finish(success: bool, summary: str) -> str:
 class RelentlessAgent(Base):
     """Base agent with auto-continuation for long tasks."""
 
-    def __init__(self, name: str) -> None:
-        super().__init__(name)
-
     def _reset(
         self,
         model_name: str | None,
@@ -167,10 +164,8 @@ class RelentlessAgent(Base):
                         "trajectory": executor.get_trajectory(),
                     },
                 )
-                result = yaml.dump({
-                        "success": False,
-                        "summary": summarizer_result,
-                    },
+                result = yaml.dump(
+                    {"success": False, "summary": summarizer_result},
                     sort_keys=False,
                 )
 

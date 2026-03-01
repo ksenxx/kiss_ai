@@ -36,17 +36,13 @@ class AgentConfig(BaseModel):
     )
 
 
-AssistantAgentConfig = AgentConfig
-RelentlessAgentConfig = AgentConfig
-
-
 class AssistantConfig(BaseModel):
-    assistant_agent: AssistantAgentConfig = Field(
-        default_factory=AssistantAgentConfig,
+    assistant_agent: AgentConfig = Field(
+        default_factory=AgentConfig,
         description="Configuration for Assistant Agent",
     )
-    relentless_agent: RelentlessAgentConfig = Field(
-        default_factory=RelentlessAgentConfig,
+    relentless_agent: AgentConfig = Field(
+        default_factory=AgentConfig,
         description="Configuration for Relentless Agent",
     )
 

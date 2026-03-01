@@ -1053,7 +1053,6 @@ function handleEvent(ev){
   case'merge_ended':document.getElementById('merge-toolbar').style.display='none';inp.focus();break;
   case'clear':
     O.innerHTML='';state=mkS();
-    _scrollLock=false;showSpinner();break;
     _scrollLock=false;
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
