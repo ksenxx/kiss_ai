@@ -86,6 +86,14 @@ class TestAnthropicModel:
         assert isinstance(m, AnthropicModel)
         m.initialize("test")
         kwargs = m._build_create_kwargs()
+        assert kwargs["max_tokens"] == 64000
+
+    @pytest.mark.timeout(60)
+    def test_default_max_tokens_non_haiku(self):
+        m = model("claude-sonnet-4", model_config={})
+        assert isinstance(m, AnthropicModel)
+        m.initialize("test")
+        kwargs = m._build_create_kwargs()
         assert kwargs["max_tokens"] == 65536
 
 

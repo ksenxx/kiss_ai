@@ -22,10 +22,9 @@
     - [`kiss.core.utils`](#kisscoreutils)
   - [`kiss.agents`](#kissagents)
     - [`kiss.agents.coding_agents`](#kissagentscoding_agents)
-      - [`kiss.agents.coding_agents.relentless_coding_agent`](#kissagentscoding_agentsrelentless_coding_agent)
       - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
     - [`kiss.agents.assistant`](#kissagentsassistant)
-      - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
+    - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.assistant.assistant_agent`](#kissagentsassistantassistant_agent)
       - [`kiss.agents.assistant.assistant`](#kissagentsassistantassistant)
       - [`kiss.agents.assistant.config`](#kissagentsassistantconfig)
@@ -687,28 +686,6 @@ from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS
 
 ______________________________________________________________________
 
-#### `kiss.agents.coding_agents.relentless_coding_agent` — *Single-agent coding system with smart continuation for long tasks.*
-
-##### `class RelentlessCodingAgent(RelentlessAgent)` — Single-agent coding system with auto-continuation for infinite tasks.
-
-**Constructor:** `RelentlessCodingAgent(name: str) -> None`
-
-- **run** — Run the coding agent with file and bash tools.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None) -> str`
-  - `model_name`: LLM model to use. Defaults to config value.
-  - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
-  - `prompt_template`: Task prompt template with format placeholders.
-  - `arguments`: Dictionary of values to fill prompt_template placeholders.
-  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
-  - `max_budget`: Maximum budget in USD. Defaults to config value.
-  - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
-  - `printer`: Printer instance for output display.
-  - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
-  - `docker_image`: Docker image name to run tools inside a container.
-  - `verbose`: Whether to print output to console. Defaults to config verbose setting.
-  - **Returns:** YAML string with 'success' and 'summary' keys.
-
-______________________________________________________________________
-
 #### `kiss.agents.coding_agents.config` — *Configuration Pydantic models for coding agent settings.*
 
 ##### `class RelentlessCodingAgentConfig(BaseModel)`
@@ -724,8 +701,6 @@ ______________________________________________________________________
 #### `kiss.core.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
 
 ##### `class RelentlessAgent(Base)` — Base agent with auto-continuation for long tasks.
-
-**Constructor:** `RelentlessAgent(name: str) -> None`
 
 - **perform_task** — Execute the task with auto-continuation across multiple sub-sessions.<br/>`perform_task(tools: list[Callable[..., Any]], attachments: list[Attachment] | None = None) -> str`
 

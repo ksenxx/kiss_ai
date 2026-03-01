@@ -27,7 +27,6 @@ from kiss.agents.assistant.code_server import (
     _scan_files,
     _setup_code_server,
 )
-from kiss.core.relentless_agent import RelentlessAgent
 from kiss.agents.assistant.task_history import (
     _KISS_DIR,
     _add_task,
@@ -51,10 +50,15 @@ from kiss.core.models.model_info import (
     get_available_models,
     get_most_expensive_model,
 )
+from kiss.core.relentless_agent import RelentlessAgent
 
 
 class _StopRequested(BaseException):
     pass
+
+
+def _clean_llm_output(text: str) -> str:
+    return text.strip().strip('"').strip("'")
 
 
 def _model_vendor_order(name: str) -> int:
@@ -118,6 +122,7 @@ def run_chatbot(
     if cs_binary:
         ext_changed = _setup_code_server(cs_data_dir)
         cs_port = 13338
+        cs_url = f"http://127.0.0.1:{cs_port}"
         port_in_use = False
         try:
             with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
@@ -150,7 +155,7 @@ def run_chatbot(
                 pass
             port_in_use = False
         if port_in_use:
-            code_server_url = f"http://127.0.0.1:{cs_port}"
+            code_server_url = cs_url
             print(f"Reusing existing code-server at {code_server_url}")
         else:
             cs_proc = subprocess.Popen(
@@ -168,7 +173,7 @@ def run_chatbot(
             for _ in range(30):
                 try:
                     with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
-                        code_server_url = f"http://127.0.0.1:{cs_port}"
+                        code_server_url = cs_url
                         break
                 except (ConnectionRefusedError, OSError):
                     time.sleep(0.5)
@@ -243,7 +248,7 @@ def run_chatbot(
                 },
                 is_agentic=False,
             )
-            suggestion = raw.strip().strip('"').strip("'")
+            suggestion = _clean_llm_output(raw)
             if suggestion:
                 printer.broadcast({
                     "type": "followup_suggestion",
@@ -291,6 +296,7 @@ def run_chatbot(
 
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
+        result_text = ""
         try:
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
@@ -306,23 +312,22 @@ def run_chatbot(
                 attachments=parsed_attachments,
                 **(agent_kwargs or {}),
             )
-            _set_latest_result(result or "")
-            _append_task_to_md(task, result or "")
+            result_text = result or ""
             printer.broadcast({"type": "task_done"})
             threading.Thread(
                 target=generate_followup,
-                args=(task, result or ""),
+                args=(task, result_text),
                 daemon=True,
             ).start()
         except _StopRequested:
-            _set_latest_result("(stopped)")
-            _append_task_to_md(task, "(stopped)")
+            result_text = "(stopped)"
             printer.broadcast({"type": "task_stopped"})
         except Exception as e:
-            _set_latest_result(f"(error: {e})")
-            _append_task_to_md(task, f"(error: {e})")
+            result_text = f"(error: {e})"
             printer.broadcast({"type": "task_error", "text": str(e)})
         finally:
+            _set_latest_result(result_text)
+            _append_task_to_md(task, result_text)
             with running_lock:
                 running = False
                 agent_thread = None
@@ -537,7 +542,7 @@ def run_chatbot(
                     arguments={"task_list": task_list, "query": query},
                     is_agentic=False,
                 )
-                s = result.strip().strip('"').strip("'")
+                s = _clean_llm_output(result)
                 if s.lower().startswith(query.lower()):
                     s = s[len(query):]
                 return s
@@ -603,6 +608,14 @@ def run_chatbot(
             json.dump({"action": action}, f)
         return JSONResponse({"status": "ok"})
 
+    async def _thread_json_response(
+        fn: Callable[[], dict[str, str]], error_status: int = 400,
+    ) -> JSONResponse:
+        result = await asyncio.to_thread(fn)
+        if "error" in result:
+            return JSONResponse(result, status_code=error_status)
+        return JSONResponse(result)
+
     async def commit(request: Request) -> JSONResponse:
         def _do_commit() -> dict[str, str]:
             subprocess.run(["git", "add", "-A"], cwd=actual_work_dir)
@@ -626,7 +639,7 @@ def run_chatbot(
                 arguments={"diff": diff_detail.stdout[:4000]},
                 is_agentic=False,
             )
-            message = message.strip().strip('"').strip("'")
+            message = _clean_llm_output(message)
             result = subprocess.run(
                 ["git", "commit", "-m", message],
                 capture_output=True, text=True, cwd=actual_work_dir,
@@ -635,10 +648,7 @@ def run_chatbot(
                 return {"error": result.stderr.strip()}
             return {"status": "ok", "message": message}
 
-        result = await asyncio.to_thread(_do_commit)
-        if "error" in result:
-            return JSONResponse(result, status_code=400)
-        return JSONResponse(result)
+        return await _thread_json_response(_do_commit)
 
     async def record_file_usage_endpoint(
         request: Request,
@@ -686,7 +696,7 @@ def run_chatbot(
                     arguments={"context": context},
                     is_agentic=False,
                 )
-                msg = message.strip().strip('"').strip("'")
+                msg = _clean_llm_output(message)
                 scm_pending = os.path.join(cs_data_dir, "pending-scm-message.json")
                 with open(scm_pending, "w") as f:
                     json.dump({"message": msg}, f)
@@ -694,10 +704,7 @@ def run_chatbot(
             except Exception as e:
                 return {"error": str(e)}
 
-        result = await asyncio.to_thread(_generate)
-        if "error" in result:
-            return JSONResponse(result, status_code=400)
-        return JSONResponse(result)
+        return await _thread_json_response(_generate)
 
     async def generate_config_message(request: Request) -> JSONResponse:
         body = await request.json()
@@ -742,10 +749,7 @@ def run_chatbot(
             except Exception as e:
                 return {"error": str(e)}
 
-        result = await asyncio.to_thread(_generate)
-        if "error" in result:
-            return JSONResponse(result, status_code=500)
-        return JSONResponse(result)
+        return await _thread_json_response(_generate, error_status=500)
 
     app = Starlette(routes=[
         Route("/", index),
@@ -816,7 +820,6 @@ def main() -> None:
 
     from kiss._version import __version__
     from kiss.agents.assistant.assistant_agent import AssistantAgent
-    from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
 
     parser = argparse.ArgumentParser(description="KISS Assistant")
     parser.add_argument(
@@ -830,22 +833,14 @@ def main() -> None:
     args = parser.parse_args()
     work_dir = str(Path(args.work_dir).resolve())
 
-    mode = os.environ.get("KISS_MODE", "assistant").lower()
-    if mode == "assistant":
-        run_chatbot(
-            agent_factory=AssistantAgent,
-            title=f"KISS Assistant: {__version__}",
-            work_dir=work_dir,
-            default_model=args.model_name,
-            agent_kwargs={"headless": False},
-        )
-    else:
-        run_chatbot(
-            agent_factory=RelentlessCodingAgent,
-            title=f"KISS Coding Assistant: {__version__}",
-            work_dir=work_dir,
-            default_model=args.model_name,
-        )
+    is_assistant = os.environ.get("KISS_MODE", "assistant").lower() == "assistant"
+    run_chatbot(
+        agent_factory=AssistantAgent,
+        title=f"KISS {'Assistant' if is_assistant else 'Coding Assistant'}: {__version__}",
+        work_dir=work_dir,
+        default_model=args.model_name,
+        agent_kwargs={"headless": not is_assistant},
+    )
 
 
 if __name__ == "__main__":

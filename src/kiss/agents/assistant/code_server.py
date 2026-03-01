@@ -260,7 +260,8 @@ function activate(ctx){
     showMergeButtons(false);
     vscode.window.showInformationMessage('All changes rejected.');
   }));
-  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.generateCommitMessage',async function(){
+  ctx.subscriptions.push(vscode.commands.registerCommand(
+    'kiss.generateCommitMessage',async function(){
     var portFile=path.join(home,'.kiss','assistant-port');
     var port='';
     try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
@@ -273,8 +274,10 @@ function activate(ctx){
     try{
       var http=require('http');
       var body=await new Promise(function(resolve,reject){
-        var req=http.request({hostname:'127.0.0.1',port:parseInt(port),path:'/generate-commit-message',method:'POST',
-          headers:{'Content-Type':'application/json'}},function(res){
+        var opts={hostname:'127.0.0.1',port:parseInt(port),
+          path:'/generate-commit-message',method:'POST',
+          headers:{'Content-Type':'application/json'}};
+        var req=http.request(opts,function(res){
           var d='';res.on('data',function(c){d+=c});
           res.on('end',function(){resolve(JSON.parse(d))});
         });
@@ -482,11 +485,19 @@ def _setup_code_server(data_dir: str) -> bool:
                 {"command": "kiss.acceptAll", "title": "Accept All Changes"},
                 {"command": "kiss.rejectAll", "title": "Reject All Changes"},
                 {"command": "kiss.commitChanges", "title": "Commit Changes"},
-                {"command": "kiss.generateCommitMessage", "title": "Generate Commit Message", "icon": "$(sparkle)"},
+                {
+                    "command": "kiss.generateCommitMessage",
+                    "title": "Generate Commit Message",
+                    "icon": "$(sparkle)",
+                },
             ],
             "menus": {
                 "scm/inputBox": [
-                    {"command": "kiss.generateCommitMessage", "group": "navigation", "when": "scmProvider == git"},
+                    {
+                        "command": "kiss.generateCommitMessage",
+                        "group": "navigation",
+                        "when": "scmProvider == git",
+                    },
                 ],
             },
         },

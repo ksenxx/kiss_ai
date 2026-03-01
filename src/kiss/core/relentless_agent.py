@@ -22,7 +22,8 @@ TASK_PROMPT = """# Task
 {task_description}
 
 # Instructions
-- If you reach step {step_threshold}: finish(success=False, summary="detailed summary of work done so far")
+- If you reach step {step_threshold}: finish(success=False,
+  summary="detailed summary of work done so far")
 - Work dir: {work_dir}
 {previous_progress}
 """
