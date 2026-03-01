@@ -462,7 +462,6 @@ kiss/
 │   │   ├── assistant/              # Assistant agent with coding + browser tools
 │   │   │   ├── assistant_agent.py      # AssistantAgent with coding and browser automation
 │   │   │   ├── assistant.py            # Browser-based assistant UI
-│   │   │   ├── relentless_agent.py     # RelentlessAgent base class
 │   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
 │   │   │   ├── chatbot_ui.py           # Chatbot UI templates: CSS, JavaScript, HTML
 │   │   │   ├── code_server.py          # Code-server setup and git diff/merge utilities
@@ -507,6 +506,7 @@ kiss/
 │   │   ├── config_builder.py  # Dynamic config builder with CLI support
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions
+│   │   ├── relentless_agent.py # RelentlessAgent base class
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface with Attachment support
 │   │       ├── gemini_model.py    # Gemini model implementation

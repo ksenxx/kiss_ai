@@ -27,7 +27,7 @@ from kiss.agents.assistant.code_server import (
     _scan_files,
     _setup_code_server,
 )
-from kiss.agents.assistant.relentless_agent import RelentlessAgent
+from kiss.core.relentless_agent import RelentlessAgent
 from kiss.agents.assistant.task_history import (
     _KISS_DIR,
     _add_task,

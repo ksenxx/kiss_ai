@@ -13,7 +13,7 @@ import tempfile
 import yaml
 
 import kiss.agents.coding_agents.config as _coding_config  # noqa: F401
-from kiss.agents.assistant.relentless_agent import RelentlessAgent
+from kiss.core.relentless_agent import RelentlessAgent
 from kiss.agents.assistant.useful_tools import UsefulTools
 from kiss.core import config as config_module
 from kiss.core.base import CODING_INSTRUCTIONS, RELLENTLESS_CODING_ASSISTANT_INSTRUCTIONS

@@ -376,7 +376,7 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.agents.coding_agents.relentless_coding_agent",
         "kiss.agents.coding_agents.repo_agent", "kiss.agents.coding_agents.repo_optimizer",
         "kiss.agents.coding_agents.agent_optimizer", "kiss.agents.coding_agents.config",
-        "kiss.agents.assistant", "kiss.agents.assistant.relentless_agent",
+        "kiss.agents.assistant", "kiss.core.relentless_agent",
         "kiss.agents.assistant.assistant_agent", "kiss.agents.assistant.assistant",
         "kiss.agents.assistant.config",
         "kiss.agents.gepa", "kiss.agents.gepa.gepa", "kiss.agents.gepa.config",
