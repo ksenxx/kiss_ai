@@ -193,12 +193,13 @@ main() {
 
     # Step 3: Commit changes
     print_step "Committing version bump..."
-    git add "$VERSION_FILE" "$README_FILE"
+    git add -A
     git commit -m "Version bumped to $VERSION"
     print_info "Committed version bump"
 
-    # Step 4: Push to origin
-    print_step "Pushing to origin..."
+    # Step 4: Pull latest from origin (rebase), then push
+    print_step "Syncing with origin..."
+    git pull --rebase origin "$CURRENT_BRANCH"
     git push origin "$CURRENT_BRANCH"
     print_info "Pushed to origin"
 
