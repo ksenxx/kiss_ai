@@ -7,6 +7,8 @@
 
 import unittest
 
+import pytest
+
 import kiss.core.utils as utils
 from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress
 from kiss.core.kiss_agent import KISSAgent
@@ -165,6 +167,7 @@ class TestGEPAProgressCallbackWithMutation(unittest.TestCase):
 class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
     """Test progress callback with merge functionality."""
 
+    @pytest.mark.timeout(90)
     def test_callback_receives_merge_phase(self):
         """Test that callback receives MERGE phase updates when merge is enabled."""
         call_count = [0]
@@ -206,9 +209,9 @@ class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
             agent_wrapper=varying_agent,
             initial_prompt_template=initial_prompt,
             evaluation_fn=varying_eval_fn,
-            max_generations=3,
-            population_size=3,
-            pareto_size=4,
+            max_generations=4,
+            population_size=4,
+            pareto_size=6,
             mutation_rate=1.0,
             use_merge=True,
             merge_val_overlap_floor=1,
