@@ -97,6 +97,7 @@ class KISSAgent(Base):
         model_name: str,
         prompt_template: str,
         arguments: dict[str, str] | None = None,
+        system_prompt: str = "",
         tools: list[Callable[..., Any]] | None = None,
         is_agentic: bool = True,
         max_steps: int | None = None,
@@ -134,6 +135,9 @@ class KISSAgent(Base):
             str: The result of the agent's task.
         """
         try:
+            if system_prompt:
+                model_config = dict(model_config) if model_config else {}
+                model_config["system_instruction"] = system_prompt
             self._reset(
                 model_name, is_agentic, max_steps, max_budget,
                 model_config, printer, verbose,

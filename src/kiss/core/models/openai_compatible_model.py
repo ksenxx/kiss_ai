@@ -557,57 +557,6 @@ class OpenAICompatibleModel(Model):
 
         return function_calls, content, response
 
-    def add_function_results_to_conversation_and_return(
-        self, function_results: list[tuple[str, dict[str, Any]]]
-    ) -> None:
-        """Add function results to the conversation state.
-
-        Args:
-            function_results: A list of tuples where each tuple contains the function name
-                and a dictionary with the function result.
-        """
-        # Find tool calls from the last assistant message
-        # Use a list to preserve order and handle multiple calls with the same name
-        tool_calls: list[dict[str, str]] = []
-        for msg in reversed(self.conversation):
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                tool_calls = [
-                    {"name": tc["function"]["name"], "id": tc["id"]}
-                    for tc in msg["tool_calls"]
-                ]
-                break
-
-        # Match results to tool calls by index (order matters when same function called twice)
-        for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = result_dict.get("result", str(result_dict))
-            if self.usage_info_for_messages:
-                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-
-            # Use the tool_call_id from the matching index if available
-            if i < len(tool_calls):
-                tool_call_id = tool_calls[i]["id"]
-            else:
-                tool_call_id = f"call_{func_name}_{i}"
-
-            self.conversation.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": result_content,
-                }
-            )
-
-    def add_message_to_conversation(self, role: str, content: str) -> None:
-        """Add a message to the conversation state.
-
-        Args:
-            role: The role of the message sender ('user', 'assistant', or 'system').
-            content: The content of the message to add.
-        """
-        if role == "user" and self.usage_info_for_messages:
-            content = f"{content}\n\n{self.usage_info_for_messages}"
-        self.conversation.append({"role": role, "content": content})
-
     def extract_input_output_token_counts_from_response(
         self, response: Any
     ) -> tuple[int, int, int, int]:
