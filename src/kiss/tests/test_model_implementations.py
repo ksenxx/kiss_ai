@@ -86,7 +86,7 @@ class TestAnthropicModel:
         assert isinstance(m, AnthropicModel)
         m.initialize("test")
         kwargs = m._build_create_kwargs()
-        assert kwargs["max_tokens"] == 16384
+        assert kwargs["max_tokens"] == 65536
 
 
 @requires_gemini_api_key
