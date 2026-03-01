@@ -116,6 +116,18 @@ class TestSetupCodeServer(unittest.TestCase):
         assert "function activate" in code_server._CS_EXTENSION_JS
         assert "module.exports={activate}" in code_server._CS_EXTENSION_JS
 
+    def test_extension_syncs_code_lens_font_size(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "syncCodeLensFontSize" in js
+        assert "codeLensFontSize" in js
+        assert "editor.fontSize" in js or "get('fontSize')" in js
+
+    def test_extension_listens_for_font_size_changes(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "onDidChangeConfiguration" in js
+        assert "affectsConfiguration" in js
+        assert "editor.fontSize" in js
+
 
 class TestBuildHtmlSplitLayout(unittest.TestCase):
 
