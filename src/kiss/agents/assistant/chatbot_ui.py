@@ -133,6 +133,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
   resize:none;outline:none;line-height:1.5;
   max-height:50vh;min-height:24px;overflow-y:hidden;
+  max-height:50vh;min-height:96px;overflow-y:hidden;
   position:relative;z-index:1;
 }
 #task-input::placeholder{color:rgba(255,255,255,0.28)}
@@ -1419,6 +1420,9 @@ function selectAC(item){
     var np=before.length+1+item.text.length+sep.length;
     inp.setSelectionRange(np,np);
     recordFileUsage(item.text);
+    inp.style.height='auto';
+    inp.style.height=inp.scrollHeight+'px';
+    inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
   }
   hideAC();inp.focus();
 }
@@ -1435,6 +1439,11 @@ function updateGhost(){
 }
 function acceptGhost(){
   inp.value+=ghostSuggest;  clearGhost();inp.focus();
+  inp.value+=ghostSuggest;
+  inp.style.height='auto';
+  inp.style.height=inp.scrollHeight+'px';
+  inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+  clearGhost();inp.focus();
 }
 function fetchGhost(){
   var q=inp.value;  if(!q.trim()||q.trim().length<2){clearGhost();return}
@@ -1701,6 +1710,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="1"
+            <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="4"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple
