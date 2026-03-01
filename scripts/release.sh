@@ -200,10 +200,20 @@ main() {
     git commit -m "Version bumped to $VERSION"
     print_info "Committed version bump"
 
-    # Step 4: Pull latest from origin (rebase), then push
+    # Step 4: Pull latest from origin (rebase), then push (with retry)
     print_step "Syncing with origin..."
-    git pull --rebase origin "$CURRENT_BRANCH"
-    git push origin "$CURRENT_BRANCH"
+    for attempt in 1 2 3; do
+        git pull --rebase origin "$CURRENT_BRANCH"
+        if git push origin "$CURRENT_BRANCH"; then
+            break
+        fi
+        if [[ $attempt -eq 3 ]]; then
+            print_error "Failed to push to origin after 3 attempts"
+            exit 1
+        fi
+        print_warn "Push to origin failed (attempt $attempt/3), retrying in 2s..."
+        sleep 2
+    done
     print_info "Pushed to origin"
 
     # Step 5: Push to kiss_ai repo (mirror from origin, force to ensure sync)
