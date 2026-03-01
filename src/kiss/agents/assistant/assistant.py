@@ -537,6 +537,9 @@ def run_chatbot(
                         "Past tasks:\n{task_list}\n\n"
                         'Partial input: "{query}"\n\n'
                         "Return ONLY the completion text (the part after what they typed). "
+                        "The completion must add a space character at the beginning, "
+                        "if the partial input ends in a word and or a punctuation "
+                        "which needs a space after."
                         "If no good completion, return empty string."
                     ),
                     arguments={"task_list": task_list, "query": query},
