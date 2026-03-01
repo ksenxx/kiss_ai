@@ -32,7 +32,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
  git pull --rebase origin main && git push public main:main --force
- 
+
 
 # =============================================================================
 # Helper Functions
@@ -162,12 +162,15 @@ main() {
     # Ensure public remote exists
     ensure_remote
 
-    # Step 1: Check if origin is ahead of kiss_ai repo
-    print_step "Checking if origin is ahead of kiss_ai repo..."
+    # Step 1: Sync local with origin, then check against public
+    print_step "Syncing with origin and checking kiss_ai repo..."
+    git add -A
+    git diff --cached --quiet || git commit -m "Pre-release sync"
     git fetch origin
     git fetch "$PUBLIC_REMOTE"
+    git pull --rebase origin "$CURRENT_BRANCH"
 
-    ORIGIN_HEAD=$(git rev-parse "origin/$CURRENT_BRANCH")
+    ORIGIN_HEAD=$(git rev-parse HEAD)
     PUBLIC_HEAD=$(git rev-parse "$PUBLIC_REMOTE/main" 2>/dev/null || echo "")
 
     if [[ -z "$PUBLIC_HEAD" ]]; then
