@@ -123,8 +123,19 @@ def run_chatbot(
                 port_in_use = True
         except (ConnectionRefusedError, OSError):
             pass
-        if port_in_use and ext_changed:
-            print("Extension updated, restarting code-server...")
+
+        workdir_file = Path(cs_data_dir) / "workdir"
+        prev_workdir = ""
+        try:
+            prev_workdir = workdir_file.read_text().strip() if workdir_file.exists() else ""
+        except OSError:
+            pass
+        workdir_changed = prev_workdir != actual_work_dir
+
+        need_restart = port_in_use and (ext_changed or workdir_changed)
+        if need_restart:
+            reason = "extension updated" if ext_changed else "work directory changed"
+            print(f"Restarting code-server ({reason})...")
             try:
                 result = subprocess.run(
                     ["lsof", "-ti", f":{cs_port}", "-sTCP:LISTEN"],
@@ -164,6 +175,11 @@ def run_chatbot(
                 print(f"code-server running at {code_server_url}")
             else:
                 print("Warning: code-server failed to start")
+        if code_server_url:
+            try:
+                workdir_file.write_text(actual_work_dir)
+            except OSError:
+                pass
 
     html_page = _build_html(title, code_server_url, actual_work_dir)
     shutdown_timer: threading.Timer | None = None

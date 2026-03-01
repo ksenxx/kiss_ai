@@ -28,6 +28,10 @@ _CS_SETTINGS = {
     "git.repositoryScanMaxDepth": 0,
     "git.autoRepositoryDetection": False,
     "git.openRepositoryInParentFolders": "never",
+    "chat.editor.enabled": False,
+    "chat.commandCenter.enabled": False,
+    "chat.experimental.offerSetup": False,
+    "workbench.chat.experimental.autoDetectLanguageModels": False,
 }
 
 _CS_STATE_ENTRIES = [
@@ -61,6 +65,12 @@ function activate(ctx){
     }
     vscode.commands.executeCommand('workbench.action.closePanel');
     vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');
+    vscode.commands.executeCommand(
+      'workbench.action.chat.clearHistory'
+    ).then(()=>{},()=>{});
+    vscode.commands.executeCommand(
+      'workbench.action.chat.close'
+    ).then(()=>{},()=>{});
   }
   cleanup();
   setTimeout(cleanup,1500);
