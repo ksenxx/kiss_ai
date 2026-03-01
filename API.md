@@ -25,7 +25,7 @@
       - [`kiss.agents.coding_agents.relentless_coding_agent`](#kissagentscoding_agentsrelentless_coding_agent)
       - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
     - [`kiss.agents.assistant`](#kissagentsassistant)
-      - [`kiss.agents.assistant.relentless_agent`](#kissagentsassistantrelentless_agent)
+      - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.assistant.assistant_agent`](#kissagentsassistantassistant_agent)
       - [`kiss.agents.assistant.assistant`](#kissagentsassistantassistant)
       - [`kiss.agents.assistant.config`](#kissagentsassistantconfig)
@@ -721,7 +721,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
+#### `kiss.core.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
 
 ##### `class RelentlessAgent(Base)` — Base agent with auto-continuation for long tasks.
 
