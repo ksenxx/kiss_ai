@@ -132,7 +132,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   width:100%;background:transparent;border:none;padding:0;margin:0;
   color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
   resize:none;outline:none;line-height:1.5;
-  max-height:50vh;min-height:24px;overflow-y:hidden;
+  max-height:50vh;min-height:68px;overflow-y:hidden;
   position:relative;z-index:1;
 }
 #task-input::placeholder{color:rgba(255,255,255,0.28)}
@@ -1380,6 +1380,7 @@ function renderAC(data){
     g.forEach(function(item){
       var baseType=item.type.replace('frequent_','');
       var d=mkEl('div','ac-item');
+      d.dataset.text=item.text;
       var useSearch=searchQ&&searchQ.length>0;
       var textHtml=useSearch
         ?hlMatch(item.text,searchQ)
@@ -1419,13 +1420,31 @@ function selectAC(item){
     var np=before.length+1+item.text.length+sep.length;
     inp.setSelectionRange(np,np);
     recordFileUsage(item.text);
+    inp.style.height='auto';
+    inp.style.height=inp.scrollHeight+'px';
+    inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
   }
   hideAC();inp.focus();
 }
-function hideAC(){ac.style.display='none';acIdx=-1}
+function hideAC(){ac.style.display='none';acIdx=-1;clearGhost()}
 function updateACSel(items){
   items.forEach(function(it,i){it.classList.toggle('sel',i===acIdx)});
-  if(acIdx>=0)items[acIdx].scrollIntoView({block:'nearest'});
+  if(acIdx>=0){
+    items[acIdx].scrollIntoView({block:'nearest'});
+    var atCtx=getAtCtx();
+    if(atCtx&&items[acIdx].dataset.text){
+      var fullPath=items[acIdx].dataset.text;
+      var query=atCtx.query;
+      if(fullPath.toLowerCase().startsWith(query.toLowerCase())){
+        ghostSuggest=fullPath.substring(query.length);
+      }else{
+        ghostSuggest=fullPath;
+      }
+      updateGhost();
+    }
+  }else{
+    clearGhost();
+  }
 }
 function clearGhost(){ghostSuggest='';ghostEl.innerHTML=''}
 function updateGhost(){
@@ -1434,7 +1453,11 @@ function updateGhost(){
     +'<span class="gs">'+esc(ghostSuggest)+'</span>';
 }
 function acceptGhost(){
-  inp.value+=ghostSuggest;  clearGhost();inp.focus();
+  inp.value+=ghostSuggest;
+  inp.style.height='auto';
+  inp.style.height=inp.scrollHeight+'px';
+  inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+  clearGhost();inp.focus();
 }
 function fetchGhost(){
   var q=inp.value;  if(!q.trim()||q.trim().length<2){clearGhost();return}
@@ -1700,7 +1723,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         <div id="input-wrap">
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
-            <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="1"
+            <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="3"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple
