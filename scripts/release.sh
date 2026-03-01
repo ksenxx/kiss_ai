@@ -203,9 +203,9 @@ main() {
     git push origin "$CURRENT_BRANCH"
     print_info "Pushed to origin"
 
-    # Step 5: Push to kiss_ai repo and tag
+    # Step 5: Push to kiss_ai repo (mirror from origin, force to ensure sync)
     print_step "Pushing to kiss_ai repo..."
-    git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force-with-lease
+    git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force
     print_info "Pushed to kiss_ai repo"
 
     print_step "Creating and pushing tag..."
