@@ -73,7 +73,7 @@ class TestModelHelpers:
         from kiss.core.models.model import Model
 
         class ConcreteModel(Model):
-            def initialize(self, prompt):
+            def initialize(self, prompt, attachments=None):
                 pass
 
             def generate(self):

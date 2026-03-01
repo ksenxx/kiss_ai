@@ -67,7 +67,7 @@ ______________________________________________________________________
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None) -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
 
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -79,6 +79,7 @@ ______________________________________________________________________
   - `model_config`: The model configuration to use for the agent. Default is None.
   - `printer`: Optional printer for streaming output. Default is None.
   - `verbose`: Whether to print output to console. Default is None (uses config verbose setting).
+  - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
@@ -108,8 +109,19 @@ ______________________________________________________________________
 #### `kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.core.models import Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
+from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
 ```
+
+##### `class Attachment` — A file attachment (image or document) to include in a prompt.
+
+- **from_file** — Create an Attachment from a file path.<br/>`from_file(path: str) -> 'Attachment'`
+
+  - `path`: Path to the file to attach.
+  - **Returns:** An Attachment with the file's bytes and detected MIME type.
+
+- **to_base64** — Return the file data as a base64-encoded string.<br/>`to_base64() -> str`
+
+- **to_data_url** — Return a data: URL suitable for OpenAI image_url fields.<br/>`to_data_url() -> str`
 
 ##### `class Model(ABC)` — Abstract base class for LLM provider implementations.
 
@@ -125,9 +137,10 @@ from kiss.core.models import Model, AnthropicModel, OpenAICompatibleModel, Gemin
 
 - **close_callback_loop** — Close the per-instance event loop used for synchronous token callback invocation. Safe to call multiple times; subsequent calls are no-ops.<br/>`close_callback_loop() -> None`
 
-- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
+- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
+  - `attachments`: Optional list of file attachments (images, PDFs) to include.
 
 - **generate** — Generates content from prompt.<br/>`generate() -> tuple[str, Any]`
 
@@ -225,9 +238,10 @@ ______________________________________________________________________
 
 - `token_callback`: Optional async callback invoked with each streamed text token.
 
-- **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
+- **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
+  - `attachments`: Optional list of file attachments (images, PDFs) to include.
 
 - **generate** — Generate content from prompt without tools.<br/>`generate() -> tuple[str, Any]`
 
@@ -273,9 +287,10 @@ ______________________________________________________________________
 
 - `token_callback`: Optional async callback invoked with each streamed text token.
 
-- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
+- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
+  - `attachments`: Optional list of file attachments (images, PDFs) to include.
 
 - **generate** — Generates content from the current conversation.<br/>`generate() -> tuple[str, Any]`
 
@@ -320,9 +335,10 @@ ______________________________________________________________________
 
 - `token_callback`: Optional async callback invoked with each streamed text token.
 
-- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str) -> None`
+- **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
+  - `attachments`: Optional list of file attachments (images, PDFs) to include.
 
 - **generate** — Generates content from prompt without tools.<br/>`generate() -> tuple[str, Any]`
 
@@ -470,7 +486,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.useful_tools` — *Useful tools for agents: file editing, bash execution, web search, and URL fetching.*
+#### `kiss.agents.assistant.useful_tools` — *Useful tools for agents: file editing and bash execution.*
 
 ##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
@@ -711,12 +727,13 @@ ______________________________________________________________________
 
 **Constructor:** `RelentlessAgent(name: str) -> None`
 
-- **perform_task** — Execute the task with auto-continuation across multiple sub-sessions.<br/>`perform_task(tools: list[Callable[..., Any]]) -> str`
+- **perform_task** — Execute the task with auto-continuation across multiple sub-sessions.<br/>`perform_task(tools: list[Callable[..., Any]], attachments: list[Attachment] | None = None) -> str`
 
   - `tools`: List of callable tools available to the agent during execution.
+  - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
-- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None) -> str`
+- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, attachments: list[Attachment] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
@@ -731,6 +748,7 @@ ______________________________________________________________________
   - `docker_image`: Docker image name to run tools inside a container.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `tools_factory`: Callable that returns the list of tools for the agent.
+  - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 **`finish`** — Finish execution with status and summary.<br/>`def finish(success: bool, summary: str) -> str`
@@ -746,7 +764,7 @@ ______________________________________________________________________
 
 **Constructor:** `AssistantAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -759,6 +777,7 @@ ______________________________________________________________________
   - `docker_image`: Docker image name to run tools inside a container.
   - `headless`: Whether to run the browser in headless mode. Defaults to config value.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
+  - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ______________________________________________________________________

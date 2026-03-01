@@ -1,4 +1,4 @@
-"""Useful tools for agents: file editing, bash execution, web search, and URL fetching."""
+"""Useful tools for agents: file editing and bash execution."""
 
 import re
 import shlex

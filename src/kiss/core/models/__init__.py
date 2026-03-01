@@ -5,7 +5,7 @@
 
 """Model implementations for different LLM providers."""
 
-from kiss.core.models.model import Model
+from kiss.core.models.model import Attachment, Model
 
 try:
     from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -22,4 +22,4 @@ try:
 except ImportError:
     GeminiModel = None  # type: ignore[assignment,misc]
 
-__all__ = ["Model", "AnthropicModel", "OpenAICompatibleModel", "GeminiModel"]
+__all__ = ["Attachment", "Model", "AnthropicModel", "OpenAICompatibleModel", "GeminiModel"]

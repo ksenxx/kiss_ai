@@ -13,6 +13,7 @@ from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.docker.docker_manager import DockerManager
 
@@ -112,11 +113,16 @@ class RelentlessAgent(Base):
             raise KISSError("Docker manager not initialized")
         return self.docker_manager.Bash(command, description)
 
-    def perform_task(self, tools: list[Callable[..., Any]]) -> str:
+    def perform_task(
+        self,
+        tools: list[Callable[..., Any]],
+        attachments: list[Attachment] | None = None,
+    ) -> str:
         """Execute the task with auto-continuation across multiple sub-sessions.
 
         Args:
             tools: List of callable tools available to the agent during execution.
+            attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
         Returns:
             YAML string with 'success' and 'summary' keys on successful completion.
@@ -149,6 +155,7 @@ class RelentlessAgent(Base):
                     max_budget=self.max_budget,
                     model_config=model_config or None,
                     printer=self.printer,
+                    attachments=attachments if trial == 0 else None,
                 )
             except Exception:
                 summarizer_agent = KISSAgent(f"{self.name} Summarizer")
@@ -203,6 +210,7 @@ class RelentlessAgent(Base):
         docker_image: str | None = None,
         verbose: bool | None = None,
         tools_factory: Callable[[], list[Callable[..., Any]]] | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> str:
         """Run the agent with tools created by tools_factory (called after _reset).
 
@@ -222,6 +230,7 @@ class RelentlessAgent(Base):
             docker_image: Docker image name to run tools inside a container.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             tools_factory: Callable that returns the list of tools for the agent.
+            attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -247,7 +256,7 @@ class RelentlessAgent(Base):
 
                     docker_mgr.stream_callback = _docker_stream
                 try:
-                    return self.perform_task(tools)
+                    return self.perform_task(tools, attachments=attachments)
                 finally:
                     self.docker_manager = None
-        return self.perform_task(tools)
+        return self.perform_task(tools, attachments=attachments)

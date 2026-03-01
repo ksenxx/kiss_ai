@@ -11,7 +11,7 @@ from typing import Any
 from anthropic import Anthropic
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model, TokenCallback
+from kiss.core.models.model import Attachment, Model, TokenCallback
 
 
 class AnthropicModel(Model):
@@ -35,14 +35,30 @@ class AnthropicModel(Model):
         super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.api_key = api_key
 
-    def initialize(self, prompt: str) -> None:
+    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
 
         Args:
             prompt: The initial user prompt to start the conversation.
+            attachments: Optional list of file attachments (images, PDFs) to include.
         """
         self.client = Anthropic(api_key=self.api_key)
-        self.conversation = [{"role": "user", "content": prompt}]
+        content: str | list[dict[str, Any]] = prompt
+        if attachments:
+            blocks: list[dict[str, Any]] = []
+            for att in attachments:
+                source = {
+                    "type": "base64",
+                    "media_type": att.mime_type,
+                    "data": att.to_base64(),
+                }
+                if att.mime_type.startswith("image/"):
+                    blocks.append({"type": "image", "source": source})
+                elif att.mime_type == "application/pdf":
+                    blocks.append({"type": "document", "source": source})
+            blocks.append({"type": "text", "text": prompt})
+            content = blocks
+        self.conversation = [{"role": "user", "content": content}]
 
     def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
         """Normalize Anthropic content blocks to JSON-serializable dicts.

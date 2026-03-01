@@ -397,6 +397,7 @@ class BaseBrowserPrinter(Printer):
         self._tool_json_buffer = ""
         self._bash_buffer: list[str] = []
         self._bash_last_flush = 0.0
+        self._bash_flush_timer: threading.Timer | None = None
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
@@ -404,8 +405,14 @@ class BaseBrowserPrinter(Printer):
         self._tool_name = ""
         self._tool_json_buffer = ""
         self._bash_buffer.clear()
+        if self._bash_flush_timer is not None:
+            self._bash_flush_timer.cancel()
+            self._bash_flush_timer = None
 
     def _flush_bash(self) -> None:
+        if self._bash_flush_timer is not None:
+            self._bash_flush_timer.cancel()
+            self._bash_flush_timer = None
         if self._bash_buffer:
             text = "".join(self._bash_buffer)
             self._bash_buffer.clear()
@@ -514,6 +521,10 @@ class BaseBrowserPrinter(Printer):
             self._bash_buffer.append(str(content))
             if time.monotonic() - self._bash_last_flush >= 0.1:
                 self._flush_bash()
+            elif self._bash_flush_timer is None:
+                self._bash_flush_timer = threading.Timer(0.1, self._flush_bash)
+                self._bash_flush_timer.daemon = True
+                self._bash_flush_timer.start()
             return ""
         if type == "tool_call":
             self._flush_bash()

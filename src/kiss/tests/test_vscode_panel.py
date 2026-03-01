@@ -116,6 +116,18 @@ class TestSetupCodeServer(unittest.TestCase):
         assert "function activate" in code_server._CS_EXTENSION_JS
         assert "module.exports={activate}" in code_server._CS_EXTENSION_JS
 
+    def test_extension_syncs_code_lens_font_size(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "syncCodeLensFontSize" in js
+        assert "codeLensFontSize" in js
+        assert "editor.fontSize" in js or "get('fontSize')" in js
+
+    def test_extension_listens_for_font_size_changes(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "onDidChangeConfiguration" in js
+        assert "affectsConfiguration" in js
+        assert "editor.fontSize" in js
+
 
 class TestBuildHtmlSplitLayout(unittest.TestCase):
 
@@ -293,6 +305,18 @@ class TestFixedPortLogic(unittest.TestCase):
         except (ConnectionRefusedError, OSError):
             connected = False
         assert not connected
+
+
+class TestWelcomeChipCounts(unittest.TestCase):
+
+    def test_welcome_shows_5_recent_and_5_suggested(self) -> None:
+        html = chatbot_ui._build_html("T")
+        assert "proposed.slice(0,5)" in html
+        assert "tasks.slice(0,5)" in html
+        assert "items.slice(0,10)" in html
+        assert "proposed.slice(0,3)" not in html
+        assert "tasks.slice(0,3)" not in html
+        assert "items.slice(0,6)" not in html
 
 
 if __name__ == "__main__":

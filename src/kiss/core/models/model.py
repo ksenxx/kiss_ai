@@ -6,15 +6,76 @@
 """Abstract base class for LLM provider model implementations."""
 
 import asyncio
+import base64
+import dataclasses
 import inspect
+import mimetypes
 import threading
 import types as types_module
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
 # Type alias for the async token streaming callback.
 TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
+
+SUPPORTED_MIME_TYPES = {
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "application/pdf",
+}
+
+
+@dataclasses.dataclass
+class Attachment:
+    """A file attachment (image or document) to include in a prompt.
+
+    Attributes:
+        data: Raw file bytes.
+        mime_type: MIME type string (e.g. "image/jpeg", "application/pdf").
+    """
+
+    data: bytes
+    mime_type: str
+
+    @staticmethod
+    def from_file(path: str) -> "Attachment":
+        """Create an Attachment from a file path.
+
+        Args:
+            path: Path to the file to attach.
+
+        Returns:
+            An Attachment with the file's bytes and detected MIME type.
+
+        Raises:
+            ValueError: If the MIME type is not supported.
+            FileNotFoundError: If the file does not exist.
+        """
+        file_path = Path(path)
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        if mime_type is None:
+            suffix = file_path.suffix.lower()
+            mime_map = {
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".gif": "image/gif",
+                ".webp": "image/webp", ".pdf": "application/pdf",
+            }
+            mime_type = mime_map.get(suffix, "")
+        if mime_type not in SUPPORTED_MIME_TYPES:
+            raise ValueError(
+                f"Unsupported MIME type '{mime_type}' for file '{path}'. "
+                f"Supported: {sorted(SUPPORTED_MIME_TYPES)}"
+            )
+        return Attachment(data=file_path.read_bytes(), mime_type=mime_type)
+
+    def to_base64(self) -> str:
+        """Return the file data as a base64-encoded string."""
+        return base64.b64encode(self.data).decode("ascii")
+
+    def to_data_url(self) -> str:
+        """Return a data: URL suitable for OpenAI image_url fields."""
+        return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
 _callback_helper_loop: asyncio.AbstractEventLoop | None = None
@@ -108,11 +169,12 @@ class Model(ABC):
     __repr__ = __str__
 
     @abstractmethod
-    def initialize(self, prompt: str) -> None:
+    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
 
         Args:
             prompt: The initial user prompt to start the conversation.
+            attachments: Optional list of file attachments (images, PDFs) to include.
         """
         pass
 
