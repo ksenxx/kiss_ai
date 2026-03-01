@@ -69,7 +69,7 @@ python -m kiss.agents.assistant.assistant
 
 # How it started?  What is "it"?
 
-During my winter vacation of 2025, I created KISS in 18 days.  KISS is a stupidly simple agentic framework.  I started with the quest "What is possible (with AI)?" and "What is possible by 49 a year old UC Berkeley SWE/PL Professor in 70 days using modern AI?" after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html).  Since then KISS has evolved into the IDE called **KISS Sorcar** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs locally as an IDE and in the chatbox on the right you can give any natural language command to it. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**.  It **codes really well** and **works pretty fast**.  It is **embedded in a browser** and uses **full-fledged vscode**.  It has **full browser**  and **multimodal** support. I provide support and maintain the framework with long-term commitment.  I do not plan to accept pull requests for the [core](src/kiss/core) and the agents in [assistant](src/kiss/agents/).  **Marius Momeu**, my incoming postdoc, will soon join the team.  The project embodies the best software engineering practices that I have learned over the last 30 years.  I will write them up once I get time, but in the meantime please read the code and see "what is possible?" You will find some sample commands when you run the `curl` command above after setting your `ANTROPIC_API_KEY` (best model for Sorkar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`.  Now I use KISS Sorcar to develop itself.  I am rapidly adding features to KISS Sorcar using KISS Sorcar.  So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
+During my winter vacation of 2025, I developed KISS, which is a stupidly simple agentic framework.  It took me 18 days to implement KISS. I started with the quest "What is possible (with AI)?" and "What is possible by 49 a year old UC Berkeley SWE/PL Professor in 70 days using modern AI?" after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html).  Since then KISS has evolved into the IDE called **KISS Sorcar** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs locally as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**.  It **codes really well** and **works pretty fast**.  It is **embedded in a browser** and uses **full-fledged vscode**.  It has **full browser**  and **multimodal** support. I provide support and maintain the framework with long-term commitment.  I do not plan to accept pull requests for the [core](src/kiss/core) and the agents in [assistant](src/kiss/agents/) in the near term.  **Marius Momeu**, my incoming postdoc, will soon join the team.  The project embodies the best software engineering practices that I have learned over the last 30 years.  I will write them up once I get time, but in the meantime, if you are interested, please play with KISS Sorcar and see "what is possible?"  You will find some sample commands when you run the `curl` command above after setting your `ANTROPIC_API_KEY` (best model for Sorkar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`.  Now I use KISS Sorcar to develop itself.  I am rapidly adding features to KISS Sorcar using KISS Sorcar.  So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
 
 **Now I ask the question to you "what is possible?".**  #whatispossible #KISSSorcar
 
@@ -159,60 +159,9 @@ print(final)
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
 
-## 💪 Using Relentless Coding Agent
+## 💬 KISS Sorcar
 
-The **flagship** coding agent of KISS is the [relentless coding agent](src/kiss/agents/coding_agents/relentless_coding_agent.py). For very long running coding tasks, use the `RelentlessCodingAgent`. The agent will work relentlessly to complete your task using a single-agent architecture with smart continuation. It can run for hours to days to complete a task:
-
-```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
-
-agent = RelentlessCodingAgent(name="Simple Coding Agent")
-
-result = agent.run(
-    prompt_template="""
-        Create a Python script that reads a CSV file,
-        filters rows where age > 18, and writes to a new file.
-    """,
-    model_name="claude-sonnet-4-5",
-    work_dir="./workspace",
-    max_steps=200,
-    max_sub_sessions=200
-)
-print(f"Result: {result}")
-```
-
-**Running with Docker:**
-
-You can optionally run bash commands inside a Docker container for isolation:
-
-```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
-
-agent = RelentlessCodingAgent(name="Dockered Relentless Coding Agent")
-
-result = agent.run(
-    prompt_template="""
-        Install numpy and create a script that generates 
-        a random matrix and computes its determinant.
-    """,
-    docker_image="python:3.11-slim",  # Bash commands run in Docker
-    max_steps=200,
-    max_sub_sessions=2000
-)
-print(f"Result: {result}")
-```
-
-**Key Features:**
-
-- **Single-Agent with Auto-Continuation**: A single agent executes the task across multiple sub-sessions, automatically continuing where it left off via structured JSON progress tracking
-- **Configurable Sub-Sessions**: Set high sub-session counts (e.g., 200+) for truly relentless execution
-- **Docker Support**: Optional isolated execution via Docker containers
-- **Built-in Tools**: Bash, Read, Edit, Write tools for file operations
-- **Budget & Token Tracking**: Automatic cost and token usage monitoring across all sub-sessions
-
-## 💬 Browser-Based Assistant
-
-KISS includes a browser-based assistant UI for interacting with agents. It provides a rich web interface with real-time streaming output, task history with autocomplete.
+KISS includes a browser-based IDE, called KISS Sorcar, for writing code and performing general tasks. It provides a rich web IDE which is free, open-source, and runs locally.
 
 ```bash
 # Launch the assistant (opens browser automatically)
@@ -318,8 +267,6 @@ uv run python -m kiss.viz_trajectory.server artifacts
 # Or with custom host/port
 uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 5050
 ```
-
-Then open your browser to `http://127.0.0.1:5050` to view the trajectories.
 
 The visualizer provides:
 
