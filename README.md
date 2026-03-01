@@ -45,15 +45,17 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 </details>
 
-## Installation and Launching KISS Assistant
+## Installation and Launching KISS Sorcar
 
+```bash
 export ANTHROPIC_API_KEY="your-key-here" # Recommended
 export GEMINI_API_KEY="your-key-here" # used for auto-complete support
 export OPENAI_API_KEY="your-key-here" # Optional
 export OPENROUTER_API_KEY="your-key-here" # Optional
 export TOGETHER_API_KEY="your-key-here" # Optional
+```
 
-Install from PyPI with pip and launch the web based interface to interact with KISS. You must provide at least one of API keys.:
+You must provide at least one of API keys.:
 
 ```bash
 # To install for development
@@ -105,6 +107,7 @@ print(result)  # 127.05
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 Well you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well established agent frameworks?**" Here is my response:
 
+- **KISS comes with KISS Sorcar, a powrful local code IDE that is free and open-source.**
 - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) and [Agent Optimizer](src/kiss/agents/coding_agents/agent_optimizer.py) which enables you to optimize a repository of code (and AI agents) for your metric of choice (e.g., cost and running time or test coverage or code quality/readability).**
 - **It has the GEPA prompt optimizer builtin with a simple API.**
 - **It has a [RelentlessCodingAgent](src/kiss/agents/coding_agents/relentless_coding_agent.py), which is pretty straightforward in terms of implementation, but it can work for very very long tasks. It was self evolved over time to save cost and running time.**
