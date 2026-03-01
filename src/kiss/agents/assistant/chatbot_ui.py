@@ -1236,11 +1236,11 @@ function loadWelcome(){
     var tasks=res[0],proposed=res[1];
     suggestionsEl.innerHTML='';
     var items=[];
-    proposed.slice(0,3).forEach(function(t){items.push({text:t,type:'suggested'})});
-    tasks.slice(0,3).forEach(function(t){
+    proposed.slice(0,5).forEach(function(t){items.push({text:t,type:'suggested'})});
+    tasks.slice(0,5).forEach(function(t){
       items.push({text:typeof t==='string'?t:(t.task||''),type:'recent'});
     });
-    items.slice(0,6).forEach(function(item){
+    items.slice(0,10).forEach(function(item){
       var chip=mkEl('div','suggestion-chip');
       chip.title=item.text;
       chip.innerHTML='<span class="chip-label '+item.type+'">'

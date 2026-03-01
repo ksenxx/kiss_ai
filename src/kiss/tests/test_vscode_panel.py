@@ -307,5 +307,17 @@ class TestFixedPortLogic(unittest.TestCase):
         assert not connected
 
 
+class TestWelcomeChipCounts(unittest.TestCase):
+
+    def test_welcome_shows_5_recent_and_5_suggested(self) -> None:
+        html = chatbot_ui._build_html("T")
+        assert "proposed.slice(0,5)" in html
+        assert "tasks.slice(0,5)" in html
+        assert "items.slice(0,10)" in html
+        assert "proposed.slice(0,3)" not in html
+        assert "tasks.slice(0,3)" not in html
+        assert "items.slice(0,6)" not in html
+
+
 if __name__ == "__main__":
     unittest.main()
