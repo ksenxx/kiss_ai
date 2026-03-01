@@ -521,8 +521,6 @@ def run_chatbot(
                 s = result.strip().strip('"').strip("'")
                 if s.lower().startswith(query.lower()):
                     s = s[len(query):]
-                if s and not s[0].isspace() and raw_query and not raw_query[-1].isspace():
-                    s = " " + s
                 return s
             except Exception:
                 return ""
