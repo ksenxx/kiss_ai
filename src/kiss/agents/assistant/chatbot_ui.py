@@ -205,17 +205,6 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #upload-btn:hover{color:rgba(255,255,255,0.7);background:rgba(255,255,255,0.05)}
 #upload-btn svg{width:16px;height:16px}
 #upload-btn:disabled{opacity:0.2;cursor:not-allowed}
-#magic-btn{
-  background:none;color:rgba(188,140,255,0.4);border:none;
-  width:32px;height:32px;cursor:pointer;flex-shrink:0;
-  transition:color 0.15s,transform 0.2s;display:flex;align-items:center;justify-content:center;
-  padding:0;border-radius:50%;
-}
-#magic-btn:hover{color:rgba(188,140,255,0.9);background:rgba(188,140,255,0.08);transform:scale(1.1)}
-#magic-btn svg{width:16px;height:16px}
-#magic-btn:disabled{opacity:0.2;cursor:not-allowed;transform:none}
-#magic-btn.loading{animation:magicSpin 1s linear infinite}
-@keyframes magicSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 #file-chips{
   display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;max-width:820px;margin-left:auto;margin-right:auto;
 }
@@ -564,8 +553,6 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel #stop-btn svg{width:11px;height:11px}
 #assistant-panel #clear-btn{width:18px;height:18px}
 #assistant-panel #clear-btn svg{width:11px;height:11px}
-#assistant-panel #magic-btn{width:28px;height:28px}
-#assistant-panel #magic-btn svg{width:12px;height:12px}
 #assistant-panel #history-search{font-size:11px;padding:6px 10px}
 #assistant-panel .sidebar-hdr{font-size:10px}
 #assistant-panel .sidebar-item{font-size:11px;padding:7px 10px;border-radius:8px;margin-bottom:4px}
@@ -1634,18 +1621,6 @@ function applyTheme(t){
 function loadTheme(){
   fetch('/theme').then(function(r){return r.json()}).then(applyTheme).catch(function(){});
 }
-var magicBtn=document.getElementById('magic-btn');
-magicBtn.addEventListener('click',function(){
-  if(running||magicBtn.disabled)return;
-  magicBtn.disabled=true;magicBtn.classList.add('loading');
-  fetch('/generate-commit-message',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model:selectedModel})})
-    .then(function(r){return r.json()})
-    .then(function(d){
-      if(d.error)alert(d.error);
-    }).catch(function(e){alert('Failed to generate: '+e)})
-    .finally(function(){magicBtn.disabled=false;magicBtn.classList.remove('loading')});
-});
 loadTheme();setInterval(loadTheme,3000);
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 """
@@ -1730,13 +1705,6 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <input type="file" id="file-input" multiple
             accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
             style="display:none"/>
-          <button id="magic-btn" title="Generate commit message">
-            <svg viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"
-            ><path d="M12 2L9.5 9.5 2 12l7.5 2.5L12 22l2.5-7.5L22 12l-7.5-2.5z"/>
-            <path d="M5 2l1 3-1 3-1-3z" opacity="0.6"/>
-            <path d="M19 16l1 3-1 3-1-3z" opacity="0.6"/></svg></button>
           <button id="upload-btn" title="Attach files">
             <svg viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2"
