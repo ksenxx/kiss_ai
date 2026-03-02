@@ -48,13 +48,24 @@ from kiss.core.models.model_info import (
     _OPENAI_PREFIXES,
     MODEL_INFO,
     get_available_models,
-    get_most_expensive_model,
 )
 from kiss.core.relentless_agent import RelentlessAgent
 
 
 class _StopRequested(BaseException):
     pass
+
+
+def _read_active_file(cs_data_dir: str) -> str:
+    try:
+        af_path = os.path.join(cs_data_dir, "active-file.json")
+        with open(af_path) as af:
+            path: str = json.loads(af.read()).get("path", "")
+        if path and os.path.isfile(path):
+            return path
+    except (OSError, json.JSONDecodeError):
+        pass
+    return ""
 
 
 def _clean_llm_output(text: str) -> str:
@@ -64,7 +75,7 @@ def _clean_llm_output(text: str) -> str:
 def _model_vendor_order(name: str) -> int:
     if name.startswith("claude-"):
         return 0
-    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
+    if name.startswith(_OPENAI_PREFIXES):
         return 1
     if name.startswith("gemini-"):
         return 2
@@ -106,12 +117,7 @@ def run_chatbot(
     agent_thread: threading.Thread | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
-    selected_model = (
-        default_model
-        or _load_last_model()
-        or get_most_expensive_model()
-        or "claude-opus-4-6"
-    )
+    selected_model = _load_last_model() or default_model
 
     _init_task_history_md()
 
@@ -303,17 +309,21 @@ def run_chatbot(
         try:
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
-            printer.broadcast({"type": "clear"})
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
+            active_file = _read_active_file(cs_data_dir)
+            printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
+            extra_kwargs = dict(agent_kwargs or {})
+            if active_file:
+                extra_kwargs["current_editor_file"] = active_file
             result = agent.run(
                 prompt_template=task,
                 work_dir=actual_work_dir,
                 printer=printer,
                 model_name=model_name,
                 attachments=parsed_attachments,
-                **(agent_kwargs or {}),
+                **extra_kwargs,
             )
             result_text = result or ""
             printer.broadcast({"type": "task_done"})
@@ -462,7 +472,8 @@ def run_chatbot(
                         frequent.append(item)
                     else:
                         rest.append(item)
-            frequent.sort(key=lambda m: -usage.get(m["text"], 0))
+            frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
+            rest.sort(key=lambda m: m["type"] != "file")
             for f in frequent:
                 f["type"] = "frequent_" + f["type"]
             return JSONResponse((frequent + rest)[:20])
@@ -657,7 +668,8 @@ def run_chatbot(
             )
             message = _clean_llm_output(message)
             result = subprocess.run(
-                ["git", "commit", "-m", message],
+                ["git", "commit", "-m", message,
+                 "--author=KISS Sorcar <kiss-sorcar@users.noreply.github.com>"],
                 capture_output=True, text=True, cwd=actual_work_dir,
             )
             if result.returncode != 0:
@@ -665,6 +677,18 @@ def run_chatbot(
             return {"status": "ok", "message": message}
 
         return await _thread_json_response(_do_commit)
+
+    async def push(request: Request) -> JSONResponse:
+        def _do_push() -> dict[str, str]:
+            result = subprocess.run(
+                ["git", "push"],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            if result.returncode != 0:
+                return {"error": result.stderr.strip() or "Push failed"}
+            return {"status": "ok"}
+
+        return await _thread_json_response(_do_push)
 
     async def record_file_usage_endpoint(
         request: Request,
@@ -684,12 +708,8 @@ def run_chatbot(
             cached_result = subprocess.run(
                 ["git", "diff", "--cached"], capture_output=True, text=True, cwd=actual_work_dir,
             )
-            untracked = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                capture_output=True, text=True, cwd=actual_work_dir,
-            )
             diff_text = (diff_result.stdout + cached_result.stdout).strip()
-            untracked_files = untracked.stdout.strip()
+            untracked_files = "\n".join(sorted(_capture_untracked(actual_work_dir)))
             if not diff_text and not untracked_files:
                 return {"error": "No changes detected"}
             context_parts = []
@@ -724,14 +744,8 @@ def run_chatbot(
 
     async def active_file_info(request: Request) -> JSONResponse:
         """Check if the current editor file is a runnable prompt."""
-        active_file_path = os.path.join(cs_data_dir, "active-file.json")
-        try:
-            with open(active_file_path) as f:
-                data = json.loads(f.read())
-            fpath = data.get("path", "")
-        except (OSError, json.JSONDecodeError):
-            return JSONResponse({"is_prompt": False, "path": ""})
-        if not fpath or not os.path.isfile(fpath) or not fpath.lower().endswith(".md"):
+        fpath = _read_active_file(cs_data_dir)
+        if not fpath or not fpath.lower().endswith(".md"):
             return JSONResponse({"is_prompt": False, "path": fpath})
         from kiss.agents.assistant.prompt_detector import PromptDetector
         detector = PromptDetector()
@@ -809,6 +823,7 @@ def run_chatbot(
         Route("/focus-editor", focus_editor, methods=["POST"]),
         Route("/merge-action", merge_action, methods=["POST"]),
         Route("/commit", commit, methods=["POST"]),
+        Route("/push", push, methods=["POST"]),
         Route("/record-file-usage", record_file_usage_endpoint,
               methods=["POST"]),
         Route("/generate-commit-message", generate_commit_message,

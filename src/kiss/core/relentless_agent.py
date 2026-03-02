@@ -167,6 +167,15 @@ class RelentlessAgent(Base):
                 summary_text = yaml.safe_load(summarizer_result).get(
                     "result", "No summary available."
                 )
+                try:
+                    parsed = yaml.safe_load(summarizer_result)
+                    summary_text = (
+                        parsed.get("result", summarizer_result)
+                        if isinstance(parsed, dict)
+                        else summarizer_result
+                    )
+                except Exception:
+                    summary_text = summarizer_result
                 result = yaml.dump(
                     {"success": False, "summary": summary_text},
                     sort_keys=False,
