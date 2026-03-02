@@ -250,12 +250,37 @@ function activate(ctx){
     showMergeButtons(false);
     vscode.window.showInformationMessage('All changes rejected.');
   }));
+  function readPort(){
+    try{return fs.readFileSync(path.join(home,'.kiss','assistant-port'),'utf8').trim();}
+    catch(e){return '';}
+  }
+  function postAssistant(p,body){
+    var http=require('http');
+    return new Promise(function(resolve,reject){
+      var req=http.request({hostname:'127.0.0.1',port:parseInt(readPort()),
+        path:p,method:'POST',headers:{'Content-Type':'application/json'}},function(res){
+        var d='';res.on('data',function(c){d+=c});
+        res.on('end',function(){resolve(JSON.parse(d))});
+      });
+      req.on('error',reject);
+      req.write(JSON.stringify(body||{}));req.end();
+    });
+  }
+  function firePost(p,body){
+    var port=readPort();if(!port)return;
+    var http=require('http');
+    var req=http.request({hostname:'127.0.0.1',port:parseInt(port),
+      path:p,method:'POST',headers:{'Content-Type':'application/json'}},function(){});
+    req.on('error',function(){});
+    req.write(JSON.stringify(body||{}));req.end();
+  }
   ctx.subscriptions.push(vscode.commands.registerCommand(
     'kiss.generateCommitMessage',async function(){
     var portFile=path.join(home,'.kiss','assistant-port');
     var port='';
     try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
     if(!port){vscode.window.showErrorMessage('Assistant server not found');return;}
+    if(!readPort()){vscode.window.showErrorMessage('Assistant server not found');return;}
     var gitExt=vscode.extensions.getExtension('vscode.git');
     if(!gitExt){vscode.window.showErrorMessage('Git extension not found');return;}
     var git=gitExt.exports.getAPI(1);
@@ -274,6 +299,7 @@ function activate(ctx){
         req.on('error',reject);
         req.write('{}');req.end();
       });
+      var body=await postAssistant('/generate-commit-message',{});
       if(body.error){
         git.repositories[0].inputBox.value='';
         vscode.window.showErrorMessage('Generate failed: '+body.error);
@@ -291,6 +317,7 @@ function activate(ctx){
     var port='';
     try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
     if(!port){vscode.window.showErrorMessage('Assistant server not found');return;}
+    if(!readPort()){vscode.window.showErrorMessage('Assistant server not found');return;}
     commitSB.text='$(loading~spin) Committing...';
     try{
       var http=require('http');
@@ -303,6 +330,7 @@ function activate(ctx){
         req.on('error',reject);
         req.write('{}');req.end();
       });
+      var body=await postAssistant('/commit',{});
       if(body.error)vscode.window.showErrorMessage('Commit failed: '+body.error);
       else vscode.window.showInformationMessage('Committed: '+body.message);
     }catch(e){vscode.window.showErrorMessage('Commit error: '+e.message);}
@@ -319,6 +347,7 @@ function activate(ctx){
       headers:{'Content-Type':'application/json'}},function(){});
     req.on('error',function(){});
     req.write('{}');req.end();
+    firePost('/focus-chatbox',{});
   }));
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
@@ -338,6 +367,7 @@ function activate(ctx){
           req.end();
         }
       }catch(e){}
+      firePost('/merge-action',{action:'all-done'});
     });
   }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){

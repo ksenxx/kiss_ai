@@ -48,13 +48,24 @@ from kiss.core.models.model_info import (
     _OPENAI_PREFIXES,
     MODEL_INFO,
     get_available_models,
-    get_most_expensive_model,
 )
 from kiss.core.relentless_agent import RelentlessAgent
 
 
 class _StopRequested(BaseException):
     pass
+
+
+def _read_active_file(cs_data_dir: str) -> str:
+    try:
+        af_path = os.path.join(cs_data_dir, "active-file.json")
+        with open(af_path) as af:
+            path: str = json.loads(af.read()).get("path", "")
+        if path and os.path.isfile(path):
+            return path
+    except (OSError, json.JSONDecodeError):
+        pass
+    return ""
 
 
 def _clean_llm_output(text: str) -> str:
@@ -106,12 +117,7 @@ def run_chatbot(
     agent_thread: threading.Thread | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
-    selected_model = (
-        _load_last_model()
-        or default_model
-        or get_most_expensive_model()
-        or "claude-opus-4-6"
-    )
+    selected_model = _load_last_model() or default_model
 
     _init_task_history_md()
 
@@ -305,15 +311,7 @@ def run_chatbot(
             printer.broadcast({"type": "tasks_updated"})
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
-            active_file = ""
-            try:
-                af_path = os.path.join(cs_data_dir, "active-file.json")
-                with open(af_path) as af:
-                    active_file = json.loads(af.read()).get("path", "")
-                if active_file and not os.path.isfile(active_file):
-                    active_file = ""
-            except (OSError, json.JSONDecodeError):
-                pass
+            active_file = _read_active_file(cs_data_dir)
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
             extra_kwargs = dict(agent_kwargs or {})
@@ -696,12 +694,8 @@ def run_chatbot(
             cached_result = subprocess.run(
                 ["git", "diff", "--cached"], capture_output=True, text=True, cwd=actual_work_dir,
             )
-            untracked = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                capture_output=True, text=True, cwd=actual_work_dir,
-            )
             diff_text = (diff_result.stdout + cached_result.stdout).strip()
-            untracked_files = untracked.stdout.strip()
+            untracked_files = "\n".join(sorted(_capture_untracked(actual_work_dir)))
             if not diff_text and not untracked_files:
                 return {"error": "No changes detected"}
             context_parts = []
@@ -736,14 +730,8 @@ def run_chatbot(
 
     async def active_file_info(request: Request) -> JSONResponse:
         """Check if the current editor file is a runnable prompt."""
-        active_file_path = os.path.join(cs_data_dir, "active-file.json")
-        try:
-            with open(active_file_path) as f:
-                data = json.loads(f.read())
-            fpath = data.get("path", "")
-        except (OSError, json.JSONDecodeError):
-            return JSONResponse({"is_prompt": False, "path": ""})
-        if not fpath or not os.path.isfile(fpath) or not fpath.lower().endswith(".md"):
+        fpath = _read_active_file(cs_data_dir)
+        if not fpath or not fpath.lower().endswith(".md"):
             return JSONResponse({"is_prompt": False, "path": fpath})
         from kiss.agents.assistant.prompt_detector import PromptDetector
         detector = PromptDetector()

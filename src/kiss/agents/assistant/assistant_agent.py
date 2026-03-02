@@ -102,6 +102,7 @@ class AssistantAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             headless: Whether to run the browser in headless mode. Defaults to config value.
             verbose: Whether to print output to console. Defaults to config verbose setting.
+            current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
         Returns:

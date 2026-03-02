@@ -1049,6 +1049,9 @@ function handleEvent(ev){
   case'clear':
     O.innerHTML='';state=mkS();
     _scrollLock=false;
+    if(ev.active_file&&pendingUserMsg){
+      pendingUserMsg.text+='\n\nCurrently open file in editor: '+ev.active_file;
+    }
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
   case'task_done':{
