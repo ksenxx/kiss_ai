@@ -139,5 +139,17 @@ def test_cmd_k_not_present_without_code_server():
     assert "e.key==='k'" in js
 
 
+def test_clear_event_appends_active_file_to_user_msg():
+    """Test that the clear SSE event augments the user message with active_file info."""
+    html = _build_html("Test", "", "/tmp")
+    js = html.split("<script>")[1].split("</script>")[0]
+    assert "ev.active_file" in js, (
+        "clear event handler should check ev.active_file"
+    )
+    assert "Currently open file in editor" in js, (
+        "clear event handler should append editor file info to user message"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

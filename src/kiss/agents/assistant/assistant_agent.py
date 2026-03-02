@@ -122,8 +122,9 @@ class AssistantAgent(RelentlessAgent):
                 summarizer_model_name=summarizer_model_name,
                 system_instructions=system_instructions,
                 prompt_template=(
-                    prompt_template
-                    + f"\n\nThe editor file path: {current_editor_file}"
+                    prompt_template + f"\n\nThe default file path: {current_editor_file}"
+                    if current_editor_file
+                    else prompt_template
                 ),
                 arguments=arguments,
                 max_steps=max_steps,
