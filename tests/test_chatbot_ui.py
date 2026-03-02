@@ -85,5 +85,47 @@ def test_hide_ac_clears_ghost():
     )
 
 
+def test_cmd_k_keybinding_in_js():
+    """Test that Cmd+K / Ctrl+K toggle focus keybinding is present in JS."""
+    html = _build_html("Test", "http://127.0.0.1:13338", "/tmp")
+    js = html.split("<script>")[1].split("</script>")[0]
+
+    assert "e.key==='k'" in js, "Should listen for 'k' key"
+    assert "e.metaKey" in js, "Should check metaKey (Cmd on Mac)"
+    assert "e.ctrlKey" in js, "Should check ctrlKey (Ctrl on Windows/Linux)"
+    assert "frame.focus()" in js, "Should focus the iframe"
+    assert "frame.contentWindow.focus()" in js, "Should focus the iframe content window"
+    assert "inp.focus()" in js, "Should focus the chatbox input"
+
+
+def test_cmd_k_focuses_code_server_frame():
+    """Test that the keybinding references the code-server-frame element."""
+    html = _build_html("Test", "http://127.0.0.1:13338", "/tmp")
+    js = html.split("<script>")[1].split("</script>")[0]
+
+    assert "getElementById('code-server-frame')" in js, (
+        "Keybinding should look up the code-server iframe"
+    )
+
+
+def test_focus_chatbox_sse_handler():
+    """Test that the SSE handler for focus_chatbox event is present."""
+    html = _build_html("Test", "", "/tmp")
+    js = html.split("<script>")[1].split("</script>")[0]
+
+    assert "case'focus_chatbox'" in js, (
+        "Should handle focus_chatbox SSE event"
+    )
+
+
+def test_cmd_k_not_present_without_code_server():
+    """Test that Cmd+K keybinding is present even without code-server (graceful no-op)."""
+    html = _build_html("Test", "", "/tmp")
+    js = html.split("<script>")[1].split("</script>")[0]
+
+    # Keybinding should still be present (it'll just no-op since there's no iframe)
+    assert "e.key==='k'" in js
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
