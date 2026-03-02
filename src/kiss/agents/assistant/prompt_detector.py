@@ -8,36 +8,31 @@ class PromptDetector:
     represents an AI prompt or system instruction file.
     """
 
-    def __init__(self) -> None:
-        # Weighting system: features are assigned points based on uniqueness to prompts
-        self.THRESHOLD = 3.0  # Score required to be classified as a prompt
+    THRESHOLD = 3.0
 
-        # 1. High-value markers: Almost certainly a prompt
-        self.STRONG_INDICATORS = {
-            r'(?i)^(?:#\s*)?(?:system\s+)?prompt': 3.0,     # Header "# System Prompt"
-            r'(?i)you\s+are\s+a(?:n)?\s+\w+': 2.0,           # Persona "You are a..."
-            r'(?i)act\s+as\s+a(?:n)?\s+\w+': 2.0,            # Persona "Act as a..."
-            r'(?i){{\s*[\w_]+\s*}}': 1.5,                   # Jinja2 {{ variable }}
-            r'(?i)<(system|user|assistant|instruction|context|example)>': 2.0, # XML tags
-        }
+    STRONG_INDICATORS: dict[str, float] = {
+        r'(?i)^(?:#\s*)?(?:system\s+)?prompt': 3.0,
+        r'(?i)you\s+are\s+a(?:n)?\s+\w+': 2.0,
+        r'(?i)act\s+as\s+a(?:n)?\s+\w+': 2.0,
+        r'(?i){{\s*[\w_]+\s*}}': 1.5,
+        r'(?i)<(system|user|assistant|instruction|context|example)>': 2.0,
+    }
 
-        # 2. Medium-value markers: Common in prompts but also found elsewhere
-        self.MEDIUM_INDICATORS = {
-            r'(?i)^#+\s*(?:role|persona|context|instruction|task|constraints|output\s+format)': 1.5,
-            r'(?i)few-shot': 1.5,
-            r'(?i)chain\s+of\s+thought': 1.5,
-            r'(?i)step-by-step': 1.0,
-            r'(?i)your\s+task\s+is': 1.5,
-            r'(?i)do\s+not\s+(?:hallucinate|invent)': 1.5,  # Negative constraints
-        }
+    MEDIUM_INDICATORS: dict[str, float] = {
+        r'(?i)^#+\s*(?:role|persona|context|instruction|task|constraints|output\s+format)': 1.5,
+        r'(?i)few-shot': 1.5,
+        r'(?i)chain\s+of\s+thought': 1.5,
+        r'(?i)step-by-step': 1.0,
+        r'(?i)your\s+task\s+is': 1.5,
+        r'(?i)do\s+not\s+(?:hallucinate|invent)': 1.5,
+    }
 
-        # 3. Contextual clues: Weak on their own
-        self.WEAK_INDICATORS = {
-            r'(?i)temperature\s*:': 0.5,
-            r'(?i)top_p\s*:': 0.5,
-            r'(?i)json\s+mode': 1.0,
-            r'```(?:json|xml|markdown)': 0.5,
-        }
+    WEAK_INDICATORS: dict[str, float] = {
+        r'(?i)temperature\s*:': 0.5,
+        r'(?i)top_p\s*:': 0.5,
+        r'(?i)json\s+mode': 1.0,
+        r'```(?:json|xml|markdown)': 0.5,
+    }
 
     def _extract_frontmatter(self, content: str) -> tuple[dict | None, str]:
         """Attempts to manually extract YAML-style frontmatter without external deps."""

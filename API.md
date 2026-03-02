@@ -988,8 +988,6 @@ ______________________________________________________________________
 
 ##### `class PromptDetector` — An intelligent detector that analyzes Markdown content to determine if it
 
-**Constructor:** `PromptDetector() -> None`
-
 - **analyze** — Analyzes a file to check if it is a prompt.<br/>`analyze(file_path: str) -> tuple[bool, float, list[str]]`
   - **Returns:** (Is Prompt?, Confidence Score, Reasons)
 
