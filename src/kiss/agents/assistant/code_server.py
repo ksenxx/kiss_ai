@@ -344,6 +344,17 @@ function activate(ctx){
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
     for(var fp in ms)refreshDeco(fp);
   }));
+  function writeActiveFile(){
+    var ed=vscode.window.activeTextEditor;
+    var fp=ed&&ed.document?ed.document.uri.fsPath:'';
+    try{
+      var d=path.join(home,'.kiss','code-server-data');
+      if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});
+      fs.writeFileSync(path.join(d,'active-file.json'),JSON.stringify({path:fp}));
+    }catch(e){}
+  }
+  writeActiveFile();
+  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile()}));
   var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
   var op=path.join(home,'.kiss','code-server-data','pending-open.json');
   var ap=path.join(home,'.kiss','code-server-data','pending-action.json');
