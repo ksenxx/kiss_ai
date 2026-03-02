@@ -164,9 +164,6 @@ class RelentlessAgent(Base):
                         "trajectory": executor.get_trajectory(),
                     },
                 )
-                summary_text = yaml.safe_load(summarizer_result).get(
-                    "result", "No summary available."
-                )
                 try:
                     parsed = yaml.safe_load(summarizer_result)
                     summary_text = (

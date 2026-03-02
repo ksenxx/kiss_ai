@@ -667,10 +667,16 @@ def run_chatbot(
                 is_agentic=False,
             )
             message = _clean_llm_output(message)
+            commit_env = {
+                **os.environ,
+                "GIT_COMMITTER_NAME": "KISS Sorcar",
+                "GIT_COMMITTER_EMAIL": "ksen@berkeley.edu",
+            }
             result = subprocess.run(
                 ["git", "commit", "-m", message,
                  "--author=KISS Sorcar <kiss-sorcar@users.noreply.github.com>"],
                 capture_output=True, text=True, cwd=actual_work_dir,
+                env=commit_env,
             )
             if result.returncode != 0:
                 return {"error": result.stderr.strip()}
