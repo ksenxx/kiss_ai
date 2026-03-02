@@ -29,7 +29,18 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 yaml.add_representer(str, _str_presenter)
 
 
-CODING_INSTRUCTIONS = """
+_artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
+
+SYSTEM_PROMPT = f"""
+# Rules
+- Write() for new files. Edit() for small changes.
+- Use bounded poll loops, never unbounded waits.
+- Use go_to_url() for browser tool and internet search or testing an agent/app.
+- Look at `{_artifact_dir.parent}/TASK_HISTORY.md` for task history and context. DO NOT WRITE/EDIT IT.
+- Call finish(success=True, summary="detailed summary of what was accomplished")
+  immediately when task is complete.
+- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
+
 ## Code Style Guidelines
 - Write simple, clean, and readable code with minimal indirection
 - Avoid unnecessary object attributes and local variables and config variables
@@ -37,8 +48,8 @@ CODING_INSTRUCTIONS = """
 - Each function should do one thing well
 - Use clear, descriptive names
 - NO need to write documentations or comments unless absolutely necessary
-- Public methods MUST have full documentation.
-- Check and test the code you have written
+- Public methods MUST have full documentation
+- You MUST check and test the code you have written following the testing requirements below
 
 ## Testing Requirements
 - Run lint and typecheckers and fix any lint and typecheck errors
@@ -55,6 +66,15 @@ CODING_INSTRUCTIONS = """
 - Look up API documentation or library usage from the internet
 - Find examples of similar implementations
 - Understand existing code in the project
+- Use the internet to augment knowledge and to perform web based tasks.
+
+### Self-Improvement Loop
+
+- Just before finishing an agent task, update `{_KISS_DIR}/LESSONS.md` 
+  with instructions and rules for yourself on how to avoid making the same 
+  mistakes in the future
+- Ruthlessly iterate on these lessons until mistake rate drops
+- Review lessons when the agent starts
 
 ## After you have implemented the task, aggresively and carefully simplify and clean up the code
  - Remove unnessary object/struct attributes, variables, config variables
@@ -64,16 +84,6 @@ CODING_INSTRUCTIONS = """
  - Remove unnecessary comments
  - Make sure that the code is still working correctly
  - Simplify and clean up the test code
-"""
-
-GENERAL_ASSISTANT_INSTRUCTIONS = """
-# Rules
-- Write() for new files. Edit() for small changes.
-- Use bounded poll loops, never unbounded waits.
-- Use go_to_url() for browser tool and internet search or testing an agent/app.
-- Call finish(success=True, summary="detailed summary of what was accomplished")
-  immediately when task is complete.
-- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 """
 
 class Base:

@@ -11,7 +11,7 @@ from kiss.agents.assistant.task_history import _get_task_history_md_path
 from kiss.agents.assistant.useful_tools import UsefulTools
 from kiss.agents.assistant.web_use_tool import WebUseTool
 from kiss.core import config as config_module
-from kiss.core.base import CODING_INSTRUCTIONS, GENERAL_ASSISTANT_INSTRUCTIONS
+from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
@@ -113,8 +113,7 @@ class AssistantAgent(RelentlessAgent):
         try:
             history_path = _get_task_history_md_path()
             system_instructions = (
-                GENERAL_ASSISTANT_INSTRUCTIONS
-                + "\n\n" + CODING_INSTRUCTIONS
+                SYSTEM_PROMPT
                 + f"\nTask History File: {history_path}\n"
             )
             return super().run(
