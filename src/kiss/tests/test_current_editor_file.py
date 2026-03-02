@@ -60,7 +60,7 @@ class TestAssistantAgentCurrentEditorFile:
     def test_signature_accepts_current_editor_file(self) -> None:
         import inspect
 
-        from kiss.agents.assistant.assistant_agent import AssistantAgent
+        from kiss.agents.sorkar.assistant_agent import AssistantAgent
 
         sig = inspect.signature(AssistantAgent.run)
         assert "current_editor_file" in sig.parameters
@@ -70,7 +70,7 @@ class TestAssistantAgentCurrentEditorFile:
     def test_current_editor_file_before_attachments(self) -> None:
         import inspect
 
-        from kiss.agents.assistant.assistant_agent import AssistantAgent
+        from kiss.agents.sorkar.assistant_agent import AssistantAgent
 
         sig = inspect.signature(AssistantAgent.run)
         params = list(sig.parameters.keys())

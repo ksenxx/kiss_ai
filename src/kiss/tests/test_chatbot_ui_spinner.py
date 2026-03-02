@@ -1,6 +1,6 @@
 """Tests for the stop button spinner behavior in chatbot_ui."""
 
-from kiss.agents.assistant.chatbot_ui import CHATBOT_CSS, CHATBOT_JS, CHATBOT_THEME_CSS, _build_html
+from kiss.agents.sorkar.chatbot_ui import CHATBOT_CSS, CHATBOT_JS, CHATBOT_THEME_CSS, _build_html
 
 
 def test_stop_btn_waiting_css_exists():

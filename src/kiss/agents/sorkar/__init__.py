@@ -1,3 +1,3 @@
 """Assistant agent with coding tools and browser automation."""
 
-import kiss.agents.assistant.config  # type: ignore # noqa: F401
+import kiss.agents.sorkar.config  # type: ignore # noqa: F401
