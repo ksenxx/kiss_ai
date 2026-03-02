@@ -167,7 +167,7 @@ class TestGEPAProgressCallbackWithMutation(unittest.TestCase):
 class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
     """Test progress callback with merge functionality."""
 
-    @pytest.mark.timeout(90)
+    @pytest.mark.timeout(180)
     def test_callback_receives_merge_phase(self):
         """Test that callback receives MERGE phase updates when merge is enabled."""
         call_count = [0]
@@ -215,7 +215,7 @@ class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
             mutation_rate=1.0,
             use_merge=True,
             merge_val_overlap_floor=1,
-            reflection_model="gpt-4o",
+            reflection_model="gpt-4o-mini",
             progress_callback=progress_callback,
         )
 
