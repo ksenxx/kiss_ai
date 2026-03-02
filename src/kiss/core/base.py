@@ -57,9 +57,9 @@ CODING_INSTRUCTIONS = """
 - Understand existing code in the project
 
 ## After you have implemented the task, aggresively and carefully simplify and clean up the code
- - Remove unnessary object/struct attributes, variables, config variables
+ - Remove unnecessary object/struct attributes, variables, config variables
  - Avoid object/struct attribute redirections
- - Remove unnessary conditional checks
+ - Remove unnecessary conditional checks
  - Remove redundant and duplicate code
  - Remove unnecessary comments
  - Make sure that the code is still working correctly
