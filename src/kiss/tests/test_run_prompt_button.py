@@ -226,6 +226,40 @@ class TestRunPromptButtonJSBehavior:
         assert 'id="run-prompt-btn" title="Run current file as prompt" disabled' in html
 
 
+class TestPlayButtonDisableDuringRun:
+    """Test that the play button is disabled when a task is running and re-enabled after."""
+
+    def test_js_disables_play_button_in_submit_task(self) -> None:
+        from kiss.agents.assistant.chatbot_ui import CHATBOT_JS
+        # submitTask() should disable runPromptBtn
+        idx_running = CHATBOT_JS.index("running=true;inp.disabled=true;")
+        idx_disable = CHATBOT_JS.index("runPromptBtn.disabled=true;", idx_running)
+        idx_btn_display = CHATBOT_JS.index("btn.style.display='none'", idx_running)
+        assert idx_disable < idx_btn_display
+
+    def test_js_check_active_file_skips_when_running(self) -> None:
+        from kiss.agents.assistant.chatbot_ui import CHATBOT_JS
+        idx_func = CHATBOT_JS.index("function checkActiveFile(){")
+        idx_guard = CHATBOT_JS.index("if(running){runPromptBtn.disabled=true;return}", idx_func)
+        idx_fetch = CHATBOT_JS.index("fetch('/active-file-info')", idx_func)
+        assert idx_guard < idx_fetch
+
+    def test_js_check_active_file_guards_after_fetch(self) -> None:
+        from kiss.agents.assistant.chatbot_ui import CHATBOT_JS
+        idx_fetch = CHATBOT_JS.index("fetch('/active-file-info')")
+        idx_guard = CHATBOT_JS.index("if(running)return;", idx_fetch)
+        idx_is_prompt = CHATBOT_JS.index("if(d.is_prompt){", idx_fetch)
+        assert idx_guard < idx_is_prompt
+
+    def test_js_set_ready_calls_check_active_file(self) -> None:
+        from kiss.agents.assistant.chatbot_ui import CHATBOT_JS
+        idx_set_ready = CHATBOT_JS.index("function setReady(label){")
+        idx_running_false = CHATBOT_JS.index("running=false;", idx_set_ready)
+        idx_check = CHATBOT_JS.index("checkActiveFile();", idx_set_ready)
+        idx_focus = CHATBOT_JS.index("inp.focus();", idx_check)
+        assert idx_running_false < idx_check < idx_focus
+
+
 class TestEndToEndPromptDetection:
     """End-to-end test: write active-file.json, check prompt detection."""
 

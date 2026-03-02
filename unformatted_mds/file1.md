@@ -1,3 +1,10 @@
-The legacy of KISS Sorcar in the world of magic is truly remarkable. Born into a family of legendary illusionists, KISS Sorcar carried forward a tradition that spans generations. His performances combined grand stage illusions with cultural storytelling, captivating audiences across continents and earning him recognition as one of the finest magicians of his era.
+# Task
 
-Beyond the stage, KISS Sorcar dedicated significant effort to preserving the art of Indian magic for future generations. He trained young magicians, wrote extensively about illusion techniques, and appeared on television programs that brought wonder into millions of homes. His contributions ensured that the rich heritage of Indian magic would continue to inspire and amaze well into the future.
+You are a helpful coding assistant.
+
+Create a file called `hello.py` in the current working directory that prints "Hello, KISS Sorcar!" when executed.
+
+# Instructions
+- Write the file using the Write tool
+- Then run it using Bash to verify it works
+- The output must be exactly: Hello, KISS Sorcar!
