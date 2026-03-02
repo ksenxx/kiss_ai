@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.1.59-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.1.60-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -23,8 +23,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
 - [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
 - [Multi-Agent Orchestration](#-multi-agent-orchestration-is-function-composition)
-- [Relentless Coding Agent](#-using-relentless-coding-agent)
-- [Browser-Based Assistant](#-browser-based-assistant)
+- [KISS Sorcar](#-kiss-sorcar)
 - [Repo Optimizer](#-using-repo-optimizer)
 - [Output Formatting](#-output-formatting)
 - [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
@@ -112,7 +111,7 @@ Well, you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, Cre
 - **KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.**
 - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) and [Agent Optimizer](src/kiss/agents/coding_agents/agent_optimizer.py) which enable you to optimize a repository of code (and AI agents) for your metric of choice (e.g., cost and running time or test coverage or code quality/readability).**
 - **It has the GEPA prompt optimizer built-in with a simple API.**
-- **It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to save cost and running time.**
+- **It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.**
 - **No bloat and simple codebase.**
 - **Optimization strategies can be written in plain English.**
 - **New techniques will be incorporated to the framework as I research them.**
@@ -489,6 +488,7 @@ kiss/
 │   │   │   ├── agent_evolver.py
 │   │   │   ├── improver_agent.py
 │   │   │   ├── config.py
+│   │   │   ├── BLOG.md
 │   │   │   └── README.md
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent (deprecated)
 │   │   │   ├── agent_evolver.py
@@ -522,6 +522,7 @@ kiss/
 │   │   ├── conftest.py
 │   │   ├── run_all_models_test.py          # Run tests across all models
 │   │   ├── test_a_model.py
+│   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
 │   │   ├── test_bash_stream_flush.py
 │   │   ├── test_chatbot_tasks.py
@@ -555,6 +556,7 @@ kiss/
 │   │   ├── test_vscode_panel.py
 │   │   ├── test_web_use_tool.py
 │   │   └── integration_test_*.py       # Integration tests
+│   ├── _version.py       # Single source of truth for package version
 │   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization

@@ -17,21 +17,20 @@ So I built a 69-line Python script and told it, in plain English, to fix the pro
 The entire optimizer is a `RelentlessCodingAgent` pointed at its own source code. Here is the core of it:
 
 ```python
-from kiss.agents.coding_agents.relentless_coding_agent import RelentlessCodingAgent
+from kiss.agents.assistant.assistant_agent import AssistantAgent
 
 TASK = """
-Can you run 'uv run src/kiss/agents/coding_agents/relentless_coding_agent.py'
-in the background so that I can see its output and you monitor the output in real time?
+Can you run the command {command}
+in the background so that you can monitor the output in real time,
+and correct the code in the working directory if needed?
 If you observe any repeated errors in the output, please fix them and run the command again.
-Once the command succeeds, analyze the output and optimize
-src/kiss/agents/coding_agents/relentless_coding_agent.py
+Once the command succeeds, analyze the output and optimize the code
 so that it runs reliably, faster, and with less cost.
-Keep repeating the process until the running time and the cost are reduced significantly,
-such 99%.
+Keep repeating the process until the metrics are reduced significantly.
 ...
 """
 
-agent = RelentlessCodingAgent("RepoAgent")
+agent = AssistantAgent("RepoOptimizer")
 result = agent.run(prompt_template=TASK, model_name="claude-opus-4-6", work_dir=PROJECT_ROOT)
 ```
 

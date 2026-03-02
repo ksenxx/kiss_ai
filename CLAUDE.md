@@ -16,7 +16,7 @@
 - Tests MUST NOT use mocks, patches, or any form of test doubles
 - Integration tests are HIGHLY encouraged
 - You MUST not add tests that are redundant or duplicate of existing
-  tests or does not add new coverage over existing tests
+  tests or that do not add new coverage over existing tests
 - Generate meaningful stress tests for the code if you are
   optimizing the code for performance
 - Each test should be independent and verify actual behavior
@@ -27,11 +27,11 @@
 - Find examples of similar implementations
 - Understand existing code in the project
 
-## After you have implemented the task, aggresively and carefully simplify and clean up the code
+## After you have implemented the task, aggressively and carefully simplify and clean up the code
 
-- Remove unnessary object/struct attributes, variables, config variables
+- Remove unnecessary object/struct attributes, variables, config variables
 - Avoid object/struct attribute redirections
-- Remove unnessary conditional checks
+- Remove unnecessary conditional checks
 - Remove redundant and duplicate code
 - Remove unnecessary comments
 - Make sure that the code is still working correctly

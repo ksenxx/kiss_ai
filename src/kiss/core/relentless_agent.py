@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -22,8 +21,9 @@ TASK_PROMPT = """# Task
 {task_description}
 
 # Instructions
-- If you reach step {step_threshold}: finish(success=False,
-  summary="detailed summary of work done so far")
+- **At step {step_threshold}: you MUST call finish(success=False,
+  summary="detailed summary of work done so far")** if the task is
+  not complete and you are at risk of running out of steps.
 - Work dir: {work_dir}
 {previous_progress}
 """
@@ -55,7 +55,9 @@ def finish(success: bool, summary: str) -> str:
         success: True if successful, False otherwise.
         summary: Detailed summary of work done so far.
     """
-    result: str = yaml.dump({"success": success, "summary": summary}, sort_keys=False)
+    if isinstance(success, str):
+        success = success.lower() in ("true", "1", "yes")
+    result: str = yaml.dump({"success": bool(success), "summary": summary}, sort_keys=False)
     return result
 
 
@@ -162,8 +164,11 @@ class RelentlessAgent(Base):
                         "trajectory": executor.get_trajectory(),
                     },
                 )
+                summary_text = yaml.safe_load(summarizer_result).get(
+                    "result", "No summary available."
+                )
                 result = yaml.dump(
-                    {"success": False, "summary": summarizer_result},
+                    {"success": False, "summary": summary_text},
                     sort_keys=False,
                 )
 
@@ -171,16 +176,16 @@ class RelentlessAgent(Base):
             self.total_tokens_used += executor.total_tokens_used
 
             try:
-                payload = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                try:
-                    payload = yaml.safe_load(result)
-                except Exception:
-                    payload = {}
+                payload = yaml.safe_load(result)
+            except Exception:
+                payload = {}
             if not isinstance(payload, dict):
                 payload = {}
 
-            if payload.get("success", False):
+            success = payload.get("success", False)
+            if isinstance(success, str):
+                success = success.lower() in ("true", "1", "yes")
+            if success:
                 return result
 
             summary = payload.get("summary", "")
