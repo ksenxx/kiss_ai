@@ -472,7 +472,8 @@ def run_chatbot(
                         frequent.append(item)
                     else:
                         rest.append(item)
-            frequent.sort(key=lambda m: -usage.get(m["text"], 0))
+            frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
+            rest.sort(key=lambda m: m["type"] != "file")
             for f in frequent:
                 f["type"] = "frequent_" + f["type"]
             return JSONResponse((frequent + rest)[:20])

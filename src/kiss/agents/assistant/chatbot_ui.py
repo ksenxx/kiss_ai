@@ -1363,10 +1363,10 @@ function renderAC(data){
   var atCtx=getAtCtx();
   var searchQ=atCtx?atCtx.query:'';
   var order=[
-    'frequent_dir','frequent_file','dir','file'
+    'frequent_file','frequent_dir','file','dir'
   ];
   var labels={
-    frequent_dir:'Frequent',frequent_file:'Frequent',
+    frequent_file:'Frequent',frequent_dir:'Frequent',
     dir:'Directories',file:'Files'
   };
   var groups={};
