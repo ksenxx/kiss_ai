@@ -197,13 +197,13 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   position:sticky;top:0;z-index:1;
 }
 #upload-btn{
-  background:none;color:rgba(255,255,255,0.3);border:none;
-  width:32px;height:32px;cursor:pointer;flex-shrink:0;
-  transition:color 0.15s;display:flex;align-items:center;justify-content:center;
-  padding:0;border-radius:50%;
+  background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
+  border:1px solid rgba(255,255,255,0.08);border-radius:8px;
+  padding:6px 8px;cursor:pointer;flex-shrink:0;
+  transition:color 0.15s,border-color 0.2s;display:flex;align-items:center;justify-content:center;
 }
-#upload-btn:hover{color:rgba(255,255,255,0.7);background:rgba(255,255,255,0.05)}
-#upload-btn svg{width:16px;height:16px}
+#upload-btn:hover{color:rgba(255,255,255,0.65);border-color:rgba(255,255,255,0.16);background:rgba(255,255,255,0.05)}
+#upload-btn svg{width:12px;height:12px}
 #upload-btn:disabled{opacity:0.2;cursor:not-allowed}
 #file-chips{
   display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;max-width:820px;margin-left:auto;margin-right:auto;
@@ -240,6 +240,17 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 #stop-btn:hover{background:rgba(248,81,73,0.2);box-shadow:0 0 16px rgba(248,81,73,0.15)}
 #stop-btn svg{width:14px;height:14px}
+#stop-btn.waiting svg{display:none}
+#stop-btn.waiting::after{
+  content:'';width:14px;height:14px;
+  border:2px solid rgba(255,255,255,0.15);
+  border-top-color:rgba(88,166,255,0.7);
+  border-radius:50%;animation:spin .8s linear infinite;
+}
+#stop-btn.waiting{
+  background:rgba(88,166,255,0.08);color:rgba(88,166,255,0.7);
+  border-color:rgba(88,166,255,0.15);
+}
 #clear-btn{
   background:none;color:rgba(255,255,255,0.2);border:none;
   width:24px;height:24px;cursor:pointer;flex-shrink:0;
@@ -554,8 +565,11 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel #send-btn svg{width:12px;height:12px}
 #assistant-panel #stop-btn{width:28px;height:28px}
 #assistant-panel #stop-btn svg{width:11px;height:11px}
+#assistant-panel #stop-btn.waiting::after{width:11px;height:11px}
 #assistant-panel #clear-btn{width:18px;height:18px}
 #assistant-panel #clear-btn svg{width:11px;height:11px}
+#assistant-panel #upload-btn{padding:4px 6px;border-radius:6px}
+#assistant-panel #upload-btn svg{width:11px;height:11px}
 #assistant-panel #history-search{font-size:11px;padding:6px 10px}
 #assistant-panel .sidebar-hdr{font-size:10px}
 #assistant-panel .sidebar-item{font-size:11px;padding:7px 10px;border-radius:8px;margin-bottom:4px}
@@ -725,6 +739,13 @@ body{background:var(--bg)}
 #assistant-panel #stop-btn:hover{
   background:rgba(var(--red-rgb),0.25);
   box-shadow:0 0 12px rgba(var(--red-rgb),0.15);
+}
+#assistant-panel #stop-btn.waiting{
+  background:rgba(var(--accent-rgb),0.1);
+  border-color:rgba(var(--accent-rgb),0.2);
+}
+#assistant-panel #stop-btn.waiting::after{
+  border-color:var(--border);border-top-color:var(--accent);
 }
 #assistant-panel #clear-btn{color:rgba(var(--fg-rgb),0.25)}
 #assistant-panel #clear-btn:hover{color:rgba(var(--fg-rgb),0.6)}
@@ -1000,17 +1021,13 @@ function stopTimer(){if(timerIv){clearInterval(timerIv);timerIv=null;}}
 var _spinnerTimer=null;
 function removeSpinner(){
   if(_spinnerTimer){clearTimeout(_spinnerTimer);_spinnerTimer=null;}
-  var sp=document.getElementById('wait-spinner');
-  if(sp)sp.remove();
+  stopBtn.classList.remove('waiting');
 }
-function showSpinner(msg){
+function showSpinner(){
   removeSpinner();
   _spinnerTimer=setTimeout(function(){
     _spinnerTimer=null;
-    var sp=mkEl('div','spinner');
-    sp.id='wait-spinner';
-    sp.textContent=msg||'Waiting ...';
-    O.appendChild(sp);sb();
+    stopBtn.classList.add('waiting');
   },250);
 }
 function setReady(label){
@@ -1049,6 +1066,9 @@ function handleEvent(ev){
   case'clear':
     O.innerHTML='';state=mkS();
     _scrollLock=false;
+    if(ev.active_file&&pendingUserMsg){
+      pendingUserMsg.text+='\n\nCurrently open file in editor: '+ev.active_file;
+    }
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
   case'task_done':{
@@ -1360,10 +1380,10 @@ function renderAC(data){
   var atCtx=getAtCtx();
   var searchQ=atCtx?atCtx.query:'';
   var order=[
-    'frequent_dir','frequent_file','dir','file'
+    'frequent_file','frequent_dir','file','dir'
   ];
   var labels={
-    frequent_dir:'Frequent',frequent_file:'Frequent',
+    frequent_file:'Frequent',frequent_dir:'Frequent',
     dir:'Directories',file:'Files'
   };
   var groups={};
@@ -1424,8 +1444,8 @@ function selectAC(item){
       inp.selectionStart||inp.value.length
     );
     var sep=(!after||/^\s/.test(after))?'':' ';
-    inp.value=before+'@'+item.text+sep+after;
-    var np=before.length+1+item.text.length+sep.length;
+    inp.value=before+item.text+sep+after;
+    var np=before.length+item.text.length+sep.length;
     inp.setSelectionRange(np,np);
     recordFileUsage(item.text);
     inp.style.height='auto';
@@ -1621,6 +1641,17 @@ function mergeCommit(){
   }).catch(function(e){alert('Error: '+e);
     btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;});
 }
+function mergePush(){
+  var btn=document.getElementById('push-btn');
+  btn.textContent='Pushing...';btn.disabled=true;
+  fetch('/push',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error)alert('Push failed: '+d.error);
+    else alert('Pushed to remote successfully');
+    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;
+  }).catch(function(e){alert('Error: '+e);
+    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;});
+}
 function hexToRgb(h){
   var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
   return r+','+g+','+b;
@@ -1737,6 +1768,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
       <button onclick="mergeAction('accept-all')">&#10004; Accept All</button>
       <button onclick="mergeAction('reject-all')">&#10008; Reject All</button>
       <button id="commit-btn" onclick="mergeCommit()">&#128230; Commit</button>
+      <button id="push-btn" onclick="mergePush()">&#128640; Push</button>
     </div>
   </div>
   <div id="divider"></div>
@@ -1781,13 +1813,6 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <input type="file" id="file-input" multiple
             accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
             style="display:none"/>
-          <button id="upload-btn" title="Attach files">
-            <svg viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"
-            ><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49
-            -8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2
-            2 0 01-2.83-2.83l8.49-8.48"/></svg></button>
           <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6"
@@ -1799,6 +1824,14 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                 stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
               <span id="model-label">Loading\u2026</span>
+            </button>
+            <button id="upload-btn" title="Attach files">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round"
+              ><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49
+              -8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2
+              2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"

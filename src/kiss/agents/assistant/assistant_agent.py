@@ -83,6 +83,7 @@ class AssistantAgent(RelentlessAgent):
         docker_image: str | None = None,
         headless: bool | None = None,
         verbose: bool | None = None,
+        current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
@@ -101,6 +102,7 @@ class AssistantAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             headless: Whether to run the browser in headless mode. Defaults to config value.
             verbose: Whether to print output to console. Defaults to config verbose setting.
+            current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
         Returns:
@@ -120,7 +122,11 @@ class AssistantAgent(RelentlessAgent):
                 model_name=model_name,
                 summarizer_model_name=summarizer_model_name,
                 system_instructions=system_instructions,
-                prompt_template=prompt_template,
+                prompt_template=(
+                    prompt_template + f"\n\nThe default file path: {current_editor_file}"
+                    if current_editor_file
+                    else prompt_template
+                ),
                 arguments=arguments,
                 max_steps=max_steps,
                 max_budget=max_budget,

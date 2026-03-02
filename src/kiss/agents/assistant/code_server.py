@@ -250,30 +250,40 @@ function activate(ctx){
     showMergeButtons(false);
     vscode.window.showInformationMessage('All changes rejected.');
   }));
+  function readPort(){
+    try{return fs.readFileSync(path.join(home,'.kiss','assistant-port'),'utf8').trim();}
+    catch(e){return '';}
+  }
+  function postAssistant(p,body){
+    var http=require('http');
+    return new Promise(function(resolve,reject){
+      var req=http.request({hostname:'127.0.0.1',port:parseInt(readPort()),
+        path:p,method:'POST',headers:{'Content-Type':'application/json'}},function(res){
+        var d='';res.on('data',function(c){d+=c});
+        res.on('end',function(){resolve(JSON.parse(d))});
+      });
+      req.on('error',reject);
+      req.write(JSON.stringify(body||{}));req.end();
+    });
+  }
+  function firePost(p,body){
+    var port=readPort();if(!port)return;
+    var http=require('http');
+    var req=http.request({hostname:'127.0.0.1',port:parseInt(port),
+      path:p,method:'POST',headers:{'Content-Type':'application/json'}},function(){});
+    req.on('error',function(){});
+    req.write(JSON.stringify(body||{}));req.end();
+  }
   ctx.subscriptions.push(vscode.commands.registerCommand(
     'kiss.generateCommitMessage',async function(){
-    var portFile=path.join(home,'.kiss','assistant-port');
-    var port='';
-    try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
-    if(!port){vscode.window.showErrorMessage('Assistant server not found');return;}
+    if(!readPort()){vscode.window.showErrorMessage('Assistant server not found');return;}
     var gitExt=vscode.extensions.getExtension('vscode.git');
     if(!gitExt){vscode.window.showErrorMessage('Git extension not found');return;}
     var git=gitExt.exports.getAPI(1);
     if(!git.repositories.length){vscode.window.showErrorMessage('No git repository found');return;}
     git.repositories[0].inputBox.value='Generating commit message...';
     try{
-      var http=require('http');
-      var body=await new Promise(function(resolve,reject){
-        var opts={hostname:'127.0.0.1',port:parseInt(port),
-          path:'/generate-commit-message',method:'POST',
-          headers:{'Content-Type':'application/json'}};
-        var req=http.request(opts,function(res){
-          var d='';res.on('data',function(c){d+=c});
-          res.on('end',function(){resolve(JSON.parse(d))});
-        });
-        req.on('error',reject);
-        req.write('{}');req.end();
-      });
+      var body=await postAssistant('/generate-commit-message',{});
       if(body.error){
         git.repositories[0].inputBox.value='';
         vscode.window.showErrorMessage('Generate failed: '+body.error);
@@ -287,57 +297,24 @@ function activate(ctx){
     }
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.commitChanges',async function(){
-    var portFile=path.join(home,'.kiss','assistant-port');
-    var port='';
-    try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
-    if(!port){vscode.window.showErrorMessage('Assistant server not found');return;}
+    if(!readPort()){vscode.window.showErrorMessage('Assistant server not found');return;}
     commitSB.text='$(loading~spin) Committing...';
     try{
-      var http=require('http');
-      var body=await new Promise(function(resolve,reject){
-        var req=http.request({hostname:'127.0.0.1',port:parseInt(port),path:'/commit',method:'POST',
-          headers:{'Content-Type':'application/json'}},function(res){
-          var d='';res.on('data',function(c){d+=c});
-          res.on('end',function(){resolve(JSON.parse(d))});
-        });
-        req.on('error',reject);
-        req.write('{}');req.end();
-      });
+      var body=await postAssistant('/commit',{});
       if(body.error)vscode.window.showErrorMessage('Commit failed: '+body.error);
       else vscode.window.showInformationMessage('Committed: '+body.message);
     }catch(e){vscode.window.showErrorMessage('Commit error: '+e.message);}
     commitSB.text='$(git-commit) Commit';
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.toggleFocus',function(){
-    var portFile=path.join(home,'.kiss','assistant-port');
-    var port='';
-    try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
-    if(!port)return;
-    var http=require('http');
-    var req=http.request({hostname:'127.0.0.1',port:parseInt(port),
-      path:'/focus-chatbox',method:'POST',
-      headers:{'Content-Type':'application/json'}},function(){});
-    req.on('error',function(){});
-    req.write('{}');req.end();
+    firePost('/focus-chatbox',{});
   }));
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
     vscode.workspace.saveAll(false).then(function(){
       vscode.window.showInformationMessage('All changes reviewed.');
       showMergeButtons(false);
-      try{
-        var portFile=path.join(home,'.kiss','assistant-port');
-        var port=fs.readFileSync(portFile,'utf8').trim();
-        if(port){
-          var http=require('http');
-          var req=http.request({hostname:'127.0.0.1',port:parseInt(port),
-            path:'/merge-action',method:'POST',
-            headers:{'Content-Type':'application/json'}},function(){});
-          req.on('error',function(){});
-          req.write(JSON.stringify({action:'all-done'}));
-          req.end();
-        }
-      }catch(e){}
+      firePost('/merge-action',{action:'all-done'});
     });
   }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
@@ -581,12 +558,12 @@ def _scan_files(work_dir: str) -> list[str]:
                 dirs.clear()
                 continue
             dirs[:] = sorted(d for d in dirs if d not in skip and not d.startswith("."))
-            for d in dirs:
-                paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
             for name in sorted(files):
                 paths.append(os.path.relpath(os.path.join(root, name), work_dir))
                 if len(paths) >= 2000:
                     return paths
+            for d in dirs:
+                paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
     except OSError:
         pass
     return paths
