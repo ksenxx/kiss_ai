@@ -1641,6 +1641,17 @@ function mergeCommit(){
   }).catch(function(e){alert('Error: '+e);
     btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;});
 }
+function mergePush(){
+  var btn=document.getElementById('push-btn');
+  btn.textContent='Pushing...';btn.disabled=true;
+  fetch('/push',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error)alert('Push failed: '+d.error);
+    else alert('Pushed to remote successfully');
+    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;
+  }).catch(function(e){alert('Error: '+e);
+    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;});
+}
 function hexToRgb(h){
   var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
   return r+','+g+','+b;
@@ -1757,6 +1768,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
       <button onclick="mergeAction('accept-all')">&#10004; Accept All</button>
       <button onclick="mergeAction('reject-all')">&#10008; Reject All</button>
       <button id="commit-btn" onclick="mergeCommit()">&#128230; Commit</button>
+      <button id="push-btn" onclick="mergePush()">&#128640; Push</button>
     </div>
   </div>
   <div id="divider"></div>

@@ -668,7 +668,8 @@ def run_chatbot(
             )
             message = _clean_llm_output(message)
             result = subprocess.run(
-                ["git", "commit", "-m", message],
+                ["git", "commit", "-m", message,
+                 "--author=KISS Sorcar <kiss-sorcar@users.noreply.github.com>"],
                 capture_output=True, text=True, cwd=actual_work_dir,
             )
             if result.returncode != 0:
@@ -676,6 +677,18 @@ def run_chatbot(
             return {"status": "ok", "message": message}
 
         return await _thread_json_response(_do_commit)
+
+    async def push(request: Request) -> JSONResponse:
+        def _do_push() -> dict[str, str]:
+            result = subprocess.run(
+                ["git", "push"],
+                capture_output=True, text=True, cwd=actual_work_dir,
+            )
+            if result.returncode != 0:
+                return {"error": result.stderr.strip() or "Push failed"}
+            return {"status": "ok"}
+
+        return await _thread_json_response(_do_push)
 
     async def record_file_usage_endpoint(
         request: Request,
@@ -810,6 +823,7 @@ def run_chatbot(
         Route("/focus-editor", focus_editor, methods=["POST"]),
         Route("/merge-action", merge_action, methods=["POST"]),
         Route("/commit", commit, methods=["POST"]),
+        Route("/push", push, methods=["POST"]),
         Route("/record-file-usage", record_file_usage_endpoint,
               methods=["POST"]),
         Route("/generate-commit-message", generate_commit_message,
