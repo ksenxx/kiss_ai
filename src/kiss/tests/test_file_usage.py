@@ -71,7 +71,8 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
                 frequent.append(item)
             else:
                 rest.append(item)
-        frequent.sort(key=lambda m: -usage.get(m["text"], 0))
+        frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
+        rest.sort(key=lambda m: m["type"] != "file")
         for f in frequent:
             f["type"] = "frequent_" + f["type"]
         result = (frequent + rest)[:20]
@@ -103,6 +104,57 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         assert len(result) == 2
         assert all(r["type"] == "file" for r in result)
 
+    def test_files_before_folders_in_rest(self) -> None:
+        file_cache = ["dir1/", "a.py", "dir2/", "b.py", "dir3/"]
+        usage: dict[str, int] = {}
+        frequent: list[dict[str, str]] = []
+        rest: list[dict[str, str]] = []
+        for path in file_cache:
+            item = {
+                "type": "dir" if path.endswith("/") else "file",
+                "text": path,
+            }
+            if usage.get(path, 0) > 0:
+                frequent.append(item)
+            else:
+                rest.append(item)
+        rest.sort(key=lambda m: m["type"] != "file")
+        result = (frequent + rest)[:20]
+        assert result[0]["text"] == "a.py"
+        assert result[1]["text"] == "b.py"
+        assert result[2]["text"] == "dir1/"
+        assert result[3]["text"] == "dir2/"
+        assert result[4]["text"] == "dir3/"
+
+    def test_files_before_folders_in_frequent(self) -> None:
+        file_cache = ["dir1/", "a.py", "dir2/", "b.py"]
+        usage = {"dir1/": 10, "a.py": 5, "dir2/": 3, "b.py": 1}
+        frequent: list[dict[str, str]] = []
+        rest: list[dict[str, str]] = []
+        for path in file_cache:
+            item = {
+                "type": "dir" if path.endswith("/") else "file",
+                "text": path,
+            }
+            if usage.get(path, 0) > 0:
+                frequent.append(item)
+            else:
+                rest.append(item)
+        frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
+        rest.sort(key=lambda m: m["type"] != "file")
+        for f in frequent:
+            f["type"] = "frequent_" + f["type"]
+        result = (frequent + rest)[:20]
+        # Files come before dirs, sorted by usage within each group
+        assert result[0]["text"] == "a.py"
+        assert result[0]["type"] == "frequent_file"
+        assert result[1]["text"] == "b.py"
+        assert result[1]["type"] == "frequent_file"
+        assert result[2]["text"] == "dir1/"
+        assert result[2]["type"] == "frequent_dir"
+        assert result[3]["text"] == "dir2/"
+        assert result[3]["type"] == "frequent_dir"
+
     def test_query_filters_before_sort(self) -> None:
         file_cache = ["src/a.py", "lib/b.py", "src/c.py"]
         usage = {"src/c.py": 10, "lib/b.py": 5}
@@ -120,7 +172,8 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
                 frequent.append(item)
             else:
                 rest.append(item)
-        frequent.sort(key=lambda m: -usage.get(m["text"], 0))
+        frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
+        rest.sort(key=lambda m: m["type"] != "file")
         for f in frequent:
             f["type"] = "frequent_" + f["type"]
         result = (frequent + rest)[:20]
