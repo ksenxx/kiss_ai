@@ -59,7 +59,7 @@ class ConsolePrinter(Printer):
             self._mid_line = False
 
     def _stream_delta(self, text: str, **kwargs: Any) -> None:
-        self._console.print(text, end="", highlight=False, **kwargs)
+        self._console.print(text, end="", highlight=False, markup=False, **kwargs)
         if text:
             self._mid_line = not text.endswith("\n")
 
@@ -78,13 +78,13 @@ class ConsolePrinter(Printer):
         """
         if type == "text":
             self._flush_newline()
-            self._console.print(content, **kwargs)
+            self._console.print(content, markup=False, **kwargs)
             return ""
         if type == "prompt":
             self._flush_newline()
             self._console.print(
                 Panel(
-                    str(content),
+                    Text(str(content)),
                     title="[bold]Prompt[/bold]",
                     border_style="cyan",
                     padding=(1, 2),
