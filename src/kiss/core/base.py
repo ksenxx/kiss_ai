@@ -191,6 +191,16 @@ class Base:
         """
         return json.dumps(self.messages, indent=2)
 
+    def get_trajectory_path(self) -> Path:
+        """Return the path where this agent's trajectory is/will be saved.
+
+        Returns:
+            Path: The file path for the trajectory YAML file.
+        """
+        folder_path = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
+        name_safe = self.name.replace(" ", "_").replace("/", "_")
+        return folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
+
     def _add_message(self, role: str, content: Any, timestamp: int | None = None) -> None:
         """Add a message to the history.
 
