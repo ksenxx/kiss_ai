@@ -135,7 +135,7 @@ class TestBuildHtmlSplitLayout(unittest.TestCase):
         html = chatbot_ui._build_html("T")
         for elem in ("split-container", "editor-panel", "divider", "assistant-panel"):
             assert f'id="{elem}"' in html, f"Missing #{elem}"
-        assert "width:80%" in html
+        assert "width:75%" in html
 
     def test_header_buttons(self) -> None:
         html = chatbot_ui._build_html("T")

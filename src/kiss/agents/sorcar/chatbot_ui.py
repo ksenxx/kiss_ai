@@ -486,7 +486,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 #editor-fallback p{margin:4px 0;color:rgba(255,255,255,0.5);font-size:13px}
 #merge-toolbar{
-  display:none;position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+  display:none;position:absolute;bottom:48px;left:50%;transform:translateX(-50%);
   z-index:100;gap:4px;
   background:rgba(18,18,20,0.95);backdrop-filter:blur(12px);
   -webkit-backdrop-filter:blur(12px);
@@ -1623,11 +1623,7 @@ document.addEventListener('click',function(e){
 });
 function mergeAction(action){
   fetch('/merge-action',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:action})}).then(function(r){return r.json()}).then(function(d){
-    if(action==='accept-all'||action==='reject-all'){
-      document.getElementById('merge-toolbar').style.display='none';
-    }
-  }).catch(function(){});
+    body:JSON.stringify({action:action})}).catch(function(){});
 }
 function mergeCommit(){
   var btn=document.getElementById('commit-btn');
@@ -1761,7 +1757,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
 
     return HTML_HEAD.format(title=title, css=css) + f"""<body>
 <div id="split-container">
-  <div id="editor-panel" style="width:80%;flex-shrink:0">
+  <div id="editor-panel" style="width:75%;flex-shrink:0">
     {editor_content}
     <div id="merge-toolbar">
       <button onclick="mergeAction('prev')">&#9664; Prev</button>

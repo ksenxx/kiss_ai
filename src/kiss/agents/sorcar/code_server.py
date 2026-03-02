@@ -256,6 +256,7 @@ function activate(ctx){
     await vscode.workspace.saveAll(false);
     showMergeButtons(false);
     vscode.window.showInformationMessage('All changes accepted.');
+    firePost('/merge-action',{action:'all-done'});
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectAll',async function(){
     for(var fp of Object.keys(ms)){
@@ -274,6 +275,7 @@ function activate(ctx){
     await vscode.workspace.saveAll(false);
     showMergeButtons(false);
     vscode.window.showInformationMessage('All changes rejected.');
+    firePost('/merge-action',{action:'all-done'});
   }));
   function readPort(){
     try{return fs.readFileSync(path.join(home,'.kiss','assistant-port'),'utf8').trim();}
