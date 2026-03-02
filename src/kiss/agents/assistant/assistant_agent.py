@@ -125,7 +125,7 @@ class AssistantAgent(RelentlessAgent):
                 arguments=arguments,
                 max_steps=max_steps,
                 max_budget=max_budget,
-                work_dir=work_dir or ".",
+                work_dir=work_dir,
                 printer=printer,
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,

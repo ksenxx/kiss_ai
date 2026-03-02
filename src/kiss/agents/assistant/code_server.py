@@ -120,13 +120,12 @@ function activate(ctx){
       var L=[];
       for(var i=0;i<s.hunks.length;i++){
         var h=s.hunks[i];
-        var endLn=h.nc>0?h.ns+h.nc:h.os+h.oc;
-        var ln=Math.min(endLn,doc.lineCount-1);
+        var ln=h.oc>0?h.os:h.ns;
         var r=new vscode.Range(ln,0,ln,0);
         var fp=doc.uri.fsPath;
-        L.push(new vscode.CodeLens(r,{title:'\\u2705 Accept',
+        L.push(new vscode.CodeLens(r,{title:'$(check) Accept',
           command:'kiss.acceptChange',arguments:[fp,i]}));
-        L.push(new vscode.CodeLens(r,{title:'\\u274c Reject',
+        L.push(new vscode.CodeLens(r,{title:'$(close) Reject',
           command:'kiss.rejectChange',arguments:[fp,i]}));
       }
       return L;
@@ -442,7 +441,7 @@ function activate(ctx){
     showMergeButtons(true);
     vscode.window.showInformationMessage(
       'Reviewing '+data.files.length+' file(s). '
-      +'Red = old, Green = new. Use \\u2705 Accept / \\u274c Reject on each change.');
+      +'Red = old, Green = new. Use Accept / Reject on each change.');
   }
 }
 module.exports={activate};

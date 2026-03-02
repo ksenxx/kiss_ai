@@ -117,33 +117,15 @@ echo "Replace all: $REPLACE_ALL"
 echo ""
 
 # Handle replacement based on mode
+export EDIT_NEW_STRING="$NEW_STRING"
+
 if [ "$REPLACE_ALL" = "true" ]; then
-    # Replace all occurrences
     if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
         echo -e "${RED}Error: String not found in file${NC}" >&2
         exit 3
     fi
-
-    # Use python for literal string replacement (handles special chars)
-    # Pass strings via environment variables to handle embedded quotes safely
-    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
-    export EDIT_NEW_STRING="$NEW_STRING"
-    python3 -c "
-import os
-file_path = os.environ['EDIT_FILE_PATH']
-old_string = os.environ['EDIT_OLD_STRING']
-new_string = os.environ['EDIT_NEW_STRING']
-with open(file_path, 'r') as f:
-    content = f.read()
-content = content.replace(old_string, new_string)
-with open(file_path, 'w') as f:
-    f.write(content)
-"
-
-    echo -e "${GREEN}✓ Successfully replaced $OCCURRENCE_COUNT occurrence(s)${NC}"
-
+    REPLACE_COUNT=""
 else
-    # Single replacement mode - requires exactly one occurrence
     if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
         echo -e "${RED}Error: String not found in file${NC}" >&2
         exit 3
@@ -152,23 +134,29 @@ else
         echo -e "${YELLOW}Hint: Use replace_all=true to replace all occurrences${NC}" >&2
         exit 3
     fi
+    REPLACE_COUNT="1"
+fi
 
-    # Exactly one occurrence - safe to replace
-    # Pass strings via environment variables to handle embedded quotes safely
-    export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
-    export EDIT_NEW_STRING="$NEW_STRING"
-    python3 -c "
+export EDIT_REPLACE_COUNT="$REPLACE_COUNT"
+python3 -c "
 import os
 file_path = os.environ['EDIT_FILE_PATH']
 old_string = os.environ['EDIT_OLD_STRING']
 new_string = os.environ['EDIT_NEW_STRING']
+count = int(os.environ['EDIT_REPLACE_COUNT']) if os.environ['EDIT_REPLACE_COUNT'] else -1
 with open(file_path, 'r') as f:
     content = f.read()
-content = content.replace(old_string, new_string, 1)
+if count >= 0:
+    content = content.replace(old_string, new_string, count)
+else:
+    content = content.replace(old_string, new_string)
 with open(file_path, 'w') as f:
     f.write(content)
 "
 
+if [ "$REPLACE_ALL" = "true" ]; then
+    echo -e "${GREEN}✓ Successfully replaced $OCCURRENCE_COUNT occurrence(s)${NC}"
+else
     echo -e "${GREEN}✓ Successfully replaced 1 occurrence${NC}"
 fi
 
