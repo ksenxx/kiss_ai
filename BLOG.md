@@ -275,34 +275,7 @@ The framework includes advanced features that would make any evolutionary comput
 - **Power-Law & Performance-Novelty Sampling**: Sophisticated parent selection strategies
 - **Multi-Model Support**: Use different LLMs with configurable probabilities
 
-This isn't theoretical. The included `kissevolve_bubblesort.py` script demonstrates how to find an O(n log n) sorting algorithm.
-
-______________________________________________________________________
-
-## 🏗️ Real-World Ready: SWE-bench Integration
-
-KISS isn't a toy. It's battle-tested against one of the most challenging AI benchmarks: **SWE-bench Verified**.
-
-SWE-bench presents AI systems with real GitHub issues from major Python repositories. The task? Generate patches that actually fix the bugs. It's the software engineering equivalent of a PhD qualifying exam.
-
-KISS includes first-class support:
-
-```bash
-uv run src/kiss/evals/swe_agent_verified/run_swebench.py \
-    --swebench_verified.model gemini-3-flash-preview \
-    --swebench_verified.instance_id "django__django-11099"
-# SWE-bench integration (see project documentation for setup)
-```
-
-The agent:
-
-1. Spins up a Docker container with the exact repository state
-1. Reads the issue description
-1. Explores the codebase using bash commands
-1. Generates a patch
-1. Gets evaluated by the official SWE-bench harness
-
-All with built-in trajectory saving, budget tracking, and automatic evaluation.
+This isn't theoretical. The KISSEvolve README includes a complete example demonstrating how to evolve an O(n log n) sorting algorithm from bubble sort.
 
 ______________________________________________________________________
 
@@ -313,7 +286,7 @@ KISS doesn't lock you into any single provider. Out of the box, it supports:
 | Provider | Models |
 |----------|--------|
 | **OpenAI** | GPT-4.1, GPT-4o, GPT-5 series |
-| **Anthropic** | Claude Opus 4.5, Sonnet 4.5, Haiku 4.5 |
+| **Anthropic** | Claude Opus 4.6/4.5/4.1, Sonnet 4.5/4, Haiku 4.5 |
 | **Google** | Gemini 2.5/3 Pro, Gemini Flash |
 | **Together AI** | Llama 4, Qwen 3, DeepSeek R1/V3 |
 | **OpenRouter** | 400+ models from all providers |
@@ -378,7 +351,7 @@ ______________________________________________________________________
 Need retrieval-augmented generation? KISS includes `SimpleRAG`:
 
 ```python
-from kiss.rag import SimpleRAG
+from kiss.agents.kiss_evolve import SimpleRAG
 
 rag = SimpleRAG(model_name="gpt-4o", metric="cosine")
 
@@ -422,12 +395,11 @@ kiss/
 │   ├── kiss_agent.py      # ~450 lines. That's the whole agent.
 │   └── models/            # OpenAI, Anthropic, Gemini, Together, OpenRouter
 ├── agents/         # Pre-built agents and optimization frameworks
+│   ├── assistant/         # Browser-based IDE (KISS Sorcar)
+│   ├── coding_agents/     # Repo optimizer and agent optimizer
 │   ├── gepa/              # Genetic-Pareto prompt evolution
-├── evals/          # Benchmark integrations
-│   └── swe_agent_verified/# SWE-bench benchmark integration
-│   └── kiss_evolve/       # Evolutionary algorithm discovery
+│   └── kiss_evolve/       # Evolutionary algorithm discovery + SimpleRAG
 ├── docker/         # Container management
-├── rag/            # Simple retrieval-augmented generation
 └── viz_trajectory/ # Web-based trajectory visualizer
 ```
 
@@ -442,7 +414,7 @@ ______________________________________________________________________
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and setup
-git clone https://github.com/your-repo/kiss_ai.git
+git clone https://github.com/ksenxx/kiss_ai.git
 cd kiss_ai
 uv venv --python 3.13
 uv sync --group dev

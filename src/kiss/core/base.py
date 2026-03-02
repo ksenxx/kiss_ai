@@ -28,6 +28,7 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 
 yaml.add_representer(str, _str_presenter)
 
+_KISS_DIR = Path().home() / ".kiss"
 
 _artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
 
@@ -36,7 +37,8 @@ SYSTEM_PROMPT = f"""
 - Write() for new files. Edit() for small changes.
 - Use bounded poll loops, never unbounded waits.
 - Use go_to_url() for browser tool and internet search or testing an agent/app.
-- Look at `{_artifact_dir.parent}/TASK_HISTORY.md` for task history and context. DO NOT WRITE/EDIT IT.
+- Look at `{_artifact_dir.parent}/TASK_HISTORY.md` for task history and context.
+  DO NOT WRITE/EDIT IT.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
@@ -70,8 +72,8 @@ SYSTEM_PROMPT = f"""
 
 ### Self-Improvement Loop
 
-- Just before finishing an agent task, update `{_KISS_DIR}/LESSONS.md` 
-  with instructions and rules for yourself on how to avoid making the same 
+- Just before finishing an agent task, update `{_KISS_DIR}/LESSONS.md`
+  with instructions and rules for yourself on how to avoid making the same
   mistakes in the future
 - Ruthlessly iterate on these lessons until mistake rate drops
 - Review lessons when the agent starts

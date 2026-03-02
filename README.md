@@ -23,8 +23,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
 - [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
 - [Multi-Agent Orchestration](#-multi-agent-orchestration-is-function-composition)
-- [Relentless Coding Agent](#-using-relentless-coding-agent)
-- [Browser-Based Assistant](#-browser-based-assistant)
+- [KISS Sorcar](#-kiss-sorcar)
 - [Repo Optimizer](#-using-repo-optimizer)
 - [Output Formatting](#-output-formatting)
 - [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
@@ -522,6 +521,7 @@ kiss/
 │   │   ├── conftest.py
 │   │   ├── run_all_models_test.py          # Run tests across all models
 │   │   ├── test_a_model.py
+│   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
 │   │   ├── test_bash_stream_flush.py
 │   │   ├── test_chatbot_tasks.py
