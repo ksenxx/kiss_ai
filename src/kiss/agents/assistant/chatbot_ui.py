@@ -240,6 +240,17 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 #stop-btn:hover{background:rgba(248,81,73,0.2);box-shadow:0 0 16px rgba(248,81,73,0.15)}
 #stop-btn svg{width:14px;height:14px}
+#stop-btn.waiting svg{display:none}
+#stop-btn.waiting::after{
+  content:'';width:14px;height:14px;
+  border:2px solid rgba(255,255,255,0.15);
+  border-top-color:rgba(88,166,255,0.7);
+  border-radius:50%;animation:spin .8s linear infinite;
+}
+#stop-btn.waiting{
+  background:rgba(88,166,255,0.08);color:rgba(88,166,255,0.7);
+  border-color:rgba(88,166,255,0.15);
+}
 #clear-btn{
   background:none;color:rgba(255,255,255,0.2);border:none;
   width:24px;height:24px;cursor:pointer;flex-shrink:0;
@@ -554,6 +565,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel #send-btn svg{width:12px;height:12px}
 #assistant-panel #stop-btn{width:28px;height:28px}
 #assistant-panel #stop-btn svg{width:11px;height:11px}
+#assistant-panel #stop-btn.waiting::after{width:11px;height:11px}
 #assistant-panel #clear-btn{width:18px;height:18px}
 #assistant-panel #clear-btn svg{width:11px;height:11px}
 #assistant-panel #upload-btn{padding:4px 6px;border-radius:6px}
@@ -727,6 +739,13 @@ body{background:var(--bg)}
 #assistant-panel #stop-btn:hover{
   background:rgba(var(--red-rgb),0.25);
   box-shadow:0 0 12px rgba(var(--red-rgb),0.15);
+}
+#assistant-panel #stop-btn.waiting{
+  background:rgba(var(--accent-rgb),0.1);
+  border-color:rgba(var(--accent-rgb),0.2);
+}
+#assistant-panel #stop-btn.waiting::after{
+  border-color:var(--border);border-top-color:var(--accent);
 }
 #assistant-panel #clear-btn{color:rgba(var(--fg-rgb),0.25)}
 #assistant-panel #clear-btn:hover{color:rgba(var(--fg-rgb),0.6)}
@@ -1002,17 +1021,13 @@ function stopTimer(){if(timerIv){clearInterval(timerIv);timerIv=null;}}
 var _spinnerTimer=null;
 function removeSpinner(){
   if(_spinnerTimer){clearTimeout(_spinnerTimer);_spinnerTimer=null;}
-  var sp=document.getElementById('wait-spinner');
-  if(sp)sp.remove();
+  stopBtn.classList.remove('waiting');
 }
-function showSpinner(msg){
+function showSpinner(){
   removeSpinner();
   _spinnerTimer=setTimeout(function(){
     _spinnerTimer=null;
-    var sp=mkEl('div','spinner');
-    sp.id='wait-spinner';
-    sp.textContent=msg||'Waiting ...';
-    O.appendChild(sp);sb();
+    stopBtn.classList.add('waiting');
   },250);
 }
 function setReady(label){
