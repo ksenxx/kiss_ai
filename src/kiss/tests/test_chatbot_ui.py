@@ -112,8 +112,7 @@ def test_cmd_k_keybinding_in_js():
     assert "e.key==='k'" in js, "Should listen for 'k' key"
     assert "e.metaKey" in js, "Should check metaKey (Cmd on Mac)"
     assert "e.ctrlKey" in js, "Should check ctrlKey (Ctrl on Windows/Linux)"
-    assert "frame.focus()" in js, "Should focus the iframe"
-    assert "frame.contentWindow.focus()" in js, "Should focus the iframe content window"
+    assert "/focus-editor" in js, "Should call focus-editor endpoint"
     assert "inp.focus()" in js, "Should focus the chatbox input"
 
 

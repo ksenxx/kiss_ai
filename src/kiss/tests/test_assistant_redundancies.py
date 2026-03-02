@@ -4,15 +4,15 @@ from kiss.agents.assistant.chatbot_ui import CHATBOT_CSS, CHATBOT_JS, _build_htm
 
 
 def test_no_duplicate_css_min_height():
-    """The old min-height:24px line should not be present (was overridden by 96px)."""
+    """The old min-height:24px line should not be present (was overridden by 68px)."""
     assert "min-height:24px" not in CHATBOT_CSS
-    assert "min-height:96px" in CHATBOT_CSS
+    assert "min-height:68px" in CHATBOT_CSS
 
 
 def test_no_duplicate_textarea_rows():
-    """HTML should have only one textarea with rows=4, not the old rows=1."""
+    """HTML should have only one textarea with rows=3, not the old rows=1."""
     html = _build_html("Test", "", "/tmp")
-    assert html.count('rows="4"') == 1
+    assert html.count('rows="3"') == 1
     assert 'rows="1"' not in html
 
 
