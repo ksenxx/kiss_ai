@@ -68,9 +68,9 @@ CODING_INSTRUCTIONS = """
 
 GENERAL_ASSISTANT_INSTRUCTIONS = """
 # Rules
-- Write() for new files. Edit() for small changes. Bash timeout_seconds=120 for long runs.
+- Write() for new files. Edit() for small changes.
 - Use bounded poll loops, never unbounded waits.
-- Use go_to_url() for browser tool.
+- Use go_to_url() for browser tool and internet search or testing an agent/app.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**

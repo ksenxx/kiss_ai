@@ -1,5 +1,5 @@
 """Tests for Model base class concrete methods (add_message_to_conversation,
-add_function_results_to_conversation_and_return) moved from subclasses."""
+add_function_results_to_conversation_and_return, compact_conversation) moved from subclasses."""
 
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.gemini_model import GeminiModel
@@ -150,3 +150,209 @@ class TestAnthropicOverride:
         ])
         last = m.conversation[-1]
         assert last["content"][0]["tool_use_id"] == "toolu_fn_a_0"
+
+
+class TestEstimateConversationTokens:
+
+    def test_empty_conversation(self):
+        for m in [_make_anthropic(), _make_gemini(), _make_openai()]:
+            m.conversation = []
+            assert m._estimate_conversation_tokens() == 0
+
+    def test_string_content(self):
+        m = _make_openai()
+        m.conversation = [{"role": "user", "content": "x" * 400}]
+        assert m._estimate_conversation_tokens() == 100
+
+    def test_list_content_blocks(self):
+        m = _make_anthropic()
+        m.conversation = [
+            {"role": "user", "content": [
+                {"type": "tool_result", "content": "a" * 800},
+            ]}
+        ]
+        tokens = m._estimate_conversation_tokens()
+        assert tokens >= 200
+
+
+class TestCompactConversation:
+
+    def _big_conversation_openai(self):
+        m = _make_openai()
+        big = "x" * 4000
+        m.conversation = [
+            {"role": "user", "content": "initial prompt"},
+            {"role": "assistant", "content": "thinking..."},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "more thinking..."},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "even more..."},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "latest response"},
+            {"role": "tool", "content": "latest result"},
+        ]
+        return m
+
+    def test_no_compaction_when_under_threshold(self):
+        m = self._big_conversation_openai()
+        original = [msg.get("content") for msg in m.conversation]
+        m.compact_conversation(1_000_000)
+        after = [msg.get("content") for msg in m.conversation]
+        assert original == after
+
+    def test_compaction_truncates_old_tool_results(self):
+        m = self._big_conversation_openai()
+        m.compact_conversation(100)
+        assert len(m.conversation[2]["content"]) < 4000
+        assert "truncated" in m.conversation[2]["content"]
+
+    def test_compaction_preserves_first_message(self):
+        m = self._big_conversation_openai()
+        m.compact_conversation(100)
+        assert m.conversation[0]["content"] == "initial prompt"
+
+    def test_compaction_preserves_recent_messages(self):
+        m = self._big_conversation_openai()
+        m.compact_conversation(100)
+        assert m.conversation[-1]["content"] == "latest result"
+        assert m.conversation[-2]["content"] == "latest response"
+
+    def test_compaction_anthropic_tool_results(self):
+        m = _make_anthropic()
+        big = "y" * 4000
+        m.conversation = [
+            {"role": "user", "content": "prompt"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "z" * 5000, "signature": "sig123"},
+                {"type": "text", "text": "response"},
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": big},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "step2"}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t2", "content": big},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "step3"}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t3", "content": big},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "latest"}]},
+            {"role": "user", "content": "final"},
+        ]
+        m.compact_conversation(100)
+        tr = m.conversation[2]["content"][0]
+        assert len(tr["content"]) < 4000
+        assert "truncated" in tr["content"]
+
+    def test_compaction_never_modifies_thinking_blocks(self):
+        m = _make_anthropic()
+        big_thinking = "z" * 5000
+        big = "x" * 4000
+        m.conversation = [
+            {"role": "user", "content": "prompt"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": big_thinking, "signature": "sig"},
+                {"type": "text", "text": "hi"},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": big},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "step2"}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t2", "content": big},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "step3"}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t3", "content": big},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+            {"role": "user", "content": "latest"},
+        ]
+        m.compact_conversation(100)
+        thinking = m.conversation[1]["content"][0]
+        assert thinking["thinking"] == big_thinking
+        assert thinking["signature"] == "sig"
+
+    def test_compaction_short_conversation_unchanged(self):
+        m = _make_openai()
+        m.conversation = [
+            {"role": "user", "content": "x" * 4000},
+            {"role": "assistant", "content": "y" * 4000},
+        ]
+        orig_lens = [len(msg["content"]) for msg in m.conversation]
+        m.compact_conversation(100)
+        after_lens = [len(msg["content"]) for msg in m.conversation]
+        assert orig_lens == after_lens
+
+    def test_compaction_preserves_system_and_user_message_openai(self):
+        m = _make_openai()
+        big = "x" * 4000
+        m.conversation = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Do the task: " + "a" * 2000},
+            {"role": "assistant", "content": "ok"},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "next"},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "more"},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "latest"},
+            {"role": "tool", "content": "small result"},
+        ]
+        m.compact_conversation(100)
+        assert m.conversation[0]["content"] == "You are a helpful assistant."
+        assert m.conversation[1]["content"].startswith("Do the task: ")
+        assert len(m.conversation[1]["content"]) > 300
+        assert len(m.conversation[3]["content"]) < 4000
+        assert "truncated" in m.conversation[3]["content"]
+
+    def test_compaction_preserves_user_message_gemini(self):
+        m = _make_gemini()
+        big = "x" * 4000
+        m.conversation = [
+            {"role": "user", "content": "Do the task: " + "a" * 2000},
+            {"role": "assistant", "content": "ok"},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "next"},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "more"},
+            {"role": "tool", "content": big},
+            {"role": "assistant", "content": "latest"},
+            {"role": "tool", "content": "small result"},
+        ]
+        m.compact_conversation(100)
+        assert m.conversation[0]["content"].startswith("Do the task: ")
+        assert len(m.conversation[0]["content"]) > 300
+        assert len(m.conversation[2]["content"]) < 4000
+        assert "truncated" in m.conversation[2]["content"]
+
+    def test_compaction_truncates_long_text_blocks(self):
+        m = _make_anthropic()
+        big_text = "w" * 4000
+        m.conversation = [
+            {"role": "user", "content": "prompt"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": big_text},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "x" * 4000},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": big_text},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t2", "content": "x" * 4000},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "step3"}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t3", "content": "x" * 4000},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "latest"}]},
+            {"role": "user", "content": "final"},
+        ]
+        m.compact_conversation(100)
+        text_block = m.conversation[1]["content"][0]
+        assert len(text_block["text"]) < 4000
+        assert "truncated" in text_block["text"]
