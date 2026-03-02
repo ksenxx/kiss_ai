@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -86,7 +87,7 @@ class TestPromptDetectorForPlayButton:
 class TestActiveFileTracking:
     """Test the active-file.json reading and prompt detection logic."""
 
-    def test_active_file_json_write_read(self, tmp_path: str) -> None:
+    def test_active_file_json_write_read(self, tmp_path: Path) -> None:
         active_file = os.path.join(str(tmp_path), "active-file.json")
         data = {"path": "/some/file.md"}
         with open(active_file, "w") as f:
@@ -95,7 +96,7 @@ class TestActiveFileTracking:
             loaded = json.loads(f.read())
         assert loaded["path"] == "/some/file.md"
 
-    def test_active_file_json_empty_path(self, tmp_path: str) -> None:
+    def test_active_file_json_empty_path(self, tmp_path: Path) -> None:
         active_file = os.path.join(str(tmp_path), "active-file.json")
         data = {"path": ""}
         with open(active_file, "w") as f:
@@ -104,7 +105,7 @@ class TestActiveFileTracking:
             loaded = json.loads(f.read())
         assert loaded["path"] == ""
 
-    def test_active_file_json_missing(self, tmp_path: str) -> None:
+    def test_active_file_json_missing(self, tmp_path: Path) -> None:
         active_file = os.path.join(str(tmp_path), "active-file.json")
         assert not os.path.exists(active_file)
 
@@ -155,21 +156,29 @@ class TestEndpointRoutes:
 class TestPromptDetectorEdgeCases:
     """Test edge cases for PromptDetector relevant to the play button."""
 
-    def test_xml_tagged_prompt(self, tmp_path: str) -> None:
+    def test_xml_tagged_prompt(self, tmp_path: Path) -> None:
         p = tmp_path / "xml_prompt.md"
-        p.write_text("<system>\nYou are a helpful assistant.\n</system>\n<instruction>\nAnalyze the following text.\n</instruction>\n")
+        content = (
+            "<system>\nYou are a helpful assistant.\n</system>\n"
+            "<instruction>\nAnalyze the following text.\n</instruction>\n"
+        )
+        p.write_text(content)
         detector = PromptDetector()
         is_prompt, score, reasons = detector.analyze(str(p))
         assert is_prompt is True
 
-    def test_frontmatter_prompt(self, tmp_path: str) -> None:
+    def test_frontmatter_prompt(self, tmp_path: Path) -> None:
         p = tmp_path / "front.md"
-        p.write_text("---\nmodel: gpt-4\ntemperature: 0.7\n---\n# Task\nWrite a marketing email for {{ product_name }}.\n")
+        content = (
+            "---\nmodel: gpt-4\ntemperature: 0.7\n---\n"
+            "# Task\nWrite a marketing email for {{ product_name }}.\n"
+        )
+        p.write_text(content)
         detector = PromptDetector()
         is_prompt, score, reasons = detector.analyze(str(p))
         assert is_prompt is True
 
-    def test_empty_md_file(self, tmp_path: str) -> None:
+    def test_empty_md_file(self, tmp_path: Path) -> None:
         p = tmp_path / "empty.md"
         p.write_text("")
         detector = PromptDetector()
@@ -177,7 +186,7 @@ class TestPromptDetectorEdgeCases:
         assert is_prompt is False
         assert score == 0.0
 
-    def test_blog_post_not_prompt(self, tmp_path: str) -> None:
+    def test_blog_post_not_prompt(self, tmp_path: Path) -> None:
         p = tmp_path / "blog.md"
         p.write_text("# My Trip to Japan\nI went to Tokyo last week.\nThe food is great.\n")
         detector = PromptDetector()
@@ -263,7 +272,7 @@ class TestPlayButtonDisableDuringRun:
 class TestEndToEndPromptDetection:
     """End-to-end test: write active-file.json, check prompt detection."""
 
-    def test_prompt_file_workflow(self, prompt_file: str, tmp_path: str) -> None:
+    def test_prompt_file_workflow(self, prompt_file: str, tmp_path: Path) -> None:
         # Simulate writing active-file.json
         active_file = os.path.join(str(tmp_path), "active-file.json")
         with open(active_file, "w") as f:
@@ -288,7 +297,7 @@ class TestEndToEndPromptDetection:
             content = f.read()
         assert "System Prompt" in content
 
-    def test_non_prompt_file_workflow(self, non_prompt_md_file: str, tmp_path: str) -> None:
+    def test_non_prompt_file_workflow(self, non_prompt_md_file: str, tmp_path: Path) -> None:
         active_file = os.path.join(str(tmp_path), "active-file.json")
         with open(active_file, "w") as f:
             json.dump({"path": non_prompt_md_file}, f)
@@ -302,7 +311,7 @@ class TestEndToEndPromptDetection:
         is_prompt, _score, _reasons = detector.analyze(fpath)
         assert is_prompt is False
 
-    def test_non_md_file_workflow(self, non_md_file: str, tmp_path: str) -> None:
+    def test_non_md_file_workflow(self, non_md_file: str, tmp_path: Path) -> None:
         active_file = os.path.join(str(tmp_path), "active-file.json")
         with open(active_file, "w") as f:
             json.dump({"path": non_md_file}, f)
