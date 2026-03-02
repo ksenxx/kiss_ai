@@ -63,7 +63,7 @@ curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/inst
 
 # To install as a library
 pip install kiss-agent-framework
-python -m kiss.agents.sorkar.sorkar
+python -m kiss.agents.sorcar.sorcar
 ```
 
 # What is KISS and KISS Sorcar? How it started?
@@ -457,9 +457,9 @@ The Docker manager automatically handles image pulling, container lifecycle, and
 kiss/
 ├── src/kiss/
 │   ├── agents/          # Agent implementations
-│   │   ├── sorkar/                 # Sorcar agent with coding + browser tools
+│   │   ├── sorcar/                 # Sorcar agent with coding + browser tools
 │   │   │   ├── assistant_agent.py      # AssistantAgent with coding and browser automation
-│   │   │   ├── sorkar.py              # Browser-based Sorcar UI
+│   │   │   ├── sorcar.py              # Browser-based Sorcar UI
 │   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
 │   │   │   ├── chatbot_ui.py           # Chatbot UI templates: CSS, JavaScript, HTML
 │   │   │   ├── code_server.py          # Code-server setup and git diff/merge utilities

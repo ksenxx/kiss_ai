@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorkar import task_history
+from kiss.agents.sorcar import task_history
 
 
 class TestFileUsage(unittest.TestCase):

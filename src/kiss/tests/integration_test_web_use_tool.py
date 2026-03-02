@@ -2,7 +2,7 @@
 
 import re
 
-from kiss.agents.sorkar.web_use_tool import WebUseTool
+from kiss.agents.sorcar.web_use_tool import WebUseTool
 
 
 def find_id(tree: str, pattern: str) -> int:

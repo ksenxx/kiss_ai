@@ -100,6 +100,8 @@ function activate(ctx){
   });
   var ms={};
   var clFire=new vscode.EventEmitter();
+  var prevSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,105);
+  prevSB.text='$(arrow-left) Prev';prevSB.command='kiss.prevChange';
   var nextSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,104);
   nextSB.text='$(arrow-right) Next';nextSB.command='kiss.nextChange';
   var acceptAllSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,103);
@@ -108,9 +110,9 @@ function activate(ctx){
   rejectAllSB.text='$(close-all) Reject All';rejectAllSB.command='kiss.rejectAll';
   var commitSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,101);
   commitSB.text='$(git-commit) Commit';commitSB.command='kiss.commitChanges';
-  ctx.subscriptions.push(nextSB,acceptAllSB,rejectAllSB,commitSB);
+  ctx.subscriptions.push(prevSB,nextSB,acceptAllSB,rejectAllSB,commitSB);
   function showMergeButtons(v){
-    [nextSB,acceptAllSB,rejectAllSB,commitSB].forEach(function(b){v?b.show():b.hide()});
+    [prevSB,nextSB,acceptAllSB,rejectAllSB,commitSB].forEach(function(b){v?b.show():b.hide()});
   }
   ctx.subscriptions.push(vscode.languages.registerCodeLensProvider({scheme:'file'},{
     onDidChangeCodeLenses:clFire.event,
@@ -190,6 +192,29 @@ function activate(ctx){
     }else{s.hunks.splice(idx,1);}
     if(!s.hunks.length)delete ms[fp];
     afterHunkAction(fp);
+  }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.prevChange',function(){
+    var allH=[];
+    for(var fp in ms)ms[fp].hunks.forEach(function(h){allH.push({fp:fp,h:h})});
+    if(!allH.length)return;
+    var ae=vscode.window.activeTextEditor;
+    var cf=ae?ae.document.uri.fsPath:'',cl=ae?ae.selection.active.line:999999;
+    var found=null;
+    for(var j=allH.length-1;j>=0;j--){
+      var ln=allH[j].h.nc>0?allH[j].h.ns:allH[j].h.os;
+      if(allH[j].fp===cf&&ln<cl){found=allH[j];break;}
+    }
+    if(!found)for(var j=allH.length-1;j>=0;j--){
+      if(allH[j].fp!==cf){found=allH[j];break;}
+    }
+    if(!found)found=allH[allH.length-1];
+    vscode.workspace.openTextDocument(vscode.Uri.file(found.fp)).then(function(doc){
+      vscode.window.showTextDocument(doc,{preview:false}).then(function(ed){
+        var ln=found.h.nc>0?found.h.ns:found.h.os;
+        ed.revealRange(new vscode.Range(ln,0,ln,0),vscode.TextEditorRevealType.InCenter);
+        ed.selection=new vscode.Selection(ln,0,ln,0);
+      });
+    });
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.nextChange',function(){
     var allH=[];
@@ -353,7 +378,8 @@ function activate(ctx){
       if(fs.existsSync(ap)){
         var ad=JSON.parse(fs.readFileSync(ap,'utf8'));
         fs.unlinkSync(ap);
-        if(ad.action==='next')vscode.commands.executeCommand('kiss.nextChange');
+        if(ad.action==='prev')vscode.commands.executeCommand('kiss.prevChange');
+        else if(ad.action==='next')vscode.commands.executeCommand('kiss.nextChange');
         else if(ad.action==='accept-all')vscode.commands.executeCommand('kiss.acceptAll');
         else if(ad.action==='reject-all')vscode.commands.executeCommand('kiss.rejectAll');
       }
@@ -507,6 +533,7 @@ def _setup_code_server(data_dir: str) -> bool:
             "commands": [
                 {"command": "kiss.acceptChange", "title": "Accept Change"},
                 {"command": "kiss.rejectChange", "title": "Reject Change"},
+                {"command": "kiss.prevChange", "title": "Previous Change"},
                 {"command": "kiss.nextChange", "title": "Next Change"},
                 {"command": "kiss.acceptAll", "title": "Accept All Changes"},
                 {"command": "kiss.rejectAll", "title": "Reject All Changes"},

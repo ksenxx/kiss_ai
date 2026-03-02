@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiss.agents.sorkar.browser_ui import (
+from kiss.agents.sorcar.browser_ui import (
     BASE_CSS,
     EVENT_HANDLER_JS,
     HTML_HEAD,
@@ -1764,6 +1764,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
   <div id="editor-panel" style="width:80%;flex-shrink:0">
     {editor_content}
     <div id="merge-toolbar">
+      <button onclick="mergeAction('prev')">&#9664; Prev</button>
       <button onclick="mergeAction('next')">&#9654; Next</button>
       <button onclick="mergeAction('accept-all')">&#10004; Accept All</button>
       <button onclick="mergeAction('reject-all')">&#10008; Reject All</button>

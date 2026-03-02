@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import kiss.agents.sorkar.task_history as assistant
+import kiss.agents.sorcar.task_history as assistant
 
 
 def _use_temp_history():

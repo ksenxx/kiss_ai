@@ -4,16 +4,16 @@ import os
 import subprocess
 import tempfile
 
-from kiss.agents.sorkar.chatbot_ui import CHATBOT_JS, _build_html
+from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS, _build_html
 
 
 def test_commit_author_in_assistant_source():
-    """The git commit command in sorkar.py must set author to KISS Sorcar."""
+    """The git commit command in sorcar.py must set author to KISS Sorcar."""
     import inspect
 
-    from kiss.agents.sorkar import sorkar
+    from kiss.agents.sorcar import sorcar
 
-    source = inspect.getsource(sorkar)
+    source = inspect.getsource(sorcar)
     assert "--author=KISS Sorcar <ksen@berkeley.edu>" in source
 
 
@@ -21,9 +21,9 @@ def test_commit_committer_env_in_assistant_source():
     """The git commit must set GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL to KISS Sorcar."""
     import inspect
 
-    from kiss.agents.sorkar import sorkar
+    from kiss.agents.sorcar import sorcar
 
-    source = inspect.getsource(sorkar)
+    source = inspect.getsource(sorcar)
     assert '"GIT_COMMITTER_NAME": "KISS Sorcar"' in source
     assert '"GIT_COMMITTER_EMAIL": "ksen@berkeley.edu"' in source
 
@@ -57,9 +57,9 @@ def test_push_route_in_assistant_source():
     """The /push route must be registered in the Starlette app."""
     import inspect
 
-    from kiss.agents.sorkar import sorkar
+    from kiss.agents.sorcar import sorcar
 
-    source = inspect.getsource(sorkar)
+    source = inspect.getsource(sorcar)
     assert 'Route("/push"' in source
 
 

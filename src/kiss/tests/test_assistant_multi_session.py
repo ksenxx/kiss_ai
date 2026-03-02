@@ -5,7 +5,7 @@ import tempfile
 
 import yaml
 
-from kiss.agents.sorkar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.assistant_agent import AssistantAgent
 from kiss.tests.conftest import requires_anthropic_api_key
 
 

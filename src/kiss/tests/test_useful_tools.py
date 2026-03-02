@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorkar.useful_tools import (
+from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
     _extract_command_names,
     _extract_leading_command_name,
