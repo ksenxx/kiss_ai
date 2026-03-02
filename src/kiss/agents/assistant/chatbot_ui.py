@@ -382,12 +382,15 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
-#history-btn,#proposals-btn{
+#history-btn,#proposals-btn,#run-prompt-btn{
   background:none;border:none;
   color:rgba(255,255,255,0.3);cursor:pointer;
-  padding:4px;transition:color 0.15s;display:flex;align-items:center;
+  padding:4px;transition:color 0.15s,opacity 0.15s;display:flex;align-items:center;
 }
 #history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.6)}
+#run-prompt-btn:not(:disabled):hover{color:rgba(34,197,94,0.9)}
+#run-prompt-btn:disabled{opacity:0.15;cursor:not-allowed}
+#run-prompt-btn:not(:disabled){color:rgba(34,197,94,0.7)}
 #sidebar-close{
   position:absolute;top:16px;right:16px;background:none;border:none;
   color:rgba(255,255,255,0.3);font-size:20px;cursor:pointer;
@@ -808,6 +811,8 @@ body{background:var(--bg)}
 #assistant-panel #history-btn:hover,#assistant-panel #proposals-btn:hover{
   color:rgba(var(--fg-rgb),0.6);
 }
+#assistant-panel #run-prompt-btn:not(:disabled){color:rgba(var(--green-rgb),0.7)}
+#assistant-panel #run-prompt-btn:not(:disabled):hover{color:var(--green)}
 #assistant-panel #sidebar-close{color:rgba(var(--fg-rgb),0.35)}
 #assistant-panel #sidebar-close:hover{
   color:rgba(var(--fg-rgb),0.7);background:rgba(var(--fg-rgb),0.06);
@@ -1648,6 +1653,36 @@ function loadTheme(){
 }
 loadTheme();setInterval(loadTheme,3000);
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
+var runPromptBtn=document.getElementById('run-prompt-btn');
+var _promptPath='';
+function checkActiveFile(){
+  fetch('/active-file-info').then(function(r){return r.json()}).then(function(d){
+    if(d.is_prompt){
+      runPromptBtn.disabled=false;
+      runPromptBtn.title='Run prompt: '+d.filename;
+      _promptPath=d.path;
+    }else{
+      runPromptBtn.disabled=true;
+      runPromptBtn.title='Run current file as prompt (no prompt detected)';
+      _promptPath='';
+    }
+  }).catch(function(){
+    runPromptBtn.disabled=true;_promptPath='';
+  });
+}
+checkActiveFile();setInterval(checkActiveFile,2000);
+runPromptBtn.addEventListener('click',function(){
+  if(runPromptBtn.disabled||running||!_promptPath)return;
+  fetch('/get-file-content?path='+encodeURIComponent(_promptPath))
+    .then(function(r){return r.json()}).then(function(d){
+    if(d.content){
+      inp.value=d.content;
+      inp.style.height='auto';
+      inp.style.height=inp.scrollHeight+'px';
+      submitTask();
+    }
+  }).catch(function(){});
+});
 document.addEventListener('keydown',function(e){
   var isMac=navigator.platform.toUpperCase().indexOf('MAC')>=0;
   if((isMac?e.metaKey:e.ctrlKey)&&e.key==='k'&&!e.shiftKey&&!e.altKey){
@@ -1772,6 +1807,12 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
                 <path d="M2 12l10 5 10-5"/>
+              </svg>
+            </button>
+            <button id="run-prompt-btn" title="Run current file as prompt" disabled>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
+                stroke="none">
+                <polygon points="5,3 19,12 5,21"/>
               </svg>
             </button>
             <div id="model-dropdown">
