@@ -647,7 +647,7 @@ ______________________________________________________________________
 #### `kiss.agents.coding_agents` — *Coding agents for KISS framework.*
 
 ```python
-from kiss.agents.coding_agents import Base, CODING_INSTRUCTIONS
+from kiss.agents.coding_agents import Base, SYSTEM_PROMPT
 ```
 
 ##### `class Base` — Base class for all KISS agents with common state management and persistence.

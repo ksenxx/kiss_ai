@@ -32,10 +32,7 @@ The module is part of the `kiss` package. No additional installation required.
 ```python
 from kiss.agents.create_and_optimize_agent import ImproverAgent
 
-improver = ImproverAgent(
-    max_steps=150,
-    max_budget=15.0,
-)
+improver = ImproverAgent()
 
 success, report = improver.improve(
     source_folder="/path/to/agent",
