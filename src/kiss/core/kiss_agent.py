@@ -85,7 +85,9 @@ class KISSAgent(Base):
         assert self.model is not None
         self.arguments = dict(arguments) if arguments is not None else {}
         self.prompt_template = prompt_template
-        full_prompt = self.prompt_template.format(**self.arguments)
+        full_prompt = self.prompt_template
+        for key, value in self.arguments.items():
+            full_prompt = full_prompt.replace("{" + key + "}", str(value))
 
         self._add_message("user", full_prompt)
         self.model.initialize(full_prompt, attachments=attachments)
