@@ -83,6 +83,7 @@ class AssistantAgent(RelentlessAgent):
         docker_image: str | None = None,
         headless: bool | None = None,
         verbose: bool | None = None,
+        current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
@@ -120,7 +121,10 @@ class AssistantAgent(RelentlessAgent):
                 model_name=model_name,
                 summarizer_model_name=summarizer_model_name,
                 system_instructions=system_instructions,
-                prompt_template=prompt_template,
+                prompt_template=(
+                    prompt_template
+                    + f"\n\nThe editor file path: {current_editor_file}"
+                ),
                 arguments=arguments,
                 max_steps=max_steps,
                 max_budget=max_budget,
