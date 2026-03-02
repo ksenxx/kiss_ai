@@ -99,9 +99,8 @@ def _load_history() -> list[dict[str, str]]:
                 return result
         except (json.JSONDecodeError, OSError):
             pass
-    entries = list(SAMPLE_TASKS)
-    _save_history(entries)
-    return entries
+    _save_history(list(SAMPLE_TASKS))
+    return _history_cache  # type: ignore[return-value]
 
 
 def _save_history(entries: list[dict[str, str]]) -> None:
@@ -140,10 +139,10 @@ def _save_proposals(proposals: list[str]) -> None:
         pass
 
 
-def _read_model_usage_file() -> dict:
-    if MODEL_USAGE_FILE.exists():
+def _load_json_dict(path: Path) -> dict:
+    if path.exists():
         try:
-            data = json.loads(MODEL_USAGE_FILE.read_text())
+            data = json.loads(path.read_text())
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, OSError):
@@ -151,18 +150,21 @@ def _read_model_usage_file() -> dict:
     return {}
 
 
-def _load_model_usage() -> dict[str, int]:
-    raw = _read_model_usage_file()
+def _int_values(raw: dict) -> dict[str, int]:
     return {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float))}
 
 
+def _load_model_usage() -> dict[str, int]:
+    return _int_values(_load_json_dict(MODEL_USAGE_FILE))
+
+
 def _load_last_model() -> str:
-    last = _read_model_usage_file().get("_last")
+    last = _load_json_dict(MODEL_USAGE_FILE).get("_last")
     return last if isinstance(last, str) else ""
 
 
 def _record_model_usage(model: str) -> None:
-    usage = _read_model_usage_file()
+    usage = _load_json_dict(MODEL_USAGE_FILE)
     usage[model] = int(usage.get(model, 0)) + 1
     usage["_last"] = model
     try:
@@ -177,15 +179,7 @@ FILE_USAGE_FILE = _KISS_DIR / "file_usage.json"
 
 def _load_file_usage() -> dict[str, int]:
     """Load file access frequency counts."""
-    if FILE_USAGE_FILE.exists():
-        try:
-            data = json.loads(FILE_USAGE_FILE.read_text())
-            if isinstance(data, dict):
-                return {str(k): int(v) for k, v in data.items()
-                        if isinstance(v, (int, float))}
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    return _int_values(_load_json_dict(FILE_USAGE_FILE))
 
 
 def _record_file_usage(path: str) -> None:
