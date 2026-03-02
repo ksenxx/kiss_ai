@@ -16,24 +16,24 @@
       - [`kiss.core.models.gemini_model`](#kisscoremodelsgemini_model)
     - [`kiss.core.printer`](#kisscoreprinter)
     - [`kiss.core.print_to_console`](#kisscoreprint_to_console)
-      - [`kiss.agents.assistant.browser_ui`](#kissagentsassistantbrowser_ui)
-      - [`kiss.agents.assistant.useful_tools`](#kissagentsassistantuseful_tools)
-      - [`kiss.agents.assistant.web_use_tool`](#kissagentsassistantweb_use_tool)
+      - [`kiss.agents.sorkar.browser_ui`](#kissagentssorkarbrowser_ui)
+      - [`kiss.agents.sorkar.useful_tools`](#kissagentssorkaruseful_tools)
+      - [`kiss.agents.sorkar.web_use_tool`](#kissagentssorkarweb_use_tool)
     - [`kiss.core.utils`](#kisscoreutils)
   - [`kiss.agents`](#kissagents)
     - [`kiss.agents.coding_agents`](#kissagentscoding_agents)
       - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
-    - [`kiss.agents.assistant`](#kissagentsassistant)
+    - [`kiss.agents.sorkar`](#kissagentssorkar)
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
-      - [`kiss.agents.assistant.assistant_agent`](#kissagentsassistantassistant_agent)
-      - [`kiss.agents.assistant.assistant`](#kissagentsassistantassistant)
-      - [`kiss.agents.assistant.config`](#kissagentsassistantconfig)
+      - [`kiss.agents.sorkar.assistant_agent`](#kissagentssorkarassistant_agent)
+      - [`kiss.agents.sorkar.sorkar`](#kissagentssorkarsorkar)
+      - [`kiss.agents.sorkar.config`](#kissagentssorkarconfig)
     - [`kiss.agents.gepa`](#kissagentsgepa)
       - [`kiss.agents.gepa.config`](#kissagentsgepaconfig)
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
-    - [`kiss.agents.assistant.prompt_detector`](#kissagentsassistantprompt_detector)
+    - [`kiss.agents.sorkar.prompt_detector`](#kissagentssorkarprompt_detector)
 
 </details>
 
@@ -427,7 +427,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.browser_ui` — *Shared browser UI components for KISS agent viewers.*
+#### `kiss.agents.sorkar.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
 ##### `class BaseBrowserPrinter(Printer)`
 
@@ -466,7 +466,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.useful_tools` — *Useful tools for agents: file editing and bash execution.*
+#### `kiss.agents.sorkar.useful_tools` — *Useful tools for agents: file editing and bash execution.*
 
 ##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
@@ -501,7 +501,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
+#### `kiss.agents.sorkar.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
 
 ##### `class WebUseTool` — Browser automation tool using Playwright with zero JS injection.
 
@@ -675,7 +675,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant` — *Assistant agent with coding tools and browser automation.*
+#### `kiss.agents.sorkar` — *Assistant agent with coding tools and browser automation.*
 
 ______________________________________________________________________
 
@@ -714,13 +714,13 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.assistant_agent` — *Assistant agent with both coding tools and browser automation.*
+#### `kiss.agents.sorkar.assistant_agent` — *Assistant agent with both coding tools and browser automation.*
 
 ##### `class AssistantAgent(RelentlessAgent)` — Agent with both coding tools and browser automation for web + code tasks.
 
 **Constructor:** `AssistantAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -733,12 +733,13 @@ ______________________________________________________________________
   - `docker_image`: Docker image name to run tools inside a container.
   - `headless`: Whether to run the browser in headless mode. Defaults to config value.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
+  - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.assistant` — *Browser-based chatbot for RelentlessAgent-based agents.*
+#### `kiss.agents.sorkar.sorkar` — *Browser-based chatbot for RelentlessAgent-based agents.*
 
 **`run_chatbot`** — Run a browser-based chatbot UI for any RelentlessAgent-based agent.<br/>`def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None`
 
@@ -750,7 +751,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.config` — *Configuration for the Assistant Agent.*
+#### `kiss.agents.sorkar.config` — *Configuration for the Assistant Agent.*
 
 ##### `class AgentConfig(BaseModel)`
 
@@ -984,7 +985,7 @@ from kiss.docker import DockerManager
 
 ______________________________________________________________________
 
-#### `kiss.agents.assistant.prompt_detector`
+#### `kiss.agents.sorkar.prompt_detector`
 
 ##### `class PromptDetector` — An intelligent detector that analyzes Markdown content to determine if it
 

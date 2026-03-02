@@ -14,8 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import kiss.agents.assistant.chatbot_ui as chatbot_ui
-import kiss.agents.assistant.code_server as code_server
+import kiss.agents.sorkar.chatbot_ui as chatbot_ui
+import kiss.agents.sorkar.code_server as code_server
 
 
 class TestSetupCodeServer(unittest.TestCase):
@@ -297,7 +297,7 @@ class TestFixedPortLogic(unittest.TestCase):
         assert connected
 
     def test_detects_closed_port(self) -> None:
-        from kiss.agents.assistant.browser_ui import find_free_port
+        from kiss.agents.sorkar.browser_ui import find_free_port
         port = find_free_port()
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.3):

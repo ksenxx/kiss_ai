@@ -63,7 +63,7 @@ curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/inst
 
 # To install as a library
 pip install kiss-agent-framework
-python -m kiss.agents.assistant.assistant
+python -m kiss.agents.sorkar.sorkar
 ```
 
 # What is KISS and KISS Sorcar? How it started?
