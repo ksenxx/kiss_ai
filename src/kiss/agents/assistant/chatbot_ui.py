@@ -1037,6 +1037,7 @@ function handleEvent(ev){
   case'tasks_updated':loadTasks();loadWelcome();break;
   case'proposed_updated':loadProposed();loadWelcome();break;
   case'theme_changed':applyTheme(ev);break;
+  case'focus_chatbox':window.focus();inp.focus();break;
   case'merge_started':document.getElementById('merge-toolbar').style.display='flex';break;
   case'merge_ended':document.getElementById('merge-toolbar').style.display='none';inp.focus();break;
   case'clear':
@@ -1647,6 +1648,18 @@ function loadTheme(){
 }
 loadTheme();setInterval(loadTheme,3000);
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
+document.addEventListener('keydown',function(e){
+  var isMac=navigator.platform.toUpperCase().indexOf('MAC')>=0;
+  if((isMac?e.metaKey:e.ctrlKey)&&e.key==='k'&&!e.shiftKey&&!e.altKey){
+    e.preventDefault();e.stopPropagation();
+    if(document.activeElement===inp||document.activeElement===document.body){
+      fetch('/focus-editor',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:'{}'}).catch(function(){});
+    }else{
+      window.focus();inp.focus();
+    }
+  }
+},true);
 """
 
 
