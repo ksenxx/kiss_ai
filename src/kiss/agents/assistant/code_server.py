@@ -28,10 +28,8 @@ _CS_SETTINGS = {
     "git.repositoryScanMaxDepth": 1,
     "git.autoRepositoryDetection": True,
     "git.openRepositoryInParentFolders": "always",
-    "chat.editor.enabled": False,
-    "chat.commandCenter.enabled": False,
-    "chat.experimental.offerSetup": False,
-    "workbench.chat.experimental.autoDetectLanguageModels": False,
+    "github.copilot.enable": {"*": True},
+    "github.copilot.editor.enableAutoCompletions": True,
 }
 
 _CS_STATE_ENTRIES = [
@@ -45,9 +43,6 @@ _CS_STATE_ENTRIES = [
     ("welcomePage.gettingStartedTabs", '[]'),
     ("workbench.welcomePage.opened", "true"),
     ("chat.setupCompleted", "true"),
-    ("chat.panelVisible", "false"),
-    ("workbench.panel.chat.hidden", "true"),
-    ("workbench.panel.chatSidebar.hidden", "true"),
 ]
 
 _CS_EXTENSION_JS = """\
@@ -65,12 +60,7 @@ function activate(ctx){
     }
     vscode.commands.executeCommand('workbench.action.closePanel');
     vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');
-    vscode.commands.executeCommand(
-      'workbench.action.chat.clearHistory'
-    ).then(()=>{},()=>{});
-    vscode.commands.executeCommand(
-      'workbench.action.chat.close'
-    ).then(()=>{},()=>{});
+
   }
   cleanup();
   setTimeout(cleanup,1500);
@@ -318,6 +308,18 @@ function activate(ctx){
     }catch(e){vscode.window.showErrorMessage('Commit error: '+e.message);}
     commitSB.text='$(git-commit) Commit';
   }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.toggleFocus',function(){
+    var portFile=path.join(home,'.kiss','assistant-port');
+    var port='';
+    try{port=fs.readFileSync(portFile,'utf8').trim();}catch(e){}
+    if(!port)return;
+    var http=require('http');
+    var req=http.request({hostname:'127.0.0.1',port:parseInt(port),
+      path:'/focus-chatbox',method:'POST',
+      headers:{'Content-Type':'application/json'}},function(){});
+    req.on('error',function(){});
+    req.write('{}');req.end();
+  }));
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
     vscode.workspace.saveAll(false).then(function(){
@@ -430,6 +432,31 @@ module.exports={activate};
 """
 
 
+_MS_GALLERY = (
+    '{"serviceUrl":"https://marketplace.visualstudio.com/_apis/public/gallery",'
+    '"itemUrl":"https://marketplace.visualstudio.com/items"}'
+)
+
+
+def _install_copilot_extension(data_dir: str) -> None:
+    """Install GitHub Copilot extension if not already present."""
+    ext_base = Path(data_dir) / "extensions"
+    if any(d.name.startswith("github.copilot-") for d in ext_base.iterdir() if d.is_dir()):
+        return
+    cs_binary = shutil.which("code-server")
+    if not cs_binary:
+        return
+    env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
+    try:
+        subprocess.run(
+            [cs_binary, "--install-extension", "github.copilot",
+             "--extensions-dir", str(ext_base)],
+            env=env, capture_output=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def _setup_code_server(data_dir: str) -> bool:
     """Pre-configure code-server user data: settings, state DB, and cleanup extension.
 
@@ -445,6 +472,10 @@ def _setup_code_server(data_dir: str) -> bool:
         existing = {}
     if "workbench.colorTheme" not in existing:
         existing["workbench.colorTheme"] = "Default Dark Modern"
+    for key in ("chat.editor.enabled", "chat.commandCenter.enabled",
+                "chat.experimental.offerSetup",
+                "workbench.chat.experimental.autoDetectLanguageModels"):
+        existing.pop(key, None)
     existing.update(_CS_SETTINGS)
     settings_file.write_text(json.dumps(existing, indent=2))
 
@@ -469,6 +500,8 @@ def _setup_code_server(data_dir: str) -> bool:
                 if chat_dir.exists():
                     shutil.rmtree(chat_dir, ignore_errors=True)
 
+    _install_copilot_extension(data_dir)
+
     ext_dir = Path(data_dir) / "extensions" / "kiss-init"
     ext_dir.mkdir(parents=True, exist_ok=True)
     (ext_dir / "package.json").write_text(json.dumps({
@@ -489,6 +522,14 @@ def _setup_code_server(data_dir: str) -> bool:
                     "command": "kiss.generateCommitMessage",
                     "title": "Generate Commit Message",
                     "icon": "$(sparkle)",
+                },
+                {"command": "kiss.toggleFocus", "title": "Toggle Focus to Chatbox"},
+            ],
+            "keybindings": [
+                {
+                    "command": "kiss.toggleFocus",
+                    "key": "ctrl+k",
+                    "mac": "cmd+k",
                 },
             ],
             "menus": {

@@ -158,6 +158,8 @@ def run_chatbot(
             code_server_url = cs_url
             print(f"Reusing existing code-server at {code_server_url}")
         else:
+            from kiss.agents.assistant.code_server import _MS_GALLERY
+            cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
             cs_proc = subprocess.Popen(
                 [
                     cs_binary, "--port", str(cs_port), "--auth", "none",
@@ -169,6 +171,7 @@ def run_chatbot(
                     actual_work_dir,
                 ],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=cs_env,
             )
             for _ in range(30):
                 try:
@@ -574,6 +577,10 @@ def run_chatbot(
         return JSONResponse({"models": models_list, "selected": selected_model})
 
 
+    async def focus_chatbox(request: Request) -> JSONResponse:
+        printer.broadcast({"type": "focus_chatbox"})
+        return JSONResponse({"status": "ok"})
+
     async def theme(request: Request) -> JSONResponse:
         theme_file = _KISS_DIR / "vscode-theme.json"
         kind = "dark"
@@ -760,6 +767,7 @@ def run_chatbot(
         Route("/run", run_task, methods=["POST"]),
         Route("/stop", stop_task, methods=["POST"]),
         Route("/open-file", open_file, methods=["POST"]),
+        Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
         Route("/merge-action", merge_action, methods=["POST"]),
         Route("/commit", commit, methods=["POST"]),
         Route("/record-file-usage", record_file_usage_endpoint,
