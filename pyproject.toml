@@ -102,7 +102,7 @@ gemini = [
 ]
 
 # Dependencies for kiss.agents.sorkar (web tools, browser UI)
-assistant = [
+sorcar = [
     "playwright>=1.40.0",
     "uvicorn>=0.30.0",
     "starlette>=0.38.0",
@@ -201,4 +201,4 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
-assistant = "kiss.agents.sorkar.sorkar:main"
+sorcar = "kiss.agents.sorkar.sorkar:main"
