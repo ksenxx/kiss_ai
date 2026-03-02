@@ -7,8 +7,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 
 class TestActiveFileReading:
     """Test reading active-file.json for current_editor_file."""
@@ -91,41 +89,66 @@ class TestRunAgentThreadEditorFile:
         af = tmp_path / "active-file.json"
         af.write_text(json.dumps({"path": "/test/file.py"}))
 
-        current_editor_file = None
+        active_file = ""
         try:
             af_path = os.path.join(cs_data_dir, "active-file.json")
             with open(af_path) as f:
-                current_editor_file = json.loads(f.read()).get("path") or None
+                active_file = json.loads(f.read()).get("path", "")
+            if active_file and not os.path.isfile(active_file):
+                active_file = ""
         except (OSError, json.JSONDecodeError):
             pass
         agent_kwargs: dict[str, Any] = {"headless": True}
         extra_kwargs = dict(agent_kwargs)
-        extra_kwargs["current_editor_file"] = current_editor_file
+        if active_file:
+            extra_kwargs["current_editor_file"] = active_file
+
+        # /test/file.py doesn't exist on disk, so active_file is cleared
+        assert extra_kwargs == {"headless": True}
+
+    def test_extra_kwargs_with_real_file(self, tmp_path: Path) -> None:
+        real_file = tmp_path / "real.py"
+        real_file.write_text("x = 1")
+        af = tmp_path / "active-file.json"
+        af.write_text(json.dumps({"path": str(real_file)}))
+
+        active_file = ""
+        try:
+            with open(str(af)) as f:
+                active_file = json.loads(f.read()).get("path", "")
+            if active_file and not os.path.isfile(active_file):
+                active_file = ""
+        except (OSError, json.JSONDecodeError):
+            pass
+        agent_kwargs: dict[str, Any] = {"headless": True}
+        extra_kwargs = dict(agent_kwargs)
+        if active_file:
+            extra_kwargs["current_editor_file"] = active_file
 
         assert extra_kwargs == {
             "headless": True,
-            "current_editor_file": "/test/file.py",
+            "current_editor_file": str(real_file),
         }
 
-    def test_extra_kwargs_none_when_no_active_file(
+    def test_extra_kwargs_no_current_editor_file_when_no_active_file(
         self, tmp_path: Path,
     ) -> None:
         cs_data_dir = str(tmp_path)
 
-        current_editor_file = None
+        active_file = ""
         try:
             af_path = os.path.join(cs_data_dir, "active-file.json")
             with open(af_path) as f:
-                current_editor_file = json.loads(f.read()).get("path") or None
+                active_file = json.loads(f.read()).get("path", "")
+            if active_file and not os.path.isfile(active_file):
+                active_file = ""
         except (OSError, json.JSONDecodeError):
             pass
         extra_kwargs: dict[str, Any] = dict({"headless": False})
-        extra_kwargs["current_editor_file"] = current_editor_file
+        if active_file:
+            extra_kwargs["current_editor_file"] = active_file
 
-        assert extra_kwargs == {
-            "headless": False,
-            "current_editor_file": None,
-        }
+        assert extra_kwargs == {"headless": False}
 
     def test_extra_kwargs_preserves_original(self) -> None:
         agent_kwargs: dict[str, Any] = {"headless": True}
@@ -135,19 +158,24 @@ class TestRunAgentThreadEditorFile:
 
 
 class TestPromptTemplateAppend:
-    """Test that the prompt template includes the editor file path."""
+    """Test that the prompt template includes the editor file path only when set."""
 
-    @pytest.mark.parametrize(
-        ("editor_file", "expected_suffix"),
-        [
-            ("/foo/bar.py", "\n\nThe editor file path: /foo/bar.py"),
-            (None, "\n\nThe editor file path: None"),
-        ],
-    )
-    def test_prompt_template_includes_editor_file(
-        self, editor_file: str | None, expected_suffix: str,
-    ) -> None:
+    def test_prompt_template_includes_editor_file_when_set(self) -> None:
         prompt_template = "Do something"
-        result = prompt_template + f"\n\nThe editor file path: {editor_file}"
-        assert result.endswith(expected_suffix)
-        assert result.startswith("Do something")
+        current_editor_file: str | None = "/foo/bar.py"
+        result = (
+            prompt_template + f"\n\nThe editor file path: {current_editor_file}"
+            if current_editor_file
+            else prompt_template
+        )
+        assert result == "Do something\n\nThe editor file path: /foo/bar.py"
+
+    def test_prompt_template_unchanged_when_editor_file_is_none(self) -> None:
+        prompt_template = "Do something"
+        current_editor_file: str | None = None
+        result = (
+            prompt_template + f"\n\nThe editor file path: {current_editor_file}"
+            if current_editor_file
+            else prompt_template
+        )
+        assert result == "Do something"

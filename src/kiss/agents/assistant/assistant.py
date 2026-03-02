@@ -64,7 +64,7 @@ def _clean_llm_output(text: str) -> str:
 def _model_vendor_order(name: str) -> int:
     if name.startswith("claude-"):
         return 0
-    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
+    if name.startswith(_OPENAI_PREFIXES):
         return 1
     if name.startswith("gemini-"):
         return 2
@@ -107,8 +107,8 @@ def run_chatbot(
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
     selected_model = (
-        default_model
-        or _load_last_model()
+        _load_last_model()
+        or default_model
         or get_most_expensive_model()
         or "claude-opus-4-6"
     )
@@ -303,26 +303,28 @@ def run_chatbot(
         try:
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
-            printer.broadcast({"type": "clear"})
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
-            current_editor_file = None
+            active_file = ""
             try:
                 af_path = os.path.join(cs_data_dir, "active-file.json")
                 with open(af_path) as af:
-                    current_editor_file = json.loads(af.read()).get("path") or None
+                    active_file = json.loads(af.read()).get("path", "")
+                if active_file and not os.path.isfile(active_file):
+                    active_file = ""
             except (OSError, json.JSONDecodeError):
                 pass
-            extra_kwargs = dict(agent_kwargs or {})
-            extra_kwargs["current_editor_file"] = current_editor_file
+            printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
+            extra_kwargs = dict(agent_kwargs or {})
+            if active_file:
+                extra_kwargs["current_editor_file"] = active_file
             result = agent.run(
                 prompt_template=task,
                 work_dir=actual_work_dir,
                 printer=printer,
                 model_name=model_name,
                 attachments=parsed_attachments,
-                **(agent_kwargs or {}),
                 **extra_kwargs,
             )
             result_text = result or ""
