@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from kiss.agents.assistant.assistant_agent import AssistantAgent
+from kiss.agents.sorkar.assistant_agent import AssistantAgent
 
 DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
-DEFAULT_AGENT_CODE = "src/kiss/agents/assistant/assistant_agent.py"
+DEFAULT_AGENT_CODE = "src/kiss/agents/sorkar/assistant_agent.py"
 DEFAULT_MODEL = "claude-opus-4-6"
 
 # Once the command succeeds and solves the task successfully,

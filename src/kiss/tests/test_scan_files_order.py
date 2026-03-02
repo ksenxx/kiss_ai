@@ -3,7 +3,7 @@
 import os
 import tempfile
 
-from kiss.agents.assistant.code_server import _scan_files
+from kiss.agents.sorkar.code_server import _scan_files
 
 
 def test_scan_files_lists_files_before_dirs():

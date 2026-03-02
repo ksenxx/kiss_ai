@@ -9,7 +9,7 @@ import queue
 import unittest
 from types import SimpleNamespace
 
-from kiss.agents.assistant.browser_ui import BaseBrowserPrinter
+from kiss.agents.sorkar.browser_ui import BaseBrowserPrinter
 from kiss.core.printer import MAX_RESULT_LEN as _MAX_RESULT_LEN
 
 
