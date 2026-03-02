@@ -8,7 +8,7 @@ until the next tool_call/tool_result event.
 import queue
 import time
 
-from kiss.agents.assistant.browser_ui import BaseBrowserPrinter
+from kiss.agents.sorkar.browser_ui import BaseBrowserPrinter
 
 
 def _subscribe(printer: BaseBrowserPrinter) -> queue.Queue:

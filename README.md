@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.1.62-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.1.63-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -63,7 +63,7 @@ curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/inst
 
 # To install as a library
 pip install kiss-agent-framework
-python -m kiss.agents.assistant.assistant
+python -m kiss.agents.sorkar.sorkar
 ```
 
 # What is KISS and KISS Sorcar? How it started?

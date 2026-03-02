@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from kiss.agents.assistant.assistant_agent import AssistantAgent
+from kiss.agents.sorkar.assistant_agent import AssistantAgent
 
 DEFAULT_MODEL = "claude-opus-4-6"
 

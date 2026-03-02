@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiss.agents.assistant.browser_ui import (
+from kiss.agents.sorkar.browser_ui import (
     BASE_CSS,
     EVENT_HANDLER_JS,
     HTML_HEAD,
