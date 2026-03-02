@@ -33,6 +33,7 @@
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
+    - [`kiss.agents.assistant.prompt_detector`](#kissagentsassistantprompt_detector)
 
 </details>
 
@@ -71,6 +72,7 @@ ______________________________________________________________________
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
   - `arguments`: The arguments to be substituted into the prompt template. Default is None.
+  - `system_prompt`: Optional system prompt to provide to the model. Default is empty string (no system prompt).
   - `tools`: The tools to use for the agent. If None, no tools are provided (only the built-in finish tool is added).
   - `is_agentic`: Whether the agent is agentic. Default is True.
   - `max_steps`: The maximum number of steps to take. Default is DEFAULT_CONFIG.agent.max_steps.
@@ -124,11 +126,9 @@ from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatible
 
 ##### `class Model(ABC)` — Abstract base class for LLM provider implementations.
 
-**Constructor:** `Model(model_name: str, model_description: str = '', model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
+**Constructor:** `Model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
 
 - `model_name`: The name/identifier of the model.
-
-- `model_description`: Optional description of the model.
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
@@ -150,7 +150,7 @@ from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatible
   - `function_map`: Dictionary mapping function names to callable functions.
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
-- **add_function_results_to_conversation_and_return** — Adds function results to the conversation state.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
+- **add_function_results_to_conversation_and_return** — Adds function results to the conversation state. Matches results to tool calls by index from the last assistant message.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
 
   - `function_results`: List of tuples containing (function_name, result_dict).
 
@@ -173,6 +173,10 @@ from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatible
 - **set_usage_info_for_messages** — Sets token information to append to messages sent to the LLM.<br/>`set_usage_info_for_messages(usage_info: str) -> None`
 
   - `usage_info`: The usage information string to append.
+
+- **compact_conversation** — Truncate old tool results and text to keep conversation within context limit. Preserves the system message, initial user prompt, and the most recent messages while truncating content in older messages. Never modifies thinking blocks (they have cryptographic signatures in Anthropic's API).<br/>`compact_conversation(max_context_tokens: int) -> None`
+
+  - `max_context_tokens`: The model's maximum context window in tokens.
 
 ______________________________________________________________________
 
@@ -251,15 +255,6 @@ ______________________________________________________________________
   - `function_map`: Dictionary mapping function names to callable functions.
   - **Returns:** A tuple of (function_calls, content, response) where function_calls is a list of dictionaries containing tool call information, content is the text response, and response is the raw API response object.
 
-- **add_function_results_to_conversation_and_return** — Add function results to the conversation state.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
-
-  - `function_results`: A list of tuples where each tuple contains the function name and a dictionary with the function result.
-
-- **add_message_to_conversation** — Add a message to the conversation state.<br/>`add_message_to_conversation(role: str, content: str) -> None`
-
-  - `role`: The role of the message sender ('user', 'assistant', or 'system').
-  - `content`: The content of the message to add.
-
 - **extract_input_output_token_counts_from_response** — Extract token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
   - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
@@ -304,11 +299,6 @@ ______________________________________________________________________
 
   - `function_results`: List of (func_name, result_dict) tuples. result_dict can contain: - "result": The result content string - "tool_use_id": Optional explicit tool_use_id to use
 
-- **add_message_to_conversation** — Adds a message to the conversation state.<br/>`add_message_to_conversation(role: str, content: str) -> None`
-
-  - `role`: The role of the message sender (e.g., 'user', 'assistant').
-  - `content`: The message content.
-
 - **extract_input_output_token_counts_from_response** — Extracts token counts from an Anthropic API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
   - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
@@ -347,15 +337,6 @@ ______________________________________________________________________
 
   - `function_map`: Dictionary mapping function names to callable functions.
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
-
-- **add_function_results_to_conversation_and_return** — Adds function results to the conversation state.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
-
-  - `function_results`: List of tuples containing (function_name, result_dict).
-
-- **add_message_to_conversation** — Adds a message to the conversation state.<br/>`add_message_to_conversation(role: str, content: str) -> None`
-
-  - `role`: The role of the message sender (e.g., 'user', 'assistant').
-  - `content`: The message content.
 
 - **extract_input_output_token_counts_from_response** — Extracts token counts from a Gemini API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
@@ -1000,5 +981,16 @@ from kiss.docker import DockerManager
   - **Returns:** The host port mapped to the container port, or None if not mapped.
 
 - **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.assistant.prompt_detector`
+
+##### `class PromptDetector` — An intelligent detector that analyzes Markdown content to determine if it
+
+**Constructor:** `PromptDetector() -> None`
+
+- **analyze** — Analyzes a file to check if it is a prompt.<br/>`analyze(file_path: str) -> tuple[bool, float, list[str]]`
+  - **Returns:** (Is Prompt?, Confidence Score, Reasons)
 
 ______________________________________________________________________

@@ -22,7 +22,7 @@ class TestSetPromptCurlyBraces(unittest.TestCase):
             model_config=None,
         )
         agent._set_prompt(prompt_template, arguments)
-        return agent.messages[-1]["content"]
+        return str(agent.messages[-1]["content"])
 
     def test_argument_with_curly_braces(self) -> None:
         result = self._run_set_prompt(

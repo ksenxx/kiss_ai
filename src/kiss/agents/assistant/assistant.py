@@ -722,6 +722,38 @@ def run_chatbot(
 
         return await _thread_json_response(_generate)
 
+    async def active_file_info(request: Request) -> JSONResponse:
+        """Check if the current editor file is a runnable prompt."""
+        active_file_path = os.path.join(cs_data_dir, "active-file.json")
+        try:
+            with open(active_file_path) as f:
+                data = json.loads(f.read())
+            fpath = data.get("path", "")
+        except (OSError, json.JSONDecodeError):
+            return JSONResponse({"is_prompt": False, "path": ""})
+        if not fpath or not os.path.isfile(fpath) or not fpath.lower().endswith(".md"):
+            return JSONResponse({"is_prompt": False, "path": fpath})
+        from kiss.agents.assistant.prompt_detector import PromptDetector
+        detector = PromptDetector()
+        is_prompt, _score, _reasons = detector.analyze(fpath)
+        return JSONResponse({
+            "is_prompt": is_prompt,
+            "path": fpath,
+            "filename": os.path.basename(fpath),
+        })
+
+    async def get_file_content(request: Request) -> JSONResponse:
+        """Return the text content of a file."""
+        fpath = request.query_params.get("path", "").strip()
+        if not fpath or not os.path.isfile(fpath):
+            return JSONResponse({"error": "File not found"}, status_code=404)
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                content = f.read()
+            return JSONResponse({"content": content})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def generate_config_message(request: Request) -> JSONResponse:
         body = await request.json()
         model = body.get("model", selected_model)
@@ -783,6 +815,8 @@ def run_chatbot(
               methods=["POST"]),
         Route("/generate-config-message", generate_config_message,
               methods=["POST"]),
+        Route("/active-file-info", active_file_info),
+        Route("/get-file-content", get_file_content),
         Route("/suggestions", suggestions),
         Route("/complete", complete),
         Route("/tasks", tasks),
