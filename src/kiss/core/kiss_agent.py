@@ -85,7 +85,9 @@ class KISSAgent(Base):
         assert self.model is not None
         self.arguments = dict(arguments) if arguments is not None else {}
         self.prompt_template = prompt_template
-        full_prompt = self.prompt_template.format(**self.arguments)
+        full_prompt = self.prompt_template
+        for key, value in self.arguments.items():
+            full_prompt = full_prompt.replace("{" + key + "}", str(value))
 
         self._add_message("user", full_prompt)
         self.model.initialize(full_prompt, attachments=attachments)
@@ -238,6 +240,12 @@ class KISSAgent(Base):
             str | None: The result string if the task is finished, None otherwise.
         """
         start_timestamp = int(time.time())
+
+        try:
+            max_ctx = get_max_context_length(self.model.model_name)
+            self.model.compact_conversation(max_ctx)
+        except Exception:
+            pass
 
         function_calls, response_text, response = self.model.generate_and_process_with_tools(
             self.function_map

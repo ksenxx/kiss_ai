@@ -44,7 +44,7 @@ header{
   box-shadow:0 1px 12px rgba(0,0,0,0.3);
 }
 .logo{font-size:12px;color:#4da6ff;font-weight:600;letter-spacing:-0.2px}
-.status{font-size:12px;color:rgba(255,255,255,0.6)}
+.status{font-size:12px;color:rgba(255,255,255,0.75)}
 .dot{width:7px;height:7px;background:rgba(255,255,255,0.4)}
 .dot.running{background:#22c55e}
 #output{
@@ -55,13 +55,13 @@ header{
 .user-msg{
   background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
   border-radius:14px;padding:14px 20px;margin:20px auto 16px;
-  font-size:14.5px;line-height:1.6;color:rgba(255,255,255,0.88);
+  font-size:14.5px;line-height:1.6;color:rgba(255,255,255,0.95);
 }
 .user-msg-images{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
 .user-msg-img{max-width:300px;max-height:200px;border-radius:8px;
 object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 .txt{
-  font-size:14.5px;line-height:1.75;color:rgba(255,255,255,0.82);padding:8px 14px;
+  font-size:14.5px;line-height:1.75;color:rgba(255,255,255,0.92);padding:8px 14px;
   margin:6px auto;
 }
 .think{
@@ -70,7 +70,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   padding:12px 16px;
 }
 .think .lbl{color:rgba(168,130,255,0.7)}
-.think .cnt{color:rgba(255,255,255,0.4)}
+.think .cnt{color:rgba(255,255,255,0.55)}
 .tc{
   border:1px solid rgba(88,166,255,0.15);border-radius:12px;
   margin:12px auto;background:rgba(88,166,255,0.02);
@@ -83,8 +83,8 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 .tc-h:hover{background:rgba(88,166,255,0.06)}
 .tn{color:rgba(88,166,255,0.9);font-size:13px}
-.tp{font-size:12px;color:rgba(120,180,255,0.45)}
-.td{color:rgba(255,255,255,0.3)}
+.tp{font-size:12px;color:rgba(120,180,255,0.65)}
+.td{color:rgba(255,255,255,0.5)}
 .tr{
   border:1px solid rgba(34,197,94,0.15);
   background:rgba(34,197,94,0.02);border-radius:10px;
@@ -104,9 +104,9 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 .usage{
   border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);
-  color:rgba(255,255,255,0.3);border-radius:8px;
+  color:rgba(255,255,255,0.5);border-radius:8px;
 }
-.spinner{color:rgba(255,255,255,0.35)}
+.spinner{color:rgba(255,255,255,0.5)}
 .spinner::before{border-color:rgba(255,255,255,0.08);border-top-color:rgba(88,166,255,0.7)}
 #input-area{
   flex-shrink:0;padding:0 24px 24px;position:relative;
@@ -346,7 +346,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   animation:fadeUp 0.5s ease;
 }
 @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-#welcome p{color:rgba(255,255,255,0.4);font-size:14px;margin-bottom:36px;
+#welcome p{color:rgba(255,255,255,0.55);font-size:14px;margin-bottom:36px;
   animation:fadeUp 0.5s ease 0.1s both}
 #suggestions{animation:fadeUp 0.5s ease 0.2s both;
   display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;max-width:760px;
@@ -354,12 +354,12 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 .suggestion-chip{
   background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);
   border-radius:12px;padding:14px 18px;cursor:pointer;text-align:left;
-  font-size:13px;color:rgba(255,255,255,0.7);line-height:1.5;
+  font-size:13px;color:rgba(255,255,255,0.82);line-height:1.5;
   transition:all 0.2s ease;
 }
 .suggestion-chip:hover{
   background:rgba(255,255,255,0.055);border-color:rgba(255,255,255,0.14);
-  color:rgba(255,255,255,0.9);transform:translateY(-2px);
+  color:rgba(255,255,255,0.95);transform:translateY(-2px);
   box-shadow:0 4px 24px rgba(0,0,0,0.35),0 0 0 1px rgba(255,255,255,0.05);
 }
 .suggestion-chip:active{transform:translateY(0);transition-duration:0.05s}
@@ -438,7 +438,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   white-space:nowrap;flex-shrink:0;
 }
 .fu-text{
-  font-size:13.5px;color:rgba(255,255,255,0.7);
+  font-size:13.5px;color:rgba(255,255,255,0.82);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .llm-panel{
@@ -447,11 +447,11 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   padding:12px 16px;background:rgba(88,166,255,0.03);
   max-width:820px;
 }
-.llm-panel .txt{font-size:10px;line-height:1.5;color:rgba(255,255,255,0.6)}
+.llm-panel .txt{font-size:10px;line-height:1.5;color:rgba(255,255,255,0.75)}
 .llm-panel .think .cnt{font-size:10px}
 .bash-panel{
   max-width:820px;margin-left:auto;margin-right:auto;
-  background:rgba(0,0,0,0.5);color:rgba(255,255,255,0.55);
+  background:rgba(0,0,0,0.5);color:rgba(255,255,255,0.7);
   border-color:rgba(255,255,255,0.05);
 }
 #split-container{display:flex;height:100vh;width:100vw;overflow:hidden}
@@ -609,21 +609,21 @@ body{background:var(--bg)}
   box-shadow:0 1px 8px rgba(0,0,0,0.2);
 }
 #assistant-panel .logo{color:var(--accent)}
-#assistant-panel .status{color:rgba(var(--fg-rgb),0.5)}
+#assistant-panel .status{color:rgba(var(--fg-rgb),0.65)}
 #assistant-panel .dot{background:rgba(var(--fg-rgb),0.35)}
 #assistant-panel .dot.running{background:var(--green)}
 #assistant-panel .user-msg{
   background:rgba(var(--fg-rgb),0.04);
   border:1px solid rgba(var(--fg-rgb),0.08);
-  color:rgba(var(--fg-rgb),0.9);
+  color:rgba(var(--fg-rgb),0.95);
 }
-#assistant-panel .txt{color:rgba(var(--fg-rgb),0.85)}
+#assistant-panel .txt{color:rgba(var(--fg-rgb),0.92)}
 #assistant-panel .think{
   border:1px solid rgba(var(--purple-rgb),0.15);
   background:rgba(var(--purple-rgb),0.04);
 }
 #assistant-panel .think .lbl{color:rgba(var(--purple-rgb),0.8)}
-#assistant-panel .think .cnt{color:rgba(var(--fg-rgb),0.4)}
+#assistant-panel .think .cnt{color:rgba(var(--fg-rgb),0.55)}
 #assistant-panel .tc{
   border:1px solid var(--border);
   background:rgba(var(--accent-rgb),0.02);
@@ -638,8 +638,8 @@ body{background:var(--bg)}
 }
 #assistant-panel .tc-h:hover{background:rgba(var(--accent-rgb),0.07)}
 #assistant-panel .tn{color:var(--accent)}
-#assistant-panel .tp{color:rgba(var(--cyan-rgb),0.7)}
-#assistant-panel .td{color:rgba(var(--fg-rgb),0.35)}
+#assistant-panel .tp{color:rgba(var(--cyan-rgb),0.85)}
+#assistant-panel .td{color:rgba(var(--fg-rgb),0.5)}
 #assistant-panel .tr{
   border:1px solid rgba(var(--green-rgb),0.2);
   background:rgba(var(--green-rgb),0.03);
@@ -658,9 +658,9 @@ body{background:var(--bg)}
 }
 #assistant-panel .usage{
   border:1px solid var(--border);background:rgba(var(--fg-rgb),0.02);
-  color:rgba(var(--fg-rgb),0.35);
+  color:rgba(var(--fg-rgb),0.5);
 }
-#assistant-panel .spinner{color:rgba(var(--fg-rgb),0.4)}
+#assistant-panel .spinner{color:rgba(var(--fg-rgb),0.55)}
 #assistant-panel .spinner::before{
   border-color:var(--border);border-top-color:rgba(var(--accent-rgb),0.7);
 }

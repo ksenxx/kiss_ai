@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -446,7 +447,9 @@ _MS_GALLERY = (
 def _install_copilot_extension(data_dir: str) -> None:
     """Install GitHub Copilot extension if not already present."""
     ext_base = Path(data_dir) / "extensions"
-    if any(d.name.startswith("github.copilot-") for d in ext_base.iterdir() if d.is_dir()):
+    if ext_base.is_dir() and any(
+        d.name.startswith("github.copilot-") for d in ext_base.iterdir() if d.is_dir()
+    ):
         return
     cs_binary = shutil.which("code-server")
     if not cs_binary:
@@ -505,8 +508,6 @@ def _setup_code_server(data_dir: str) -> bool:
                 if chat_dir.exists():
                     shutil.rmtree(chat_dir, ignore_errors=True)
 
-    _install_copilot_extension(data_dir)
-
     ext_dir = Path(data_dir) / "extensions" / "kiss-init"
     ext_dir.mkdir(parents=True, exist_ok=True)
     (ext_dir / "package.json").write_text(json.dumps({
@@ -551,6 +552,9 @@ def _setup_code_server(data_dir: str) -> bool:
     ext_file = ext_dir / "extension.js"
     old_content = ext_file.read_text() if ext_file.exists() else ""
     ext_file.write_text(_CS_EXTENSION_JS)
+
+    threading.Thread(target=_install_copilot_extension, args=(data_dir,), daemon=True).start()
+
     return old_content != _CS_EXTENSION_JS
 
 

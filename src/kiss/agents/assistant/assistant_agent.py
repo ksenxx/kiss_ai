@@ -7,7 +7,6 @@ import tempfile
 
 import yaml
 
-import kiss.agents.assistant.config  # noqa: F401
 from kiss.agents.assistant.task_history import _get_task_history_md_path
 from kiss.agents.assistant.useful_tools import UsefulTools
 from kiss.agents.assistant.web_use_tool import WebUseTool
