@@ -1020,6 +1020,7 @@ function setReady(label){
   inp.disabled=false;
   btn.style.display='';
   stopBtn.style.display='none';
+  checkActiveFile();
   inp.focus();
 }
 function connectSSE(){
@@ -1203,6 +1204,7 @@ function submitTask(){
   var fileMatch=task.match(/^@(\S+)$/);
   if(fileMatch){openInEditor(fileMatch[1]);inp.value='';return}
   running=true;inp.disabled=true;
+  runPromptBtn.disabled=true;
   btn.style.display='none';
   stopBtn.style.display='inline-flex';
   D.classList.add('running');hideAC();startTimer();
@@ -1656,7 +1658,9 @@ connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 var runPromptBtn=document.getElementById('run-prompt-btn');
 var _promptPath='';
 function checkActiveFile(){
+  if(running){runPromptBtn.disabled=true;return}
   fetch('/active-file-info').then(function(r){return r.json()}).then(function(d){
+    if(running)return;
     if(d.is_prompt){
       runPromptBtn.disabled=false;
       runPromptBtn.title='Run prompt: '+d.filename;
