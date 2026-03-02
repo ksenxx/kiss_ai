@@ -115,6 +115,8 @@ class KISSAgent(Base):
             prompt_template (str): The prompt template for the agent.
             arguments (dict[str, str] | None): The arguments to be substituted into the prompt
                 template. Default is None.
+            system_prompt (str): Optional system prompt to provide to the model.
+                Default is empty string (no system prompt).
             tools (list[Callable[..., Any]] | None): The tools to use for the agent.
                 If None, no tools are provided (only the built-in finish tool is added).
             is_agentic (bool): Whether the agent is agentic. Default is True.

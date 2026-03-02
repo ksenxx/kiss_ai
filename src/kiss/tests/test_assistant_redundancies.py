@@ -30,6 +30,7 @@ def test_accept_ghost_no_duplicate_lines():
 def test_config_import_not_in_assistant_agent():
     """assistant_agent.py should not redundantly import config (already in __init__)."""
     import inspect
+
     import kiss.agents.assistant.assistant_agent as module
     source = inspect.getsource(module)
     assert "import kiss.agents.assistant.config" not in source
