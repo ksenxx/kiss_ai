@@ -139,6 +139,30 @@ def test_cmd_k_not_present_without_code_server():
     assert "e.key==='k'" in js
 
 
+def test_autocomplete_select_removes_at_symbol():
+    """Test that selecting a file via autocomplete does NOT insert '@' prefix."""
+    html = _build_html("Test", "", "/tmp")
+    js = html.split("<script>")[1].split("</script>")[0]
+    assert "inp.value=before+item.text+sep+after" in js, (
+        "selectAC should insert path WITHOUT '@' prefix"
+    )
+    assert "inp.value=before+'@'+item.text" not in js, (
+        "selectAC should NOT insert '@' before the path"
+    )
+
+
+def test_autocomplete_select_cursor_position():
+    """Test that cursor position after autocomplete does not include '@' offset."""
+    html = _build_html("Test", "", "/tmp")
+    js = html.split("<script>")[1].split("</script>")[0]
+    assert "np=before.length+item.text.length+sep.length" in js, (
+        "Cursor position should not add +1 for '@'"
+    )
+    assert "np=before.length+1+item.text.length" not in js, (
+        "Cursor position should not include +1 offset for '@'"
+    )
+
+
 def test_clear_event_appends_active_file_to_user_msg():
     """Test that the clear SSE event augments the user message with active_file info."""
     html = _build_html("Test", "", "/tmp")

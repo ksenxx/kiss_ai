@@ -1427,8 +1427,8 @@ function selectAC(item){
       inp.selectionStart||inp.value.length
     );
     var sep=(!after||/^\s/.test(after))?'':' ';
-    inp.value=before+'@'+item.text+sep+after;
-    var np=before.length+1+item.text.length+sep.length;
+    inp.value=before+item.text+sep+after;
+    var np=before.length+item.text.length+sep.length;
     inp.setSelectionRange(np,np);
     recordFileUsage(item.text);
     inp.style.height='auto';
