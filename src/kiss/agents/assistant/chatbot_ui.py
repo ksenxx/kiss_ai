@@ -197,13 +197,13 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   position:sticky;top:0;z-index:1;
 }
 #upload-btn{
-  background:none;color:rgba(255,255,255,0.3);border:none;
-  width:32px;height:32px;cursor:pointer;flex-shrink:0;
-  transition:color 0.15s;display:flex;align-items:center;justify-content:center;
-  padding:0;border-radius:50%;
+  background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
+  border:1px solid rgba(255,255,255,0.08);border-radius:8px;
+  padding:6px 8px;cursor:pointer;flex-shrink:0;
+  transition:color 0.15s,border-color 0.2s;display:flex;align-items:center;justify-content:center;
 }
-#upload-btn:hover{color:rgba(255,255,255,0.7);background:rgba(255,255,255,0.05)}
-#upload-btn svg{width:16px;height:16px}
+#upload-btn:hover{color:rgba(255,255,255,0.65);border-color:rgba(255,255,255,0.16);background:rgba(255,255,255,0.05)}
+#upload-btn svg{width:12px;height:12px}
 #upload-btn:disabled{opacity:0.2;cursor:not-allowed}
 #file-chips{
   display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;max-width:820px;margin-left:auto;margin-right:auto;
@@ -556,6 +556,8 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel #stop-btn svg{width:11px;height:11px}
 #assistant-panel #clear-btn{width:18px;height:18px}
 #assistant-panel #clear-btn svg{width:11px;height:11px}
+#assistant-panel #upload-btn{padding:4px 6px;border-radius:6px}
+#assistant-panel #upload-btn svg{width:11px;height:11px}
 #assistant-panel #history-search{font-size:11px;padding:6px 10px}
 #assistant-panel .sidebar-hdr{font-size:10px}
 #assistant-panel .sidebar-item{font-size:11px;padding:7px 10px;border-radius:8px;margin-bottom:4px}
@@ -1784,13 +1786,6 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <input type="file" id="file-input" multiple
             accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
             style="display:none"/>
-          <button id="upload-btn" title="Attach files">
-            <svg viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"
-            ><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49
-            -8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2
-            2 0 01-2.83-2.83l8.49-8.48"/></svg></button>
           <button id="clear-btn" title="Clear chat"><svg viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             ><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6"
@@ -1802,6 +1797,14 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                 stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
               <span id="model-label">Loading\u2026</span>
+            </button>
+            <button id="upload-btn" title="Attach files">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round"
+              ><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49
+              -8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2
+              2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
