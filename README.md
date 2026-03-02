@@ -55,7 +55,7 @@ export OPENROUTER_API_KEY="your-key-here" # Optional
 export TOGETHER_API_KEY="your-key-here" # Optional
 ```
 
-You must provide at least one of API keys.:
+You must provide at least one API key:
 
 ```bash
 # To install for development
@@ -69,7 +69,7 @@ python -m kiss.agents.assistant.assistant
 
 # What is KISS and KISS Sorcar? How it started?
 
-During my winter vacation of 2025, I developed KISS, which is a stupidly simple agentic framework. It took me 18 days to implement KISS. I started with the quest "What is possible (with AI)?" and "What is possible by a 49 year old SWE/PL Professor in 70 days using modern AI?" after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. Since then KISS has evolved into the IDE **(a free alternative to Cursor or Antigravity)** called **KISS Sorcar** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs locally as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support. I provide support and maintain the framework with long-term commitment. I do not plan to accept pull requests for the [core](src/kiss/core) and the agents in [assistant](src/kiss/agents/) in the near term. **Marius Momeu**, my incoming postdoc, will soon join the team. The project embodies the best software engineering practices that I have learned over the last 30 years. I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTROPIC_API_KEY` (best model for Sorkar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
+During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet very powerful agentic framework**. It took me 18 days to implement KISS using both AI and manual coding. The motivation for the KISS project came after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. I started the KISS project with the quest "What is possible (with AI)?" and "What is possible by a mid-career SWE/PL Professor in 2 months using modern AI?" . Since then 2 months have passed and KISS has evolved into a simple yet powerful IDE, called **KISS Sorcar** **(a free alternative to Cursor or Antigravity)** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support. I provide support and maintain the framework with long-term commitment. I do not plan to accept pull requests for the [core](src/kiss/core) and the agents in [assistant](src/kiss/agents/) in the near term. **Marius Momeu**, my incoming postdoc, will soon join the team. The project embodies the best software engineering practices that I have learned over the last 30 years. I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTHROPIC_API_KEY` (best model for Sorcar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
 
 **Now I ask the question to you "what is possible?".** #whatispossible #KISSSorcar
 
@@ -109,10 +109,10 @@ print(result)  # 127.05
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 Well you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well established agent frameworks?**" Here is my response:
 
-- **KISS comes with KISS Sorcar, a powrful local code IDE that is free and open-source.**
+- **KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.**
 - **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) and [Agent Optimizer](src/kiss/agents/coding_agents/agent_optimizer.py) which enables you to optimize a repository of code (and AI agents) for your metric of choice (e.g., cost and running time or test coverage or code quality/readability).**
 - **It has the GEPA prompt optimizer builtin with a simple API.**
-- **It has a [RelentlessCodingAgent](src/kiss/agents/coding_agents/relentless_coding_agent.py), which is pretty straightforward in terms of implementation, but it can work for very very long tasks. It was self evolved over time to save cost and running time.**
+- **It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to save cost and running time.**
 - **No bloat and simple codebase.**
 - **Optimization strategies can be written in plain English.**
 - **New techniques will be incorporated to the framework as I research them.**
@@ -173,7 +173,7 @@ uv run assistant
 uv run assistant ./my-project
 
 # Or with a specific default model
-uv run assistant --model_name "gemini-2.5-pro"
+uv run assistant --model_name "claude-opus-4-6"
 ```
 
 The assistant features:
@@ -185,7 +185,7 @@ The assistant features:
 
 ## 🔧 Using Repo Optimizer
 
-**This is one of the most important and useful feature of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `RelentlessCodingAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here.](src/kiss/agents/coding_agents/repo_optimizer.py).
+**This is one of the most important and useful features of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `AssistantAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
 
 ```bash
 # Optimize a program for speed and cost
@@ -289,7 +289,7 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 
 - **Simple Architecture**: Clean, minimal core that's easy to understand and extend
 - **Multi-Tool Execution**: Agents can execute multiple tool calls in a single step for faster task completion
-- **Relentless Coding Agent**: Single-agent coding system with smart auto-continuation for long-running tasks
+- **Relentless Agent**: Single-agent coding system with smart auto-continuation for long-running tasks
 - **Browser-Based Assistant**: Interactive web UI for agents with real-time streaming and task history
 - **Repo Optimizer**: Uses RelentlessCodingAgent to iteratively optimize code in your project for speed and cost (💡 new idea)
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems

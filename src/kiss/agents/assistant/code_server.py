@@ -349,6 +349,11 @@ function activate(ctx){
   var sp=path.join(home,'.kiss','code-server-data','pending-scm-message.json');
   var iv=setInterval(function(){
     try{
+      var fep=path.join(home,'.kiss','code-server-data','pending-focus-editor.json');
+      if(fs.existsSync(fep)){
+        fs.unlinkSync(fep);
+        vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+      }
       if(fs.existsSync(op)){
         var od=JSON.parse(fs.readFileSync(op,'utf8'));
         fs.unlinkSync(op);

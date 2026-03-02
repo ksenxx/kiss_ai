@@ -581,6 +581,12 @@ def run_chatbot(
         printer.broadcast({"type": "focus_chatbox"})
         return JSONResponse({"status": "ok"})
 
+    async def focus_editor(request: Request) -> JSONResponse:
+        pending = os.path.join(cs_data_dir, "pending-focus-editor.json")
+        with open(pending, "w") as f:
+            json.dump({"focus": True}, f)
+        return JSONResponse({"status": "ok"})
+
     async def theme(request: Request) -> JSONResponse:
         theme_file = _KISS_DIR / "vscode-theme.json"
         kind = "dark"
@@ -768,6 +774,7 @@ def run_chatbot(
         Route("/stop", stop_task, methods=["POST"]),
         Route("/open-file", open_file, methods=["POST"]),
         Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
+        Route("/focus-editor", focus_editor, methods=["POST"]),
         Route("/merge-action", merge_action, methods=["POST"]),
         Route("/commit", commit, methods=["POST"]),
         Route("/record-file-usage", record_file_usage_endpoint,
