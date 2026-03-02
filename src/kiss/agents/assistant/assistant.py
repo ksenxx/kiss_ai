@@ -306,6 +306,15 @@ def run_chatbot(
             printer.broadcast({"type": "clear"})
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
+            current_editor_file = None
+            try:
+                af_path = os.path.join(cs_data_dir, "active-file.json")
+                with open(af_path) as af:
+                    current_editor_file = json.loads(af.read()).get("path") or None
+            except (OSError, json.JSONDecodeError):
+                pass
+            extra_kwargs = dict(agent_kwargs or {})
+            extra_kwargs["current_editor_file"] = current_editor_file
             agent = agent_factory("Chatbot")
             result = agent.run(
                 prompt_template=task,
@@ -314,6 +323,7 @@ def run_chatbot(
                 model_name=model_name,
                 attachments=parsed_attachments,
                 **(agent_kwargs or {}),
+                **extra_kwargs,
             )
             result_text = result or ""
             printer.broadcast({"type": "task_done"})

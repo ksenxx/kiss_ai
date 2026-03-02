@@ -310,5 +310,33 @@ class TestStreamingFlow(unittest.TestCase):
         assert p._current_block_type == ""
 
 
+class TestRichMarkupEscaping(unittest.TestCase):
+    """Ensure content with bracket patterns like [/path] doesn't crash Rich."""
+
+    def test_text_with_bracket_path_no_crash(self):
+        buf = io.StringIO()
+        p = ConsolePrinter(file=buf)
+        p.print("[/foo/bar.py]\n\nThe editor file path: /foo/bar.py", type="text")
+
+    def test_prompt_with_bracket_path_no_crash(self):
+        buf = io.StringIO()
+        p = ConsolePrinter(file=buf)
+        content = "Fix the bug in [/foo/bar.py]\n\nThe editor file path: /foo/bar.py"
+        p.print(content, type="prompt")
+
+    def test_stream_delta_with_bracket_path_no_crash(self):
+        buf = io.StringIO()
+        p = ConsolePrinter(file=buf)
+        p._stream_delta("[/foo/bar.py] some text")
+
+    def test_text_preserves_brackets_literally(self):
+        buf = io.StringIO()
+        p = ConsolePrinter(file=buf)
+        p.print("[bold]not bold[/bold]", type="text")
+        output = buf.getvalue()
+        assert "[bold]" in output
+        assert "[/bold]" in output
+
+
 if __name__ == "__main__":
     unittest.main()
