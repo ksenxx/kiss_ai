@@ -160,6 +160,8 @@ class GEPAProgress:
     population_size: int         # Current population size
     best_val_accuracy: float | None     # Best validation accuracy so far
     current_val_accuracy: float | None  # Current candidate's validation accuracy
+    current_val_scores: dict[str, float]  # Full per-metric validation scores for current candidate
+    current_dev_scores: dict[str, float]  # Full per-metric dev scores for current candidate
     pareto_frontier_size: int    # Size of Pareto frontier
     num_candidates_evaluated: int  # Candidates evaluated this generation
     message: str                 # Description of current activity
