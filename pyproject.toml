@@ -101,7 +101,7 @@ gemini = [
     "google-genai>=0.30.0",
 ]
 
-# Dependencies for kiss.agents.sorkar (web tools, browser UI)
+# Dependencies for kiss.agents.sorcar (web tools, browser UI)
 sorcar = [
     "playwright>=1.40.0",
     "uvicorn>=0.30.0",
@@ -201,4 +201,4 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
-sorcar = "kiss.agents.sorkar.sorkar:main"
+sorcar = "kiss.agents.sorcar.sorcar:main"

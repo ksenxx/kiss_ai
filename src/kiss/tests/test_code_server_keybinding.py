@@ -1,7 +1,7 @@
 """Tests for code-server extension Cmd+K toggle focus keybinding."""
 
-from kiss.agents.sorkar.chatbot_ui import CHATBOT_JS
-from kiss.agents.sorkar.code_server import _CS_EXTENSION_JS
+from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 
 
 def test_extension_js_has_toggle_focus_command():

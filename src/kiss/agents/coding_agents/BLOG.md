@@ -17,7 +17,7 @@ So I built a 69-line Python script and told it, in plain English, to fix the pro
 The entire optimizer is a `RelentlessCodingAgent` pointed at its own source code. Here is the core of it:
 
 ```python
-from kiss.agents.sorkar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.assistant_agent import AssistantAgent
 
 TASK = """
 Can you run the command {command}
