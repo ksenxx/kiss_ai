@@ -18,6 +18,7 @@ cd kiss_ai
 uv venv --python 3.13
 source .venv/bin/activate
 uv sync
+uv run check  
 
 if [[ -z "${GEMINI_API_KEY}" && -z "${OPENAI_API_KEY}" && -z "${ANTHROPIC_API_KEY}" && -z "${TOGETHER_API_KEY}" && -z "${OPENROUTER_API_KEY}" && -z "${MINIMAX_API_KEY}" ]]; then
   echo "❌ At least one API key must be set. Export one of:"
