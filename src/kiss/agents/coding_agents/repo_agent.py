@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from kiss.agents.sorkar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.assistant_agent import AssistantAgent
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 

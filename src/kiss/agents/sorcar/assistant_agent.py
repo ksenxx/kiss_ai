@@ -7,9 +7,9 @@ import tempfile
 
 import yaml
 
-from kiss.agents.sorkar.task_history import _get_task_history_md_path
-from kiss.agents.sorkar.useful_tools import UsefulTools
-from kiss.agents.sorkar.web_use_tool import WebUseTool
+from kiss.agents.sorcar.task_history import _get_task_history_md_path
+from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core import config as config_module
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment

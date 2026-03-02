@@ -6,7 +6,7 @@ import time
 
 import yaml
 
-from kiss.agents.sorkar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.assistant_agent import AssistantAgent
 
 
 def test_assistant_agent_web_and_bash() -> None:

@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 
-from kiss.agents.sorkar.code_server import _CS_EXTENSION_JS, _CS_SETTINGS, _setup_code_server
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _CS_SETTINGS, _setup_code_server
 
 
 class TestScmMessageExtensionJS(unittest.TestCase):
@@ -75,7 +75,7 @@ class TestGenerateCommitMessageCommand(unittest.TestCase):
         assert "body.message" in _CS_EXTENSION_JS
 
     def test_chatbot_js_does_not_contain_magic_btn(self) -> None:
-        from kiss.agents.sorkar.chatbot_ui import CHATBOT_JS
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
         assert "magicBtn" not in CHATBOT_JS
         assert "magic-btn" not in CHATBOT_JS
 

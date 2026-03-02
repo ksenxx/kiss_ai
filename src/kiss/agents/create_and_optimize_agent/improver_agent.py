@@ -15,7 +15,7 @@ import shutil
 import time
 from pathlib import Path
 
-from kiss.agents.sorkar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.assistant_agent import AssistantAgent
 from kiss.core import config as config_module
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
@@ -31,7 +31,7 @@ You have to optimize an AI agent for long-running complex tasks.
     then look at code under the src folder as required.
     {kiss_folder}/src/kiss/core/models/model_info.py contains information
     about different LLM models and their context lengths, costs, etc.
-    Use {kiss_folder}/src/kiss/agents/sorkar/assistant_agent.py
+    Use {kiss_folder}/src/kiss/agents/sorcar/assistant_agent.py
     as the initial agent implementation.
   - The agent **MUST** be tested for success on the given task description.
 """

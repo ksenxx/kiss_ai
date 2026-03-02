@@ -18,16 +18,16 @@ from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorkar.browser_ui import BaseBrowserPrinter, find_free_port
-from kiss.agents.sorkar.chatbot_ui import _THEME_PRESETS, _build_html
-from kiss.agents.sorkar.code_server import (
+from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter, find_free_port
+from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
+from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _parse_diff_hunks,
     _prepare_merge_view,
     _scan_files,
     _setup_code_server,
 )
-from kiss.agents.sorkar.task_history import (
+from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
     _add_task,
     _append_task_to_md,
@@ -164,7 +164,7 @@ def run_chatbot(
             code_server_url = cs_url
             print(f"Reusing existing code-server at {code_server_url}")
         else:
-            from kiss.agents.sorkar.code_server import _MS_GALLERY
+            from kiss.agents.sorcar.code_server import _MS_GALLERY
             cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
             cs_proc = subprocess.Popen(
                 [
@@ -628,7 +628,7 @@ def run_chatbot(
         if action == "all-done":
             printer.broadcast({"type": "merge_ended"})
             return JSONResponse({"status": "ok"})
-        if action not in ("next", "accept-all", "reject-all"):
+        if action not in ("prev", "next", "accept-all", "reject-all"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
         pending = os.path.join(cs_data_dir, "pending-action.json")
         with open(pending, "w") as f:
@@ -753,7 +753,7 @@ def run_chatbot(
         fpath = _read_active_file(cs_data_dir)
         if not fpath or not fpath.lower().endswith(".md"):
             return JSONResponse({"is_prompt": False, "path": fpath})
-        from kiss.agents.sorkar.prompt_detector import PromptDetector
+        from kiss.agents.sorcar.prompt_detector import PromptDetector
         detector = PromptDetector()
         is_prompt, _score, _reasons = detector.analyze(fpath)
         return JSONResponse({
@@ -892,7 +892,7 @@ def main() -> None:
     import argparse
 
     from kiss._version import __version__
-    from kiss.agents.sorkar.assistant_agent import AssistantAgent
+    from kiss.agents.sorcar.assistant_agent import AssistantAgent
 
     parser = argparse.ArgumentParser(description="KISS Assistant")
     parser.add_argument(
