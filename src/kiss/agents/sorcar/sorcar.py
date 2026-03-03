@@ -312,6 +312,8 @@ def run_chatbot(
         nonlocal running, agent_thread
         from kiss.core.models.model import Attachment
 
+        current_thread = threading.current_thread()
+
         parsed_attachments: list[Attachment] | None = None
         if attachments:
             parsed_attachments = []
@@ -342,6 +344,9 @@ def run_chatbot(
                 **extra_kwargs,
             )
             result_text = result or ""
+            with running_lock:
+                if agent_thread is not current_thread:
+                    return
             printer.broadcast({"type": "task_done"})
             threading.Thread(
                 target=generate_followup,
@@ -350,14 +355,22 @@ def run_chatbot(
             ).start()
         except _StopRequested:
             result_text = "(stopped)"
+            with running_lock:
+                if agent_thread is not current_thread:
+                    return
             printer.broadcast({"type": "task_stopped"})
         except Exception as e:
             result_text = f"(error: {e})"
+            with running_lock:
+                if agent_thread is not current_thread:
+                    return
             printer.broadcast({"type": "task_error", "text": str(e)})
         finally:
             _set_latest_result(result_text)
             _append_task_to_md(task, result_text)
             with running_lock:
+                if agent_thread is not current_thread:
+                    return
                 running = False
                 agent_thread = None
             try:
@@ -378,20 +391,27 @@ def run_chatbot(
                 pass
 
     def stop_agent() -> bool:
-        nonlocal agent_thread
+        """Kill the current agent thread and reset state for a new task.
+
+        Immediately resets running state so a new agent thread can be started.
+        Injects _StopRequested into the old thread to clean it up.
+        """
+        nonlocal running, agent_thread
         with running_lock:
             thread = agent_thread
-        if thread is None or not thread.is_alive():
-            return False
+            if thread is None or not thread.is_alive():
+                return False
+            running = False
+            agent_thread = None
         import ctypes
 
         tid = thread.ident
-        if tid is None:
-            return False
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid),
-            ctypes.py_object(_StopRequested),
-        )
+        if tid is not None:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(tid),
+                ctypes.py_object(_StopRequested),
+            )
+        printer.broadcast({"type": "task_stopped"})
         return True
 
     def _cleanup() -> None:
@@ -448,18 +468,12 @@ def run_chatbot(
 
     async def run_task(request: Request) -> JSONResponse:
         nonlocal running, agent_thread, selected_model
-        with running_lock:
-            if running:
-                return JSONResponse({"error": "Agent is already running"}, status_code=409)
-            running = True
         body = await request.json()
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
         attachments = body.get("attachments")
         selected_model = model
         if not task:
-            with running_lock:
-                running = False
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
         t = threading.Thread(
@@ -468,6 +482,9 @@ def run_chatbot(
             daemon=True,
         )
         with running_lock:
+            if running:
+                return JSONResponse({"error": "Agent is already running"}, status_code=409)
+            running = True
             agent_thread = t
         t.start()
         return JSONResponse({"status": "started"})

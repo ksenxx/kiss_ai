@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ TASK_PROMPT = """# Task
   summary="detailed summary of work done so far")** if the task is
   not complete and you are at risk of running out of steps.
 - Work dir: {work_dir}
+- Current process PID: {current_pid} — NEVER kill this process.
 {previous_progress}
 """
 
@@ -127,6 +129,7 @@ class RelentlessAgent(Base):
 
         progress_section = ""
         summary = ""
+        current_pid = str(os.getpid())
         for trial in range(self.max_sub_sessions):
             executor = KISSAgent(f"{self.name} Trial-{trial}")
             try:
@@ -138,6 +141,7 @@ class RelentlessAgent(Base):
                         "previous_progress": progress_section,
                         "step_threshold": str(self.max_steps - 2),
                         "work_dir": self.work_dir,
+                        "current_pid": current_pid,
                     },
                     system_prompt=self.system_instructions,
                     tools=all_tools,
