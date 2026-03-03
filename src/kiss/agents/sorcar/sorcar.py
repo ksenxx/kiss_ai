@@ -825,10 +825,10 @@ def run_chatbot(
             info_parts = [
                 f"Work directory: {actual_work_dir}",
                 f"Selected model: {model}",
-                f"Max steps: {cfg.assistant.assistant_agent.max_steps}",
-                f"Max budget: ${cfg.assistant.assistant_agent.max_budget:.2f}",
+                f"Max steps: {cfg.assistant.sorcar_agent.max_steps}",
+                f"Max budget: ${cfg.assistant.sorcar_agent.max_budget:.2f}",
                 f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
-                f"Headless browser: {cfg.assistant.assistant_agent.headless}",
+                f"Headless browser: {cfg.assistant.sorcar_agent.headless}",
                 f"Code-server: {'running' if code_server_url else 'not available'}",
                 f"Tasks completed: {len(history)}",
             ]

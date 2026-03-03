@@ -5,14 +5,14 @@ import tempfile
 
 import yaml
 
-from kiss.agents.sorcar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.tests.conftest import requires_anthropic_api_key
 
 
 @requires_anthropic_api_key
-def test_assistant_agent_continues_to_second_sub_session() -> None:
+def test_sorcar_agent_continues_to_second_sub_session() -> None:
     """Test that the agent enters a second sub-session when the first ends with success=False."""
-    agent = AssistantAgent("Multi-Session Test Agent")
+    agent = SorcarAgent("Multi-Session Test Agent")
     work_dir = tempfile.mkdtemp()
     old_cwd = os.getcwd()
     os.chdir(work_dir)
@@ -55,5 +55,5 @@ def test_assistant_agent_continues_to_second_sub_session() -> None:
 
 
 if __name__ == "__main__":
-    test_assistant_agent_continues_to_second_sub_session()
+    test_sorcar_agent_continues_to_second_sub_session()
     print("\nMulti-session integration test passed!")

@@ -54,15 +54,15 @@ class TestActiveFileReading:
         assert result is None
 
 
-class TestAssistantAgentCurrentEditorFile:
-    """Test that AssistantAgent.run() accepts current_editor_file."""
+class TestSorcarAgentCurrentEditorFile:
+    """Test that SorcarAgent.run() accepts current_editor_file."""
 
     def test_signature_accepts_current_editor_file(self) -> None:
         import inspect
 
-        from kiss.agents.sorcar.assistant_agent import AssistantAgent
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
-        sig = inspect.signature(AssistantAgent.run)
+        sig = inspect.signature(SorcarAgent.run)
         assert "current_editor_file" in sig.parameters
         param = sig.parameters["current_editor_file"]
         assert param.default is None
@@ -70,9 +70,9 @@ class TestAssistantAgentCurrentEditorFile:
     def test_current_editor_file_before_attachments(self) -> None:
         import inspect
 
-        from kiss.agents.sorcar.assistant_agent import AssistantAgent
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
-        sig = inspect.signature(AssistantAgent.run)
+        sig = inspect.signature(SorcarAgent.run)
         params = list(sig.parameters.keys())
         cef_idx = params.index("current_editor_file")
         att_idx = params.index("attachments")

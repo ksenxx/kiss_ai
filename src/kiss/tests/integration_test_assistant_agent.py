@@ -9,7 +9,7 @@ import yaml
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
-def test_assistant_agent_web_and_bash() -> None:
+def test_sorcar_agent_web_and_bash() -> None:
     """Test that the agent can use both browser tools and coding tools together."""
     agent = SorcarAgent("Integration Test Agent")
     task = """
@@ -70,7 +70,7 @@ AND coding tools (Bash, Write) to complete this task.
 
 
 def main() -> None:
-    test_assistant_agent_web_and_bash()
+    test_sorcar_agent_web_and_bash()
     print("\nAll integration tests passed!")
 
 
