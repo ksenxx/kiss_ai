@@ -35,12 +35,12 @@ _artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
 SYSTEM_PROMPT = f"""
 # Rules
 - Write() for new files. Edit() for small changes.
-- Use bounded poll loops with output sent to a temporary file for bash commands; 
+- Use bounded poll loops with output sent to a temporary file for bash commands;
   never use unbounded waits.
 - Use go_to_url() for browser tool and internet search or testing an agent/app.
 - Look at `{_artifact_dir.parent}/TASK_HISTORY.md` for task history and context.
-  Pay more attention to the recent tasks over old tasks. Do not try to finish a 
-  task from the task history. DO NOT WRITE/EDIT the task history.  
+  Pay more attention to the recent tasks over old tasks. Do not try to finish a
+  task from the task history. DO NOT WRITE/EDIT the task history.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
