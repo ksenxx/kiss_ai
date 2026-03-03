@@ -68,17 +68,6 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
-  function syncCodeLensFontSize(){
-    var cfg=vscode.workspace.getConfiguration('editor');
-    var sz=cfg.get('fontSize')||14;
-    if(cfg.get('codeLensFontSize')!==sz){
-      cfg.update('codeLensFontSize',sz,vscode.ConfigurationTarget.Global);
-    }
-  }
-  syncCodeLensFontSize();
-  ctx.subscriptions.push(vscode.workspace.onDidChangeConfiguration(function(e){
-    if(e.affectsConfiguration('editor.fontSize'))syncCodeLensFontSize();
-  }));
   function writeTheme(){
     var k=vscode.window.activeColorTheme.kind;
     var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
@@ -94,55 +83,22 @@ function activate(ctx){
     backgroundColor:'rgba(248,81,73,0.15)',
     isWholeLine:true
   });
-  var greenDeco=vscode.window.createTextEditorDecorationType({
-    backgroundColor:'rgba(34,197,94,0.13)',
+  var blueDeco=vscode.window.createTextEditorDecorationType({
+    backgroundColor:'rgba(59,130,246,0.15)',
     isWholeLine:true
   });
   var ms={};
-  var clFire=new vscode.EventEmitter();
-  var prevSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,105);
-  prevSB.text='$(arrow-left) Prev';prevSB.command='kiss.prevChange';
-  var nextSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,104);
-  nextSB.text='$(arrow-right) Next';nextSB.command='kiss.nextChange';
-  var acceptAllSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,103);
-  acceptAllSB.text='$(check-all) Accept All';acceptAllSB.command='kiss.acceptAll';
-  var rejectAllSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,102);
-  rejectAllSB.text='$(close-all) Reject All';rejectAllSB.command='kiss.rejectAll';
-  var commitSB=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left,101);
-  commitSB.text='$(git-commit) Commit';commitSB.command='kiss.commitChanges';
-  ctx.subscriptions.push(prevSB,nextSB,acceptAllSB,rejectAllSB,commitSB);
-  function showMergeButtons(v){
-    [prevSB,nextSB,acceptAllSB,rejectAllSB,commitSB].forEach(function(b){v?b.show():b.hide()});
-  }
-  ctx.subscriptions.push(vscode.languages.registerCodeLensProvider({scheme:'file'},{
-    onDidChangeCodeLenses:clFire.event,
-    provideCodeLenses:function(doc){
-      var s=ms[doc.uri.fsPath];
-      if(!s||!s.hunks.length)return[];
-      var L=[];
-      for(var i=0;i<s.hunks.length;i++){
-        var h=s.hunks[i];
-        var ln=h.oc>0?h.os:h.ns;
-        var r=new vscode.Range(ln,0,ln,0);
-        var fp=doc.uri.fsPath;
-        L.push(new vscode.CodeLens(r,{title:'$(check) Accept',
-          command:'kiss.acceptChange',arguments:[fp,i]}));
-        L.push(new vscode.CodeLens(r,{title:'$(close) Reject',
-          command:'kiss.rejectChange',arguments:[fp,i]}));
-      }
-      return L;
-    }
-  }));
+  var curHunk=null;
   function refreshDeco(fp){
     vscode.window.visibleTextEditors.forEach(function(ed){
       if(ed.document.uri.fsPath!==fp)return;
-      var s=ms[fp],reds=[],greens=[];
+      var s=ms[fp],reds=[],blues=[];
       if(s)s.hunks.forEach(function(h){
         if(h.oc>0)reds.push(new vscode.Range(h.os,0,h.os+h.oc-1,99999));
-        if(h.nc>0)greens.push(new vscode.Range(h.ns,0,h.ns+h.nc-1,99999));
+        if(h.nc>0)blues.push(new vscode.Range(h.ns,0,h.ns+h.nc-1,99999));
       });
       ed.setDecorations(redDeco,reds);
-      ed.setDecorations(greenDeco,greens);
+      ed.setDecorations(blueDeco,blues);
     });
   }
   async function delLines(ed,start,count){
@@ -161,7 +117,7 @@ function activate(ctx){
     }
   }
   function afterHunkAction(fp){
-    refreshDeco(fp);clFire.fire();
+    refreshDeco(fp);
     if(Object.keys(ms).length>0)vscode.commands.executeCommand('kiss.nextChange');
     else checkAllDone();
   }
@@ -196,7 +152,7 @@ function activate(ctx){
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.prevChange',function(){
     var allH=[];
     for(var fp in ms)ms[fp].hunks.forEach(function(h){allH.push({fp:fp,h:h})});
-    if(!allH.length)return;
+    if(!allH.length){curHunk=null;return;}
     var ae=vscode.window.activeTextEditor;
     var cf=ae?ae.document.uri.fsPath:'',cl=ae?ae.selection.active.line:999999;
     var found=null;
@@ -208,6 +164,7 @@ function activate(ctx){
       if(allH[j].fp!==cf){found=allH[j];break;}
     }
     if(!found)found=allH[allH.length-1];
+    curHunk={fp:found.fp,idx:ms[found.fp].hunks.indexOf(found.h)};
     vscode.workspace.openTextDocument(vscode.Uri.file(found.fp)).then(function(doc){
       vscode.window.showTextDocument(doc,{preview:false}).then(function(ed){
         var ln=found.h.nc>0?found.h.ns:found.h.os;
@@ -219,7 +176,7 @@ function activate(ctx){
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.nextChange',function(){
     var allH=[];
     for(var fp in ms)ms[fp].hunks.forEach(function(h){allH.push({fp:fp,h:h})});
-    if(!allH.length)return;
+    if(!allH.length){curHunk=null;return;}
     var ae=vscode.window.activeTextEditor;
     var cf=ae?ae.document.uri.fsPath:'',cl=ae?ae.selection.active.line:-1;
     var found=null;
@@ -231,6 +188,7 @@ function activate(ctx){
       if(allH[j].fp!==cf){found=allH[j];break;}
     }
     if(!found)found=allH[0];
+    curHunk={fp:found.fp,idx:ms[found.fp].hunks.indexOf(found.h)};
     vscode.workspace.openTextDocument(vscode.Uri.file(found.fp)).then(function(doc){
       vscode.window.showTextDocument(doc,{preview:false}).then(function(ed){
         var ln=found.h.nc>0?found.h.ns:found.h.os;
@@ -250,11 +208,10 @@ function activate(ctx){
       for(var i=s.hunks.length-1;i>=0;i--){
         if(s.hunks[i].oc>0)await delLines(ed,s.hunks[i].os,s.hunks[i].oc);
       }
-      ed.setDecorations(redDeco,[]);ed.setDecorations(greenDeco,[]);
+      ed.setDecorations(redDeco,[]);ed.setDecorations(blueDeco,[]);
     }
-    ms={};clFire.fire();
+    ms={};curHunk=null;
     await vscode.workspace.saveAll(false);
-    showMergeButtons(false);
     vscode.window.showInformationMessage('All changes accepted.');
     firePost('/merge-action',{action:'all-done'});
   }));
@@ -269,11 +226,10 @@ function activate(ctx){
       for(var i=s.hunks.length-1;i>=0;i--){
         if(s.hunks[i].nc>0)await delLines(ed,s.hunks[i].ns,s.hunks[i].nc);
       }
-      ed.setDecorations(redDeco,[]);ed.setDecorations(greenDeco,[]);
+      ed.setDecorations(redDeco,[]);ed.setDecorations(blueDeco,[]);
     }
-    ms={};clFire.fire();
+    ms={};curHunk=null;
     await vscode.workspace.saveAll(false);
-    showMergeButtons(false);
     vscode.window.showInformationMessage('All changes rejected.');
     firePost('/merge-action',{action:'all-done'});
   }));
@@ -325,22 +281,20 @@ function activate(ctx){
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.commitChanges',async function(){
     if(!readPort()){vscode.window.showErrorMessage('Assistant server not found');return;}
-    commitSB.text='$(loading~spin) Committing...';
     try{
       var body=await postAssistant('/commit',{});
       if(body.error)vscode.window.showErrorMessage('Commit failed: '+body.error);
       else vscode.window.showInformationMessage('Committed: '+body.message);
     }catch(e){vscode.window.showErrorMessage('Commit error: '+e.message);}
-    commitSB.text='$(git-commit) Commit';
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.toggleFocus',function(){
     firePost('/focus-chatbox',{});
   }));
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
+    curHunk=null;
     vscode.workspace.saveAll(false).then(function(){
       vscode.window.showInformationMessage('All changes reviewed.');
-      showMergeButtons(false);
       firePost('/merge-action',{action:'all-done'});
     });
   }
@@ -384,6 +338,12 @@ function activate(ctx){
         else if(ad.action==='next')vscode.commands.executeCommand('kiss.nextChange');
         else if(ad.action==='accept-all')vscode.commands.executeCommand('kiss.acceptAll');
         else if(ad.action==='reject-all')vscode.commands.executeCommand('kiss.rejectAll');
+        else if(ad.action==='accept'){
+          if(curHunk&&ms[curHunk.fp])vscode.commands.executeCommand('kiss.acceptChange',curHunk.fp,curHunk.idx);
+        }
+        else if(ad.action==='reject'){
+          if(curHunk&&ms[curHunk.fp])vscode.commands.executeCommand('kiss.rejectChange',curHunk.fp,curHunk.idx);
+        }
       }
       if(fs.existsSync(sp)){
         var sd=JSON.parse(fs.readFileSync(sp,'utf8'));
@@ -409,7 +369,7 @@ function activate(ctx){
       vscode.window.visibleTextEditors.forEach(function(ed){
         if(ed.document.uri.fsPath===fp){
           ed.setDecorations(redDeco,[]);
-          ed.setDecorations(greenDeco,[]);
+          ed.setDecorations(blueDeco,[]);
         }
       });
     }
@@ -442,11 +402,12 @@ function activate(ctx){
           vscode.TextEditorRevealType.InCenter);
       }
     }
-    clFire.fire();
-    showMergeButtons(true);
+    var firstFp=Object.keys(ms)[0];
+    if(firstFp&&ms[firstFp].hunks.length)curHunk={fp:firstFp,idx:0};
+    else curHunk=null;
     vscode.window.showInformationMessage(
       'Reviewing '+data.files.length+' file(s). '
-      +'Red = old, Green = new. Use Accept / Reject on each change.');
+      +'Red = old, Blue = new. Use Accept / Reject on toolbar.');
   }
 }
 module.exports={activate};

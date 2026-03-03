@@ -117,8 +117,6 @@ class SorcarAgent(RelentlessAgent):
             history_path = _get_task_history_md_path()
             system_instructions = SYSTEM_PROMPT + f"\nTask History File: {history_path}\n"
             prompt = prompt_template
-            if current_editor_file:
-                prompt += f"\n\nThe default file path: {current_editor_file}"
             if attachments:
                 img_count = sum(1 for a in attachments if a.mime_type.startswith("image/"))
                 pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")

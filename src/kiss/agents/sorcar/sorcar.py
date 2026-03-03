@@ -672,7 +672,7 @@ def run_chatbot(
         if action == "all-done":
             printer.broadcast({"type": "merge_ended"})
             return JSONResponse({"status": "ok"})
-        if action not in ("prev", "next", "accept-all", "reject-all"):
+        if action not in ("prev", "next", "accept-all", "reject-all", "accept", "reject"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
         pending = os.path.join(cs_data_dir, "pending-action.json")
         with open(pending, "w") as f:

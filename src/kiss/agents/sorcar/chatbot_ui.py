@@ -519,22 +519,26 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 #editor-fallback p{margin:4px 0;color:rgba(255,255,255,0.5);font-size:13px}
 #merge-toolbar{
-  display:none;position:absolute;bottom:48px;left:50%;transform:translateX(-50%);
-  z-index:100;gap:4px;
+  display:none;position:fixed;bottom:48px;left:50%;transform:translateX(-50%);
+  z-index:100;gap:3px;
   background:rgba(18,18,20,0.95);backdrop-filter:blur(12px);
   -webkit-backdrop-filter:blur(12px);
   border:1px solid rgba(255,255,255,0.15);border-radius:8px;
-  padding:4px 8px;
+  padding:4px 6px;
   box-shadow:0 4px 24px rgba(0,0,0,0.5);
 }
 #merge-toolbar button{
   background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);
-  border-radius:4px;color:rgba(255,255,255,0.8);font-size:10px;
-  padding:3px 8px;cursor:pointer;transition:all 0.15s;
-  font-family:inherit;white-space:nowrap;
+  border-radius:4px;color:rgba(255,255,255,0.7);
+  width:28px;height:28px;padding:0;cursor:pointer;transition:all 0.15s;
+  display:inline-flex;align-items:center;justify-content:center;
 }
+#merge-toolbar button svg{width:14px;height:14px;flex-shrink:0}
 #merge-toolbar button:hover{
   background:rgba(88,166,255,0.15);border-color:rgba(88,166,255,0.3);color:#fff;
+}
+#merge-toolbar .mt-sep{
+  width:1px;height:20px;background:rgba(255,255,255,0.1);margin:0 2px;align-self:center;
 }
 #divider{
   width:6px;flex-shrink:0;cursor:col-resize;
@@ -916,12 +920,13 @@ body{background:var(--bg)}
 }
 #merge-toolbar button{
   background:rgba(var(--fg-rgb),0.08);border:1px solid rgba(var(--fg-rgb),0.12);
-  color:rgba(var(--fg-rgb),0.8);
+  color:rgba(var(--fg-rgb),0.7);
 }
 #merge-toolbar button:hover{
   background:rgba(var(--accent-rgb),0.15);
   border-color:rgba(var(--accent-rgb),0.3);color:#fff;
 }
+#merge-toolbar .mt-sep{background:rgba(var(--fg-rgb),0.1)}
 #assistant-panel .prompt-h{
   background:rgba(var(--cyan-rgb),0.08);color:var(--cyan);
 }
@@ -1800,12 +1805,17 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
   <div id="editor-panel" style="width:75%;flex-shrink:0">
     {editor_content}
     <div id="merge-toolbar">
-      <button onclick="mergeAction('prev')">&#9664; Prev</button>
-      <button onclick="mergeAction('next')">&#9654; Next</button>
-      <button onclick="mergeAction('accept-all')">&#10004; Accept All</button>
-      <button onclick="mergeAction('reject-all')">&#10008; Reject All</button>
-      <button id="commit-btn" onclick="mergeCommit()">&#128230; Commit</button>
-      <button id="push-btn" onclick="mergePush()">&#128640; Push</button>
+      <button onclick="mergeAction('accept')" title="Accept current change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></button>
+      <button onclick="mergeAction('reject')" title="Reject current change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <span class="mt-sep"></span>
+      <button onclick="mergeAction('prev')" title="Previous change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button onclick="mergeAction('next')" title="Next change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
+      <span class="mt-sep"></span>
+      <button onclick="mergeAction('accept-all')" title="Accept all remaining changes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 7 9.5 17 6 13"/><polyline points="22 7 13.5 17 12 15.3"/></svg></button>
+      <button onclick="mergeAction('reject-all')" title="Reject all remaining changes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="5" x2="7" y2="15"/><line x1="7" y1="5" x2="17" y2="15"/><line x1="17" y1="9" x2="7" y2="19"/><line x1="7" y1="9" x2="17" y2="19"/></svg></button>
+      <span class="mt-sep"></span>
+      <button id="commit-btn" onclick="mergeCommit()" title="Commit changes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/></svg></button>
+      <button id="push-btn" onclick="mergePush()" title="Push to remote"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
     </div>
   </div>
   <div id="divider"></div>
