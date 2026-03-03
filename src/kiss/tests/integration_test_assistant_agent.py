@@ -1,4 +1,4 @@
-"""Integration test for AssistantAgent: uses both browser and bash tools."""
+"""Integration test for SorcarAgent: uses both browser and bash tools."""
 
 import os
 import tempfile
@@ -6,12 +6,12 @@ import time
 
 import yaml
 
-from kiss.agents.sorcar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def test_assistant_agent_web_and_bash() -> None:
     """Test that the agent can use both browser tools and coding tools together."""
-    agent = AssistantAgent("Integration Test Agent")
+    agent = SorcarAgent("Integration Test Agent")
     task = """
 **Task:** Research information from a website and create a local report using both
 the browser and coding tools.

@@ -1,4 +1,4 @@
-"""Assistant agent with both coding tools and browser automation."""
+"""Sorcar agent with both coding tools and browser automation."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
 
 
-class AssistantAgent(RelentlessAgent):
+class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
 
     def __init__(self, name: str) -> None:
@@ -141,7 +141,7 @@ class AssistantAgent(RelentlessAgent):
                 prompt_template=(
                     prompt + f"\n\n- The default file path: {current_editor_file}"
                     if current_editor_file
-                    else ""
+                    else prompt
                 ),
                 arguments=arguments,
                 max_steps=max_steps,
@@ -160,11 +160,11 @@ class AssistantAgent(RelentlessAgent):
 
 
 def main() -> None:
-    """Run a demo of the AssistantAgent with a sample Gmail task."""
+    """Run a demo of the SorcarAgent with a sample Gmail task."""
     import argparse
     import time as time_mod
 
-    parser = argparse.ArgumentParser(description="Run AssistantAgent demo")
+    parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
         "--model_name", type=str, default="claude-sonnet-4-6", help="LLM model name"
     )
@@ -204,7 +204,7 @@ password 'For AI Assistant.' and read the messages.
         os.makedirs(work_dir, exist_ok=True)
     else:
         work_dir = tempfile.mkdtemp()
-    agent = AssistantAgent("Assistant Agent Test")
+    agent = SorcarAgent("Sorcar Agent Test")
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
