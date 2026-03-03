@@ -1,14 +1,14 @@
-"""Repo agent that optimizes agent code using AssistantAgent."""
+"""Repo agent that optimizes agent code using SorcarAgent."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from kiss.agents.sorcar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
-DEFAULT_AGENT_CODE = "src/kiss/agents/sorcar/assistant_agent.py"
+DEFAULT_AGENT_CODE = "src/kiss/agents/sorcar/sorcar_agent.py"
 DEFAULT_MODEL = "claude-opus-4-6"
 
 # Once the command succeeds and solves the task successfully,
@@ -79,7 +79,7 @@ to the problems in any possible way.
 
 def main() -> None:
     """Run the agent optimizer that iteratively improves agent code for speed and cost."""
-    parser = argparse.ArgumentParser(description="Optimize an agent using AssistantAgent")
+    parser = argparse.ArgumentParser(description="Optimize an agent using SorcarAgent")
     parser.add_argument(
         "--project-root",
         default=DEFAULT_PROJECT_ROOT,
@@ -96,7 +96,7 @@ def main() -> None:
     args = parser.parse_args()
 
     task = TASK_TEMPLATE.format(agent_code=args.agent_code)
-    agent = AssistantAgent("RepoOptimizer")
+    agent = SorcarAgent("RepoOptimizer")
     result = agent.run(
         prompt_template=task,
         model_name=args.model,

@@ -1,10 +1,10 @@
-"""Repo agent that optimizes agent code using AssistantAgent."""
+"""Repo agent that optimizes agent code using SorcarAgent."""
 
 from __future__ import annotations
 
 import argparse
 
-from kiss.agents.sorcar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 DEFAULT_MODEL = "claude-opus-4-6"
 
@@ -37,7 +37,7 @@ code after the optimization is complete.
 
 def main() -> None:
     """Run the repo optimizer that iteratively runs a command and optimizes code."""
-    parser = argparse.ArgumentParser(description="Optimize a repository using AssistantAgent")
+    parser = argparse.ArgumentParser(description="Optimize a repository using SorcarAgent")
     parser.add_argument("--command", help="Command to run")
     parser.add_argument("--metrics", help="Metrics to optimize")
     parser.add_argument("--work-dir", default=".", help="Working directory (default: .)")
@@ -48,7 +48,7 @@ def main() -> None:
     work_dir = args.work_dir
 
     task = TASK_TEMPLATE.format(command=command, metrics=metrics, work_dir=work_dir)
-    agent = AssistantAgent("RepoOptimizer")
+    agent = SorcarAgent("RepoOptimizer")
     result = agent.run(
         prompt_template=task,
         model_name=DEFAULT_MODEL,
