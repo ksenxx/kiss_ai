@@ -11,24 +11,52 @@ from kiss.agents.sorcar.browser_ui import (
 
 _THEME_PRESETS: dict[str, dict[str, str]] = {
     "dark": {
-        "bg": "#1e1e1e", "bg2": "#252526", "fg": "#d4d4d4",
-        "accent": "#3794ff", "border": "#3c3c3c", "inputBg": "#313131",
-        "green": "#23d18b", "red": "#f14c4c", "purple": "#b180d7", "cyan": "#29b8db",
+        "bg": "#1e1e1e",
+        "bg2": "#252526",
+        "fg": "#d4d4d4",
+        "accent": "#3794ff",
+        "border": "#3c3c3c",
+        "inputBg": "#313131",
+        "green": "#23d18b",
+        "red": "#f14c4c",
+        "purple": "#b180d7",
+        "cyan": "#29b8db",
     },
     "light": {
-        "bg": "#ffffff", "bg2": "#f3f3f3", "fg": "#333333",
-        "accent": "#005fb8", "border": "#d4d4d4", "inputBg": "#ffffff",
-        "green": "#388a34", "red": "#cd3131", "purple": "#7e57c2", "cyan": "#0598bc",
+        "bg": "#ffffff",
+        "bg2": "#f3f3f3",
+        "fg": "#333333",
+        "accent": "#005fb8",
+        "border": "#d4d4d4",
+        "inputBg": "#ffffff",
+        "green": "#388a34",
+        "red": "#cd3131",
+        "purple": "#7e57c2",
+        "cyan": "#0598bc",
     },
     "hcDark": {
-        "bg": "#000000", "bg2": "#0a0a0a", "fg": "#ffffff",
-        "accent": "#3794ff", "border": "#6fc3df", "inputBg": "#0a0a0a",
-        "green": "#23d18b", "red": "#f48771", "purple": "#b180d7", "cyan": "#29b8db",
+        "bg": "#000000",
+        "bg2": "#0a0a0a",
+        "fg": "#ffffff",
+        "accent": "#3794ff",
+        "border": "#6fc3df",
+        "inputBg": "#0a0a0a",
+        "green": "#23d18b",
+        "red": "#f48771",
+        "purple": "#b180d7",
+        "cyan": "#29b8db",
     },
     "hcLight": {
-        "bg": "#ffffff", "bg2": "#f0f0f0", "fg": "#000000",
-        "accent": "#0f4a85", "border": "#0f4a85", "inputBg": "#ffffff",
-        "green": "#1b7d2c", "red": "#b5200d", "purple": "#5e3a8a", "cyan": "#0f4a85",
+        "bg": "#ffffff",
+        "bg2": "#f0f0f0",
+        "fg": "#000000",
+        "accent": "#0f4a85",
+        "border": "#0f4a85",
+        "inputBg": "#ffffff",
+        "green": "#1b7d2c",
+        "red": "#b5200d",
+        "purple": "#5e3a8a",
+        "cyan": "#0f4a85",
     },
 }
 
@@ -240,17 +268,14 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 #stop-btn:hover{background:rgba(248,81,73,0.2);box-shadow:0 0 16px rgba(248,81,73,0.15)}
 #stop-btn svg{width:14px;height:14px}
-#stop-btn.waiting svg{display:none}
-#stop-btn.waiting::after{
-  content:'';width:14px;height:14px;
+#wait-spinner{
+  display:none;width:16px;height:16px;
   border:2px solid rgba(255,255,255,0.15);
   border-top-color:rgba(88,166,255,0.7);
   border-radius:50%;animation:spin .8s linear infinite;
+  flex-shrink:0;
 }
-#stop-btn.waiting{
-  background:rgba(88,166,255,0.08);color:rgba(88,166,255,0.7);
-  border-color:rgba(88,166,255,0.15);
-}
+#wait-spinner.active{display:block}
 #clear-btn{
   background:none;color:rgba(255,255,255,0.2);border:none;
   width:24px;height:24px;cursor:pointer;flex-shrink:0;
@@ -565,7 +590,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel #send-btn svg{width:12px;height:12px}
 #assistant-panel #stop-btn{width:28px;height:28px}
 #assistant-panel #stop-btn svg{width:11px;height:11px}
-#assistant-panel #stop-btn.waiting::after{width:11px;height:11px}
+#assistant-panel #wait-spinner{width:12px;height:12px}
 #assistant-panel #clear-btn{width:18px;height:18px}
 #assistant-panel #clear-btn svg{width:11px;height:11px}
 #assistant-panel #upload-btn{padding:4px 6px;border-radius:6px}
@@ -740,11 +765,7 @@ body{background:var(--bg)}
   background:rgba(var(--red-rgb),0.25);
   box-shadow:0 0 12px rgba(var(--red-rgb),0.15);
 }
-#assistant-panel #stop-btn.waiting{
-  background:rgba(var(--accent-rgb),0.1);
-  border-color:rgba(var(--accent-rgb),0.2);
-}
-#assistant-panel #stop-btn.waiting::after{
+#assistant-panel #wait-spinner{
   border-color:var(--border);border-top-color:var(--accent);
 }
 #assistant-panel #clear-btn{color:rgba(var(--fg-rgb),0.25)}
@@ -1019,15 +1040,16 @@ function startTimer(){
 }
 function stopTimer(){if(timerIv){clearInterval(timerIv);timerIv=null;}}
 var _spinnerTimer=null;
+var waitSpinner=document.getElementById('wait-spinner');
 function removeSpinner(){
   if(_spinnerTimer){clearTimeout(_spinnerTimer);_spinnerTimer=null;}
-  stopBtn.classList.remove('waiting');
+  waitSpinner.classList.remove('active');
 }
 function showSpinner(){
   removeSpinner();
   _spinnerTimer=setTimeout(function(){
     _spinnerTimer=null;
-    stopBtn.classList.add('waiting');
+    waitSpinner.classList.add('active');
   },250);
 }
 function setReady(label){
@@ -1735,6 +1757,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
 
     if code_server_url:
         import urllib.parse
+
         wd_enc = urllib.parse.quote(work_dir, safe="")
         editor_content = (
             f'<iframe id="code-server-frame"'
@@ -1745,17 +1768,19 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
     else:
         editor_content = (
             '<div id="editor-fallback">'
-            '<h3>VS Code Editor</h3>'
-            '<p>code-server is not installed. Install it to enable the embedded editor:</p>'
-            '<code>curl -fsSL https://code-server.dev/install.sh | sh</code>'
-            '<p>Or via Homebrew:</p>'
-            '<code>brew install code-server</code>'
+            "<h3>VS Code Editor</h3>"
+            "<p>code-server is not installed. Install it to enable the embedded editor:</p>"
+            "<code>curl -fsSL https://code-server.dev/install.sh | sh</code>"
+            "<p>Or via Homebrew:</p>"
+            "<code>brew install code-server</code>"
             '<p style="margin-top:16px;font-size:12px;opacity:0.5">'
-            'Restart the assistant after installation.</p>'
-            '</div>'
+            "Restart the assistant after installation.</p>"
+            "</div>"
         )
 
-    return HTML_HEAD.format(title=title, css=css) + f"""<body>
+    return (
+        HTML_HEAD.format(title=title, css=css)
+        + f"""<body>
 <div id="split-container">
   <div id="editor-panel" style="width:75%;flex-shrink:0">
     {editor_content}
@@ -1856,6 +1881,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
             </div>
           </div>
           <div id="input-actions">
+            <span id="wait-spinner"></span>
             <button id="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
               ><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"
@@ -1874,3 +1900,4 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
 </script>
 </body>
 </html>"""
+    )

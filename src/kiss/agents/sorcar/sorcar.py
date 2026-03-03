@@ -147,11 +147,12 @@ def run_chatbot(
         need_restart = port_in_use and (ext_changed or workdir_changed)
         if need_restart:
             reason = "extension updated" if ext_changed else "work directory changed"
-            print(f"Restarting code-server ({reason})...")
+            printer.print(f"Restarting code-server ({reason})...")
             try:
                 result = subprocess.run(
                     ["lsof", "-ti", f":{cs_port}", "-sTCP:LISTEN"],
-                    capture_output=True, text=True,
+                    capture_output=True,
+                    text=True,
                 )
                 for pid_str in result.stdout.strip().split("\n"):
                     if pid_str.strip():
@@ -162,21 +163,31 @@ def run_chatbot(
             port_in_use = False
         if port_in_use:
             code_server_url = cs_url
-            print(f"Reusing existing code-server at {code_server_url}")
+            printer.print(f"Reusing existing code-server at {code_server_url}")
         else:
             from kiss.agents.sorcar.code_server import _MS_GALLERY
+
             cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
             cs_proc = subprocess.Popen(
                 [
-                    cs_binary, "--port", str(cs_port), "--auth", "none",
-                    "--bind-addr", f"127.0.0.1:{cs_port}", "--disable-telemetry",
-                    "--user-data-dir", cs_data_dir,
-                    "--extensions-dir", str(Path(cs_data_dir) / "extensions"),
+                    cs_binary,
+                    "--port",
+                    str(cs_port),
+                    "--auth",
+                    "none",
+                    "--bind-addr",
+                    f"127.0.0.1:{cs_port}",
+                    "--disable-telemetry",
+                    "--user-data-dir",
+                    cs_data_dir,
+                    "--extensions-dir",
+                    str(Path(cs_data_dir) / "extensions"),
                     "--disable-getting-started-override",
                     "--disable-workspace-trust",
                     actual_work_dir,
                 ],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 env=cs_env,
             )
             for _ in range(30):
@@ -187,9 +198,9 @@ def run_chatbot(
                 except (ConnectionRefusedError, OSError):
                     time.sleep(0.5)
             if code_server_url:
-                print(f"code-server running at {code_server_url}")
+                printer.print(f"code-server running at {code_server_url}")
             else:
-                print("Warning: code-server failed to start")
+                printer.print("Warning: code-server failed to start")
         if code_server_url:
             try:
                 workdir_file.write_text(actual_work_dir)
@@ -259,10 +270,12 @@ def run_chatbot(
             )
             suggestion = _clean_llm_output(raw)
             if suggestion:
-                printer.broadcast({
-                    "type": "followup_suggestion",
-                    "text": suggestion,
-                })
+                printer.broadcast(
+                    {
+                        "type": "followup_suggestion",
+                        "text": suggestion,
+                    }
+                )
         except Exception:
             pass
 
@@ -291,7 +304,9 @@ def run_chatbot(
     threading.Thread(target=_watch_theme_file, daemon=True).start()
 
     def run_agent_thread(
-        task: str, model_name: str, attachments: list | None = None,
+        task: str,
+        model_name: str,
+        attachments: list | None = None,
     ) -> None:
         nonlocal running, agent_thread
         from kiss.core.models.model import Attachment
@@ -346,7 +361,10 @@ def run_chatbot(
                 agent_thread = None
             try:
                 merge_result = _prepare_merge_view(
-                    actual_work_dir, cs_data_dir, pre_hunks, pre_untracked,
+                    actual_work_dir,
+                    cs_data_dir,
+                    pre_hunks,
+                    pre_untracked,
                 )
                 if merge_result.get("status") == "opened":
                     printer.broadcast({"type": "merge_started"})
@@ -444,7 +462,9 @@ def run_chatbot(
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
         t = threading.Thread(
-            target=run_agent_thread, args=(task, model, attachments), daemon=True,
+            target=run_agent_thread,
+            args=(task, model, attachments),
+            daemon=True,
         )
         with running_lock:
             agent_thread = t
@@ -515,14 +535,14 @@ def run_chatbot(
         for entry in _load_history():
             task = entry.get("task", "")
             if task.lower().startswith(query_lower) and len(task) > len(query):
-                return task[len(query):]
+                return task[len(query) :]
         words = raw_query.split()
         last_word = words[-1] if words else ""
         if last_word and len(last_word) >= 2:
             lw_lower = last_word.lower()
             for path in file_cache:
                 if path.lower().startswith(lw_lower) and len(path) > len(last_word):
-                    return path[len(last_word):]
+                    return path[len(last_word) :]
         return ""
 
     async def complete(request: Request) -> JSONResponse:
@@ -561,7 +581,7 @@ def run_chatbot(
                 )
                 s = _clean_llm_output(result)
                 if s.lower().startswith(query.lower()):
-                    s = s[len(query):]
+                    s = s[len(query) :]
                 return s
             except Exception:
                 return ""
@@ -575,18 +595,21 @@ def run_chatbot(
         for name in get_available_models():
             info = MODEL_INFO.get(name)
             if info and info.is_function_calling_supported:
-                models_list.append({
-                    "name": name,
-                    "inp": info.input_price_per_1M,
-                    "out": info.output_price_per_1M,
-                    "uses": usage.get(name, 0),
-                })
-        models_list.sort(key=lambda m: (
-            _model_vendor_order(str(m["name"])),
-            -(float(m["inp"]) + float(m["out"])),
-        ))
+                models_list.append(
+                    {
+                        "name": name,
+                        "inp": info.input_price_per_1M,
+                        "out": info.output_price_per_1M,
+                        "uses": usage.get(name, 0),
+                    }
+                )
+        models_list.sort(
+            key=lambda m: (
+                _model_vendor_order(str(m["name"])),
+                -(float(m["inp"]) + float(m["out"])),
+            )
+        )
         return JSONResponse({"models": models_list, "selected": selected_model})
-
 
     async def focus_chatbox(request: Request) -> JSONResponse:
         printer.broadcast({"type": "focus_chatbox"})
@@ -636,7 +659,8 @@ def run_chatbot(
         return JSONResponse({"status": "ok"})
 
     async def _thread_json_response(
-        fn: Callable[[], dict[str, str]], error_status: int = 400,
+        fn: Callable[[], dict[str, str]],
+        error_status: int = 400,
     ) -> JSONResponse:
         result = await asyncio.to_thread(fn)
         if "error" in result:
@@ -648,13 +672,17 @@ def run_chatbot(
             subprocess.run(["git", "add", "-A"], cwd=actual_work_dir)
             diff_stat = subprocess.run(
                 ["git", "diff", "--cached", "--stat"],
-                capture_output=True, text=True, cwd=actual_work_dir,
+                capture_output=True,
+                text=True,
+                cwd=actual_work_dir,
             )
             if not diff_stat.stdout.strip():
                 return {"error": "No changes to commit"}
             diff_detail = subprocess.run(
                 ["git", "diff", "--cached"],
-                capture_output=True, text=True, cwd=actual_work_dir,
+                capture_output=True,
+                text=True,
+                cwd=actual_work_dir,
             )
             agent = KISSAgent("Commit Message Generator")
             message = agent.run(
@@ -673,9 +701,10 @@ def run_chatbot(
                 "GIT_COMMITTER_EMAIL": "ksen@berkeley.edu",
             }
             result = subprocess.run(
-                ["git", "commit", "-m", message,
-                 "--author=KISS Sorcar <ksen@berkeley.edu>"],
-                capture_output=True, text=True, cwd=actual_work_dir,
+                ["git", "commit", "-m", message, "--author=KISS Sorcar <ksen@berkeley.edu>"],
+                capture_output=True,
+                text=True,
+                cwd=actual_work_dir,
                 env=commit_env,
             )
             if result.returncode != 0:
@@ -688,7 +717,9 @@ def run_chatbot(
         def _do_push() -> dict[str, str]:
             result = subprocess.run(
                 ["git", "push"],
-                capture_output=True, text=True, cwd=actual_work_dir,
+                capture_output=True,
+                text=True,
+                cwd=actual_work_dir,
             )
             if result.returncode != 0:
                 return {"error": result.stderr.strip() or "Push failed"}
@@ -707,12 +738,19 @@ def run_chatbot(
 
     async def generate_commit_message(request: Request) -> JSONResponse:
         """Generate a git commit message from current diff and fill the SCM input."""
+
         def _generate() -> dict[str, str]:
             diff_result = subprocess.run(
-                ["git", "diff"], capture_output=True, text=True, cwd=actual_work_dir,
+                ["git", "diff"],
+                capture_output=True,
+                text=True,
+                cwd=actual_work_dir,
             )
             cached_result = subprocess.run(
-                ["git", "diff", "--cached"], capture_output=True, text=True, cwd=actual_work_dir,
+                ["git", "diff", "--cached"],
+                capture_output=True,
+                text=True,
+                cwd=actual_work_dir,
             )
             diff_text = (diff_result.stdout + cached_result.stdout).strip()
             untracked_files = "\n".join(sorted(_capture_untracked(actual_work_dir)))
@@ -754,13 +792,16 @@ def run_chatbot(
         if not fpath or not fpath.lower().endswith(".md"):
             return JSONResponse({"is_prompt": False, "path": fpath})
         from kiss.agents.sorcar.prompt_detector import PromptDetector
+
         detector = PromptDetector()
         is_prompt, _score, _reasons = detector.analyze(fpath)
-        return JSONResponse({
-            "is_prompt": is_prompt,
-            "path": fpath,
-            "filename": os.path.basename(fpath),
-        })
+        return JSONResponse(
+            {
+                "is_prompt": is_prompt,
+                "path": fpath,
+                "filename": os.path.basename(fpath),
+            }
+        )
 
     async def get_file_content(request: Request) -> JSONResponse:
         """Return the text content of a file."""
@@ -819,36 +860,36 @@ def run_chatbot(
 
         return await _thread_json_response(_generate, error_status=500)
 
-    app = Starlette(routes=[
-        Route("/", index),
-        Route("/events", events),
-        Route("/run", run_task, methods=["POST"]),
-        Route("/stop", stop_task, methods=["POST"]),
-        Route("/open-file", open_file, methods=["POST"]),
-        Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
-        Route("/focus-editor", focus_editor, methods=["POST"]),
-        Route("/merge-action", merge_action, methods=["POST"]),
-        Route("/commit", commit, methods=["POST"]),
-        Route("/push", push, methods=["POST"]),
-        Route("/record-file-usage", record_file_usage_endpoint,
-              methods=["POST"]),
-        Route("/generate-commit-message", generate_commit_message,
-              methods=["POST"]),
-        Route("/generate-config-message", generate_config_message,
-              methods=["POST"]),
-        Route("/active-file-info", active_file_info),
-        Route("/get-file-content", get_file_content),
-        Route("/suggestions", suggestions),
-        Route("/complete", complete),
-        Route("/tasks", tasks),
-        Route("/proposed_tasks", proposed_tasks_endpoint),
-        Route("/models", models_endpoint),
-        Route("/theme", theme),
-    ])
+    app = Starlette(
+        routes=[
+            Route("/", index),
+            Route("/events", events),
+            Route("/run", run_task, methods=["POST"]),
+            Route("/stop", stop_task, methods=["POST"]),
+            Route("/open-file", open_file, methods=["POST"]),
+            Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
+            Route("/focus-editor", focus_editor, methods=["POST"]),
+            Route("/merge-action", merge_action, methods=["POST"]),
+            Route("/commit", commit, methods=["POST"]),
+            Route("/push", push, methods=["POST"]),
+            Route("/record-file-usage", record_file_usage_endpoint, methods=["POST"]),
+            Route("/generate-commit-message", generate_commit_message, methods=["POST"]),
+            Route("/generate-config-message", generate_config_message, methods=["POST"]),
+            Route("/active-file-info", active_file_info),
+            Route("/get-file-content", get_file_content),
+            Route("/suggestions", suggestions),
+            Route("/complete", complete),
+            Route("/tasks", tasks),
+            Route("/proposed_tasks", proposed_tasks_endpoint),
+            Route("/models", models_endpoint),
+            Route("/theme", theme),
+        ]
+    )
 
     threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
 
     import atexit
+
     atexit.register(_cleanup)
 
     port = find_free_port()
@@ -857,8 +898,8 @@ def run_chatbot(
     except OSError:
         pass
     url = f"http://127.0.0.1:{port}"
-    print(f"{title} running at {url}")
-    print(f"Work directory: {actual_work_dir}")
+    printer.print(f"{title} running at {url}")
+    printer.print(f"Work directory: {actual_work_dir}")
 
     def _open_browser() -> None:
         time.sleep(2)
@@ -866,9 +907,13 @@ def run_chatbot(
 
     threading.Thread(target=_open_browser, daemon=True).start()
     import logging
+
     logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)
     config = uvicorn.Config(
-        app, host="127.0.0.1", port=port, log_level="warning",
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
         timeout_graceful_shutdown=1,
     )
     server = uvicorn.Server(config)
@@ -896,11 +941,14 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="KISS Assistant")
     parser.add_argument(
-        "work_dir", nargs="?", default=os.getcwd(),
+        "work_dir",
+        nargs="?",
+        default=os.getcwd(),
         help="Working directory for the agent",
     )
     parser.add_argument(
-        "--model_name", default="claude-opus-4-6",
+        "--model_name",
+        default="claude-opus-4-6",
         help="Default LLM model name",
     )
     args = parser.parse_args()

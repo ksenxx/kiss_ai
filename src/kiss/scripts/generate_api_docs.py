@@ -10,8 +10,14 @@ KISS_SRC = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = KISS_SRC.parent.parent
 OUTPUT = PROJECT_ROOT / "API.md"
 EXCLUDE_DIRS = {
-    "tests", "scripts", "evals", "viz_trajectory", "demo", "__pycache__",
-    "create_and_optimize_agent", "self_evolving_multi_agent",
+    "tests",
+    "scripts",
+    "evals",
+    "viz_trajectory",
+    "demo",
+    "__pycache__",
+    "create_and_optimize_agent",
+    "self_evolving_multi_agent",
 }
 EXCLUDE_FILES = {"_version.py", "conftest.py", "novelty_prompts.py"}
 
@@ -130,7 +136,7 @@ def _parse_google_docstring(raw: str) -> ParsedDoc:
                 args.append((current_arg_name, current_arg_desc.strip()))
                 current_arg_name = current_arg_desc = ""
             section = "returns"
-            rest = stripped[len("returns:"):].strip()
+            rest = stripped[len("returns:") :].strip()
             if rest:
                 returns_parts.append(rest)
             continue
@@ -181,8 +187,8 @@ def _parse_google_docstring(raw: str) -> ParsedDoc:
 
 def _has_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
     return any(
-        (isinstance(d, ast.Name) and d.id == name) or
-        (isinstance(d, ast.Attribute) and d.attr == name)
+        (isinstance(d, ast.Name) and d.id == name)
+        or (isinstance(d, ast.Attribute) and d.attr == name)
         for d in node.decorator_list
     )
 
@@ -199,16 +205,22 @@ def _extract_class(node: ast.ClassDef) -> ClassInfo:
             init_sig = _format_func_sig(item, skip_self=True)
             init_doc = _parse_google_docstring(ast.get_docstring(item) or "")
         elif not item.name.startswith("_"):
-            methods.append(FuncInfo(
-                name=item.name,
-                signature=_format_func_sig(item, skip_self=True),
-                parsed_doc=_parse_google_docstring(ast.get_docstring(item) or ""),
-                is_async=isinstance(item, ast.AsyncFunctionDef),
-                is_property=_has_decorator(item, "property"),
-            ))
+            methods.append(
+                FuncInfo(
+                    name=item.name,
+                    signature=_format_func_sig(item, skip_self=True),
+                    parsed_doc=_parse_google_docstring(ast.get_docstring(item) or ""),
+                    is_async=isinstance(item, ast.AsyncFunctionDef),
+                    is_property=_has_decorator(item, "property"),
+                )
+            )
     return ClassInfo(
-        name=node.name, bases=bases, doc=_get_summary(node),
-        init_sig=init_sig, init_doc=init_doc, methods=methods,
+        name=node.name,
+        bases=bases,
+        doc=_get_summary(node),
+        init_sig=init_sig,
+        init_doc=init_doc,
+        methods=methods,
     )
 
 
@@ -228,7 +240,8 @@ def _parse_all_list(tree: ast.Module) -> list[str] | None:
                 if isinstance(target, ast.Name) and target.id == "__all__":
                     if isinstance(node.value, ast.List):
                         return [
-                            e.value for e in node.value.elts
+                            e.value
+                            for e in node.value.elts
                             if isinstance(e, ast.Constant) and isinstance(e.value, str)
                         ]
     return None
@@ -335,11 +348,17 @@ def discover_modules() -> list[ModuleDoc]:
             else:
                 functions.append(defn)
 
-        modules.append(ModuleDoc(
-            name=module_name, doc=doc, all_exports=all_list,
-            classes=classes, functions=functions, is_package=True,
-            deprecated=deprecated,
-        ))
+        modules.append(
+            ModuleDoc(
+                name=module_name,
+                doc=doc,
+                all_exports=all_list,
+                classes=classes,
+                functions=functions,
+                is_package=True,
+                deprecated=deprecated,
+            )
+        )
 
     for py_file in sorted(KISS_SRC.rglob("*.py")):
         if py_file.name == "__init__.py" or _should_skip(py_file):
@@ -352,38 +371,63 @@ def discover_modules() -> list[ModuleDoc]:
         if not classes and not functions:
             continue
         doc = _get_summary(ast.parse(py_file.read_text()))
-        modules.append(ModuleDoc(
-            name=module_name, doc=doc, all_exports=None,
-            classes=classes, functions=functions,
-        ))
+        modules.append(
+            ModuleDoc(
+                name=module_name,
+                doc=doc,
+                all_exports=None,
+                classes=classes,
+                functions=functions,
+            )
+        )
 
     return _sort_modules(modules)
 
 
 def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
     order = [
-        "kiss", "kiss.core", "kiss.core.kiss_agent", "kiss.core.base",
-        "kiss.core.config", "kiss.core.config_builder",
-        "kiss.core.models", "kiss.core.models.model", "kiss.core.models.model_info",
-        "kiss.core.models.openai_compatible_model", "kiss.core.models.anthropic_model",
+        "kiss",
+        "kiss.core",
+        "kiss.core.kiss_agent",
+        "kiss.core.base",
+        "kiss.core.config",
+        "kiss.core.config_builder",
+        "kiss.core.models",
+        "kiss.core.models.model",
+        "kiss.core.models.model_info",
+        "kiss.core.models.openai_compatible_model",
+        "kiss.core.models.anthropic_model",
         "kiss.core.models.gemini_model",
-        "kiss.core.printer", "kiss.core.print_to_console",
-        "kiss.agents.sorcar.browser_ui", "kiss.agents.sorcar.useful_tools",
+        "kiss.core.printer",
+        "kiss.core.print_to_console",
+        "kiss.agents.sorcar.browser_ui",
+        "kiss.agents.sorcar.useful_tools",
         "kiss.agents.sorcar.web_use_tool",
-        "kiss.core.utils", "kiss.core.kiss_error",
-        "kiss.agents", "kiss.agents.kiss",
+        "kiss.core.utils",
+        "kiss.core.kiss_error",
+        "kiss.agents",
+        "kiss.agents.kiss",
         "kiss.agents.coding_agents",
-        "kiss.agents.coding_agents.repo_agent", "kiss.agents.coding_agents.repo_optimizer",
-        "kiss.agents.coding_agents.agent_optimizer", "kiss.agents.coding_agents.config",
-        "kiss.agents.sorcar", "kiss.core.relentless_agent",
-        "kiss.agents.sorcar.assistant_agent", "kiss.agents.sorcar.sorcar",
+        "kiss.agents.coding_agents.repo_agent",
+        "kiss.agents.coding_agents.repo_optimizer",
+        "kiss.agents.coding_agents.agent_optimizer",
+        "kiss.agents.coding_agents.config",
+        "kiss.agents.sorcar",
+        "kiss.core.relentless_agent",
+        "kiss.agents.sorcar.assistant_agent",
+        "kiss.agents.sorcar.sorcar",
         "kiss.agents.sorcar.config",
-        "kiss.agents.gepa", "kiss.agents.gepa.gepa", "kiss.agents.gepa.config",
-        "kiss.agents.kiss_evolve", "kiss.agents.kiss_evolve.kiss_evolve",
+        "kiss.agents.gepa",
+        "kiss.agents.gepa.gepa",
+        "kiss.agents.gepa.config",
+        "kiss.agents.kiss_evolve",
+        "kiss.agents.kiss_evolve.kiss_evolve",
         "kiss.agents.kiss_evolve.config",
-        "kiss.agents.imo_agent", "kiss.agents.imo_agent.imo_agent",
+        "kiss.agents.imo_agent",
+        "kiss.agents.imo_agent.imo_agent",
         "kiss.agents.imo_agent.config",
-        "kiss.docker", "kiss.docker.docker_manager",
+        "kiss.docker",
+        "kiss.docker.docker_manager",
     ]
     rank = {name: i for i, name in enumerate(order)}
 

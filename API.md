@@ -174,10 +174,6 @@ from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatible
 
   - `usage_info`: The usage information string to append.
 
-- **compact_conversation** — Truncate old tool results and text to keep conversation within context limit. Preserves the system message, initial user prompt, and the most recent messages while truncating content in older messages. Never modifies thinking blocks (they have cryptographic signatures in Anthropic's API).<br/>`compact_conversation(max_context_tokens: int) -> None`
-
-  - `max_context_tokens`: The model's maximum context window in tokens.
-
 ______________________________________________________________________
 
 #### `kiss.core.models.model_info` — *Model information: pricing and context lengths for supported LLM providers.*

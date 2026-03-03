@@ -16,10 +16,22 @@ _AUTO_DETECT = "auto"
 KISS_PROFILE_DIR = str(Path.home() / ".kiss" / "browser_profile")
 
 INTERACTIVE_ROLES = {
-    "link", "button", "textbox", "searchbox", "combobox",
-    "checkbox", "radio", "switch", "slider", "spinbutton",
-    "tab", "menuitem", "menuitemcheckbox", "menuitemradio",
-    "option", "treeitem",
+    "link",
+    "button",
+    "textbox",
+    "searchbox",
+    "combobox",
+    "checkbox",
+    "radio",
+    "switch",
+    "slider",
+    "spinbutton",
+    "tab",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "treeitem",
 }
 
 _ROLE_LINE_RE = re.compile(r"^(\s*)-\s+([\w]+)\s*(.*)")

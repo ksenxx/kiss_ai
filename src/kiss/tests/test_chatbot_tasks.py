@@ -80,21 +80,25 @@ class TestAddTask(unittest.TestCase):
         assert history[0]["task"] == "Build a REST API"
 
     def test_exact_duplicate_moves_to_top(self) -> None:
-        assistant._save_history([
-            _entry("old task"),
-            _entry("Build a REST API"),
-            _entry("another task"),
-        ])
+        assistant._save_history(
+            [
+                _entry("old task"),
+                _entry("Build a REST API"),
+                _entry("another task"),
+            ]
+        )
         assistant._add_task("Build a REST API")
         history = assistant._load_history()
         assert history[0]["task"] == "Build a REST API"
         assert sum(1 for e in history if e["task"] == "Build a REST API") == 1
 
     def test_modified_task_kept_as_separate_entry(self) -> None:
-        assistant._save_history([
-            _entry("Write unit tests for the auth module"),
-            _entry("Fix homepage layout bugs"),
-        ])
+        assistant._save_history(
+            [
+                _entry("Write unit tests for the auth module"),
+                _entry("Fix homepage layout bugs"),
+            ]
+        )
         assistant._add_task("Add tests for the authentication module")
         history = assistant._load_history()
         assert history[0]["task"] == "Add tests for the authentication module"

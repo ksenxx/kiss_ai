@@ -91,9 +91,7 @@ class TestBudgetExceeded(unittest.TestCase):
         try:
             agent.run(
                 model_name=TEST_MODEL,
-                prompt_template=(
-                    "Call dummy_tool repeatedly. Never call finish."
-                ),
+                prompt_template=("Call dummy_tool repeatedly. Never call finish."),
                 tools=[dummy_tool],
                 is_agentic=True,
                 max_steps=50,

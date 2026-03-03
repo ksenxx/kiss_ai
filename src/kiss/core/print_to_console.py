@@ -259,18 +259,12 @@ class ConsolePrinter(Printer):
             total_tokens_used = kwargs.get("total_tokens_used", 0)
             cost_str = f"${budget_used:.4f}" if budget_used else "N/A"
             self._flush_newline()
-            body = (
-                self._format_result_content(message.result)
-                if message.result
-                else "(no result)"
-            )
+            body = self._format_result_content(message.result) if message.result else "(no result)"
             self._console.print(
                 Panel(
                     body,
                     title="Result",
-                    subtitle=(
-                        f"steps={step_count}  tokens={total_tokens_used}  cost={cost_str}"
-                    ),
+                    subtitle=(f"steps={step_count}  tokens={total_tokens_used}  cost={cost_str}"),
                     border_style="bold green",
                     padding=(1, 2),
                 )

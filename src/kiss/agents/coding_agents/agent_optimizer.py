@@ -80,12 +80,19 @@ to the problems in any possible way.
 def main() -> None:
     """Run the agent optimizer that iteratively improves agent code for speed and cost."""
     parser = argparse.ArgumentParser(description="Optimize an agent using AssistantAgent")
-    parser.add_argument("--project-root", default=DEFAULT_PROJECT_ROOT,
-                        help=f"Project root directory (default: {DEFAULT_PROJECT_ROOT})")
-    parser.add_argument("--agent-code", default=DEFAULT_AGENT_CODE,
-                        help=f"Path to agent code to optimize (default: {DEFAULT_AGENT_CODE})")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"Model name to use (default: {DEFAULT_MODEL})")
+    parser.add_argument(
+        "--project-root",
+        default=DEFAULT_PROJECT_ROOT,
+        help=f"Project root directory (default: {DEFAULT_PROJECT_ROOT})",
+    )
+    parser.add_argument(
+        "--agent-code",
+        default=DEFAULT_AGENT_CODE,
+        help=f"Path to agent code to optimize (default: {DEFAULT_AGENT_CODE})",
+    )
+    parser.add_argument(
+        "--model", default=DEFAULT_MODEL, help=f"Model name to use (default: {DEFAULT_MODEL})"
+    )
     args = parser.parse_args()
 
     task = TASK_TEMPLATE.format(agent_code=args.agent_code)

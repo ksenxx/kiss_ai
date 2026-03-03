@@ -19,7 +19,6 @@ import kiss.agents.sorcar.code_server as code_server
 
 
 class TestSetupCodeServer(unittest.TestCase):
-
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
 
@@ -28,9 +27,7 @@ class TestSetupCodeServer(unittest.TestCase):
 
     def test_all_settings_keys_present(self) -> None:
         code_server._setup_code_server(self.tmpdir)
-        settings = json.loads(
-            (Path(self.tmpdir) / "User" / "settings.json").read_text()
-        )
+        settings = json.loads((Path(self.tmpdir) / "User" / "settings.json").read_text())
         for key in code_server._CS_SETTINGS:
             assert key in settings, f"Missing setting: {key}"
             assert settings[key] == code_server._CS_SETTINGS[key]
@@ -48,17 +45,13 @@ class TestSetupCodeServer(unittest.TestCase):
 
     def test_first_run_sets_dark_modern_theme(self) -> None:
         code_server._setup_code_server(self.tmpdir)
-        settings = json.loads(
-            (Path(self.tmpdir) / "User" / "settings.json").read_text()
-        )
+        settings = json.loads((Path(self.tmpdir) / "User" / "settings.json").read_text())
         assert settings["workbench.colorTheme"] == "Default Dark Modern"
 
     def test_preserves_existing_color_theme(self) -> None:
         user_dir = Path(self.tmpdir) / "User"
         user_dir.mkdir(parents=True)
-        (user_dir / "settings.json").write_text(
-            json.dumps({"workbench.colorTheme": "Monokai"})
-        )
+        (user_dir / "settings.json").write_text(json.dumps({"workbench.colorTheme": "Monokai"}))
         code_server._setup_code_server(self.tmpdir)
         settings = json.loads((user_dir / "settings.json").read_text())
         assert settings["workbench.colorTheme"] == "Monokai"
@@ -130,7 +123,6 @@ class TestSetupCodeServer(unittest.TestCase):
 
 
 class TestBuildHtmlSplitLayout(unittest.TestCase):
-
     def test_split_layout_structure(self) -> None:
         html = chatbot_ui._build_html("T")
         for elem in ("split-container", "editor-panel", "divider", "assistant-panel"):
@@ -184,7 +176,6 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 
 
 class TestBuildHtmlCSS(unittest.TestCase):
-
     def test_split_layout_css(self) -> None:
         html = chatbot_ui._build_html("T")
         for pattern in (
@@ -199,17 +190,18 @@ class TestBuildHtmlCSS(unittest.TestCase):
 
 
 class TestMergeEndpoints(unittest.TestCase):
-
     def setUp(self) -> None:
         self.repo = tempfile.mkdtemp()
         subprocess.run(["git", "init"], cwd=self.repo, capture_output=True)
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
-            cwd=self.repo, capture_output=True,
+            cwd=self.repo,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test"],
-            cwd=self.repo, capture_output=True,
+            cwd=self.repo,
+            capture_output=True,
         )
         (Path(self.repo) / "file.txt").write_text("original\n")
         subprocess.run(["git", "add", "."], cwd=self.repo, capture_output=True)
@@ -225,31 +217,46 @@ class TestMergeEndpoints(unittest.TestCase):
 
     def test_diff_contains_changes(self) -> None:
         result = subprocess.run(
-            ["git", "diff", "main"], capture_output=True, text=True, cwd=self.repo,
+            ["git", "diff", "main"],
+            capture_output=True,
+            text=True,
+            cwd=self.repo,
         )
         assert "original" in result.stdout and "modified" in result.stdout
 
     def test_revert_file(self) -> None:
         subprocess.run(
             ["git", "checkout", "main", "--", "file.txt"],
-            capture_output=True, text=True, cwd=self.repo, check=True,
+            capture_output=True,
+            text=True,
+            cwd=self.repo,
+            check=True,
         )
         assert (Path(self.repo) / "file.txt").read_text() == "original\n"
 
     def test_revert_with_patch(self) -> None:
         diff = subprocess.run(
-            ["git", "diff", "main"], capture_output=True, text=True, cwd=self.repo,
+            ["git", "diff", "main"],
+            capture_output=True,
+            text=True,
+            cwd=self.repo,
         ).stdout
         subprocess.run(
-            ["git", "apply", "--reverse"], input=diff,
-            capture_output=True, text=True, cwd=self.repo, check=True,
+            ["git", "apply", "--reverse"],
+            input=diff,
+            capture_output=True,
+            text=True,
+            cwd=self.repo,
+            check=True,
         )
         assert (Path(self.repo) / "file.txt").read_text() == "original\n"
 
     def test_revert_nonexistent_file_fails(self) -> None:
         result = subprocess.run(
             ["git", "checkout", "main", "--", "no_such_file.txt"],
-            capture_output=True, text=True, cwd=self.repo,
+            capture_output=True,
+            text=True,
+            cwd=self.repo,
         )
         assert result.returncode != 0
 
@@ -258,30 +265,43 @@ class TestMergeEndpoints(unittest.TestCase):
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--is-inside-work-tree"],
-                capture_output=True, text=True, cwd=non_git,
+                capture_output=True,
+                text=True,
+                cwd=non_git,
             )
             assert result.returncode != 0
         finally:
             shutil.rmtree(non_git, ignore_errors=True)
 
     def test_revert_all_files(self) -> None:
-        changed = subprocess.run(
-            ["git", "diff", "--name-only", "main"],
-            capture_output=True, text=True, cwd=self.repo,
-        ).stdout.strip().split("\n")
+        changed = (
+            subprocess.run(
+                ["git", "diff", "--name-only", "main"],
+                capture_output=True,
+                text=True,
+                cwd=self.repo,
+            )
+            .stdout.strip()
+            .split("\n")
+        )
         for f in changed:
             subprocess.run(
                 ["git", "checkout", "main", "--", f],
-                capture_output=True, text=True, cwd=self.repo, check=True,
+                capture_output=True,
+                text=True,
+                cwd=self.repo,
+                check=True,
             )
         diff = subprocess.run(
-            ["git", "diff", "main"], capture_output=True, text=True, cwd=self.repo,
+            ["git", "diff", "main"],
+            capture_output=True,
+            text=True,
+            cwd=self.repo,
         ).stdout
         assert diff.strip() == ""
 
 
 class TestFixedPortLogic(unittest.TestCase):
-
     def test_detects_open_port(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("127.0.0.1", 0))
@@ -298,6 +318,7 @@ class TestFixedPortLogic(unittest.TestCase):
 
     def test_detects_closed_port(self) -> None:
         from kiss.agents.sorcar.browser_ui import find_free_port
+
         port = find_free_port()
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.3):
@@ -308,7 +329,6 @@ class TestFixedPortLogic(unittest.TestCase):
 
 
 class TestWelcomeChipCounts(unittest.TestCase):
-
     def test_welcome_shows_5_recent_and_5_suggested(self) -> None:
         html = chatbot_ui._build_html("T")
         assert "proposed.slice(0,5)" in html

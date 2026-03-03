@@ -752,9 +752,15 @@ def evaluate_agent_code(
     n = len(tasks)
     results: dict[str, Any] = {
         "fitness": 0.0,
-        "metrics": {"tasks_passed": 0, "tasks_total": n, "total_time": 0.0,
-                    "avg_time": 0.0, "total_llm_calls": 0, "avg_llm_calls": 0.0,
-                    "efficiency_score": 0.0},
+        "metrics": {
+            "tasks_passed": 0,
+            "tasks_total": n,
+            "total_time": 0.0,
+            "avg_time": 0.0,
+            "total_llm_calls": 0,
+            "avg_llm_calls": 0.0,
+            "efficiency_score": 0.0,
+        },
         "artifacts": {},
         "error": None,
     }
@@ -801,8 +807,12 @@ def evaluate_agent_code(
 
         task_time = time.time() - task_start
         total_time += task_time
-        results["artifacts"][task.name] = {"passed": task_passed, "time": task_time,
-                                            "llm_calls": llm_calls, "complexity": task.complexity}
+        results["artifacts"][task.name] = {
+            "passed": task_passed,
+            "time": task_time,
+            "llm_calls": llm_calls,
+            "complexity": task.complexity,
+        }
 
     # Metrics
     m = results["metrics"]
@@ -830,6 +840,7 @@ def create_code_agent_wrapper(default_model: str) -> Callable[..., str]:
         A wrapper function that takes prompt_template, arguments, and
         optional model_name, and returns the agent's response string.
     """
+
     def wrapper(
         prompt_template: str,
         arguments: dict[str, str],
@@ -843,6 +854,7 @@ def create_code_agent_wrapper(default_model: str) -> Callable[..., str]:
             max_steps=100,
             max_budget=10.0,
         )
+
     return wrapper
 
 
@@ -895,8 +907,10 @@ class AgentEvolver:
             The best CodeVariant found during evolution, containing the
             optimized code, fitness score, and metrics.
         """
-        print(f"Evolving: model={self.model_name}, pop={self.population_size}, "
-              f"gens={self.max_generations}, tasks={len(self.tasks)}")
+        print(
+            f"Evolving: model={self.model_name}, pop={self.population_size}, "
+            f"gens={self.max_generations}, tasks={len(self.tasks)}"
+        )
 
         efficiency_instructions = """
 ## Optimization Goals ##
@@ -930,7 +944,7 @@ Focus on: task understanding, error recovery, code verification, long-horizon ta
         else:
             instructions = accuracy_instructions
         evolver = KISSEvolve(
-            code_agent_wrapper=create_code_agent_wrapper('gemini-3-pro-preview'),
+            code_agent_wrapper=create_code_agent_wrapper("gemini-3-pro-preview"),
             initial_code=self.base_agent_code,
             evaluation_fn=lambda code: evaluate_agent_code(code, self.tasks),
             model_names=[(self.model_name, 1.0)],
@@ -943,9 +957,11 @@ Focus on: task understanding, error recovery, code verification, long-horizon ta
 
         best = evolver.evolve()
         m = best.metrics or {}
-        passed, total = m.get('tasks_passed'), m.get('tasks_total')
-        print(f"Done: fitness={best.fitness:.4f}, passed={passed}/{total}, "
-              f"avg_llm={m.get('avg_llm_calls', 0):.1f}")
+        passed, total = m.get("tasks_passed"), m.get("tasks_total")
+        print(
+            f"Done: fitness={best.fitness:.4f}, passed={passed}/{total}, "
+            f"avg_llm={m.get('avg_llm_calls', 0):.1f}"
+        )
         return best
 
     def save_best(self, variant: CodeVariant, path: str | None = None) -> None:
@@ -1002,8 +1018,11 @@ def main() -> None:
     baseline = evolver.run_baseline_evaluation()
     best = evolver.evolve()
 
-    improvement = ((best.fitness - baseline['fitness']) / baseline['fitness'] * 100
-                   if baseline['fitness'] > 0 else 0)
+    improvement = (
+        (best.fitness - baseline["fitness"]) / baseline["fitness"] * 100
+        if baseline["fitness"] > 0
+        else 0
+    )
     print(f"Improvement: {improvement:+.1f}%")
     evolver.save_best(best)
 

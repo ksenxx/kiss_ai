@@ -60,9 +60,7 @@ class TestToolOutputStreaming:
             )
         except Exception:
             pass
-        tool_result_prints = [
-            p for p in printer.prints if p[0] == "tool_result"
-        ]
+        tool_result_prints = [p for p in printer.prints if p[0] == "tool_result"]
         assert len(tool_result_prints) > 0
 
 

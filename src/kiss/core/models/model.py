@@ -21,7 +21,10 @@ from typing import Any, Union, get_args, get_origin
 TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
 
 SUPPORTED_MIME_TYPES = {
-    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
     "application/pdf",
 }
 
@@ -57,9 +60,12 @@ class Attachment:
         if mime_type is None:
             suffix = file_path.suffix.lower()
             mime_map = {
-                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".gif": "image/gif",
-                ".webp": "image/webp", ".pdf": "application/pdf",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+                ".pdf": "application/pdf",
             }
             mime_type = mime_map.get(suffix, "")
         if mime_type not in SUPPORTED_MIME_TYPES:
@@ -139,9 +145,7 @@ class Model(ABC):
             running_loop = None
         if running_loop and running_loop.is_running():
             helper_loop = _get_callback_loop()
-            future = asyncio.run_coroutine_threadsafe(
-                self.token_callback(token), helper_loop
-            )
+            future = asyncio.run_coroutine_threadsafe(self.token_callback(token), helper_loop)
             future.result(timeout=30)
             return
         if self._callback_loop is None or self._callback_loop.is_closed():
@@ -213,8 +217,7 @@ class Model(ABC):
         for msg in reversed(self.conversation):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 tool_calls = [
-                    {"name": tc["function"]["name"], "id": tc["id"]}
-                    for tc in msg["tool_calls"]
+                    {"name": tc["function"]["name"], "id": tc["id"]} for tc in msg["tool_calls"]
                 ]
                 break
 
@@ -282,72 +285,6 @@ class Model(ABC):
             usage_info: The usage information string to append.
         """
         self.usage_info_for_messages = usage_info
-
-    def _estimate_conversation_tokens(self) -> int:
-        """Rough estimate of current conversation size in tokens (chars / 4)."""
-        total_chars = 0
-        for msg in self.conversation:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        for v in block.values():
-                            if isinstance(v, str):
-                                total_chars += len(v)
-        return total_chars // 4
-
-    def compact_conversation(self, max_context_tokens: int) -> None:
-        """Truncate old tool results and text to keep conversation within context limit.
-
-        Preserves the system message, initial user prompt, and the most recent
-        messages while truncating content in older messages. Never modifies
-        thinking blocks (they have cryptographic signatures in Anthropic's API).
-
-        Args:
-            max_context_tokens: The model's maximum context window in tokens.
-        """
-        estimated = self._estimate_conversation_tokens()
-        if estimated < int(max_context_tokens * 0.7):
-            return
-
-        keep_start = 1
-        for i, msg in enumerate(self.conversation):
-            if msg.get("role") in ("user", "human"):
-                keep_start = i + 1
-                break
-
-        keep_recent = min(6, len(self.conversation))
-        if len(self.conversation) <= keep_start + keep_recent:
-            return
-
-        cutoff = len(self.conversation) - keep_recent
-        trunc_marker = "\n...[truncated to save context]...\n"
-        max_len = 300
-
-        for msg in self.conversation[keep_start:cutoff]:
-            content = msg.get("content")
-            if msg.get("role") == "tool" and isinstance(content, str) and len(content) > max_len:
-                msg["content"] = content[:150] + trunc_marker + content[-100:]
-                continue
-            if isinstance(content, str) and len(content) > max_len:
-                msg["content"] = content[:150] + trunc_marker + content[-100:]
-            elif isinstance(content, list):
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type", "")
-                    if btype == "thinking":
-                        continue
-                    if btype == "tool_result":
-                        c = block.get("content", "")
-                        if isinstance(c, str) and len(c) > max_len:
-                            block["content"] = c[:150] + trunc_marker + c[-100:]
-                    elif btype == "text":
-                        t = block.get("text", "")
-                        if len(t) > max_len:
-                            block["text"] = t[:150] + trunc_marker + t[-100:]
 
     # =========================================================================
     # Helper methods for building tool schemas (shared across implementations)

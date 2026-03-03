@@ -30,9 +30,7 @@ class TestDockerManager(unittest.TestCase):
         host_port = find_free_port()
 
         with DockerManager("python:3.11-slim", ports={8000: host_port}) as env:
-            env.Bash(
-                "echo 'Hello from Docker!' > /tmp/index.html", "Create test file"
-            )
+            env.Bash("echo 'Hello from Docker!' > /tmp/index.html", "Create test file")
             env.Bash("cd /tmp && python -m http.server 8000 &", "Start HTTP server")
 
             import time
