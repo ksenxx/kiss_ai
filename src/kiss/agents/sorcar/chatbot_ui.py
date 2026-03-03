@@ -76,7 +76,7 @@ header{
 .dot{width:7px;height:7px;background:rgba(255,255,255,0.4)}
 .dot.running{background:#22c55e}
 #output{
-  flex:1;overflow-y:auto;padding:32px 24px 24px;
+  flex:1;overflow-y:auto;overflow-x:hidden;padding:32px 24px 24px;
   scroll-behavior:smooth;min-height:0;
 }
 .ev,.txt,.spinner,.empty-msg,.user-msg{max-width:820px;margin-left:auto;margin-right:auto}
@@ -392,6 +392,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   border-radius:12px;padding:14px 18px;cursor:pointer;text-align:left;
   font-size:13px;color:rgba(255,255,255,0.82);line-height:1.5;
   transition:all 0.2s ease;
+  overflow:hidden;min-width:0;overflow-wrap:break-word;word-break:break-word;
 }
 .suggestion-chip:hover{
   background:rgba(255,255,255,0.055);border-color:rgba(255,255,255,0.14);
