@@ -1,4 +1,4 @@
-"""Integration test: AssistantAgent goes through multiple sub-sessions."""
+"""Integration test: SorcarAgent goes through multiple sub-sessions."""
 
 import os
 import tempfile
