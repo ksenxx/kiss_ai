@@ -2,7 +2,7 @@
 
 ![KISS Framework](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/818u234myu55pxt0wi7j.jpeg)
 
-# When Simplicity Becomes Your Superpower: Meet KISS Multi Agent Multi Optimization Framework
+# When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
 [![Version](https://img.shields.io/badge/version-0.1.65-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
@@ -48,7 +48,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ```bash
 export ANTHROPIC_API_KEY="your-key-here" # Recommended
-export GEMINI_API_KEY="your-key-here" # used for auto-complete support
+export GEMINI_API_KEY="your-key-here" # used for autocomplete support
 export OPENAI_API_KEY="your-key-here" # Optional
 export OPENROUTER_API_KEY="your-key-here" # Optional
 export TOGETHER_API_KEY="your-key-here" # Optional
@@ -66,9 +66,9 @@ pip install kiss-agent-framework
 python -m kiss.agents.sorcar.sorcar
 ```
 
-# What is KISS and KISS Sorcar? How it started?
+# What is KISS and KISS Sorcar? How It Started
 
-During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet very powerful agentic framework**. It took me 18 days to implement KISS using both AI and manual coding. The motivation for the KISS project came after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. I started the KISS project with the quest "What is possible (with AI)?" and "What is possible by a mid-career SWE/PL Professor in a couple of months using modern AI?". Since then 2 months have passed and KISS has evolved into a simple yet powerful IDE, called **KISS Sorcar** **(a free alternative to Cursor or Antigravity)** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support. I provide support and maintain the framework with long-term commitment. I do not plan to accept pull requests for the [core](src/kiss/core) and the agents in [agents](src/kiss/agents/) in the near term. **Marius Momeu**, my incoming postdoc, will soon join the team. The project embodies the best software engineering practices that I have learned over the last 30 years. I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTHROPIC_API_KEY` (best model for Sorcar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
+During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet very powerful agentic framework**. It took me 18 days to implement KISS using both AI and manual coding. The motivation for the KISS project came after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. I started the KISS project with the quest "What is possible (with AI)?" and "What is possible by a mid-career SWE/PL Professor in a couple of months using modern AI?". Since then 2 months have passed and KISS has evolved into a simple yet powerful IDE, called **KISS Sorcar** **(a free alternative to Cursor or Antigravity)** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support. I provide support and maintain the framework with long-term commitment. I do not plan to accept pull requests for the [core](src/kiss/core) and the agents in [agents](src/kiss/agents/) in the near term. **Marius Momeu**, my incoming postdoc, will soon join the team. The project incorporates software engineering principles and practices developed over my 30 years of experience in the field. I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTHROPIC_API_KEY` (best model for Sorcar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
 
 **Now I ask the question to you "what is possible?".** #whatispossible #KISSSorcar
 
@@ -84,7 +84,7 @@ What if building AI agents could be as straightforward as the name suggests?
 
 Enter **KISS** — the *Keep It Simple, Stupid* Agent Framework.
 
-## 🚀 Your First Agent in 30 Seconds.
+## 🚀 Your First Agent in 30 Seconds
 
 Let me show you something beautiful:
 

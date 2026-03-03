@@ -241,12 +241,6 @@ class KISSAgent(Base):
         """
         start_timestamp = int(time.time())
 
-        try:
-            max_ctx = get_max_context_length(self.model.model_name)
-            self.model.compact_conversation(max_ctx)
-        except Exception:
-            pass
-
         function_calls, response_text, response = self.model.generate_and_process_with_tools(
             self.function_map
         )
