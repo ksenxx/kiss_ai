@@ -164,7 +164,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
-        "--model_name", type=str, default="claude-sonnet-4-6", help="LLM model name"
+        "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
     )
     parser.add_argument(
         "--summarizer_model_name", type=str, default="claude-haiku-4-5", help="LLM model name"

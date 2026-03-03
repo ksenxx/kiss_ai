@@ -52,6 +52,9 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.relentless_agent import RelentlessAgent
 
+_FAST_MODEL = "gemini-2.0-flash"
+_COMMIT_MODEL = "claude-haiku-4-5"
+
 
 class _StopRequested(BaseException):
     pass
@@ -71,6 +74,30 @@ def _read_active_file(cs_data_dir: str) -> str:
 
 def _clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'")
+
+
+def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
+    if detailed:
+        prompt = (
+            "Generate a nicely formatted, informative git commit message for "
+            "these changes. Use conventional commit format with a clear subject "
+            "line (type: description) and optionally a body with bullet points "
+            "for multiple changes. Return ONLY the commit message text, no "
+            "quotes or markdown fences.\n\n{context}"
+        )
+    else:
+        prompt = (
+            "Generate a concise git commit message (1-2 lines) for these changes. "
+            "Return ONLY the commit message text, no quotes.\n\n{context}"
+        )
+    agent = KISSAgent("Commit Message Generator")
+    raw = agent.run(
+        model_name=_COMMIT_MODEL,
+        prompt_template=prompt,
+        arguments={"context": diff_text[:4000]},
+        is_agentic=False,
+    )
+    return _clean_llm_output(raw)
 
 
 def _model_vendor_order(name: str) -> int:
@@ -227,7 +254,7 @@ def run_chatbot(
         agent = KISSAgent("Task Proposer")
         try:
             result = agent.run(
-                model_name="gemini-2.0-flash",
+                model_name=_FAST_MODEL,
                 prompt_template=(
                     "Based on these past tasks a developer has worked on, suggest 5 new "
                     "tasks they might want to do next. Tasks should be natural follow-ups, "
@@ -254,7 +281,7 @@ def run_chatbot(
         try:
             agent = KISSAgent("Followup Proposer")
             raw = agent.run(
-                model_name="gemini-2.0-flash",
+                model_name=_FAST_MODEL,
                 prompt_template=(
                     "A developer just completed this task:\n"
                     "Task: {task}\n"
@@ -582,7 +609,7 @@ def run_chatbot(
             agent = KISSAgent("Autocomplete")
             try:
                 result = agent.run(
-                    model_name="gemini-2.0-flash",
+                    model_name=_FAST_MODEL,
                     prompt_template=(
                         "You are an inline autocomplete engine for a coding assistant. "
                         "Given the user's partial input and their past task history, "
@@ -705,17 +732,7 @@ def run_chatbot(
                 text=True,
                 cwd=actual_work_dir,
             )
-            agent = KISSAgent("Commit Message Generator")
-            message = agent.run(
-                model_name="claude-haiku-4-5",
-                prompt_template=(
-                    "Generate a concise git commit message (1-2 lines) for these changes. "
-                    "Return ONLY the commit message text, no quotes.\n\n{diff}"
-                ),
-                arguments={"diff": diff_detail.stdout[:4000]},
-                is_agentic=False,
-            )
-            message = _clean_llm_output(message)
+            message = _generate_commit_msg(diff_detail.stdout)
             commit_env = {
                 **os.environ,
                 "GIT_COMMITTER_NAME": "KISS Sorcar",
@@ -782,22 +799,8 @@ def run_chatbot(
                 context_parts.append(f"Diff:\n{diff_text[:4000]}")
             if untracked_files:
                 context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
-            context = "\n\n".join(context_parts)
-            agent = KISSAgent("Commit Message Generator")
             try:
-                message = agent.run(
-                    model_name="claude-haiku-4-5",
-                    prompt_template=(
-                        "Generate a nicely formatted, informative git commit message for "
-                        "these changes. Use conventional commit format with a clear subject "
-                        "line (type: description) and optionally a body with bullet points "
-                        "for multiple changes. Return ONLY the commit message text, no "
-                        "quotes or markdown fences.\n\n{context}"
-                    ),
-                    arguments={"context": context},
-                    is_agentic=False,
-                )
-                msg = _clean_llm_output(message)
+                msg = _generate_commit_msg("\n\n".join(context_parts), detailed=True)
                 scm_pending = os.path.join(cs_data_dir, "pending-scm-message.json")
                 with open(scm_pending, "w") as f:
                     json.dump({"message": msg}, f)
@@ -861,7 +864,7 @@ def run_chatbot(
             agent = KISSAgent("Config Message Generator")
             try:
                 result = agent.run(
-                    model_name="gemini-2.0-flash",
+                    model_name=_FAST_MODEL,
                     prompt_template=(
                         "You are a helpful assistant. Given the following configuration "
                         "information about a coding assistant environment, generate a "

@@ -1722,7 +1722,7 @@ function applyTheme(t){
 function loadTheme(){
   fetch('/theme').then(function(r){return r.json()}).then(applyTheme).catch(function(){});
 }
-loadTheme();setInterval(loadTheme,3000);
+loadTheme();
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
 var runPromptBtn=document.getElementById('run-prompt-btn');
 var _promptPath='';
