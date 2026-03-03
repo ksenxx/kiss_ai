@@ -19,7 +19,6 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 
-
 _NON_RETRYABLE_ERROR_TYPES = (
     "AuthenticationError",
     "PermissionDeniedError",
