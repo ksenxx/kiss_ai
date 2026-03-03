@@ -386,9 +386,7 @@ class UsefulTools:
         except Exception as e:  # pragma: no cover
             return f"Error: {e}"
 
-    def _bash_streaming(
-        self, command: str, timeout_seconds: float, max_output_chars: int
-    ) -> str:
+    def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
         assert self.stream_callback is not None
         process = subprocess.Popen(
             command,

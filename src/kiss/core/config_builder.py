@@ -57,9 +57,7 @@ def _add_model_arguments(parser: ArgumentParser, model: type[BaseModel], prefix:
                 arg_type = float
             else:
                 arg_type = str
-            parser.add_argument(
-                *names, type=arg_type, dest=dest_name, default=None, help=help_text
-            )
+            parser.add_argument(*names, type=arg_type, dest=dest_name, default=None, help=help_text)
 
 
 def _flat_to_nested_dict(

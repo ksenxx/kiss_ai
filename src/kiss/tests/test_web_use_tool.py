@@ -384,9 +384,7 @@ class TestKissProfile:
 
     def test_user_data_dir_stored_correctly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            tool = WebUseTool(
-                browser_type="chromium", headless=True, user_data_dir=tmpdir
-            )
+            tool = WebUseTool(browser_type="chromium", headless=True, user_data_dir=tmpdir)
             assert tool.user_data_dir == tmpdir
             assert tool._browser is None
             assert tool._context is None

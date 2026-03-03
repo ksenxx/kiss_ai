@@ -169,6 +169,7 @@ class TestPrint(unittest.TestCase):
 class TestTokenCallback(unittest.TestCase):
     def test_token_callback_broadcasts_text_delta(self):
         import asyncio
+
         p = BaseBrowserPrinter()
         q = _subscribe(p)
         asyncio.run(p.token_callback("hello"))
@@ -178,6 +179,7 @@ class TestTokenCallback(unittest.TestCase):
 
     def test_token_callback_empty_string_no_broadcast(self):
         import asyncio
+
         p = BaseBrowserPrinter()
         q = _subscribe(p)
         asyncio.run(p.token_callback(""))
@@ -185,6 +187,7 @@ class TestTokenCallback(unittest.TestCase):
 
     def test_token_callback_during_thinking_broadcasts_thinking_delta(self):
         import asyncio
+
         p = BaseBrowserPrinter()
         p._current_block_type = "thinking"
         q = _subscribe(p)
@@ -195,6 +198,7 @@ class TestTokenCallback(unittest.TestCase):
 
     def test_token_callback_during_text_broadcasts_text_delta(self):
         import asyncio
+
         p = BaseBrowserPrinter()
         p._current_block_type = "text"
         q = _subscribe(p)
@@ -212,13 +216,16 @@ class TestStreamingFlow(unittest.TestCase):
 
     def test_thinking_block_flow(self):
         import asyncio
+
         p = BaseBrowserPrinter()
         q = _subscribe(p)
         p.print(
-            self._event({
-                "type": "content_block_start",
-                "content_block": {"type": "thinking"},
-            }),
+            self._event(
+                {
+                    "type": "content_block_start",
+                    "content_block": {"type": "thinking"},
+                }
+            ),
             type="stream_event",
         )
         assert p._current_block_type == "thinking"
@@ -226,10 +233,12 @@ class TestStreamingFlow(unittest.TestCase):
         assert any(e["type"] == "thinking_start" for e in events)
 
         text = p.print(
-            self._event({
-                "type": "content_block_delta",
-                "delta": {"type": "thinking_delta", "thinking": "hmm"},
-            }),
+            self._event(
+                {
+                    "type": "content_block_delta",
+                    "delta": {"type": "thinking_delta", "thinking": "hmm"},
+                }
+            ),
             type="stream_event",
         )
         assert text == "hmm"
@@ -247,21 +256,26 @@ class TestStreamingFlow(unittest.TestCase):
 
     def test_no_double_broadcast(self):
         import asyncio
+
         p = BaseBrowserPrinter()
         q = _subscribe(p)
         p.print(
-            self._event({
-                "type": "content_block_start",
-                "content_block": {"type": "text"},
-            }),
+            self._event(
+                {
+                    "type": "content_block_start",
+                    "content_block": {"type": "text"},
+                }
+            ),
             type="stream_event",
         )
         _drain(q)
         p.print(
-            self._event({
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "unique_token"},
-            }),
+            self._event(
+                {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "unique_token"},
+                }
+            ),
             type="stream_event",
         )
         asyncio.run(p.token_callback("unique_token"))

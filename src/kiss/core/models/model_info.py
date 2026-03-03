@@ -97,9 +97,21 @@ def _emb(ctx: int, inp: float) -> ModelInfo:
 
 _OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
 _TOGETHER_PREFIXES = (
-    "meta-llama/", "Qwen/", "MiniMaxAI/", "mistralai/", "deepseek-ai/", "deepcogito/",
-    "google/gemma", "moonshotai/", "nvidia/", "zai-org/", "openai/gpt-oss",
-    "arcee-ai/", "essentialai/", "BAAI/", "intfloat/",
+    "meta-llama/",
+    "Qwen/",
+    "MiniMaxAI/",
+    "mistralai/",
+    "deepseek-ai/",
+    "deepcogito/",
+    "google/gemma",
+    "moonshotai/",
+    "nvidia/",
+    "zai-org/",
+    "openai/gpt-oss",
+    "arcee-ai/",
+    "essentialai/",
+    "BAAI/",
+    "intfloat/",
 )
 
 
@@ -403,7 +415,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/neversleep/noromaid-20b": _mi(4096, 1.00, 1.75, fc=False),
     "openrouter/nex-agi/deepseek-v3.1-nex-n1": _mi(131072, 0.27, 1.00, fc=False),
     "openrouter/nousresearch/deephermes-3-mistral-24b-preview": _mi(
-    32768, 0.02, 0.10, fc=False, gen=False
+        32768, 0.02, 0.10, fc=False, gen=False
     ),
     "openrouter/nousresearch/hermes-2-pro-llama-3-8b": _mi(8192, 0.14, 0.14, fc=False),
     "openrouter/nousresearch/hermes-3-llama-3.1-405b": _mi(131072, 1.00, 1.00, fc=False),
@@ -673,13 +685,20 @@ def model(
         api_key = model_config.get("api_key", "")
         filtered = {k: v for k, v in model_config.items() if k not in ("base_url", "api_key")}
         return _openai_compatible(
-            model_name, base_url, api_key, filtered or None, token_callback,
+            model_name,
+            base_url,
+            api_key,
+            filtered or None,
+            token_callback,
         )
     keys = config_module.DEFAULT_CONFIG.agent.api_keys
     if model_name.startswith("openrouter/"):
         return _openai_compatible(
-            model_name, "https://openrouter.ai/api/v1",
-            keys.OPENROUTER_API_KEY, model_config, token_callback,
+            model_name,
+            "https://openrouter.ai/api/v1",
+            keys.OPENROUTER_API_KEY,
+            model_config,
+            token_callback,
         )
     if model_name == "text-embedding-004":
         if GeminiModel is None:
@@ -687,18 +706,26 @@ def model(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
         return GeminiModel(
-            model_name=model_name, api_key=keys.GEMINI_API_KEY,
-            model_config=model_config, token_callback=token_callback,
+            model_name=model_name,
+            api_key=keys.GEMINI_API_KEY,
+            model_config=model_config,
+            token_callback=token_callback,
         )
     if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
         return _openai_compatible(
-            model_name, "https://api.openai.com/v1",
-            keys.OPENAI_API_KEY, model_config, token_callback,
+            model_name,
+            "https://api.openai.com/v1",
+            keys.OPENAI_API_KEY,
+            model_config,
+            token_callback,
         )
     if model_name.startswith(_TOGETHER_PREFIXES):
         return _openai_compatible(
-            model_name, "https://api.together.xyz/v1",
-            keys.TOGETHER_API_KEY, model_config, token_callback,
+            model_name,
+            "https://api.together.xyz/v1",
+            keys.TOGETHER_API_KEY,
+            model_config,
+            token_callback,
         )
     if model_name.startswith("claude-"):
         if AnthropicModel is None:
@@ -706,8 +733,10 @@ def model(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
             )
         return AnthropicModel(
-            model_name=model_name, api_key=keys.ANTHROPIC_API_KEY,
-            model_config=model_config, token_callback=token_callback,
+            model_name=model_name,
+            api_key=keys.ANTHROPIC_API_KEY,
+            model_config=model_config,
+            token_callback=token_callback,
         )
     if model_name.startswith("gemini-"):
         if GeminiModel is None:
@@ -715,13 +744,18 @@ def model(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
         return GeminiModel(
-            model_name=model_name, api_key=keys.GEMINI_API_KEY,
-            model_config=model_config, token_callback=token_callback,
+            model_name=model_name,
+            api_key=keys.GEMINI_API_KEY,
+            model_config=model_config,
+            token_callback=token_callback,
         )
     if model_name.startswith("minimax-"):
         return _openai_compatible(
-            model_name, "https://api.minimax.chat/v1",
-            keys.MINIMAX_API_KEY, model_config, token_callback,
+            model_name,
+            "https://api.minimax.chat/v1",
+            keys.MINIMAX_API_KEY,
+            model_config,
+            token_callback,
         )
     raise KISSError(f"Unknown model name: {model_name}")
 

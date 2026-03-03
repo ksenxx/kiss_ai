@@ -21,7 +21,10 @@ from typing import Any, Union, get_args, get_origin
 TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
 
 SUPPORTED_MIME_TYPES = {
-    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
     "application/pdf",
 }
 
@@ -57,9 +60,12 @@ class Attachment:
         if mime_type is None:
             suffix = file_path.suffix.lower()
             mime_map = {
-                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".gif": "image/gif",
-                ".webp": "image/webp", ".pdf": "application/pdf",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+                ".pdf": "application/pdf",
             }
             mime_type = mime_map.get(suffix, "")
         if mime_type not in SUPPORTED_MIME_TYPES:
@@ -139,9 +145,7 @@ class Model(ABC):
             running_loop = None
         if running_loop and running_loop.is_running():
             helper_loop = _get_callback_loop()
-            future = asyncio.run_coroutine_threadsafe(
-                self.token_callback(token), helper_loop
-            )
+            future = asyncio.run_coroutine_threadsafe(self.token_callback(token), helper_loop)
             future.result(timeout=30)
             return
         if self._callback_loop is None or self._callback_loop.is_closed():
@@ -213,8 +217,7 @@ class Model(ABC):
         for msg in reversed(self.conversation):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 tool_calls = [
-                    {"name": tc["function"]["name"], "id": tc["id"]}
-                    for tc in msg["tool_calls"]
+                    {"name": tc["function"]["name"], "id": tc["id"]} for tc in msg["tool_calls"]
                 ]
                 break
 
@@ -282,8 +285,6 @@ class Model(ABC):
             usage_info: The usage information string to append.
         """
         self.usage_info_for_messages = usage_info
-
-
 
     # =========================================================================
     # Helper methods for building tool schemas (shared across implementations)

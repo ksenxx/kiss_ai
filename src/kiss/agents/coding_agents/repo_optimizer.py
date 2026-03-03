@@ -34,15 +34,13 @@ Repeat the process.  Do not forget to remove the diagnostic
 code after the optimization is complete.
 """
 
+
 def main() -> None:
     """Run the repo optimizer that iteratively runs a command and optimizes code."""
-    parser = argparse.ArgumentParser(
-        description="Optimize a repository using AssistantAgent"
-    )
+    parser = argparse.ArgumentParser(description="Optimize a repository using AssistantAgent")
     parser.add_argument("--command", help="Command to run")
     parser.add_argument("--metrics", help="Metrics to optimize")
-    parser.add_argument("--work-dir", default=".",
-                        help="Working directory (default: .)")
+    parser.add_argument("--work-dir", default=".", help="Working directory (default: .)")
     args = parser.parse_args()
 
     command = args.command

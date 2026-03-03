@@ -55,7 +55,8 @@ class AssistantAgent(RelentlessAgent):
         super()._reset(
             model_name=model_name if model_name is not None else cfg.model_name,
             summarizer_model_name=(
-                summarizer_model_name if summarizer_model_name is not None
+                summarizer_model_name
+                if summarizer_model_name is not None
                 else cfg.summarizer_model_name
             ),
             max_sub_sessions=(
@@ -114,10 +115,7 @@ class AssistantAgent(RelentlessAgent):
 
         try:
             history_path = _get_task_history_md_path()
-            system_instructions = (
-                SYSTEM_PROMPT
-                + f"\nTask History File: {history_path}\n"
-            )
+            system_instructions = SYSTEM_PROMPT + f"\nTask History File: {history_path}\n"
             prompt = prompt_template
             if current_editor_file:
                 prompt += f"\n\nThe default file path: {current_editor_file}"
@@ -178,13 +176,13 @@ def main() -> None:
     parser.add_argument("--work_dir", type=str, default=None, help="Working directory")
     parser.add_argument(
         "--headless",
-        type=lambda x: (str(x).lower() == "true"),
+        type=lambda x: str(x).lower() == "true",
         default=False,
         help="Run browser headless (true/false)",
     )
     parser.add_argument(
         "--verbose",
-        type=lambda x: (str(x).lower() == "true"),
+        type=lambda x: str(x).lower() == "true",
         default=True,
         help="Print output to console",
     )

@@ -11,7 +11,7 @@ def test_stop_btn_waiting_css_exists():
 
 def test_stop_btn_waiting_css_has_border_spinner():
     idx = CHATBOT_CSS.index("#stop-btn.waiting::after{")
-    block = CHATBOT_CSS[idx:CHATBOT_CSS.index("}", idx) + 1]
+    block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
     assert "border-radius:50%" in block
     assert "border-top-color" in block
 

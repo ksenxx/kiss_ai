@@ -76,6 +76,7 @@ class TestGenerateCommitMessageCommand(unittest.TestCase):
 
     def test_chatbot_js_does_not_contain_magic_btn(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         assert "magicBtn" not in CHATBOT_JS
         assert "magic-btn" not in CHATBOT_JS
 

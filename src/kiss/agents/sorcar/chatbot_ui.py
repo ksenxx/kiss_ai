@@ -11,24 +11,52 @@ from kiss.agents.sorcar.browser_ui import (
 
 _THEME_PRESETS: dict[str, dict[str, str]] = {
     "dark": {
-        "bg": "#1e1e1e", "bg2": "#252526", "fg": "#d4d4d4",
-        "accent": "#3794ff", "border": "#3c3c3c", "inputBg": "#313131",
-        "green": "#23d18b", "red": "#f14c4c", "purple": "#b180d7", "cyan": "#29b8db",
+        "bg": "#1e1e1e",
+        "bg2": "#252526",
+        "fg": "#d4d4d4",
+        "accent": "#3794ff",
+        "border": "#3c3c3c",
+        "inputBg": "#313131",
+        "green": "#23d18b",
+        "red": "#f14c4c",
+        "purple": "#b180d7",
+        "cyan": "#29b8db",
     },
     "light": {
-        "bg": "#ffffff", "bg2": "#f3f3f3", "fg": "#333333",
-        "accent": "#005fb8", "border": "#d4d4d4", "inputBg": "#ffffff",
-        "green": "#388a34", "red": "#cd3131", "purple": "#7e57c2", "cyan": "#0598bc",
+        "bg": "#ffffff",
+        "bg2": "#f3f3f3",
+        "fg": "#333333",
+        "accent": "#005fb8",
+        "border": "#d4d4d4",
+        "inputBg": "#ffffff",
+        "green": "#388a34",
+        "red": "#cd3131",
+        "purple": "#7e57c2",
+        "cyan": "#0598bc",
     },
     "hcDark": {
-        "bg": "#000000", "bg2": "#0a0a0a", "fg": "#ffffff",
-        "accent": "#3794ff", "border": "#6fc3df", "inputBg": "#0a0a0a",
-        "green": "#23d18b", "red": "#f48771", "purple": "#b180d7", "cyan": "#29b8db",
+        "bg": "#000000",
+        "bg2": "#0a0a0a",
+        "fg": "#ffffff",
+        "accent": "#3794ff",
+        "border": "#6fc3df",
+        "inputBg": "#0a0a0a",
+        "green": "#23d18b",
+        "red": "#f48771",
+        "purple": "#b180d7",
+        "cyan": "#29b8db",
     },
     "hcLight": {
-        "bg": "#ffffff", "bg2": "#f0f0f0", "fg": "#000000",
-        "accent": "#0f4a85", "border": "#0f4a85", "inputBg": "#ffffff",
-        "green": "#1b7d2c", "red": "#b5200d", "purple": "#5e3a8a", "cyan": "#0f4a85",
+        "bg": "#ffffff",
+        "bg2": "#f0f0f0",
+        "fg": "#000000",
+        "accent": "#0f4a85",
+        "border": "#0f4a85",
+        "inputBg": "#ffffff",
+        "green": "#1b7d2c",
+        "red": "#b5200d",
+        "purple": "#5e3a8a",
+        "cyan": "#0f4a85",
     },
 }
 
@@ -1735,6 +1763,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
 
     if code_server_url:
         import urllib.parse
+
         wd_enc = urllib.parse.quote(work_dir, safe="")
         editor_content = (
             f'<iframe id="code-server-frame"'
@@ -1745,17 +1774,19 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
     else:
         editor_content = (
             '<div id="editor-fallback">'
-            '<h3>VS Code Editor</h3>'
-            '<p>code-server is not installed. Install it to enable the embedded editor:</p>'
-            '<code>curl -fsSL https://code-server.dev/install.sh | sh</code>'
-            '<p>Or via Homebrew:</p>'
-            '<code>brew install code-server</code>'
+            "<h3>VS Code Editor</h3>"
+            "<p>code-server is not installed. Install it to enable the embedded editor:</p>"
+            "<code>curl -fsSL https://code-server.dev/install.sh | sh</code>"
+            "<p>Or via Homebrew:</p>"
+            "<code>brew install code-server</code>"
             '<p style="margin-top:16px;font-size:12px;opacity:0.5">'
-            'Restart the assistant after installation.</p>'
-            '</div>'
+            "Restart the assistant after installation.</p>"
+            "</div>"
         )
 
-    return HTML_HEAD.format(title=title, css=css) + f"""<body>
+    return (
+        HTML_HEAD.format(title=title, css=css)
+        + f"""<body>
 <div id="split-container">
   <div id="editor-panel" style="width:75%;flex-shrink:0">
     {editor_content}
@@ -1874,3 +1905,4 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
 </script>
 </body>
 </html>"""
+    )
