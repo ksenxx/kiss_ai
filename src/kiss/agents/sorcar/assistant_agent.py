@@ -118,14 +118,32 @@ class AssistantAgent(RelentlessAgent):
                 SYSTEM_PROMPT
                 + f"\nTask History File: {history_path}\n"
             )
+            prompt = prompt_template
+            if current_editor_file:
+                prompt += f"\n\nThe default file path: {current_editor_file}"
+            if attachments:
+                img_count = sum(1 for a in attachments if a.mime_type.startswith("image/"))
+                pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")
+                parts = []
+                if img_count:
+                    parts.append(f"{img_count} image(s)")
+                if pdf_count:
+                    parts.append(f"{pdf_count} PDF(s)")
+                if parts:
+                    prompt += (
+                        f"\n\n# Important\n - User attached {', '.join(parts)}. "
+                        f"The files are included in this message. "
+                        f"Examine them directly — do NOT use browser tools "
+                        f"to view or screenshot these attachments."
+                    )
             return super().run(
                 model_name=model_name,
                 summarizer_model_name=summarizer_model_name,
                 system_instructions=system_instructions,
                 prompt_template=(
-                    prompt_template + f"\n\nThe default file path: {current_editor_file}"
+                    prompt + f"\n\n- The default file path: {current_editor_file}"
                     if current_editor_file
-                    else prompt_template
+                    else ""
                 ),
                 arguments=arguments,
                 max_steps=max_steps,
