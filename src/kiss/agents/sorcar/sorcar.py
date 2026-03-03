@@ -825,10 +825,10 @@ def run_chatbot(
             info_parts = [
                 f"Work directory: {actual_work_dir}",
                 f"Selected model: {model}",
-                f"Max steps: {cfg.assistant.assistant_agent.max_steps}",
-                f"Max budget: ${cfg.assistant.assistant_agent.max_budget:.2f}",
+                f"Max steps: {cfg.assistant.sorcar_agent.max_steps}",
+                f"Max budget: ${cfg.assistant.sorcar_agent.max_budget:.2f}",
                 f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
-                f"Headless browser: {cfg.assistant.assistant_agent.headless}",
+                f"Headless browser: {cfg.assistant.sorcar_agent.headless}",
                 f"Code-server: {'running' if code_server_url else 'not available'}",
                 f"Tasks completed: {len(history)}",
             ]
@@ -937,7 +937,7 @@ def main() -> None:
     import argparse
 
     from kiss._version import __version__
-    from kiss.agents.sorcar.assistant_agent import AssistantAgent
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
     parser = argparse.ArgumentParser(description="KISS Assistant")
     parser.add_argument(
@@ -956,7 +956,7 @@ def main() -> None:
 
     is_assistant = os.environ.get("KISS_MODE", "assistant").lower() == "assistant"
     run_chatbot(
-        agent_factory=AssistantAgent,
+        agent_factory=SorcarAgent,
         title=f"KISS {'Assistant' if is_assistant else 'Coding Assistant'}: {__version__}",
         work_dir=work_dir,
         default_model=args.model_name,

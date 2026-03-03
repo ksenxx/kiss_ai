@@ -15,7 +15,7 @@ import shutil
 import time
 from pathlib import Path
 
-from kiss.agents.sorcar.assistant_agent import AssistantAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import config as config_module
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
@@ -31,7 +31,7 @@ You have to optimize an AI agent for long-running complex tasks.
     then look at code under the src folder as required.
     {kiss_folder}/src/kiss/core/models/model_info.py contains information
     about different LLM models and their context lengths, costs, etc.
-    Use {kiss_folder}/src/kiss/agents/sorcar/assistant_agent.py
+    Use {kiss_folder}/src/kiss/agents/sorcar/sorcar_agent.py
     as the initial agent implementation.
   - The agent **MUST** be tested for success on the given task description.
 """
@@ -42,7 +42,7 @@ AGENT_EVOLVER_PROMPT_PART2 = """
 """
 
 AGENT_EVOLVER_PROMPT_PART3 = """
-  - You MUST use AssistantAgent, KISSAgent, or a mixture of them
+  - You MUST use SorcarAgent, KISSAgent, or a mixture of them
     to implement the agent.
   - You MUST not use multithreading or multiprocessing or docker manager
     or 'anyio' or 'async' or 'await' in the agent implementation.
@@ -331,7 +331,7 @@ class ImproverAgent:
     ) -> tuple[bool, ImprovementReport | None]:
         """Run the improvement process using a coding agent.
 
-        Executes the AssistantAgent with the AGENT_EVOLVER_PROMPT to create
+        Executes the SorcarAgent with the AGENT_EVOLVER_PROMPT to create
         or improve agent code. Tracks metrics including tokens used, cost,
         and execution time.
 
@@ -348,7 +348,7 @@ class ImproverAgent:
             documenting the changes. Returns (False, None) on failure.
         """
 
-        agent = AssistantAgent("Agent Improver")
+        agent = SorcarAgent("Agent Improver")
 
         print(f"Running improvement on {work_dir}")
         if not config_module.DEFAULT_CONFIG.create_and_optimize_agent.evolver.evolve_to_solve_task:
