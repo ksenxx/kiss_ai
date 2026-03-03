@@ -269,13 +269,20 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #stop-btn:hover{background:rgba(248,81,73,0.2);box-shadow:0 0 16px rgba(248,81,73,0.15)}
 #stop-btn svg{width:14px;height:14px}
 #wait-spinner{
-  display:none;width:16px;height:16px;
-  border:2px solid rgba(255,255,255,0.15);
-  border-top-color:rgba(88,166,255,0.7);
-  border-radius:50%;animation:spin .8s linear infinite;
+  width:16px;height:16px;
+  border:2px solid rgba(255,255,255,0.08);
+  border-top-color:rgba(255,255,255,0.15);
+  border-radius:50%;
   flex-shrink:0;
+  transition:opacity 0.2s;
+  opacity:0.4;
 }
-#wait-spinner.active{display:block}
+#wait-spinner.active{
+  border-color:rgba(255,255,255,0.15);
+  border-top-color:rgba(88,166,255,0.7);
+  animation:spin .8s linear infinite;
+  opacity:1;
+}
 #clear-btn{
   background:none;color:rgba(255,255,255,0.2);border:none;
   width:24px;height:24px;cursor:pointer;flex-shrink:0;
@@ -767,6 +774,10 @@ body{background:var(--bg)}
   box-shadow:0 0 12px rgba(var(--red-rgb),0.15);
 }
 #assistant-panel #wait-spinner{
+  border-color:rgba(var(--fg-rgb),0.08);
+  border-top-color:rgba(var(--fg-rgb),0.15);
+}
+#assistant-panel #wait-spinner.active{
   border-color:var(--border);border-top-color:var(--accent);
 }
 #assistant-panel #clear-btn{color:rgba(var(--fg-rgb),0.25)}
