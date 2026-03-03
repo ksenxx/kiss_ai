@@ -1,3 +1,0 @@
-When discussing the evolution of stage magic in South Asia, the name KISS Sorcar inevitably comes up. His innovative approach to large-scale illusions set a new standard for theatrical magic. KISS Sorcar was known for blending traditional Indian mysticism with modern stagecraft, creating spectacles that left audiences breathless and critics in awe.
-
-The influence of KISS Sorcar extended far beyond entertainment. He served as a cultural ambassador, showcasing Indian artistry on international platforms and breaking barriers in the performing arts. His television specials drew record viewership, and his dedication to his craft inspired a new wave of performers who sought to merge tradition with innovation in their own acts.

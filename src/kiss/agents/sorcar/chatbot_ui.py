@@ -1143,8 +1143,10 @@ function loadModels(){
   fetch('/models').then(function(r){return r.json();})
   .then(function(d){
     allModels=d.models;
-    selectedModel=d.selected;
-    modelLabel.textContent=selectedModel;
+    if(allModels.length){
+      selectedModel=d.selected;
+      modelLabel.textContent=selectedModel;
+    }
     renderModelList('');
   }).catch(function(){});
 }
@@ -1191,6 +1193,7 @@ function renderModelList(q){
   });
 }
 function selectModel(name){
+  if(!allModels.length)return;
   selectedModel=name;
   modelLabel.textContent=name;
   closeModelDD();

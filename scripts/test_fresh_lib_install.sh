@@ -4,6 +4,6 @@ mkdir -p kiss_tmp
 cd kiss_tmp
 uv init --python 3.13
 uv add kiss-agent-framework
-uv run assistant
+uv run sorcar
 cd ..
 rm -rf kiss_tmp
