@@ -181,9 +181,7 @@ class GeminiModel(Model):
                 )
         return content, function_calls
 
-    def _build_config(
-        self, tools: list[types.Tool] | None = None
-    ) -> types.GenerateContentConfig:
+    def _build_config(self, tools: list[types.Tool] | None = None) -> types.GenerateContentConfig:
         thinking_config = self.model_config.get("thinking_config")
         if thinking_config is None:
             thinking_config = types.ThinkingConfig(include_thoughts=True)

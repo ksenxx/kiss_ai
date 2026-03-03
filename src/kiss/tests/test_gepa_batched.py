@@ -109,9 +109,7 @@ class TestGEPABatchedBasic(unittest.TestCase):
             results: list[tuple[str, Any]] = []
             for args in args_list:
                 expected = args.get("_expected", "unknown")
-                results.append(
-                    (f"EXPECTED:{expected}\nRESULT:result={expected}", [])
-                )
+                results.append((f"EXPECTED:{expected}\nRESULT:result={expected}", []))
             return results
 
         seq_wrapper, _ = create_deterministic_sequential_wrapper()
@@ -203,9 +201,7 @@ class TestGEPABatchedMultiGeneration(unittest.TestCase):
             results: list[tuple[str, Any]] = []
             for args in args_list:
                 expected = args.get("_expected", "unknown")
-                results.append(
-                    (f"EXPECTED:{expected}\nRESULT:result={expected}", [])
-                )
+                results.append((f"EXPECTED:{expected}\nRESULT:result={expected}", []))
             return results
 
         seq_wrapper, seq_counter = create_deterministic_sequential_wrapper()
@@ -226,6 +222,7 @@ class TestGEPABatchedMultiGeneration(unittest.TestCase):
         self.assertGreater(batch_call_count[0], 2)
         # Sequential wrapper should not be called at all
         self.assertEqual(seq_counter[0], 0)
+
 
 @requires_openai_api_key
 class TestGEPABatchedWithMutation(unittest.TestCase):
@@ -265,9 +262,7 @@ class TestGEPABatchedEdgeCases(unittest.TestCase):
             for i, args in enumerate(args_list):
                 expected = args.get("_expected", "unknown")
                 suffix = "a" if (call_count[0] + i) % 2 == 0 else "b"
-                results.append(
-                    (f"EXPECTED:{expected}\nRESULT:result={expected}{suffix}", [])
-                )
+                results.append((f"EXPECTED:{expected}\nRESULT:result={expected}{suffix}", []))
             return results
 
         def varying_eval_fn(result: str) -> dict[str, float]:

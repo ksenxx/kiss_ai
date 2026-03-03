@@ -125,15 +125,17 @@ def finish(
     Returns:
         A YAML string containing the status, analysis, and result of the agent's task.
     """
-    return str(yaml.dump(
-        {
-            "status": status,
-            "analysis": analysis,
-            "result": result,
-        },
-        indent=2,
-        sort_keys=False,
-    ))
+    return str(
+        yaml.dump(
+            {
+                "status": status,
+                "analysis": analysis,
+                "result": result,
+            },
+            indent=2,
+            sort_keys=False,
+        )
+    )
 
 
 def read_project_file(file_path_relative_to_project_root: str) -> str:

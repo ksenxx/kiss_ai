@@ -123,8 +123,7 @@ def create_progress_callback(
     def progress_callback(progress: GEPAProgress) -> None:
         """Report GEPA optimization progress."""
         is_val_complete = (
-            progress.phase == GEPAPhase.VAL_EVALUATION
-            and progress.message.startswith("Evaluated")
+            progress.phase == GEPAPhase.VAL_EVALUATION and progress.message.startswith("Evaluated")
         )
         is_pareto_update = progress.phase == GEPAPhase.PARETO_UPDATE
         if verbose or is_val_complete or is_pareto_update:
@@ -185,9 +184,8 @@ class GEPA:
         max_merge_invocations: int = 5,
         merge_val_overlap_floor: int = 2,
         progress_callback: Callable[[GEPAProgress], None] | None = None,
-        batched_agent_wrapper: Callable[
-            [str, list[dict[str, str]]], list[tuple[str, list[Any]]]
-        ] | None = None,
+        batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]]
+        | None = None,
     ):
         """Initialize GEPA optimizer.
 
@@ -323,25 +321,27 @@ class GEPA:
         if not self.progress_callback:
             return
 
-        self.progress_callback(GEPAProgress(
-            generation=generation,
-            max_generations=self.max_generations,
-            phase=phase,
-            candidate_id=candidate.id if candidate else None,
-            candidate_index=candidate_index,
-            population_size=len(self.candidates),
-            best_val_accuracy=self._best_val_accuracy,
-            current_val_accuracy=(
-                self._get_val_accuracy(candidate)
-                if candidate and candidate.val_scores
-                else None
-            ),
-            current_val_scores=dict(candidate.val_scores) if candidate else {},
-            current_dev_scores=dict(candidate.dev_scores) if candidate else {},
-            pareto_frontier_size=len(self.pareto_frontier),
-            num_candidates_evaluated=num_candidates_evaluated,
-            message=message,
-        ))
+        self.progress_callback(
+            GEPAProgress(
+                generation=generation,
+                max_generations=self.max_generations,
+                phase=phase,
+                candidate_id=candidate.id if candidate else None,
+                candidate_index=candidate_index,
+                population_size=len(self.candidates),
+                best_val_accuracy=self._best_val_accuracy,
+                current_val_accuracy=(
+                    self._get_val_accuracy(candidate)
+                    if candidate and candidate.val_scores
+                    else None
+                ),
+                current_val_scores=dict(candidate.val_scores) if candidate else {},
+                current_dev_scores=dict(candidate.dev_scores) if candidate else {},
+                pareto_frontier_size=len(self.pareto_frontier),
+                num_candidates_evaluated=num_candidates_evaluated,
+                message=message,
+            )
+        )
 
     def _update_best_val_accuracy(self, candidate: PromptCandidate) -> None:
         """Update best validation accuracy tracking."""
@@ -421,10 +421,20 @@ class GEPA:
         """
         if self.batched_agent_wrapper is not None:
             return self._run_minibatch_batched(
-                prompt, examples, capture_results, phase, generation, candidate_id,
+                prompt,
+                examples,
+                capture_results,
+                phase,
+                generation,
+                candidate_id,
             )
         return self._run_minibatch_sequential(
-            prompt, examples, capture_results, phase, generation, candidate_id,
+            prompt,
+            examples,
+            capture_results,
+            phase,
+            generation,
+            candidate_id,
         )
 
     def _run_minibatch_sequential(
@@ -449,7 +459,12 @@ class GEPA:
                 trajectories.append(trajectory)
 
             self._report_example_progress(
-                phase, generation, candidate_id, i, len(examples), scores,
+                phase,
+                generation,
+                candidate_id,
+                i,
+                len(examples),
+                scores,
             )
 
         return self._aggregate_scores(all_scores), all_scores, results, trajectories
@@ -478,7 +493,12 @@ class GEPA:
                 trajectories.append(trajectory)
 
             self._report_example_progress(
-                phase, generation, candidate_id, i, len(examples), scores,
+                phase,
+                generation,
+                candidate_id,
+                i,
+                len(examples),
+                scores,
             )
 
         return self._aggregate_scores(all_scores), all_scores, results, trajectories
@@ -501,10 +521,7 @@ class GEPA:
         self._report_progress(
             generation=generation,
             phase=phase,
-            message=(
-                f"Candidate {candidate_id}: example {index + 1}/{total} "
-                f"({scores_str})"
-            ),
+            message=(f"Candidate {candidate_id}: example {index + 1}/{total} ({scores_str})"),
         )
 
     @staticmethod
@@ -821,9 +838,7 @@ class GEPA:
         c1, c2 = merge_pairs[0]
         return self._merge_structural(c1, c2)
 
-    def _update_pareto(
-        self, candidate: PromptCandidate, generation: int = 0
-    ) -> None:
+    def _update_pareto(self, candidate: PromptCandidate, generation: int = 0) -> None:
         """Update instance-level Pareto frontier with a new candidate.
 
         Updates the best-per-instance tracking and rebuilds the Pareto frontier
@@ -1010,18 +1025,14 @@ class GEPA:
                 self._update_best_val_accuracy(candidate)
 
                 # Report progress after val evaluation (now with updated scores)
-                val_scores_str = ", ".join(
-                    f"{k}={v:.4f}" for k, v in candidate.val_scores.items()
-                )
+                val_scores_str = ", ".join(f"{k}={v:.4f}" for k, v in candidate.val_scores.items())
                 self._report_progress(
                     generation=gen,
                     phase=GEPAPhase.VAL_EVALUATION,
                     candidate=candidate,
                     candidate_index=idx,
                     num_candidates_evaluated=idx + 1,
-                    message=(
-                        f"Evaluated candidate {candidate.id}: {val_scores_str}"
-                    ),
+                    message=(f"Evaluated candidate {candidate.id}: {val_scores_str}"),
                 )
 
             # Generate next generation (skip last)

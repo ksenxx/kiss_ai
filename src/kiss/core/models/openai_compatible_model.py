@@ -240,15 +240,19 @@ class OpenAICompatibleModel(Model):
             parts: list[dict[str, Any]] = []
             for att in attachments:
                 if att.mime_type.startswith("image/"):
-                    parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": att.to_data_url()},
-                    })
+                    parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": att.to_data_url()},
+                        }
+                    )
                 elif att.mime_type == "application/pdf":
-                    parts.append({
-                        "type": "file",
-                        "file": {"file_data": att.to_data_url()},
-                    })
+                    parts.append(
+                        {
+                            "type": "file",
+                            "file": {"file_data": att.to_data_url()},
+                        }
+                    )
             parts.append({"type": "text", "text": prompt})
             content = parts
         self.conversation.append({"role": "user", "content": content})

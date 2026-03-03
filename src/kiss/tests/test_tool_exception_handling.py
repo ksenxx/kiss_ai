@@ -161,10 +161,12 @@ def test_finish_tool_error_produces_valid_yaml_result() -> None:
     agent = _make_agent()
     agent._add_functions([finish])
     # Calling finish with wrong argument types - success is a str not bool
-    name, response = agent._execute_tool({
-        "name": "finish",
-        "arguments": {"success": True, "summary": "done"},
-    })
+    name, response = agent._execute_tool(
+        {
+            "name": "finish",
+            "arguments": {"success": True, "summary": "done"},
+        }
+    )
     assert name == "finish"
     # Should succeed and return valid YAML
     result = yaml.safe_load(response)

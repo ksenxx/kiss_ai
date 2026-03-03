@@ -5,13 +5,28 @@ from pathlib import Path
 from typing import Any
 
 LANG_MAP = {
-    "py": "python", "js": "javascript", "ts": "typescript",
-    "sh": "bash", "bash": "bash", "zsh": "bash",
-    "rb": "ruby", "rs": "rust", "go": "go",
-    "java": "java", "c": "c", "cpp": "cpp", "h": "c",
-    "json": "json", "yaml": "yaml", "yml": "yaml",
-    "toml": "toml", "xml": "xml", "html": "html",
-    "css": "css", "sql": "sql", "md": "markdown",
+    "py": "python",
+    "js": "javascript",
+    "ts": "typescript",
+    "sh": "bash",
+    "bash": "bash",
+    "zsh": "bash",
+    "rb": "ruby",
+    "rs": "rust",
+    "go": "go",
+    "java": "java",
+    "c": "c",
+    "cpp": "cpp",
+    "h": "c",
+    "json": "json",
+    "yaml": "yaml",
+    "yml": "yaml",
+    "toml": "toml",
+    "xml": "xml",
+    "html": "html",
+    "css": "css",
+    "sql": "sql",
+    "md": "markdown",
 }
 
 MAX_RESULT_LEN = 3000

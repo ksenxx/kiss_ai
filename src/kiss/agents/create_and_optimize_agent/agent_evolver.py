@@ -179,18 +179,11 @@ def create_progress_callback(
     import sys as _sys
 
     def progress_callback(progress: EvolverProgress) -> None:
-        is_eval_complete = (
-            progress.phase == EvolverPhase.EVALUATING
-            and progress.current_metrics
-        )
+        is_eval_complete = progress.phase == EvolverPhase.EVALUATING and progress.current_metrics
         is_pareto_update = progress.phase == EvolverPhase.PARETO_UPDATE
         is_complete = progress.phase == EvolverPhase.COMPLETE
         if verbose or is_eval_complete or is_pareto_update or is_complete:
-            best_str = (
-                f"{progress.best_score:.2f}"
-                if progress.best_score is not None
-                else "N/A"
-            )
+            best_str = f"{progress.best_score:.2f}" if progress.best_score is not None else "N/A"
             print(
                 f"  Gen {progress.generation}/{progress.max_generations} | "
                 f"{progress.phase.value:15} | Best: {best_str:>8} | {progress.message}",
@@ -375,18 +368,20 @@ class AgentEvolver:
         if not self.progress_callback:
             return
 
-        self.progress_callback(EvolverProgress(
-            generation=generation,
-            max_generations=self.max_generations,
-            phase=phase,
-            variant_id=variant.id if variant else None,
-            parent_ids=variant.parent_ids if variant else [],
-            frontier_size=len(self.pareto_frontier),
-            best_score=self._best_score,
-            current_metrics=variant.metrics if variant else {},
-            added_to_frontier=added_to_frontier,
-            message=message,
-        ))
+        self.progress_callback(
+            EvolverProgress(
+                generation=generation,
+                max_generations=self.max_generations,
+                phase=phase,
+                variant_id=variant.id if variant else None,
+                parent_ids=variant.parent_ids if variant else [],
+                frontier_size=len(self.pareto_frontier),
+                best_score=self._best_score,
+                current_metrics=variant.metrics if variant else {},
+                added_to_frontier=added_to_frontier,
+                message=message,
+            )
+        )
 
     def _update_best_score(self) -> None:
         """Update best score tracking from the current Pareto frontier."""
@@ -732,7 +727,8 @@ class AgentEvolver:
             parent_ids=[primary.id, secondary.id],
         )
 
-    def evolve(self,
+    def evolve(
+        self,
         task_description: str,
         max_generations: int | None = None,
         initial_frontier_size: int | None = None,
@@ -862,10 +858,7 @@ class AgentEvolver:
                     generation=gen,
                     phase=EvolverPhase.CROSSOVER,
                     variant=primary,
-                    message=(
-                        f"Crossing over variant {primary.id} "
-                        f"with variant {secondary.id}"
-                    ),
+                    message=(f"Crossing over variant {primary.id} with variant {secondary.id}"),
                 )
 
                 new_variant = self._crossover(primary, secondary)
@@ -930,8 +923,7 @@ class AgentEvolver:
             phase=EvolverPhase.COMPLETE,
             variant=best,
             message=(
-                f"Evolution complete. Best variant {best.id}: "
-                f"{self._format_metrics(best.metrics)}"
+                f"Evolution complete. Best variant {best.id}: {self._format_metrics(best.metrics)}"
             ),
         )
 

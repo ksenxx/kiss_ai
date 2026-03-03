@@ -188,10 +188,13 @@ class TestSelectACSpacing(unittest.TestCase):
 
     @staticmethod
     def _select_ac(
-        value: str, cursor: int, item_text: str,
+        value: str,
+        cursor: int,
+        item_text: str,
     ) -> tuple[str, int]:
         before = value[:cursor]
         import re
+
         m = re.search(r"@([^\s]*)$", before)
         if not m:
             return value, cursor
@@ -219,7 +222,9 @@ class TestSelectACSpacing(unittest.TestCase):
 
     def test_mid_sentence(self) -> None:
         result, pos = self._select_ac(
-            "check @sr and go", 9, "src/",
+            "check @sr and go",
+            9,
+            "src/",
         )
         assert result == "check @src/ and go"
         assert pos == 11

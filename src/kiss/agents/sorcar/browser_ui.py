@@ -467,7 +467,11 @@ class BaseBrowserPrinter(Printer):
             return bool(self._clients)
 
     def _broadcast_result(
-        self, text: str, step_count: int = 0, total_tokens: int = 0, cost: str = "N/A",
+        self,
+        text: str,
+        step_count: int = 0,
+        total_tokens: int = 0,
+        cost: str = "N/A",
     ) -> None:
         event: dict[str, Any] = {
             "type": "result",
@@ -533,17 +537,21 @@ class BaseBrowserPrinter(Printer):
             return ""
         if type == "tool_result":
             self._flush_bash()
-            self.broadcast({
-                "type": "tool_result",
-                "content": truncate_result(str(content)),
-                "is_error": kwargs.get("is_error", False),
-            })
+            self.broadcast(
+                {
+                    "type": "tool_result",
+                    "content": truncate_result(str(content)),
+                    "is_error": kwargs.get("is_error", False),
+                }
+            )
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})
             self._broadcast_result(
-                str(content), kwargs.get("step_count", 0),
-                kwargs.get("total_tokens", 0), kwargs.get("cost", "N/A"),
+                str(content),
+                kwargs.get("step_count", 0),
+                kwargs.get("total_tokens", 0),
+                kwargs.get("cost", "N/A"),
             )
             return ""
         return ""
@@ -556,9 +564,7 @@ class BaseBrowserPrinter(Printer):
         """
         if token:
             delta_type = (
-                "thinking_delta"
-                if self._current_block_type == "thinking"
-                else "text_delta"
+                "thinking_delta" if self._current_block_type == "thinking" else "text_delta"
             )
             self.broadcast({"type": delta_type, "text": token})
 
@@ -643,8 +649,10 @@ class BaseBrowserPrinter(Printer):
         elif hasattr(message, "content"):
             for block in message.content:
                 if hasattr(block, "is_error") and hasattr(block, "content"):
-                    self.broadcast({
-                        "type": "tool_result",
-                        "content": truncate_result(str(block.content)),
-                        "is_error": bool(block.is_error),
-                    })
+                    self.broadcast(
+                        {
+                            "type": "tool_result",
+                            "content": truncate_result(str(block.content)),
+                            "is_error": bool(block.is_error),
+                        }
+                    )

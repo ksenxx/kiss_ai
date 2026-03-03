@@ -126,5 +126,6 @@ class TestModelInfoEdgeCases:
 
         assert calculate_cost("unknown-model-xyz", 1000, 1000) == 0.0
 
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

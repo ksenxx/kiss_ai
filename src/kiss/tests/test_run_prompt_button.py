@@ -115,6 +115,7 @@ class TestCodeServerExtensionActiveFileWrite:
 
     def test_extension_js_contains_active_file_tracking(self) -> None:
         from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
+
         assert "writeActiveFile" in _CS_EXTENSION_JS
         assert "active-file.json" in _CS_EXTENSION_JS
         assert "onDidChangeActiveTextEditor" in _CS_EXTENSION_JS
@@ -125,6 +126,7 @@ class TestRunPromptHTMLButton:
 
     def test_html_contains_run_prompt_btn(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import _build_html
+
         html = _build_html("Test Title", "", "/tmp")
         assert 'id="run-prompt-btn"' in html
         assert "Run current file as prompt" in html
@@ -132,6 +134,7 @@ class TestRunPromptHTMLButton:
 
     def test_js_contains_active_file_check(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         assert "checkActiveFile" in CHATBOT_JS
         assert "/active-file-info" in CHATBOT_JS
         assert "/get-file-content" in CHATBOT_JS
@@ -139,6 +142,7 @@ class TestRunPromptHTMLButton:
 
     def test_css_contains_run_prompt_btn_styles(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS
+
         assert "#run-prompt-btn" in CHATBOT_CSS
 
 
@@ -147,6 +151,7 @@ class TestEndpointRoutes:
 
     def test_routes_include_active_file_info(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import _build_html
+
         # Verify the JS references the endpoints
         html = _build_html("Test", "", "/tmp")
         assert "/active-file-info" in html
@@ -199,10 +204,12 @@ class TestRunPromptButtonThemeCSS:
 
     def test_theme_css_run_prompt_btn_enabled(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_THEME_CSS
+
         assert "#run-prompt-btn:not(:disabled)" in CHATBOT_THEME_CSS
 
     def test_theme_css_run_prompt_btn_hover(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_THEME_CSS
+
         assert "#run-prompt-btn:not(:disabled):hover" in CHATBOT_THEME_CSS
 
 
@@ -211,26 +218,32 @@ class TestRunPromptButtonJSBehavior:
 
     def test_js_polls_active_file(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         assert "setInterval(checkActiveFile,2000)" in CHATBOT_JS
 
     def test_js_disables_when_no_prompt(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         assert "runPromptBtn.disabled=true" in CHATBOT_JS
 
     def test_js_enables_when_prompt(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         assert "runPromptBtn.disabled=false" in CHATBOT_JS
 
     def test_js_calls_submit_on_click(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         assert "submitTask()" in CHATBOT_JS
 
     def test_js_sets_input_value_from_content(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         assert "inp.value=d.content" in CHATBOT_JS
 
     def test_play_button_disabled_by_default(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import _build_html
+
         html = _build_html("Test", "", "/tmp")
         assert 'id="run-prompt-btn" title="Run current file as prompt" disabled' in html
 
@@ -240,6 +253,7 @@ class TestPlayButtonDisableDuringRun:
 
     def test_js_disables_play_button_in_submit_task(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         # submitTask() should disable runPromptBtn
         idx_running = CHATBOT_JS.index("running=true;inp.disabled=true;")
         idx_disable = CHATBOT_JS.index("runPromptBtn.disabled=true;", idx_running)
@@ -248,6 +262,7 @@ class TestPlayButtonDisableDuringRun:
 
     def test_js_check_active_file_skips_when_running(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         idx_func = CHATBOT_JS.index("function checkActiveFile(){")
         idx_guard = CHATBOT_JS.index("if(running){runPromptBtn.disabled=true;return}", idx_func)
         idx_fetch = CHATBOT_JS.index("fetch('/active-file-info')", idx_func)
@@ -255,6 +270,7 @@ class TestPlayButtonDisableDuringRun:
 
     def test_js_check_active_file_guards_after_fetch(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         idx_fetch = CHATBOT_JS.index("fetch('/active-file-info')")
         idx_guard = CHATBOT_JS.index("if(running)return;", idx_fetch)
         idx_is_prompt = CHATBOT_JS.index("if(d.is_prompt){", idx_fetch)
@@ -262,6 +278,7 @@ class TestPlayButtonDisableDuringRun:
 
     def test_js_set_ready_calls_check_active_file(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
         idx_set_ready = CHATBOT_JS.index("function setReady(label){")
         idx_running_false = CHATBOT_JS.index("running=false;", idx_set_ready)
         idx_check = CHATBOT_JS.index("checkActiveFile();", idx_set_ready)

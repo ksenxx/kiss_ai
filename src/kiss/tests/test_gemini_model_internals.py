@@ -3,6 +3,7 @@
 These tests avoid mocks while exercising internal transformations and
 conversation handling without making external API calls.
 """
+
 from kiss.core.models.gemini_model import GeminiModel
 
 
@@ -44,9 +45,7 @@ class TestGeminiModelConversationConversion:
         model.set_usage_info_for_messages("Usage: 10 tokens")
         model.conversation = []
 
-        model.add_function_results_to_conversation_and_return(
-            [("tool_a", {"result": "ok"})]
-        )
+        model.add_function_results_to_conversation_and_return([("tool_a", {"result": "ok"})])
         assert model.conversation[-1]["tool_call_id"].startswith("call_tool_a_")
         assert "Usage: 10 tokens" in model.conversation[-1]["content"]
 

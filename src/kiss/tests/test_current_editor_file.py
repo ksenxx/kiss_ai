@@ -83,7 +83,8 @@ class TestRunAgentThreadEditorFile:
     """Test the run_agent_thread logic for reading active-file.json."""
 
     def test_extra_kwargs_includes_current_editor_file(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         cs_data_dir = str(tmp_path)
         af = tmp_path / "active-file.json"
@@ -131,7 +132,8 @@ class TestRunAgentThreadEditorFile:
         }
 
     def test_extra_kwargs_no_current_editor_file_when_no_active_file(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         cs_data_dir = str(tmp_path)
 

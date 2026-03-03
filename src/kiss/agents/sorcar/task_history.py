@@ -16,20 +16,17 @@ MAX_HISTORY = 1000
 def _ensure_kiss_dir() -> None:
     _KISS_DIR.mkdir(parents=True, exist_ok=True)
 
+
 SAMPLE_TASKS = [
     {"task": "run 'uv run check' and fix", "result": ""},
     {
         "task": (
-            "plan a trip to Yosemite over the weekend based on"
-            " warnings and hotel availability"
+            "plan a trip to Yosemite over the weekend based on warnings and hotel availability"
         ),
         "result": "",
     },
     {
-        "task": (
-            "find the cheapest afternoon non-stop flight"
-            " from SFO to NYC around March 15"
-        ),
+        "task": ("find the cheapest afternoon non-stop flight from SFO to NYC around March 15"),
         "result": "",
     },
     {
@@ -48,30 +45,24 @@ SAMPLE_TASKS = [
     },
     {
         "task": (
-            "develop an automated evaluation framework for"
-            " agent performance against benchmarks"
+            "develop an automated evaluation framework for agent performance against benchmarks"
         ),
         "result": "",
     },
     {
         "task": (
-            "launch a browser, research technical innovations,"
-            " and compile a document incrementally"
+            "launch a browser, research technical innovations, and compile a document incrementally"
         ),
         "result": "",
     },
     {
         "task": (
-            "read all *.md files, check consistency with"
-            " the code, and fix any inconsistencies"
+            "read all *.md files, check consistency with the code, and fix any inconsistencies"
         ),
         "result": "",
     },
     {
-        "task": (
-            "remove duplicate or redundant tests while"
-            " ensuring coverage doesn't decrease"
-        ),
+        "task": ("remove duplicate or redundant tests while ensuring coverage doesn't decrease"),
         "result": "",
     },
 ]
@@ -201,6 +192,7 @@ def _add_task(task: str) -> None:
 
 def _get_task_history_md_path() -> Path:
     from kiss.core import config as config_module
+
     return Path(config_module.DEFAULT_CONFIG.agent.artifact_dir).parent / "TASK_HISTORY.md"
 
 

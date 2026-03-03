@@ -43,9 +43,7 @@ def main() -> None:
             print("Step 2: Enter email address")
             print("=" * 70)
             email_id = find_id(tree, r"\[(\d+)\].*textbox")
-            tree = web.type_text(
-                email_id, "kissagent1@gmail.com", press_enter=True
-            )
+            tree = web.type_text(email_id, "kissagent1@gmail.com", press_enter=True)
             print(tree)
             time.sleep(3)
             tree = web.get_page_content()
@@ -57,9 +55,7 @@ def main() -> None:
             print("Step 3: Enter password")
             print("=" * 70)
             pw_id = find_id(tree, r"\[(\d+)\].*textbox")
-            tree = web.type_text(
-                pw_id, "Fot AI Assistant.", press_enter=True
-            )
+            tree = web.type_text(pw_id, "Fot AI Assistant.", press_enter=True)
             print(tree)
             time.sleep(5)
             tree = web.get_page_content()

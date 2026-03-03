@@ -38,6 +38,7 @@ _SSL_CTX = ssl.create_default_context()
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
     req = Request(url, headers=headers or {})
     for attempt in range(3):
@@ -47,7 +48,7 @@ def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
         except Exception:
             if attempt == 2:
                 raise
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
     raise RuntimeError("unreachable")
 
 
@@ -65,6 +66,7 @@ def fmt_price(p: float) -> str:
 # ---------------------------------------------------------------------------
 # API Fetchers — each returns dict[model_name, dict] with ctx/pricing info
 # ---------------------------------------------------------------------------
+
 
 def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
     """Fetch all models from OpenRouter (public API, no auth).
@@ -156,9 +158,15 @@ def fetch_gemini(verbose: bool = False) -> dict[str, dict]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     data = api_get(url)
     skip_suffixes = (
-        "-exp", "-latest", "-preview-tts", "-image-generation",
-        "-image-preview", "-customtools", "-native-audio",
-        "-computer-use", "-robotics",
+        "-exp",
+        "-latest",
+        "-preview-tts",
+        "-image-generation",
+        "-image-preview",
+        "-customtools",
+        "-native-audio",
+        "-computer-use",
+        "-robotics",
     )
     models: dict[str, dict] = {}
     for m in data.get("models", []):
@@ -212,6 +220,7 @@ def fetch_anthropic(verbose: bool = False) -> dict[str, dict]:
 # Get current MODEL_INFO
 # ---------------------------------------------------------------------------
 
+
 def get_current_model_info() -> dict[str, dict]:
     from kiss.core.models.model_info import MODEL_INFO
 
@@ -231,6 +240,7 @@ def get_current_model_info() -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 # Model capability testing
 # ---------------------------------------------------------------------------
+
 
 def test_generate(model_name: str) -> bool:
     from kiss.core.models.model_info import model as create_model
@@ -280,7 +290,8 @@ def test_function_calling(model_name: str) -> bool:
 
 
 def test_model_capabilities(
-    model_name: str, verbose: bool = False,
+    model_name: str,
+    verbose: bool = False,
 ) -> dict[str, bool]:
     results: dict[str, bool] = {}
     if verbose:
@@ -307,6 +318,7 @@ def test_model_capabilities(
 # ---------------------------------------------------------------------------
 # Diff computation
 # ---------------------------------------------------------------------------
+
 
 def find_deprecated_models(
     current: dict[str, dict],
@@ -376,13 +388,15 @@ def compute_changes(
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
             if fetched["context_length"] and fetched["input_price_per_1M"] > 0:
-                new_models.append({
-                    "name": name,
-                    "context_length": fetched["context_length"],
-                    "input_price_per_1M": fetched["input_price_per_1M"],
-                    "output_price_per_1M": fetched["output_price_per_1M"],
-                    "source": "openrouter",
-                })
+                new_models.append(
+                    {
+                        "name": name,
+                        "context_length": fetched["context_length"],
+                        "input_price_per_1M": fetched["input_price_per_1M"],
+                        "output_price_per_1M": fetched["output_price_per_1M"],
+                        "source": "openrouter",
+                    }
+                )
 
     # --- Together AI models ---
     for name, fetched in together.items():
@@ -405,46 +419,54 @@ def compute_changes(
                 and fetched.get("type") in ("chat", "embedding")
                 and fetched["input_price_per_1M"] > 0
             ):
-                new_models.append({
-                    "name": name,
-                    "context_length": fetched["context_length"],
-                    "input_price_per_1M": fetched["input_price_per_1M"],
-                    "output_price_per_1M": fetched["output_price_per_1M"],
-                    "source": "together",
-                    "is_embedding": fetched.get("is_embedding", False),
-                })
+                new_models.append(
+                    {
+                        "name": name,
+                        "context_length": fetched["context_length"],
+                        "input_price_per_1M": fetched["input_price_per_1M"],
+                        "output_price_per_1M": fetched["output_price_per_1M"],
+                        "source": "together",
+                        "is_embedding": fetched.get("is_embedding", False),
+                    }
+                )
 
     # --- Gemini models (context length updates only, no pricing in API) ---
     for name, fetched in gemini.items():
         if name in current:
             cur = current[name]
             if fetched["context_length"] and fetched["context_length"] != cur["context_length"]:
-                updates.append({
-                    "name": name,
-                    "changes": {"context_length": fetched["context_length"]},
-                    "source": "gemini",
-                })
+                updates.append(
+                    {
+                        "name": name,
+                        "changes": {"context_length": fetched["context_length"]},
+                        "source": "gemini",
+                    }
+                )
         else:
-            new_models.append({
-                "name": name,
-                "context_length": fetched["context_length"],
-                "input_price_per_1M": 0.0,
-                "output_price_per_1M": 0.0,
-                "source": "gemini",
-                "needs_pricing": True,
-            })
+            new_models.append(
+                {
+                    "name": name,
+                    "context_length": fetched["context_length"],
+                    "input_price_per_1M": 0.0,
+                    "output_price_per_1M": 0.0,
+                    "source": "gemini",
+                    "needs_pricing": True,
+                }
+            )
 
     # --- Anthropic models (new model detection only) ---
     for name in anthropic:
         if name not in current:
-            new_models.append({
-                "name": name,
-                "context_length": 200000,
-                "input_price_per_1M": 0.0,
-                "output_price_per_1M": 0.0,
-                "source": "anthropic",
-                "needs_pricing": True,
-            })
+            new_models.append(
+                {
+                    "name": name,
+                    "context_length": 200000,
+                    "input_price_per_1M": 0.0,
+                    "output_price_per_1M": 0.0,
+                    "source": "anthropic",
+                    "needs_pricing": True,
+                }
+            )
 
     return updates, new_models
 
@@ -453,9 +475,15 @@ def compute_changes(
 # File update
 # ---------------------------------------------------------------------------
 
+
 def _make_entry_line(
-    name: str, ctx: int, inp: float, out: float,
-    fc: bool = True, emb: bool = False, gen: bool = True,
+    name: str,
+    ctx: int,
+    inp: float,
+    out: float,
+    fc: bool = True,
+    emb: bool = False,
+    gen: bool = True,
     comment: str = "",
 ) -> str:
     if emb and not gen:
@@ -494,8 +522,13 @@ def apply_updates_to_file(
         new_inp = upd["changes"].get("input_price_per_1M", cur["input_price_per_1M"])
         new_out = upd["changes"].get("output_price_per_1M", cur["output_price_per_1M"])
         new_line = _make_entry_line(
-            name, new_ctx, new_inp, new_out,
-            fc=cur["fc"], emb=cur["emb"], gen=cur["gen"],
+            name,
+            new_ctx,
+            new_inp,
+            new_out,
+            fc=cur["fc"],
+            emb=cur["emb"],
+            gen=cur["gen"],
         )
         pattern = re.compile(rf'^\s+"{re.escape(name)}"\s*:')
         for i, line in enumerate(lines):
@@ -530,10 +563,14 @@ def apply_updates_to_file(
         else:
             comment = "NEW"
         entry_line = _make_entry_line(
-            name, nm["context_length"],
-            nm["input_price_per_1M"], nm["output_price_per_1M"],
-            fc=nm.get("fc", True), emb=nm.get("emb", False),
-            gen=nm.get("gen", True), comment=comment,
+            name,
+            nm["context_length"],
+            nm["input_price_per_1M"],
+            nm["output_price_per_1M"],
+            fc=nm.get("fc", True),
+            emb=nm.get("emb", False),
+            gen=nm.get("gen", True),
+            comment=comment,
         )
         new_lines_to_add.append(entry_line)
         added += 1
@@ -559,10 +596,13 @@ def apply_updates_to_file(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update model_info.py from vendor APIs")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Don't modify files",
+        "--dry-run",
+        action="store_true",
+        help="Don't modify files",
     )
     parser.add_argument("--skip-test", action="store_true", help="Skip capability testing")
     parser.add_argument("--test-existing", action="store_true", help="Re-test existing models")
@@ -588,7 +628,10 @@ def main() -> None:
     # 3. Detect deprecated models
     print("\n[3/6] Detecting deprecated models...")
     deprecated = find_deprecated_models(
-        current, openrouter_models, anthropic_models, gemini_models,
+        current,
+        openrouter_models,
+        anthropic_models,
+        gemini_models,
     )
     if deprecated:
         print(f"\n  Deprecated models in MODEL_INFO ({len(deprecated)}):")
@@ -600,7 +643,11 @@ def main() -> None:
     # 4. Compute diff
     print("\n[4/6] Computing changes...")
     updates, new_models = compute_changes(
-        current, openrouter_models, together_models, gemini_models, anthropic_models,
+        current,
+        openrouter_models,
+        together_models,
+        gemini_models,
+        anthropic_models,
     )
 
     # Print summary
@@ -608,8 +655,7 @@ def main() -> None:
         print(f"\n  Pricing/context updates ({len(updates)}):")
         for upd in updates:
             changes_str = ", ".join(
-                f"{k}: {current[upd['name']].get(k, '?')} -> {v}"
-                for k, v in upd["changes"].items()
+                f"{k}: {current[upd['name']].get(k, '?')} -> {v}" for k, v in upd["changes"].items()
             )
             print(f"    {upd['name']}: {changes_str}")
     else:
