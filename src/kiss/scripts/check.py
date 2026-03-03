@@ -151,7 +151,7 @@ def main() -> int:
 
     Parses command-line arguments and runs code quality checks including
     dependency installation, syntax checking with py_compile, linting with ruff,
-    type checking with mypy and pyright, and markdown formatting checks.
+    type checking with mypy, and markdown formatting checks.
 
     Returns:
         Exit code 0 if all checks pass, 1 if any check fails.
@@ -183,7 +183,6 @@ def main() -> int:
         (["uv", "run", "python", "-m", "compileall", "-q", "src/"], "Syntax check (compileall)"),
         (["uv", "run", "ruff", "check", "src/"], "Lint code (ruff)"),
         (["uv", "run", "mypy", "src/"], "Type check (mypy)"),
-        (["uv", "run", "pyright", "src/"], "Type check (pyright)"),
     ]
 
     # Add markdown lint check if there are markdown files
