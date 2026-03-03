@@ -14,7 +14,7 @@ from kiss.agents.create_and_optimize_agent.improver_agent import (
     ImprovementReport,
 )
 
-VARIANT_AGENT_TEMPLATE = '''
+VARIANT_AGENT_TEMPLATE = """
 def agent_run(task: str) -> dict:
     return {{
         "metrics": {{
@@ -23,17 +23,19 @@ def agent_run(task: str) -> dict:
             "execution_time": {time},
         }}
     }}
-'''
+"""
 
 
-def _create_agent_dir(base_dir: str, variant_id: int,
-                      success: int = 0, tokens: int = 100,
-                      time: float = 1.5) -> tuple[str, str]:
+def _create_agent_dir(
+    base_dir: str, variant_id: int, success: int = 0, tokens: int = 100, time: float = 1.5
+) -> tuple[str, str]:
     folder = os.path.join(base_dir, f"variant_{variant_id}")
     os.makedirs(folder, exist_ok=True)
 
     agent_code = VARIANT_AGENT_TEMPLATE.format(
-        success=success, tokens=tokens, time=time,
+        success=success,
+        tokens=tokens,
+        time=time,
     )
     with open(os.path.join(folder, "agent.py"), "w") as f:
         f.write(agent_code)
@@ -67,7 +69,8 @@ class TestableAgentEvolver(AgentEvolver):
     def _create_initial_agent(self, variant_id: int) -> AgentVariant:
         metrics = self._next_test_metrics()
         folder, report_path = _create_agent_dir(
-            str(self.work_dir), variant_id,
+            str(self.work_dir),
+            variant_id,
             success=int(metrics.get("success", 0)),
             tokens=int(metrics.get("tokens_used", 100)),
             time=metrics.get("execution_time", 1.5),
@@ -93,7 +96,8 @@ class TestableAgentEvolver(AgentEvolver):
         new_id = self._next_variant_id()
         metrics = self._next_test_metrics()
         folder, report_path = _create_agent_dir(
-            str(self.work_dir), new_id,
+            str(self.work_dir),
+            new_id,
             success=int(metrics.get("success", 0)),
             tokens=int(metrics.get("tokens_used", 100)),
             time=metrics.get("execution_time", 1.5),
@@ -119,7 +123,8 @@ class TestableAgentEvolver(AgentEvolver):
         new_id = self._next_variant_id()
         metrics = self._next_test_metrics()
         folder, report_path = _create_agent_dir(
-            str(self.work_dir), new_id,
+            str(self.work_dir),
+            new_id,
             success=int(metrics.get("success", 0)),
             tokens=int(metrics.get("tokens_used", 100)),
             time=metrics.get("execution_time", 1.5),

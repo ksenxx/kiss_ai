@@ -205,8 +205,11 @@ class AnthropicModel(Model):
                     content = msg["content"]
                     if isinstance(content, str):
                         msg["content"] = [
-                            {"type": "text", "text": content,
-                             "cache_control": {"type": "ephemeral"}}
+                            {
+                                "type": "text",
+                                "text": content,
+                                "cache_control": {"type": "ephemeral"},
+                            }
                         ]
                     elif isinstance(content, list) and content:
                         content[-1]["cache_control"] = {"type": "ephemeral"}

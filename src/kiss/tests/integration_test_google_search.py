@@ -48,11 +48,27 @@ def main() -> None:
         links = re.findall(r"\[(\d+)\] link \"([^\"]+)\"", tree)
 
         skip_patterns = {
-            "google.com", "gstatic.com", "googleapis.com",
-            "youtube.com", "accounts.google", "support.google",
-            "maps.google", "play.google", "Sign in", "More options",
-            "Settings", "Tools", "Images", "Videos", "News", "Shopping",
-            "All", "Maps", "Books", "Flights", "Finance",
+            "google.com",
+            "gstatic.com",
+            "googleapis.com",
+            "youtube.com",
+            "accounts.google",
+            "support.google",
+            "maps.google",
+            "play.google",
+            "Sign in",
+            "More options",
+            "Settings",
+            "Tools",
+            "Images",
+            "Videos",
+            "News",
+            "Shopping",
+            "All",
+            "Maps",
+            "Books",
+            "Flights",
+            "Finance",
         }
 
         results: list[tuple[str, str]] = []

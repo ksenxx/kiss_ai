@@ -45,15 +45,13 @@ def _create_jpeg_bytes() -> bytes:
     """Create a minimal valid JPEG image using PIL if available, else raw bytes."""
     try:
         from PIL import Image  # type: ignore[import-not-found]
+
         buf = io.BytesIO()
         img = Image.new("RGB", (4, 4), color=(0, 0, 255))
         img.save(buf, format="JPEG")
         return buf.getvalue()
     except ImportError:
-        return (
-            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
-            b"\xff\xd9"
-        )
+        return b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
 
 
 def _create_minimal_pdf() -> bytes:
@@ -121,12 +119,14 @@ class TestAttachment(unittest.TestCase):
 
     def test_to_base64(self) -> None:
         import base64
+
         data = b"test data"
         att = Attachment(data=data, mime_type="image/png")
         assert att.to_base64() == base64.b64encode(data).decode("ascii")
 
     def test_to_data_url(self) -> None:
         import base64
+
         data = b"test data"
         att = Attachment(data=data, mime_type="image/jpeg")
         expected = f"data:image/jpeg;base64,{base64.b64encode(data).decode('ascii')}"
@@ -177,8 +177,7 @@ class TestGeminiMultimodal(unittest.TestCase):
         result = agent.run(
             model_name="gemini-2.0-flash",
             prompt_template=(
-                "Describe this image. What color is it? "
-                "Answer with just the color name."
+                "Describe this image. What color is it? Answer with just the color name."
             ),
             is_agentic=False,
             max_budget=0.50,
@@ -195,10 +194,7 @@ class TestGeminiMultimodal(unittest.TestCase):
         agent = KISSAgent("Gemini PDF Test")
         result = agent.run(
             model_name="gemini-2.0-flash",
-            prompt_template=(
-                "What text does this PDF contain? "
-                "Answer with just the text content."
-            ),
+            prompt_template=("What text does this PDF contain? Answer with just the text content."),
             is_agentic=False,
             max_budget=0.50,
             attachments=[att],
@@ -214,8 +210,7 @@ class TestGeminiMultimodal(unittest.TestCase):
         result = agent.run(
             model_name="gemini-2.0-flash",
             prompt_template=(
-                "I'm sending you two images. What are their primary colors? "
-                "Answer briefly."
+                "I'm sending you two images. What are their primary colors? Answer briefly."
             ),
             is_agentic=False,
             max_budget=0.50,
@@ -241,8 +236,7 @@ class TestAnthropicMultimodal(unittest.TestCase):
         result = agent.run(
             model_name="claude-haiku-4-5",
             prompt_template=(
-                "Describe this image. What color is it? "
-                "Answer with just the color name."
+                "Describe this image. What color is it? Answer with just the color name."
             ),
             is_agentic=False,
             max_budget=0.50,
@@ -259,10 +253,7 @@ class TestAnthropicMultimodal(unittest.TestCase):
         agent = KISSAgent("Claude PDF Test")
         result = agent.run(
             model_name="claude-haiku-4-5",
-            prompt_template=(
-                "What text does this PDF contain? "
-                "Answer with just the text content."
-            ),
+            prompt_template=("What text does this PDF contain? Answer with just the text content."),
             is_agentic=False,
             max_budget=0.50,
             attachments=[att],

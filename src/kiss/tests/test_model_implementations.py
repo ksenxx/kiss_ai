@@ -317,12 +317,7 @@ class TestCachePricing:
 
     def test_calculate_cost_with_cache_tokens(self):
         cost = calculate_cost("claude-sonnet-4", 500_000, 100_000, 400_000, 100_000)
-        expected = (
-            500_000 * 3.00
-            + 100_000 * 15.00
-            + 400_000 * 0.30
-            + 100_000 * 3.75
-        ) / 1_000_000
+        expected = (500_000 * 3.00 + 100_000 * 15.00 + 400_000 * 0.30 + 100_000 * 3.75) / 1_000_000
         assert cost == pytest.approx(expected)
 
     def test_calculate_cost_cache_tokens_default_zero(self):
@@ -378,10 +373,12 @@ class TestAnthropicCacheControl:
         m.initialize("test")
         m._build_create_kwargs()
         m.conversation.append({"role": "assistant", "content": "reply"})
-        m.conversation.append({
-            "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
-        })
+        m.conversation.append(
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+            }
+        )
         m._build_create_kwargs()
         last_user = m.conversation[-1]
         assert last_user["content"][-1].get("cache_control") == {"type": "ephemeral"}

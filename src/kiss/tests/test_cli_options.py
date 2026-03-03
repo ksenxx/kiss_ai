@@ -54,9 +54,7 @@ class TestSWEBenchConfigCLI(CLITestBase):
             instance_id: str = Field(default="")
             instance_ids: list[str] = Field(default_factory=list)
             max_instances: int = Field(default=0)
-            docker_image_base: str = Field(
-                default="slimshetty/swebench-verified:sweb.eval.x86_64."
-            )
+            docker_image_base: str = Field(default="slimshetty/swebench-verified:sweb.eval.x86_64.")
             workdir: str = Field(default="/testbed")
             model: str = Field(default="gemini-3-pro-preview")
             max_steps: int = Field(default=100)

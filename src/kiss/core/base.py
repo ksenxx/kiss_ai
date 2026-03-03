@@ -89,6 +89,7 @@ SYSTEM_PROMPT = f"""
  - Simplify and clean up the test code
 """
 
+
 class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
@@ -134,7 +135,6 @@ class Base:
                 self.printer = printer
             elif verbose is not False:
                 self.printer = ConsolePrinter()
-
 
     def _build_state_dict(self) -> dict[str, Any]:
         """Build state dictionary for saving.

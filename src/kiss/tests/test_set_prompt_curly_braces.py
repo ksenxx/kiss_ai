@@ -10,9 +10,7 @@ TEST_MODEL = "gemini-3-flash-preview"
 
 @requires_gemini_api_key
 class TestSetPromptCurlyBraces(unittest.TestCase):
-    def _run_set_prompt(
-        self, prompt_template: str, arguments: dict[str, str] | None = None
-    ) -> str:
+    def _run_set_prompt(self, prompt_template: str, arguments: dict[str, str] | None = None) -> str:
         agent = KISSAgent("CurlyBraceTest")
         agent._reset(
             model_name=TEST_MODEL,

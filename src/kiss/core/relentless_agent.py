@@ -78,28 +78,20 @@ class RelentlessAgent(Base):
     ) -> None:
         global_cfg = config_module.DEFAULT_CONFIG
         cfg = global_cfg.assistant.relentless_agent
-        default_work_dir = str(
-            Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir"
-        )
+        default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
 
         self.max_sub_sessions = (
-            max_sub_sessions if max_sub_sessions is not None
-            else cfg.max_sub_sessions
+            max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
         )
-        self.max_steps = (
-            max_steps if max_steps is not None else cfg.max_steps
-        )
-        self.max_budget = (
-            max_budget if max_budget is not None else cfg.max_budget
-        )
-        self.model_name = (
-            model_name if model_name is not None else cfg.model_name
-        )
+        self.max_steps = max_steps if max_steps is not None else cfg.max_steps
+        self.max_budget = max_budget if max_budget is not None else cfg.max_budget
+        self.model_name = model_name if model_name is not None else cfg.model_name
         self.summarizer_model_name = (
-            summarizer_model_name if summarizer_model_name is not None
+            summarizer_model_name
+            if summarizer_model_name is not None
             else cfg.summarizer_model_name
         )
         self.budget_used: float = 0.0
@@ -240,9 +232,15 @@ class RelentlessAgent(Base):
             YAML string with 'success' and 'summary' keys.
         """
         self._reset(
-            model_name, summarizer_model_name, max_sub_sessions,
-            max_steps, max_budget, work_dir, docker_image,
-            printer, verbose,
+            model_name,
+            summarizer_model_name,
+            max_sub_sessions,
+            max_steps,
+            max_budget,
+            work_dir,
+            docker_image,
+            printer,
+            verbose,
         )
         self.system_instructions = system_instructions
         self.task_description = prompt_template.format(**(arguments or {}))

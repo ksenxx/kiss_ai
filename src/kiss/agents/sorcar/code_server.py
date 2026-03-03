@@ -40,8 +40,8 @@ _CS_STATE_ENTRIES = [
     ("workbench.panel.pinnedPanels", "[]"),
     ("memento/gettingStartedService", '{"installed":true}'),
     ("profileAssociations", '{"workspaces":{}}'),
-    ("userDataProfiles", '[]'),
-    ("welcomePage.gettingStartedTabs", '[]'),
+    ("userDataProfiles", "[]"),
+    ("welcomePage.gettingStartedTabs", "[]"),
     ("workbench.welcomePage.opened", "true"),
     ("chat.setupCompleted", "true"),
 ]
@@ -472,9 +472,10 @@ def _install_copilot_extension(data_dir: str) -> None:
     env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
     try:
         subprocess.run(
-            [cs_binary, "--install-extension", "github.copilot",
-             "--extensions-dir", str(ext_base)],
-            env=env, capture_output=True, timeout=120,
+            [cs_binary, "--install-extension", "github.copilot", "--extensions-dir", str(ext_base)],
+            env=env,
+            capture_output=True,
+            timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError):
         pass
@@ -495,9 +496,12 @@ def _setup_code_server(data_dir: str) -> bool:
         existing = {}
     if "workbench.colorTheme" not in existing:
         existing["workbench.colorTheme"] = "Default Dark Modern"
-    for key in ("chat.editor.enabled", "chat.commandCenter.enabled",
-                "chat.experimental.offerSetup",
-                "workbench.chat.experimental.autoDetectLanguageModels"):
+    for key in (
+        "chat.editor.enabled",
+        "chat.commandCenter.enabled",
+        "chat.experimental.offerSetup",
+        "workbench.chat.experimental.autoDetectLanguageModels",
+    ):
         existing.pop(key, None)
     existing.update(_CS_SETTINGS)
     settings_file.write_text(json.dumps(existing, indent=2))
@@ -506,12 +510,12 @@ def _setup_code_server(data_dir: str) -> bool:
     state_db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(state_db)) as conn:
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS ItemTable"
-            " (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)"
+            "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)"
         )
         for key, value in _CS_STATE_ENTRIES:
             conn.execute(
-                "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (key, value),
+                "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)",
+                (key, value),
             )
         conn.commit()
 
@@ -525,46 +529,52 @@ def _setup_code_server(data_dir: str) -> bool:
 
     ext_dir = Path(data_dir) / "extensions" / "kiss-init"
     ext_dir.mkdir(parents=True, exist_ok=True)
-    (ext_dir / "package.json").write_text(json.dumps({
-        "name": "kiss-init", "version": "0.0.1", "publisher": "kiss",
-        "engines": {"vscode": "^1.80.0"},
-        "activationEvents": ["onStartupFinished"],
-        "extensionDependencies": ["vscode.git"],
-        "main": "./extension.js",
-        "contributes": {
-            "commands": [
-                {"command": "kiss.acceptChange", "title": "Accept Change"},
-                {"command": "kiss.rejectChange", "title": "Reject Change"},
-                {"command": "kiss.prevChange", "title": "Previous Change"},
-                {"command": "kiss.nextChange", "title": "Next Change"},
-                {"command": "kiss.acceptAll", "title": "Accept All Changes"},
-                {"command": "kiss.rejectAll", "title": "Reject All Changes"},
-                {"command": "kiss.commitChanges", "title": "Commit Changes"},
-                {
-                    "command": "kiss.generateCommitMessage",
-                    "title": "Generate Commit Message",
-                    "icon": "$(sparkle)",
-                },
-                {"command": "kiss.toggleFocus", "title": "Toggle Focus to Chatbox"},
-            ],
-            "keybindings": [
-                {
-                    "command": "kiss.toggleFocus",
-                    "key": "ctrl+k",
-                    "mac": "cmd+k",
-                },
-            ],
-            "menus": {
-                "scm/inputBox": [
-                    {
-                        "command": "kiss.generateCommitMessage",
-                        "group": "navigation",
-                        "when": "scmProvider == git",
+    (ext_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "kiss-init",
+                "version": "0.0.1",
+                "publisher": "kiss",
+                "engines": {"vscode": "^1.80.0"},
+                "activationEvents": ["onStartupFinished"],
+                "extensionDependencies": ["vscode.git"],
+                "main": "./extension.js",
+                "contributes": {
+                    "commands": [
+                        {"command": "kiss.acceptChange", "title": "Accept Change"},
+                        {"command": "kiss.rejectChange", "title": "Reject Change"},
+                        {"command": "kiss.prevChange", "title": "Previous Change"},
+                        {"command": "kiss.nextChange", "title": "Next Change"},
+                        {"command": "kiss.acceptAll", "title": "Accept All Changes"},
+                        {"command": "kiss.rejectAll", "title": "Reject All Changes"},
+                        {"command": "kiss.commitChanges", "title": "Commit Changes"},
+                        {
+                            "command": "kiss.generateCommitMessage",
+                            "title": "Generate Commit Message",
+                            "icon": "$(sparkle)",
+                        },
+                        {"command": "kiss.toggleFocus", "title": "Toggle Focus to Chatbox"},
+                    ],
+                    "keybindings": [
+                        {
+                            "command": "kiss.toggleFocus",
+                            "key": "ctrl+k",
+                            "mac": "cmd+k",
+                        },
+                    ],
+                    "menus": {
+                        "scm/inputBox": [
+                            {
+                                "command": "kiss.generateCommitMessage",
+                                "group": "navigation",
+                                "when": "scmProvider == git",
+                            },
+                        ],
                     },
-                ],
-            },
-        },
-    }))
+                },
+            }
+        )
+    )
     ext_file = ext_dir / "extension.js"
     old_content = ext_file.read_text() if ext_file.exists() else ""
     ext_file.write_text(_CS_EXTENSION_JS)
@@ -577,8 +587,15 @@ def _setup_code_server(data_dir: str) -> bool:
 def _scan_files(work_dir: str) -> list[str]:
     paths: list[str] = []
     skip = {
-        ".git", "__pycache__", "node_modules", ".venv", "venv",
-        ".tox", ".mypy_cache", ".ruff_cache", ".pytest_cache",
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".tox",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
     }
     try:
         for root, dirs, files in os.walk(work_dir):
@@ -601,7 +618,9 @@ def _scan_files(work_dir: str) -> list[str]:
 def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]]]:
     result = subprocess.run(
         ["git", "diff", "-U0", "HEAD", "--no-color"],
-        capture_output=True, text=True, cwd=work_dir,
+        capture_output=True,
+        text=True,
+        cwd=work_dir,
     )
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
@@ -612,19 +631,23 @@ def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]
             continue
         hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
         if hm and current_file:
-            hunks.setdefault(current_file, []).append((
-                int(hm.group(1)),
-                int(hm.group(2)) if hm.group(2) is not None else 1,
-                int(hm.group(3)),
-                int(hm.group(4)) if hm.group(4) is not None else 1,
-            ))
+            hunks.setdefault(current_file, []).append(
+                (
+                    int(hm.group(1)),
+                    int(hm.group(2)) if hm.group(2) is not None else 1,
+                    int(hm.group(3)),
+                    int(hm.group(4)) if hm.group(4) is not None else 1,
+                )
+            )
     return hunks
 
 
 def _capture_untracked(work_dir: str) -> set[str]:
     result = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
-        capture_output=True, text=True, cwd=work_dir,
+        capture_output=True,
+        text=True,
+        cwd=work_dir,
     )
     return {line.strip() for line in result.stdout.split("\n") if line.strip()}
 
@@ -669,17 +692,26 @@ def _prepare_merge_view(
         base_path.parent.mkdir(parents=True, exist_ok=True)
         base_result = subprocess.run(
             ["git", "show", f"HEAD:{fname}"],
-            capture_output=True, text=True, cwd=work_dir,
+            capture_output=True,
+            text=True,
+            cwd=work_dir,
         )
         base_path.write_text(base_result.stdout if base_result.returncode == 0 else "")
-        manifest_files.append({
-            "name": fname,
-            "base": str(base_path),
-            "current": str(current_path),
-            "hunks": fh,
-        })
+        manifest_files.append(
+            {
+                "name": fname,
+                "base": str(base_path),
+                "current": str(current_path),
+                "hunks": fh,
+            }
+        )
     manifest = Path(data_dir) / "pending-merge.json"
-    manifest.write_text(json.dumps({
-        "branch": "HEAD", "files": manifest_files,
-    }))
+    manifest.write_text(
+        json.dumps(
+            {
+                "branch": "HEAD",
+                "files": manifest_files,
+            }
+        )
+    )
     return {"status": "opened", "count": len(manifest_files)}

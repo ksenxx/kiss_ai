@@ -10,13 +10,13 @@ from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS, CHATBOT_JS, _build_html
 class TestTextareaAutoResize(unittest.TestCase):
     def test_css_max_height_uses_viewport_units(self) -> None:
         idx = CHATBOT_CSS.index("#task-input{")
-        block = CHATBOT_CSS[idx:CHATBOT_CSS.index("}", idx) + 1]
+        block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
         assert "max-height:50vh" in block
         assert "max-height:200px" not in block
 
     def test_css_overflow_y_hidden_by_default(self) -> None:
         idx = CHATBOT_CSS.index("#task-input{")
-        block = CHATBOT_CSS[idx:CHATBOT_CSS.index("}", idx) + 1]
+        block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
         assert "overflow-y:hidden" in block
 
     def test_js_auto_resize_no_200px_cap(self) -> None:
@@ -167,9 +167,7 @@ def test_clear_event_appends_active_file_to_user_msg():
     """Test that the clear SSE event augments the user message with active_file info."""
     html = _build_html("Test", "", "/tmp")
     js = html.split("<script>")[1].split("</script>")[0]
-    assert "ev.active_file" in js, (
-        "clear event handler should check ev.active_file"
-    )
+    assert "ev.active_file" in js, "clear event handler should check ev.active_file"
     assert "Currently open file in editor" in js, (
         "clear event handler should append editor file info to user message"
     )

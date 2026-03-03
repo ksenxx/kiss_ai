@@ -154,7 +154,8 @@ class TestHasDecorator:
 
 class TestExtractClass:
     def test_simple_class(self) -> None:
-        tree = ast.parse(textwrap.dedent("""
+        tree = ast.parse(
+            textwrap.dedent("""
             class Foo:
                 '''My class.'''
                 def __init__(self, x: int) -> None:
@@ -164,7 +165,8 @@ class TestExtractClass:
                     return ''
                 def _private(self):
                     pass
-        """))
+        """)
+        )
         cls = _extract_class(tree.body[0])  # type: ignore[arg-type]
         assert cls.name == "Foo"
         assert cls.doc == "My class."
@@ -243,11 +245,13 @@ class TestModuleToPath:
 class TestFileToModule:
     def test_init_file(self) -> None:
         from kiss.scripts.generate_api_docs import KISS_SRC
+
         path = KISS_SRC / "core" / "__init__.py"
         assert _file_to_module(path) == "kiss.core"
 
     def test_module_file(self) -> None:
         from kiss.scripts.generate_api_docs import KISS_SRC
+
         path = KISS_SRC / "core" / "kiss_agent.py"
         assert _file_to_module(path) == "kiss.core.kiss_agent"
 
@@ -255,14 +259,17 @@ class TestFileToModule:
 class TestShouldSkip:
     def test_skip_tests(self) -> None:
         from kiss.scripts.generate_api_docs import KISS_SRC
+
         assert _should_skip(KISS_SRC / "tests" / "test_foo.py")
 
     def test_skip_excluded_file(self) -> None:
         from kiss.scripts.generate_api_docs import KISS_SRC
+
         assert _should_skip(KISS_SRC / "_version.py")
 
     def test_allow_core(self) -> None:
         from kiss.scripts.generate_api_docs import KISS_SRC
+
         assert not _should_skip(KISS_SRC / "core" / "kiss_agent.py")
 
 
@@ -293,13 +300,15 @@ class TestFindDefInFile:
 class TestExtractPublicFromFile:
     def test_extracts_public_only(self, tmp_path: Path) -> None:
         p = tmp_path / "mod.py"
-        p.write_text(textwrap.dedent("""
+        p.write_text(
+            textwrap.dedent("""
             class Pub: pass
             class _Priv: pass
             def pub_fn(): pass
             def _priv_fn(): pass
             def main(): pass
-        """))
+        """)
+        )
         classes, functions = _extract_public_from_file(p)
         assert [c.name for c in classes] == ["Pub"]
         assert [f.name for f in functions] == ["pub_fn"]
@@ -343,8 +352,11 @@ class TestSortModules:
 class TestRenderClass:
     def test_renders_class_with_methods(self) -> None:
         cls = ClassInfo(
-            name="Foo", bases=["Bar"], doc="A foo.",
-            init_sig="(x: int)", methods=[
+            name="Foo",
+            bases=["Bar"],
+            doc="A foo.",
+            init_sig="(x: int)",
+            methods=[
                 FuncInfo(name="do_it", signature="() -> str", parsed_doc=ParsedDoc("Does it.")),
             ],
         )
@@ -359,7 +371,10 @@ class TestRenderClass:
 
     def test_async_method(self) -> None:
         cls = ClassInfo(
-            name="Foo", bases=[], doc="", init_sig="",
+            name="Foo",
+            bases=[],
+            doc="",
+            init_sig="",
             methods=[FuncInfo(name="bar", signature="()", parsed_doc=ParsedDoc(""), is_async=True)],
         )
         lines: list[str] = []
@@ -397,7 +412,9 @@ class TestGenerateMarkdown:
     def test_basic_structure(self) -> None:
         modules = [
             ModuleDoc(
-                name="mypack", doc="My package.", all_exports=["Foo"],
+                name="mypack",
+                doc="My package.",
+                all_exports=["Foo"],
                 classes=[ClassInfo(name="Foo", bases=[], doc="A foo.", init_sig="()")],
                 is_package=True,
             ),
@@ -450,9 +467,7 @@ class TestDiscoverModules:
         func_names = [f.name for f in utils_mod.functions]
         assert "finish" in func_names
 
-        relentless_mod = next(
-            m for m in modules if m.name == "kiss.core.relentless_agent"
-        )
+        relentless_mod = next(m for m in modules if m.name == "kiss.core.relentless_agent")
         func_names2 = [f.name for f in relentless_mod.functions]
         assert "finish" in func_names2
 

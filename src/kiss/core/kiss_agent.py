@@ -53,9 +53,7 @@ class KISSAgent(Base):
         self.model = model(model_name, model_config=model_config, token_callback=token_callback)
         self.is_agentic = is_agentic
         self.max_steps = (
-            max_steps
-            if max_steps is not None
-            else config_module.DEFAULT_CONFIG.agent.max_steps
+            max_steps if max_steps is not None else config_module.DEFAULT_CONFIG.agent.max_steps
         )
         self.max_budget = (
             max_budget
@@ -143,8 +141,13 @@ class KISSAgent(Base):
                 model_config = dict(model_config) if model_config else {}
                 model_config["system_instruction"] = system_prompt
             self._reset(
-                model_name, is_agentic, max_steps, max_budget,
-                model_config, printer, verbose,
+                model_name,
+                is_agentic,
+                max_steps,
+                max_budget,
+                model_config,
+                printer,
+                verbose,
             )
 
             if not self.is_agentic and tools is not None:
@@ -200,10 +203,12 @@ class KISSAgent(Base):
             "model", response_text + "\n```text\n" + usage_info_str + "\n```\n", start_timestamp
         )
         if response_text and self.printer:
-            self.printer.print(response_text, type="result",
-            step_count=self.step_count,
-            total_tokens=self.total_tokens_used,
-            cost=f"${self.budget_used:.4f}",
+            self.printer.print(
+                response_text,
+                type="result",
+                step_count=self.step_count,
+                total_tokens=self.total_tokens_used,
+                cost=f"${self.budget_used:.4f}",
             )
         return response_text
 
@@ -216,7 +221,8 @@ class KISSAgent(Base):
                     if self.printer:
                         cost = f"${self.budget_used:.4f}"
                         self.printer.print(
-                            result, type="result",
+                            result,
+                            type="result",
                             step_count=self.step_count,
                             total_tokens=self.total_tokens_used,
                             cost=cost,
@@ -278,8 +284,7 @@ class KISSAgent(Base):
                 finish_result = response_str
 
         model_content = (
-            response_text + "\n" + "\n".join(call_reprs)
-            + "\n```text\n" + usage_info + "\n```\n"
+            response_text + "\n" + "\n".join(call_reprs) + "\n```text\n" + usage_info + "\n```\n"
         )
         tool_call_timestamp = int(time.time())
         self._add_message("model", model_content, start_timestamp)
@@ -320,8 +325,7 @@ class KISSAgent(Base):
             sig = inspect.signature(fn) if fn else None
             sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
             function_response = (
-                f"Failed to call {function_name} with "
-                f"{function_args}: {e}{sig_str}\n"
+                f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
             )
 
         if self.printer:
