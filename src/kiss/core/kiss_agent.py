@@ -19,6 +19,35 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 
+
+_NON_RETRYABLE_ERROR_TYPES = (
+    "AuthenticationError",
+    "PermissionDeniedError",
+    "PermissionDenied",
+)
+_NON_RETRYABLE_PHRASES = (
+    "api key",
+    "api_key",
+    "invalid key",
+    "invalid x-api-key",
+    "incorrect api key",
+    "unauthorized",
+    "permission denied",
+    "could not resolve authentication",
+)
+MAX_CONSECUTIVE_ERRORS = 3
+
+
+def _is_retryable_error(e: Exception) -> bool:
+    error_type = type(e).__name__
+    if any(pattern in error_type for pattern in _NON_RETRYABLE_ERROR_TYPES):
+        return False
+    error_msg = str(e).lower()
+    if any(phrase in error_msg for phrase in _NON_RETRYABLE_PHRASES):
+        return False
+    return True
+
+
 if TYPE_CHECKING:  # pragma: no cover
     from kiss.core.printer import Printer
 
@@ -213,10 +242,12 @@ class KISSAgent(Base):
         return response_text
 
     def _run_agentic_loop(self) -> str:
+        consecutive_errors = 0
         for _ in range(self.max_steps):
             self.step_count += 1
             try:
                 result = self._execute_step()
+                consecutive_errors = 0
                 if result is not None:
                     if self.printer:
                         cost = f"${self.budget_used:.4f}"
@@ -228,7 +259,17 @@ class KISSAgent(Base):
                             cost=cost,
                         )
                     return result
+            except KISSError:
+                raise
             except Exception as e:
+                if not _is_retryable_error(e):
+                    raise KISSError(f"Non-retryable error from model: {e}") from e
+                consecutive_errors += 1
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    raise KISSError(
+                        f"Agent {self.name} failed with {consecutive_errors} "
+                        f"consecutive errors. Last error: {e}"
+                    ) from e
                 content = f"Failed to get response from Model: {e}.\nPlease try again.\n"
                 self.model.add_message_to_conversation("user", content)
                 self._add_message("user", content)

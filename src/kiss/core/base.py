@@ -35,23 +35,25 @@ _artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
 SYSTEM_PROMPT = f"""
 # Rules
 - Write() for new files. Edit() for small changes.
-- Use bounded poll loops, never unbounded waits.
+- Use bounded poll loops with output sent to a temporary file for bash commands; 
+  never use unbounded waits.
 - Use go_to_url() for browser tool and internet search or testing an agent/app.
 - Look at `{_artifact_dir.parent}/TASK_HISTORY.md` for task history and context.
-  DO NOT WRITE/EDIT IT.
+  Pay more attention to the recent tasks over old tasks. Do not try to finish a 
+  task from the task history. DO NOT WRITE/EDIT the task history.  
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 
 ## Code Style Guidelines
 - Write simple, clean, and readable code with minimal indirection
-- Avoid unnecessary object attributes and local variables and config variables
-- No redundant abstractions or duplicate code and config code
+- Avoid unnecessary object attributes, local variables, and config variables
+- Avoid object/struct attribute redirections
+- No redundant abstractions or duplicate code
 - Each function should do one thing well
 - Use clear, descriptive names
-- NO need to write documentations or comments unless absolutely necessary
 - Public methods MUST have full documentation
-- You MUST check and test the code you have written execpt for formatting/typing changes
+- You MUST check and test the code you have written except for formatting/typing changes
 
 ## Testing Instructions
 - Run lint and typecheckers and fix any lint and typecheck errors
@@ -74,17 +76,12 @@ SYSTEM_PROMPT = f"""
 
 ### Self-Improvement Loop
 - Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
-  with instructions and rules for yourself on how to avoid making the same
-  mistakes in the future
-- Ruthlessly iterate on these lessons until mistake rate drops
+  with instructions and rules for yourself if you have learned any major lessons
+  during the task execution.
 - Review lessons when the agent starts
 
 ## After you have implemented the task, aggresively and carefully simplify and clean up the code
- - Remove unnessary object/struct attributes, variables, config variables
- - Avoid object/struct attribute redirections
- - Remove unnessary conditional checks
- - Remove redundant and duplicate code
- - Remove unnecessary comments
+ - Remove unnecessary conditional checks
  - Make sure that the code is still working correctly
  - Simplify and clean up the test code
 """

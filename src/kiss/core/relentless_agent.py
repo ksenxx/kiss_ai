@@ -150,25 +150,28 @@ class RelentlessAgent(Base):
                     printer=self.printer,
                     attachments=attachments if trial == 0 else None,
                 )
-            except Exception:
-                summarizer_agent = KISSAgent(f"{self.name} Summarizer")
-                summarizer_result = summarizer_agent.run(
-                    model_name=self.summarizer_model_name,
-                    prompt_template=SUMMARIZER_PROMPT,
-                    is_agentic=False,
-                    arguments={
-                        "trajectory": executor.get_trajectory(),
-                    },
-                )
+            except Exception as exc:
                 try:
-                    parsed = yaml.safe_load(summarizer_result)
-                    summary_text = (
-                        parsed.get("result", summarizer_result)
-                        if isinstance(parsed, dict)
-                        else summarizer_result
+                    summarizer_agent = KISSAgent(f"{self.name} Summarizer")
+                    summarizer_result = summarizer_agent.run(
+                        model_name=self.summarizer_model_name,
+                        prompt_template=SUMMARIZER_PROMPT,
+                        is_agentic=False,
+                        arguments={
+                            "trajectory": executor.get_trajectory(),
+                        },
                     )
+                    try:
+                        parsed = yaml.safe_load(summarizer_result)
+                        summary_text = (
+                            parsed.get("result", summarizer_result)
+                            if isinstance(parsed, dict)
+                            else summarizer_result
+                        )
+                    except Exception:
+                        summary_text = summarizer_result
                 except Exception:
-                    summary_text = summarizer_result
+                    summary_text = f"Agent failed: {exc}"
                 result = yaml.dump(
                     {"success": False, "summary": summary_text},
                     sort_keys=False,
