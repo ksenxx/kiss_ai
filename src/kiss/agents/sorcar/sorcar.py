@@ -29,6 +29,7 @@ from kiss.agents.sorcar.code_server import (
 )
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
+    SAMPLE_TASKS,
     _add_task,
     _append_task_to_md,
     _init_task_history_md,
@@ -528,7 +529,10 @@ def run_chatbot(
 
     async def proposed_tasks_endpoint(request: Request) -> JSONResponse:
         with proposed_lock:
-            return JSONResponse(list(proposed_tasks))
+            tasks_list = list(proposed_tasks)
+        if not tasks_list:
+            tasks_list = [t["task"] for t in SAMPLE_TASKS[:5]]
+        return JSONResponse(tasks_list)
 
     def _fast_complete(raw_query: str, query: str) -> str:
         query_lower = query.lower()
