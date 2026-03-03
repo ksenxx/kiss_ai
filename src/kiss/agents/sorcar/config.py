@@ -37,7 +37,7 @@ class AgentConfig(BaseModel):
 
 
 class AssistantConfig(BaseModel):
-    assistant_agent: AgentConfig = Field(
+    sorcar_agent: AgentConfig = Field(
         default_factory=AgentConfig,
         description="Configuration for Assistant Agent",
     )

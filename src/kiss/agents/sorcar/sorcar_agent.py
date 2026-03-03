@@ -51,7 +51,7 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        cfg = config_module.DEFAULT_CONFIG.assistant.assistant_agent
+        cfg = config_module.DEFAULT_CONFIG.assistant.sorcar_agent
         super()._reset(
             model_name=model_name if model_name is not None else cfg.model_name,
             summarizer_model_name=(
@@ -109,7 +109,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        cfg = config_module.DEFAULT_CONFIG.assistant.assistant_agent
+        cfg = config_module.DEFAULT_CONFIG.assistant.sorcar_agent
         actual_headless = headless if headless is not None else cfg.headless
         self.web_use_tool = WebUseTool(headless=actual_headless)
 
