@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -10,7 +11,7 @@ _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.json"
 PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
 MODEL_USAGE_FILE = _KISS_DIR / "model_usage.json"
-MAX_HISTORY = 1000
+MAX_HISTORY = 2000
 
 
 def _ensure_kiss_dir() -> None:
@@ -69,32 +70,36 @@ SAMPLE_TASKS = [
 
 
 _history_cache: list[dict[str, str]] | None = None
+_history_lock = threading.Lock()
 
 
 def _load_history() -> list[dict[str, str]]:
+    """Load task history from cache or disk. Thread-safe."""
     global _history_cache
-    if _history_cache is not None:
-        return _history_cache
-    if HISTORY_FILE.exists():
-        try:
-            data = json.loads(HISTORY_FILE.read_text())
-            if isinstance(data, list) and data:
-                seen: set[str] = set()
-                result: list[dict[str, str]] = []
-                for t in data[:MAX_HISTORY]:
-                    task_str = t["task"]
-                    if task_str not in seen:
-                        seen.add(task_str)
-                        result.append(t)
-                _history_cache = result
-                return result
-        except (json.JSONDecodeError, OSError):
-            pass
-    _save_history(list(SAMPLE_TASKS))
-    return _history_cache  # type: ignore[return-value]
+    with _history_lock:
+        if _history_cache is not None:
+            return _history_cache
+        if HISTORY_FILE.exists():
+            try:
+                data = json.loads(HISTORY_FILE.read_text())
+                if isinstance(data, list) and data:
+                    seen: set[str] = set()
+                    result: list[dict[str, str]] = []
+                    for t in data[:MAX_HISTORY]:
+                        task_str = t["task"]
+                        if task_str not in seen:
+                            seen.add(task_str)
+                            result.append(t)
+                    _history_cache = result
+                    return result
+            except (json.JSONDecodeError, OSError):
+                pass
+        _save_history_unlocked(list(SAMPLE_TASKS))
+        return _history_cache  # type: ignore[return-value]
 
 
-def _save_history(entries: list[dict[str, str]]) -> None:
+def _save_history_unlocked(entries: list[dict[str, str]]) -> None:
+    """Save history to cache and disk. Must be called with _history_lock held."""
     global _history_cache
     _history_cache = entries[:MAX_HISTORY]
     try:
@@ -104,11 +109,20 @@ def _save_history(entries: list[dict[str, str]]) -> None:
         pass
 
 
+def _save_history(entries: list[dict[str, str]]) -> None:
+    """Save history to cache and disk. Thread-safe."""
+    with _history_lock:
+        _save_history_unlocked(entries)
+
+
 def _set_latest_result(result: str) -> None:
-    history = _load_history()
-    if history:
-        history[0]["result"] = result
-        _save_history(history)
+    """Set the result of the most recent task. Thread-safe."""
+    with _history_lock:
+        if _history_cache is None:
+            return
+        if _history_cache:
+            _history_cache[0]["result"] = result
+            _save_history_unlocked(_history_cache)
 
 
 def _load_proposals() -> list[str]:
@@ -188,9 +202,30 @@ def _record_file_usage(path: str) -> None:
 
 
 def _add_task(task: str) -> None:
-    history = [e for e in _load_history() if e["task"] != task]
-    history.insert(0, {"task": task, "result": ""})
-    _save_history(history[:MAX_HISTORY])
+    """Add a task to history, deduplicating. Thread-safe."""
+    with _history_lock:
+        # Force load if not cached yet (without re-acquiring lock)
+        global _history_cache
+        if _history_cache is None:
+            if HISTORY_FILE.exists():
+                try:
+                    data = json.loads(HISTORY_FILE.read_text())
+                    if isinstance(data, list) and data:
+                        seen: set[str] = set()
+                        result: list[dict[str, str]] = []
+                        for t in data[:MAX_HISTORY]:
+                            task_str = t["task"]
+                            if task_str not in seen:
+                                seen.add(task_str)
+                                result.append(t)
+                        _history_cache = result
+                except (json.JSONDecodeError, OSError):
+                    pass
+            if _history_cache is None:
+                _history_cache = list(SAMPLE_TASKS)
+        history = [e for e in _history_cache if e["task"] != task]
+        history.insert(0, {"task": task, "result": ""})
+        _save_history_unlocked(history[:MAX_HISTORY])
 
 
 def _get_task_history_md_path() -> Path:

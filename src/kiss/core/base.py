@@ -7,6 +7,7 @@
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, ClassVar
@@ -97,6 +98,7 @@ class Base:
 
     agent_counter: ClassVar[int] = 1
     global_budget_used: ClassVar[float] = 0.0
+    _class_lock: ClassVar[threading.Lock] = threading.Lock()
 
     model_name: str
     messages: list[dict[str, Any]]
@@ -114,8 +116,9 @@ class Base:
             name: The name identifier for the agent.
         """
         self.name = name
-        self.id = Base.agent_counter
-        Base.agent_counter += 1
+        with Base._class_lock:
+            self.id = Base.agent_counter
+            Base.agent_counter += 1
         self.base_dir = ""
         self.printer: Printer | None = None
 

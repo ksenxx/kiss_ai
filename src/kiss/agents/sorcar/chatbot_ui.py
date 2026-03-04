@@ -179,7 +179,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   margin-top:10px;padding-top:10px;
   border-top:1px solid rgba(255,255,255,0.04);
 }
-#model-picker{position:relative;display:flex;align-items:center;gap:4px}
+#model-picker{position:relative;display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden}
 #model-btn{
   background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
   border:1px solid rgba(255,255,255,0.08);border-radius:8px;
@@ -249,7 +249,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   transition:color 0.15s;
 }
 .file-chip .fc-rm:hover{color:rgba(248,81,73,0.8)}
-#input-actions{display:flex;gap:8px;align-items:center}
+#input-actions{display:flex;gap:8px;align-items:center;flex-shrink:0}
 #send-btn{
   background:rgba(88,166,255,0.15);color:rgba(88,166,255,0.9);border:none;
   border-radius:50%;width:36px;height:36px;cursor:pointer;
@@ -501,7 +501,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   background:rgba(0,0,0,0.5);color:rgba(255,255,255,0.7);
   border-color:rgba(255,255,255,0.05);
 }
-#split-container{display:flex;height:100vh;width:100vw;overflow:hidden}
+#split-container{display:flex;height:100%;width:100%;overflow:hidden}
 #editor-panel{position:relative;overflow:hidden}
 #editor-panel iframe{
   width:125%;height:125%;border:none;
@@ -551,8 +551,8 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   width:2px;height:40px;background:rgba(255,255,255,0.2);border-radius:1px;
 }
 #assistant-panel{
-  display:flex;flex-direction:column;overflow:hidden;min-width:300px;
-  background:#0a0a0c;position:relative;
+  display:flex;flex-direction:column;overflow:hidden;min-width:0;
+  background:#0a0a0c;position:relative;flex:1;
 }
 .tp[data-path]{cursor:pointer;text-decoration:underline dotted}
 .tp[data-path]:hover{color:rgba(120,180,255,0.8);text-decoration:underline solid}
@@ -1642,9 +1642,9 @@ if(divider){
     var rect=splitContainer.getBoundingClientRect();
     var x=e.clientX-rect.left;
     var pct=Math.max(15,Math.min(85,(x/rect.width)*100));
-    editorPanel.style.width=pct+'%';
-    editorPanel.style.flex='none';
-    assistantPanel.style.flex='1';
+    var assistPct=100-pct;
+    editorPanel.style.flex=pct+' 1 0%';
+    assistantPanel.style.flex=assistPct+' 1 0%';
   });
   document.addEventListener('mouseup',function(){
     if(!isDragging)return;
@@ -1840,7 +1840,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         HTML_HEAD.format(title=title, css=css)
         + f"""<body>
 <div id="split-container">
-  <div id="editor-panel" style="width:75%;flex-shrink:0">
+  <div id="editor-panel" style="flex:3;min-width:0">
     {editor_content}
     <div id="merge-toolbar">
       <button onclick="mergeAction('accept')" title="Accept current change">{_svg_accept}</button>
