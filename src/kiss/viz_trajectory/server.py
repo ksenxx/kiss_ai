@@ -17,6 +17,10 @@ from pathlib import Path
 import yaml
 from flask import Flask, jsonify, render_template
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Set template folder relative to this file
 template_dir = Path(__file__).parent / "templates"
 app = Flask(__name__, template_folder=str(template_dir))
@@ -90,6 +94,7 @@ def _parse_state_dir_timestamp(state_dir: str) -> datetime:
             yyyy, mo, dd, hh, mm, ss = map(int, parts[1:7])
             return datetime(yyyy, mo, dd, hh, mm, ss)
     except (ValueError, IndexError):
+        logger.debug("Exception caught", exc_info=True)
         pass
     return datetime.min  # fallback for unparseable names
 
@@ -145,6 +150,7 @@ def load_job_trajectories(artifact_dir: Path, job_name: str) -> list[dict]:
         try:
             trajectories.append(_parse_trajectory_yaml(file_path))
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             print(f"Error loading {file_path}: {e}")
 
     # Sort by run_start_timestamp in ascending order

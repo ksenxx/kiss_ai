@@ -43,6 +43,9 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.docker.docker_manager import DockerManager
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TodoItem:
@@ -188,6 +191,7 @@ class SelfEvolvingMultiAgent:
                 self.state.completed_tasks.append(f"[{todo_id}] {todo.description}: {res}")
                 return f"Todo {todo_id} finished: {res}"
             except Exception as e:
+                logger.debug("Exception caught", exc_info=True)
                 todo.error_count += 1
                 self.state.last_error = str(e)
                 if todo.error_count <= self.max_retries:
@@ -204,6 +208,7 @@ class SelfEvolvingMultiAgent:
                 try:
                     return run_bash(bash_command_template.format(arg=arg), description)
                 except Exception as e:
+                    logger.debug("Exception caught", exc_info=True)
                     return str(e)
 
             dynamic_tool.__name__, dynamic_tool.__doc__ = name, description
@@ -321,6 +326,7 @@ def run_task(task: str) -> dict:
             "stats": agent.get_stats(),
         }
     except Exception as e:
+        logger.debug("Exception caught", exc_info=True)
         return {"result": str(e), "metrics": {"llm_calls": 10, "steps": 0}, "error": str(e)}
 
 
@@ -690,6 +696,7 @@ def verify_task_completion(docker: DockerManager) -> bool:
             print(f"\n❌ Task verification FAILED:\n{result}")
             return False
     except Exception as e:
+        logger.debug("Exception caught", exc_info=True)
         print(f"\n❌ Verification error: {e}")
         return False
 
@@ -735,6 +742,7 @@ def main() -> None:
                 print("\n🎉 Task completed and verified successfully!")
 
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             print(f"\nTask failed with error: {e}")
             stats = agent.get_stats()
             print(f"Stats at failure: {stats}")

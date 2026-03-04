@@ -14,6 +14,9 @@ import yaml
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 def get_config_value[T](
     value: T | None, config_obj: Any, attr_name: str, default: T | None = None
@@ -175,6 +178,7 @@ def read_project_file(file_path_relative_to_project_root: str) -> str:
             package = __package__ or "kiss.core"
             return importlib.resources.read_text(package, file, encoding="utf-8")
     except Exception as e:
+        logger.debug("Exception caught", exc_info=True)
         raise KISSError(
             f"Could not find '{file_path_relative_to_project_root}' "
             f"as a file or in a package. ({e})"
@@ -196,6 +200,7 @@ def read_project_file_from_package(file_name_as_python_package: str) -> str:
         package = __package__ or "kiss.core"
         return importlib.resources.read_text(package, file_name_as_python_package, encoding="utf-8")
     except Exception as e:
+        logger.debug("Exception caught", exc_info=True)
         raise KISSError(
             f"Could not find '{file_name_as_python_package}' as a file or in a package. ({e})"
         )

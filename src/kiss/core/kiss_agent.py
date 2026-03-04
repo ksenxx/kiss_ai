@@ -19,6 +19,10 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _NON_RETRYABLE_ERROR_TYPES = (
     "AuthenticationError",
     "PermissionDeniedError",
@@ -259,8 +263,10 @@ class KISSAgent(Base):
                         )
                     return result
             except KISSError:
+                logger.debug("Exception caught", exc_info=True)
                 raise
             except Exception as e:
+                logger.debug("Exception caught", exc_info=True)
                 if not _is_retryable_error(e):
                     raise KISSError(f"Non-retryable error from model: {e}") from e
                 consecutive_errors += 1
@@ -361,6 +367,7 @@ class KISSAgent(Base):
                 raise KISSError(f"Function {function_name} is not a registered tool")
             function_response = str(self.function_map[function_name](**function_args))
         except (Exception, SystemExit) as e:
+            logger.debug("Exception caught", exc_info=True)
             fn = self.function_map.get(function_name)
             sig = inspect.signature(fn) if fn else None
             sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
@@ -418,6 +425,7 @@ class KISSAgent(Base):
             with Base._class_lock:
                 Base.global_budget_used += cost
         except Exception as e:  # pragma: no cover
+            logger.debug("Exception caught", exc_info=True)
             print(f"Error updating tokens and budget from response: {e} {traceback.format_exc()}")
 
     def _get_usage_info_string(self) -> str:
@@ -432,6 +440,7 @@ class KISSAgent(Base):
                 f"Global Budget: ${Base.global_budget_used:.4f}/${global_max:.2f}"
             )
         except Exception:  # pragma: no cover
+            logger.debug("Exception caught", exc_info=True)
             return f"Steps: {self.step_count}/{self.max_steps}"
 
     def finish(self, result: str) -> str:

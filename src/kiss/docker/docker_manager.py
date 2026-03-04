@@ -18,6 +18,9 @@ from docker.models.containers import Container  # type: ignore[assignment]
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class DockerManager:
     """Manages Docker container lifecycle and command execution."""
@@ -74,6 +77,7 @@ class DockerManager:
         try:
             self.client.images.get(full_image_name)
         except docker.errors.ImageNotFound:  # type: ignore[attr-defined]
+            logger.debug("Exception caught", exc_info=True)
             self.client.images.pull(image, tag=tag)
         # Create and start a container
         print(f"Creating and starting container from {full_image_name}")
@@ -203,12 +207,14 @@ class DockerManager:
             print(f"Stopping container {container_id}")
             self.container.stop()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             print(f"Failed to stop container {container_id}: {e}")
 
         try:
             print(f"Removing container {container_id}")
             self.container.remove()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             print(f"Failed to remove container {container_id}: {e}")
 
         self.container = None
@@ -218,6 +224,7 @@ class DockerManager:
             try:
                 shutil.rmtree(self.host_shared_path)
             except Exception as e:
+                logger.debug("Exception caught", exc_info=True)
                 print(f"Failed to clean up temp directory: {e}")
 
         print("Container closed successfully")

@@ -28,6 +28,9 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.utils import get_config_value
 from kiss.docker.docker_manager import DockerManager
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _load_base_agent_code(
     package_name: str,
@@ -51,6 +54,7 @@ def _load_base_agent_code(
         agent_file = package_files.joinpath(agent_file_path)
         return agent_file.read_text(encoding="utf-8")
     except (AttributeError, TypeError):
+        logger.debug("Exception caught", exc_info=True)
         import importlib.resources as resources
 
         with resources.open_text(package_name, agent_file_path) as f:
@@ -773,6 +777,7 @@ def evaluate_agent_code(
             results["error"] = "Agent code does not define run_task function"
             return results
     except Exception as e:
+        logger.debug("Exception caught", exc_info=True)
         results["error"] = f"Failed to compile agent code: {e}"
         return results
 
@@ -803,6 +808,7 @@ def evaluate_agent_code(
                     passed += 1
                     complexity_score += weight
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             results["artifacts"][task.name] = f"Error: {e}"
 
         task_time = time.time() - task_start
