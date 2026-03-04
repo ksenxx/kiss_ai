@@ -33,7 +33,6 @@ def test_sorcar_agent_continues_to_second_sub_session() -> None:
         result = agent.run(
             prompt_template=task,
             model_name="claude-haiku-4-5",
-            summarizer_model_name="claude-haiku-4-5",
             max_steps=10,
             max_sub_sessions=3,
             max_budget=1.0,

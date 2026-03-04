@@ -69,7 +69,6 @@ class RelentlessAgent(Base):
     def _reset(
         self,
         model_name: str | None,
-        summarizer_model_name: str | None,
         max_sub_sessions: int | None,
         max_steps: int | None,
         max_budget: float | None,
@@ -91,11 +90,6 @@ class RelentlessAgent(Base):
         self.max_steps = max_steps if max_steps is not None else cfg.max_steps
         self.max_budget = max_budget if max_budget is not None else cfg.max_budget
         self.model_name = model_name if model_name is not None else cfg.model_name
-        self.summarizer_model_name = (
-            summarizer_model_name
-            if summarizer_model_name is not None
-            else cfg.summarizer_model_name
-        )
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.docker_image = docker_image
@@ -154,7 +148,7 @@ class RelentlessAgent(Base):
                 try:
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")
                     summarizer_result = summarizer_agent.run(
-                        model_name=self.summarizer_model_name,
+                        model_name=self.model_name,
                         prompt_template=SUMMARIZER_PROMPT,
                         is_agentic=False,
                         arguments={
@@ -201,7 +195,6 @@ class RelentlessAgent(Base):
     def run(
         self,
         model_name: str | None = None,
-        summarizer_model_name: str | None = None,
         system_instructions: str = "",
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
@@ -219,8 +212,6 @@ class RelentlessAgent(Base):
 
         Args:
             model_name: LLM model to use. Defaults to config value.
-            summarizer_model_name: LLM model for summarizing trajectories on failure.
-                Defaults to config value.
             system_instructions: System-level instructions passed to the underlying LLM
                 via model_config. Defaults to empty string (no system instructions).
             prompt_template: Task prompt template with format placeholders.
@@ -240,7 +231,6 @@ class RelentlessAgent(Base):
         """
         self._reset(
             model_name,
-            summarizer_model_name,
             max_sub_sessions,
             max_steps,
             max_budget,
