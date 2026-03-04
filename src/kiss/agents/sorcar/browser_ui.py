@@ -25,6 +25,7 @@ def find_free_port() -> int:
 
 BASE_CSS = r"""
 *{margin:0;padding:0;box-sizing:border-box}
+html{height:100%;overflow:hidden}
 :root{
   --bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;
   --text:#e6edf3;--dim:#8b949e;--accent:#58a6ff;--green:#3fb950;
@@ -33,7 +34,7 @@ BASE_CSS = r"""
 body{
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
   background:var(--bg);color:var(--text);line-height:1.6;
-  height:100vh;display:flex;flex-direction:column;overflow:hidden;
+  height:100%;display:flex;flex-direction:column;overflow:hidden;
 }
 header{
   background:linear-gradient(135deg,var(--surface) 0%,var(--surface2) 100%);
