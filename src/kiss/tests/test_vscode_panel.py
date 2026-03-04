@@ -109,17 +109,26 @@ class TestSetupCodeServer(unittest.TestCase):
         assert "function activate" in code_server._CS_EXTENSION_JS
         assert "module.exports={activate}" in code_server._CS_EXTENSION_JS
 
-    def test_extension_syncs_code_lens_font_size(self) -> None:
+    def test_extension_uses_blue_decorations(self) -> None:
         js = code_server._CS_EXTENSION_JS
-        assert "syncCodeLensFontSize" in js
-        assert "codeLensFontSize" in js
-        assert "editor.fontSize" in js or "get('fontSize')" in js
+        assert "blueDeco" in js
+        assert "rgba(59,130,246,0.15)" in js
+        assert "greenDeco" not in js
 
-    def test_extension_listens_for_font_size_changes(self) -> None:
+    def test_extension_has_no_codelens(self) -> None:
         js = code_server._CS_EXTENSION_JS
-        assert "onDidChangeConfiguration" in js
-        assert "affectsConfiguration" in js
-        assert "editor.fontSize" in js
+        assert "registerCodeLensProvider" not in js
+        assert "CodeLens" not in js
+
+    def test_extension_tracks_current_hunk(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "var curHunk=null" in js
+        assert "curHunk={fp:found.fp,idx:" in js
+
+    def test_extension_handles_accept_reject_actions(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "ad.action==='accept'" in js
+        assert "ad.action==='reject'" in js
 
 
 class TestBuildHtmlSplitLayout(unittest.TestCase):

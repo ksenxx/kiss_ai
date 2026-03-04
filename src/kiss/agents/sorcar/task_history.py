@@ -145,8 +145,12 @@ def _int_values(raw: dict) -> dict[str, int]:
     return {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float))}
 
 
+def _load_usage(path: Path) -> dict[str, int]:
+    return _int_values(_load_json_dict(path))
+
+
 def _load_model_usage() -> dict[str, int]:
-    return _int_values(_load_json_dict(MODEL_USAGE_FILE))
+    return _load_usage(MODEL_USAGE_FILE)
 
 
 def _load_last_model() -> str:
@@ -169,8 +173,7 @@ FILE_USAGE_FILE = _KISS_DIR / "file_usage.json"
 
 
 def _load_file_usage() -> dict[str, int]:
-    """Load file access frequency counts."""
-    return _int_values(_load_json_dict(FILE_USAGE_FILE))
+    return _load_usage(FILE_USAGE_FILE)
 
 
 def _record_file_usage(path: str) -> None:

@@ -5,7 +5,6 @@ from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS, CHATBOT_JS, CHATBOT_THEME
 
 def test_wait_spinner_css_exists():
     assert "#wait-spinner{" in CHATBOT_CSS
-    assert "#wait-spinner.active{display:block}" in CHATBOT_CSS
 
 
 def test_wait_spinner_css_has_border_spinner():
@@ -13,21 +12,50 @@ def test_wait_spinner_css_has_border_spinner():
     block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
     assert "border-radius:50%" in block
     assert "border-top-color" in block
-    assert "animation:spin" in block
 
 
-def test_wait_spinner_hidden_by_default():
+def test_wait_spinner_always_visible():
     idx = CHATBOT_CSS.index("#wait-spinner{")
     block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
-    assert "display:none" in block
+    assert "display:none" not in block
+    assert "display:block" not in block
+
+
+def test_wait_spinner_greyed_out_by_default():
+    idx = CHATBOT_CSS.index("#wait-spinner{")
+    block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+    assert "opacity:0.4" in block
+
+
+def test_wait_spinner_no_animation_by_default():
+    idx = CHATBOT_CSS.index("#wait-spinner{")
+    block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+    assert "animation:" not in block
+
+
+def test_wait_spinner_active_has_animation():
+    idx = CHATBOT_CSS.index("#wait-spinner.active{")
+    block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+    assert "animation:spin" in block
+    assert "opacity:1" in block
+
+
+def test_wait_spinner_active_has_accent_color():
+    idx = CHATBOT_CSS.index("#wait-spinner.active{")
+    block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+    assert "border-top-color:rgba(88,166,255,0.7)" in block
 
 
 def test_assistant_panel_wait_spinner_size():
-    assert "#assistant-panel #wait-spinner{width:12px;height:12px}" in CHATBOT_CSS
+    assert "#assistant-panel #wait-spinner{" in CHATBOT_CSS
 
 
 def test_themed_wait_spinner_css():
     assert "#assistant-panel #wait-spinner{" in CHATBOT_THEME_CSS
+
+
+def test_themed_wait_spinner_active_css():
+    assert "#assistant-panel #wait-spinner.active{" in CHATBOT_THEME_CSS
 
 
 def test_js_show_spinner_toggles_class():

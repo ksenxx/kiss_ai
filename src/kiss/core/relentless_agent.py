@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ TASK_PROMPT = """# Task
   summary="detailed summary of work done so far")** if the task is
   not complete and you are at risk of running out of steps.
 - Work dir: {work_dir}
+- Current process PID: {current_pid} — NEVER kill this process.
 {previous_progress}
 """
 
@@ -127,6 +129,7 @@ class RelentlessAgent(Base):
 
         progress_section = ""
         summary = ""
+        current_pid = str(os.getpid())
         for trial in range(self.max_sub_sessions):
             executor = KISSAgent(f"{self.name} Trial-{trial}")
             try:
@@ -138,6 +141,7 @@ class RelentlessAgent(Base):
                         "previous_progress": progress_section,
                         "step_threshold": str(self.max_steps - 2),
                         "work_dir": self.work_dir,
+                        "current_pid": current_pid,
                     },
                     system_prompt=self.system_instructions,
                     tools=all_tools,
@@ -146,25 +150,28 @@ class RelentlessAgent(Base):
                     printer=self.printer,
                     attachments=attachments if trial == 0 else None,
                 )
-            except Exception:
-                summarizer_agent = KISSAgent(f"{self.name} Summarizer")
-                summarizer_result = summarizer_agent.run(
-                    model_name=self.summarizer_model_name,
-                    prompt_template=SUMMARIZER_PROMPT,
-                    is_agentic=False,
-                    arguments={
-                        "trajectory": executor.get_trajectory(),
-                    },
-                )
+            except Exception as exc:
                 try:
-                    parsed = yaml.safe_load(summarizer_result)
-                    summary_text = (
-                        parsed.get("result", summarizer_result)
-                        if isinstance(parsed, dict)
-                        else summarizer_result
+                    summarizer_agent = KISSAgent(f"{self.name} Summarizer")
+                    summarizer_result = summarizer_agent.run(
+                        model_name=self.summarizer_model_name,
+                        prompt_template=SUMMARIZER_PROMPT,
+                        is_agentic=False,
+                        arguments={
+                            "trajectory": executor.get_trajectory(),
+                        },
                     )
+                    try:
+                        parsed = yaml.safe_load(summarizer_result)
+                        summary_text = (
+                            parsed.get("result", summarizer_result)
+                            if isinstance(parsed, dict)
+                            else summarizer_result
+                        )
+                    except Exception:
+                        summary_text = summarizer_result
                 except Exception:
-                    summary_text = summarizer_result
+                    summary_text = f"Agent failed: {exc}"
                 result = yaml.dump(
                     {"success": False, "summary": summary_text},
                     sort_keys=False,

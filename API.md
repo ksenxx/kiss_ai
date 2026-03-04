@@ -25,7 +25,7 @@
       - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
     - [`kiss.agents.sorcar`](#kissagentssorcar)
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
-      - [`kiss.agents.sorcar.assistant_agent`](#kissagentssorcarassistant_agent)
+      - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
       - [`kiss.agents.sorcar.sorcar`](#kissagentssorcarsorcar)
       - [`kiss.agents.sorcar.config`](#kissagentssorcarconfig)
     - [`kiss.agents.gepa`](#kissagentsgepa)
@@ -671,7 +671,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.sorcar` — *Assistant agent with coding tools and browser automation.*
+#### `kiss.agents.sorcar` — *Sorcar agent with coding tools and browser automation.*
 
 ______________________________________________________________________
 
@@ -710,11 +710,11 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.sorcar.assistant_agent` — *Assistant agent with both coding tools and browser automation.*
+#### `kiss.agents.sorcar.sorcar_agent` — *Sorcar agent with both coding tools and browser automation.*
 
-##### `class AssistantAgent(RelentlessAgent)` — Agent with both coding tools and browser automation for web + code tasks.
+##### `class SorcarAgent(RelentlessAgent)` — Agent with both coding tools and browser automation for web + code tasks.
 
-**Constructor:** `AssistantAgent(name: str) -> None`
+**Constructor:** `SorcarAgent(name: str) -> None`
 
 - **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
