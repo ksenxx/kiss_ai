@@ -396,7 +396,9 @@ def compute_changes(
             if changed:
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
-            if fetched["context_length"] and fetched["input_price_per_1M"] > 0:
+            is_preview = "preview" in name.split("/")[-1]
+            has_pricing = fetched["input_price_per_1M"] > 0
+            if fetched["context_length"] and (has_pricing or is_preview):
                 new_models.append(
                     {
                         "name": name,
@@ -404,6 +406,7 @@ def compute_changes(
                         "input_price_per_1M": fetched["input_price_per_1M"],
                         "output_price_per_1M": fetched["output_price_per_1M"],
                         "source": "openrouter",
+                        "needs_pricing": not has_pricing,
                     }
                 )
 
@@ -423,10 +426,12 @@ def compute_changes(
             if changed:
                 updates.append({"name": name, "changes": changed, "source": "together"})
         else:
+            is_preview = "preview" in name.split("/")[-1]
+            has_pricing = fetched["input_price_per_1M"] > 0
             if (
                 fetched["context_length"]
                 and fetched.get("type") in ("chat", "embedding")
-                and fetched["input_price_per_1M"] > 0
+                and (has_pricing or is_preview)
             ):
                 new_models.append(
                     {
@@ -436,6 +441,7 @@ def compute_changes(
                         "output_price_per_1M": fetched["output_price_per_1M"],
                         "source": "together",
                         "is_embedding": fetched.get("is_embedding", False),
+                        "needs_pricing": not has_pricing,
                     }
                 )
 
