@@ -395,6 +395,7 @@ class BaseBrowserPrinter(Printer):
         self._current_block_type = ""
         self._tool_name = ""
         self._tool_json_buffer = ""
+        self._bash_lock = threading.Lock()
         self._bash_buffer: list[str] = []
         self._bash_last_flush = 0.0
         self._bash_flush_timer: threading.Timer | None = None
@@ -405,19 +406,24 @@ class BaseBrowserPrinter(Printer):
         self._current_block_type = ""
         self._tool_name = ""
         self._tool_json_buffer = ""
-        self._bash_buffer.clear()
-        if self._bash_flush_timer is not None:
-            self._bash_flush_timer.cancel()
-            self._bash_flush_timer = None
+        with self._bash_lock:
+            self._bash_buffer.clear()
+            if self._bash_flush_timer is not None:
+                self._bash_flush_timer.cancel()
+                self._bash_flush_timer = None
 
     def _flush_bash(self) -> None:
-        if self._bash_flush_timer is not None:
-            self._bash_flush_timer.cancel()
-            self._bash_flush_timer = None
-        if self._bash_buffer:
-            text = "".join(self._bash_buffer)
-            self._bash_buffer.clear()
-            self._bash_last_flush = time.monotonic()
+        with self._bash_lock:
+            if self._bash_flush_timer is not None:
+                self._bash_flush_timer.cancel()
+                self._bash_flush_timer = None
+            if self._bash_buffer:
+                text = "".join(self._bash_buffer)
+                self._bash_buffer.clear()
+                self._bash_last_flush = time.monotonic()
+            else:
+                text = ""
+        if text:
             self.broadcast({"type": "system_output", "text": text})
 
     @staticmethod
@@ -528,13 +534,19 @@ class BaseBrowserPrinter(Printer):
             self.broadcast({"type": "usage_info", "text": str(content).strip()})
             return ""
         if type == "bash_stream":
-            self._bash_buffer.append(str(content))
-            if time.monotonic() - self._bash_last_flush >= 0.1:
+            with self._bash_lock:
+                self._bash_buffer.append(str(content))
+                if time.monotonic() - self._bash_last_flush >= 0.1:
+                    needs_flush = True
+                elif self._bash_flush_timer is None:
+                    self._bash_flush_timer = threading.Timer(0.1, self._flush_bash)
+                    self._bash_flush_timer.daemon = True
+                    self._bash_flush_timer.start()
+                    needs_flush = False
+                else:
+                    needs_flush = False
+            if needs_flush:
                 self._flush_bash()
-            elif self._bash_flush_timer is None:
-                self._bash_flush_timer = threading.Timer(0.1, self._flush_bash)
-                self._bash_flush_timer.daemon = True
-                self._bash_flush_timer.start()
             return ""
         if type == "tool_call":
             self._flush_bash()
