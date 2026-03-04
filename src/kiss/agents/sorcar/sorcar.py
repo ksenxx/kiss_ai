@@ -53,7 +53,7 @@ from kiss.core.models.model_info import (
 from kiss.core.relentless_agent import RelentlessAgent
 
 _FAST_MODEL = "gemini-2.0-flash"
-_COMMIT_MODEL = "claude-haiku-4-5"
+_COMMIT_MODEL = "gemini-2.0-flash"
 
 
 class _StopRequested(BaseException):
@@ -79,7 +79,7 @@ def _clean_llm_output(text: str) -> str:
 def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
     if detailed:
         prompt = (
-            "Generate a nicely formatted, informative git commit message for "
+            "Generate a nicely markdown formatted, informative git commit message for "
             "these changes. Use conventional commit format with a clear subject "
             "line (type: description) and optionally a body with bullet points "
             "for multiple changes. Return ONLY the commit message text, no "
@@ -91,13 +91,16 @@ def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
             "Return ONLY the commit message text, no quotes.\n\n{context}"
         )
     agent = KISSAgent("Commit Message Generator")
-    raw = agent.run(
-        model_name=_COMMIT_MODEL,
-        prompt_template=prompt,
-        arguments={"context": diff_text[:4000]},
-        is_agentic=False,
-    )
-    return _clean_llm_output(raw)
+    try:
+        raw = agent.run(
+            model_name=_COMMIT_MODEL,
+            prompt_template=prompt,
+            arguments={"context": diff_text},
+            is_agentic=False,
+        )
+        return _clean_llm_output(raw)
+    except Exception:
+        return ""
 
 
 def _model_vendor_order(name: str) -> int:
@@ -380,7 +383,7 @@ def run_chatbot(
                 args=(task, result_text),
                 daemon=True,
             ).start()
-        except _StopRequested:
+        except (KeyboardInterrupt, _StopRequested):
             result_text = "(stopped)"
             with running_lock:
                 if agent_thread is not current_thread:
@@ -420,8 +423,9 @@ def run_chatbot(
     def stop_agent() -> bool:
         """Kill the current agent thread and reset state for a new task.
 
-        Immediately resets running state so a new agent thread can be started.
-        Injects _StopRequested into the old thread to clean it up.
+        Sets the printer's stop_event so the agent stops at the next
+        printer.print() or token_callback() check.  Also injects
+        _StopRequested via PyThreadState_SetAsyncExc as a fallback.
         """
         nonlocal running, agent_thread
         with running_lock:
@@ -430,6 +434,7 @@ def run_chatbot(
                 return False
             running = False
             agent_thread = None
+        printer.stop_event.set()
         import ctypes
 
         tid = thread.ident
@@ -503,6 +508,7 @@ def run_chatbot(
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
+        printer.stop_event.clear()
         t = threading.Thread(
             target=run_agent_thread,
             args=(task, model, attachments),
@@ -615,14 +621,10 @@ def run_chatbot(
                         "Given the user's partial input and their past task history, "
                         "predict what they want to type and return ONLY the remaining "
                         "text to complete their input. Do NOT repeat the text they already typed. "
-                        "Keep the completion concise and natural.\n\n"
+                        "Keep the completion concise and natural."
+                        "If no good completion, return empty string.\n\n"
                         "Past tasks:\n{task_list}\n\n"
                         'Partial input: "{query}"\n\n'
-                        "Return ONLY the completion text (the part after what they typed). "
-                        "The completion must add a space character at the beginning, "
-                        "if the partial input ends in a word and or a punctuation "
-                        "which needs a space after."
-                        "If no good completion, return empty string."
                     ),
                     arguments={"task_list": task_list, "query": query},
                     is_agentic=False,
@@ -849,10 +851,10 @@ def run_chatbot(
             info_parts = [
                 f"Work directory: {actual_work_dir}",
                 f"Selected model: {model}",
-                f"Max steps: {cfg.assistant.sorcar_agent.max_steps}",
-                f"Max budget: ${cfg.assistant.sorcar_agent.max_budget:.2f}",
+                f"Max steps: {cfg.sorcar.sorcar_agent.max_steps}",
+                f"Max budget: ${cfg.sorcar.sorcar_agent.max_budget:.2f}",
                 f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
-                f"Headless browser: {cfg.assistant.sorcar_agent.headless}",
+                f"Headless browser: {cfg.sorcar.sorcar_agent.headless}",
                 f"Code-server: {'running' if code_server_url else 'not available'}",
                 f"Tasks completed: {len(history)}",
             ]

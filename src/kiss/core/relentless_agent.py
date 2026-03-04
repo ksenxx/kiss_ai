@@ -69,7 +69,6 @@ class RelentlessAgent(Base):
     def _reset(
         self,
         model_name: str | None,
-        summarizer_model_name: str | None,
         max_sub_sessions: int | None,
         max_steps: int | None,
         max_budget: float | None,
@@ -79,7 +78,7 @@ class RelentlessAgent(Base):
         verbose: bool | None = None,
     ) -> None:
         global_cfg = config_module.DEFAULT_CONFIG
-        cfg = global_cfg.assistant.relentless_agent
+        cfg = global_cfg.relentless_agent
         default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
@@ -91,11 +90,6 @@ class RelentlessAgent(Base):
         self.max_steps = max_steps if max_steps is not None else cfg.max_steps
         self.max_budget = max_budget if max_budget is not None else cfg.max_budget
         self.model_name = model_name if model_name is not None else cfg.model_name
-        self.summarizer_model_name = (
-            summarizer_model_name
-            if summarizer_model_name is not None
-            else cfg.summarizer_model_name
-        )
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.docker_image = docker_image
@@ -154,7 +148,7 @@ class RelentlessAgent(Base):
                 try:
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")
                     summarizer_result = summarizer_agent.run(
-                        model_name=self.summarizer_model_name,
+                        model_name=self.model_name,
                         prompt_template=SUMMARIZER_PROMPT,
                         is_agentic=False,
                         arguments={
@@ -201,7 +195,6 @@ class RelentlessAgent(Base):
     def run(
         self,
         model_name: str | None = None,
-        summarizer_model_name: str | None = None,
         system_instructions: str = "",
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
@@ -212,15 +205,13 @@ class RelentlessAgent(Base):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         verbose: bool | None = None,
-        tools_factory: Callable[[], list[Callable[..., Any]]] | None = None,
+        tools: list[Callable[..., Any]] | None = None,
         attachments: list[Attachment] | None = None,
     ) -> str:
-        """Run the agent with tools created by tools_factory (called after _reset).
+        """Run the agent with the provided tools.
 
         Args:
             model_name: LLM model to use. Defaults to config value.
-            summarizer_model_name: LLM model for summarizing trajectories on failure.
-                Defaults to config value.
             system_instructions: System-level instructions passed to the underlying LLM
                 via model_config. Defaults to empty string (no system instructions).
             prompt_template: Task prompt template with format placeholders.
@@ -232,7 +223,7 @@ class RelentlessAgent(Base):
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
             verbose: Whether to print output to console. Defaults to config verbose setting.
-            tools_factory: Callable that returns the list of tools for the agent.
+            tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
         Returns:
@@ -240,7 +231,6 @@ class RelentlessAgent(Base):
         """
         self._reset(
             model_name,
-            summarizer_model_name,
             max_sub_sessions,
             max_steps,
             max_budget,
@@ -251,8 +241,6 @@ class RelentlessAgent(Base):
         )
         self.system_instructions = system_instructions
         self.task_description = prompt_template.format(**(arguments or {}))
-
-        tools = tools_factory() if tools_factory else []
 
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
@@ -265,7 +253,7 @@ class RelentlessAgent(Base):
 
                     docker_mgr.stream_callback = _docker_stream
                 try:
-                    return self.perform_task(tools, attachments=attachments)
+                    return self.perform_task(tools or [], attachments=attachments)
                 finally:
                     self.docker_manager = None
-        return self.perform_task(tools, attachments=attachments)
+        return self.perform_task(tools or [], attachments=attachments)
