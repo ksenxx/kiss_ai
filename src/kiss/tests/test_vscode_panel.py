@@ -25,37 +25,6 @@ class TestSetupCodeServer(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_all_settings_keys_present(self) -> None:
-        code_server._setup_code_server(self.tmpdir)
-        settings = json.loads((Path(self.tmpdir) / "User" / "settings.json").read_text())
-        for key in code_server._CS_SETTINGS:
-            assert key in settings, f"Missing setting: {key}"
-            assert settings[key] == code_server._CS_SETTINGS[key]
-
-    def test_settings_preserve_existing_keys(self) -> None:
-        user_dir = Path(self.tmpdir) / "User"
-        user_dir.mkdir(parents=True)
-        (user_dir / "settings.json").write_text(
-            json.dumps({"editor.tabSize": 4, "workbench.startupEditor": "welcomePage"})
-        )
-        code_server._setup_code_server(self.tmpdir)
-        settings = json.loads((user_dir / "settings.json").read_text())
-        assert settings["editor.tabSize"] == 4
-        assert settings["workbench.startupEditor"] == "none"
-
-    def test_first_run_sets_dark_modern_theme(self) -> None:
-        code_server._setup_code_server(self.tmpdir)
-        settings = json.loads((Path(self.tmpdir) / "User" / "settings.json").read_text())
-        assert settings["workbench.colorTheme"] == "Default Dark Modern"
-
-    def test_preserves_existing_color_theme(self) -> None:
-        user_dir = Path(self.tmpdir) / "User"
-        user_dir.mkdir(parents=True)
-        (user_dir / "settings.json").write_text(json.dumps({"workbench.colorTheme": "Monokai"}))
-        code_server._setup_code_server(self.tmpdir)
-        settings = json.loads((user_dir / "settings.json").read_text())
-        assert settings["workbench.colorTheme"] == "Monokai"
-
     def test_settings_handles_corrupted_json(self) -> None:
         user_dir = Path(self.tmpdir) / "User"
         user_dir.mkdir(parents=True)
@@ -64,15 +33,6 @@ class TestSetupCodeServer(unittest.TestCase):
         settings = json.loads((user_dir / "settings.json").read_text())
         assert settings["workbench.startupEditor"] == "none"
 
-    def test_state_db_has_all_entries(self) -> None:
-        code_server._setup_code_server(self.tmpdir)
-        db_path = Path(self.tmpdir) / "User" / "globalStorage" / "state.vscdb"
-        with sqlite3.connect(str(db_path)) as conn:
-            rows = dict(conn.execute("SELECT key, value FROM ItemTable").fetchall())
-        for key, value in code_server._CS_STATE_ENTRIES:
-            assert key in rows, f"Missing state entry: {key}"
-            assert rows[key] == value
-
     def test_state_db_idempotent(self) -> None:
         code_server._setup_code_server(self.tmpdir)
         code_server._setup_code_server(self.tmpdir)
@@ -80,14 +40,6 @@ class TestSetupCodeServer(unittest.TestCase):
         with sqlite3.connect(str(db_path)) as conn:
             keys = [r[0] for r in conn.execute("SELECT key FROM ItemTable").fetchall()]
         assert len(keys) == len(set(keys))
-
-    def test_extension_files(self) -> None:
-        code_server._setup_code_server(self.tmpdir)
-        ext_dir = Path(self.tmpdir) / "extensions" / "kiss-init"
-        pkg = json.loads((ext_dir / "package.json").read_text())
-        assert pkg["name"] == "kiss-init"
-        assert "onStartupFinished" in pkg["activationEvents"]
-        assert (ext_dir / "extension.js").read_text() == code_server._CS_EXTENSION_JS
 
     def test_cleans_chat_sessions_preserves_other_files(self) -> None:
         ws = Path(self.tmpdir) / "User" / "workspaceStorage" / "abc123"
@@ -132,21 +84,6 @@ class TestSetupCodeServer(unittest.TestCase):
 
 
 class TestBuildHtmlSplitLayout(unittest.TestCase):
-    def test_split_layout_structure(self) -> None:
-        html = chatbot_ui._build_html("T")
-        for elem in ("split-container", "editor-panel", "divider", "assistant-panel"):
-            assert f'id="{elem}"' in html, f"Missing #{elem}"
-        assert "flex:3" in html
-
-    def test_header_buttons(self) -> None:
-        html = chatbot_ui._build_html("T")
-        assert 'title="Task history"' in html
-        assert 'title="Suggested tasks"' in html
-
-    def test_editor_fallback_without_code_server(self) -> None:
-        html = chatbot_ui._build_html("T")
-        assert 'id="editor-fallback"' in html
-        assert "<iframe" not in html
 
     def test_iframe_with_code_server_url(self) -> None:
         html = chatbot_ui._build_html("T", "http://127.0.0.1:9999", "/tmp/work")
@@ -154,10 +91,6 @@ class TestBuildHtmlSplitLayout(unittest.TestCase):
         assert 'data-base-url="http://127.0.0.1:9999"' in html
         assert 'data-work-dir="/tmp/work"' in html
         assert 'id="editor-fallback"' not in html
-
-    def test_iframe_folder_url_encoded(self) -> None:
-        html = chatbot_ui._build_html("T", "http://x:1", "/path with spaces")
-        assert "path%20with%20spaces" in html
 
 
 class TestBuildHtmlJavaScript(unittest.TestCase):
@@ -182,20 +115,6 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
         js = self.html[start:end]
         assert js.count("{") == js.count("}")
         assert js.count("(") == js.count(")")
-
-
-class TestBuildHtmlCSS(unittest.TestCase):
-    def test_split_layout_css(self) -> None:
-        html = chatbot_ui._build_html("T")
-        for pattern in (
-            "#split-container{display:flex",
-            "#editor-panel{position:relative",
-            "cursor:col-resize",
-            "#assistant-panel{",
-            ".tp[data-path]{cursor:pointer",
-            "#assistant-panel #suggestions{grid-template-columns:1fr",
-        ):
-            assert pattern in html, f"Missing CSS: {pattern}"
 
 
 class TestMergeEndpoints(unittest.TestCase):

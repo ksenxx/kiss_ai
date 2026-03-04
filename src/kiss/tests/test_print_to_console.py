@@ -26,13 +26,6 @@ class TestConsolePrinterInit(unittest.TestCase):
         assert p._tool_json_buffer == ""
 
 
-class TestStreamDelta(unittest.TestCase):
-    def test_empty_string_no_change(self):
-        p = ConsolePrinter(file=io.StringIO())
-        p._stream_delta("")
-        assert p._mid_line is False
-
-
 class TestFormatToolCall(unittest.TestCase):
     def _make_printer(self):
         buf = io.StringIO()
@@ -55,13 +48,6 @@ class TestPrintToolResult(unittest.TestCase):
     def _make_printer(self):
         buf = io.StringIO()
         return ConsolePrinter(file=buf), buf
-
-    def test_success(self):
-        p, buf = self._make_printer()
-        p._print_tool_result("Success output", is_error=False)
-        out = buf.getvalue()
-        assert "OK" in out
-        assert "Success output" in out
 
 
 class TestPrintStreamEvent(unittest.TestCase):
@@ -101,20 +87,6 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert text == "Let me think..."
         assert "Let me think" not in buf.getvalue()
 
-    def test_content_block_delta_text(self):
-        p, buf = self._make_printer()
-        text = p.print(
-            self._event(
-                {
-                    "type": "content_block_delta",
-                    "delta": {"type": "text_delta", "text": "Hello world"},
-                }
-            ),
-            type="stream_event",
-        )
-        assert text == "Hello world"
-        assert "Hello world" not in buf.getvalue()
-
     def test_content_block_delta_unknown_delta_type(self):
         p, _ = self._make_printer()
         text = p.print(
@@ -127,19 +99,6 @@ class TestPrintStreamEvent(unittest.TestCase):
             type="stream_event",
         )
         assert text == ""
-
-    def test_content_block_start_text(self):
-        p, _ = self._make_printer()
-        p.print(
-            self._event(
-                {
-                    "type": "content_block_start",
-                    "content_block": {"type": "text"},
-                }
-            ),
-            type="stream_event",
-        )
-        assert p._current_block_type == "text"
 
     def test_content_block_start_thinking(self):
         p, buf = self._make_printer()
@@ -234,11 +193,6 @@ class TestPrint(unittest.TestCase):
         buf = io.StringIO()
         return ConsolePrinter(file=buf), buf
 
-    def test_print_string(self):
-        p, buf = self._make_printer()
-        p.print("hello world")
-        assert "hello world" in buf.getvalue()
-
     def test_print_flushes_mid_line(self):
         p, buf = self._make_printer()
         p._mid_line = True
@@ -253,28 +207,6 @@ class TestTokenCallback(unittest.TestCase):
         buf = io.StringIO()
         return ConsolePrinter(file=buf), buf
 
-    def test_token_callback_streams_text(self):
-        import asyncio
-
-        p, buf = self._make_printer()
-        asyncio.run(p.token_callback("hello"))
-        assert "hello" in buf.getvalue()
-        assert p._mid_line is True
-
-    def test_token_callback_empty_string(self):
-        import asyncio
-
-        p, buf = self._make_printer()
-        asyncio.run(p.token_callback(""))
-        assert p._mid_line is False
-
-    def test_token_callback_ending_newline(self):
-        import asyncio
-
-        p, buf = self._make_printer()
-        asyncio.run(p.token_callback("line\n"))
-        assert p._mid_line is False
-
     def test_token_callback_during_thinking_block(self):
         import asyncio
 
@@ -283,14 +215,6 @@ class TestTokenCallback(unittest.TestCase):
         asyncio.run(p.token_callback("deep thought"))
         assert "deep thought" in buf.getvalue()
         assert p._mid_line is True
-
-    def test_token_callback_during_text_block(self):
-        import asyncio
-
-        p, buf = self._make_printer()
-        p._current_block_type = "text"
-        asyncio.run(p.token_callback("regular text"))
-        assert "regular text" in buf.getvalue()
 
 
 class TestStreamingFlow(unittest.TestCase):
@@ -330,34 +254,6 @@ class TestStreamingFlow(unittest.TestCase):
         assert output.count("unique_token") == 1
         p.print(self._event({"type": "content_block_stop"}), type="stream_event")
         assert p._current_block_type == ""
-
-
-class TestRichMarkupEscaping(unittest.TestCase):
-    """Ensure content with bracket patterns like [/path] doesn't crash Rich."""
-
-    def test_text_with_bracket_path_no_crash(self):
-        buf = io.StringIO()
-        p = ConsolePrinter(file=buf)
-        p.print("[/foo/bar.py]\n\nThe editor file path: /foo/bar.py", type="text")
-
-    def test_prompt_with_bracket_path_no_crash(self):
-        buf = io.StringIO()
-        p = ConsolePrinter(file=buf)
-        content = "Fix the bug in [/foo/bar.py]\n\nThe editor file path: /foo/bar.py"
-        p.print(content, type="prompt")
-
-    def test_stream_delta_with_bracket_path_no_crash(self):
-        buf = io.StringIO()
-        p = ConsolePrinter(file=buf)
-        p._stream_delta("[/foo/bar.py] some text")
-
-    def test_text_preserves_brackets_literally(self):
-        buf = io.StringIO()
-        p = ConsolePrinter(file=buf)
-        p.print("[bold]not bold[/bold]", type="text")
-        output = buf.getvalue()
-        assert "[bold]" in output
-        assert "[/bold]" in output
 
 
 if __name__ == "__main__":

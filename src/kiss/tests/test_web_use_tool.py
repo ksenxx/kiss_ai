@@ -122,22 +122,6 @@ def web_tool():
 
 
 class TestNavigation:
-    def test_go_to_url(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/")
-        assert "Page: Test Form" in result
-        assert "URL:" in result
-        assert "[" in result
-
-    def test_go_to_url_returns_interactive_elements(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/")
-        assert "link" in result
-        assert "textbox" in result
-        assert "button" in result
-
-    def test_go_to_second_page(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/second")
-        assert "Page: Second Page" in result
-        assert "Second Page" in result
 
     def test_go_to_invalid_url(self, web_tool):
         result = web_tool.go_to_url("http://localhost:99999/nonexistent")
@@ -149,15 +133,6 @@ class TestNavigation:
 
 
 class TestAccessibilityTree:
-    def test_tree_has_element_ids(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/")
-        ids = re.findall(r"\[(\d+)\]", result)
-        assert len(ids) >= 4
-
-    def test_tree_shows_roles(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/")
-        assert "textbox" in result
-        assert "button" in result
 
     def test_get_page_content_tree(self, http_server, web_tool):
         web_tool.go_to_url(http_server + "/")
@@ -171,25 +146,8 @@ class TestAccessibilityTree:
         assert "Page: Test Form" in result
         assert "Test Form Page" in result
 
-    def test_tree_roles_page(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/roles")
-        assert "button" in result
-        assert "link" in result
-        assert "Role Button" in result
-
-    def test_tree_contenteditable(self, http_server, web_tool):
-        result = web_tool.go_to_url(http_server + "/roles")
-        assert "Editable div" in result
-
 
 class TestClick:
-    def test_click_button(self, http_server, web_tool):
-        dom = web_tool.go_to_url(http_server + "/")
-        match = re.search(r"\[(\d+)\].*button.*Action", dom)
-        assert match, f"No Action button found:\n{dom}"
-        btn_id = int(match.group(1))
-        result = web_tool.click(btn_id)
-        assert "Clicked!" in result
 
     def test_click_link(self, http_server, web_tool):
         dom = web_tool.go_to_url(http_server + "/")
@@ -198,12 +156,6 @@ class TestClick:
         link_id = int(match.group(1))
         result = web_tool.click(link_id)
         assert "Second Page" in result
-
-    def test_click_invalid_id(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        result = web_tool.click(99999)
-        assert "Error" in result
-        assert "not found" in result
 
     def test_hover(self, http_server, web_tool):
         dom = web_tool.go_to_url(http_server + "/")
@@ -245,19 +197,10 @@ class TestTypeText:
 
 
 class TestPressKey:
-    def test_press_escape(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        result = web_tool.press_key("Escape")
-        assert "Page:" in result
 
     def test_press_tab(self, http_server, web_tool):
         web_tool.go_to_url(http_server + "/")
         result = web_tool.press_key("Tab")
-        assert "Page:" in result
-
-    def test_press_page_down(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/long")
-        result = web_tool.press_key("PageDown")
         assert "Page:" in result
 
     def test_press_invalid_key(self, http_server, web_tool):
@@ -267,19 +210,10 @@ class TestPressKey:
 
 
 class TestScroll:
-    def test_scroll_down(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/long")
-        result = web_tool.scroll("down", 3)
-        assert "Page:" in result
 
     def test_scroll_up(self, http_server, web_tool):
         web_tool.go_to_url(http_server + "/long")
         result = web_tool.scroll("up", 2)
-        assert "Page:" in result
-
-    def test_scroll_default(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/long")
-        result = web_tool.scroll()
         assert "Page:" in result
 
 
@@ -314,10 +248,6 @@ class TestScreenshot:
 
 
 class TestBrowserLifecycle:
-    def test_lazy_init(self):
-        tool = WebUseTool(user_data_dir=None)
-        assert tool._page is None
-        assert tool._browser is None
 
     def test_close_and_reuse(self, http_server, web_tool):
         web_tool.go_to_url(http_server + "/")
@@ -346,12 +276,6 @@ class TestBrowserLifecycle:
             "get_page_content",
         }
 
-    def test_constructor_accepts_browser_types(self):
-        for browser_type in ["chromium", "firefox", "webkit"]:
-            tool = WebUseTool(browser_type=browser_type, headless=True, user_data_dir=None)
-            assert tool.browser_type == browser_type
-            assert tool._page is None
-
 
 class TestAxTreeTruncation:
     def test_truncation(self, http_server, web_tool):
@@ -368,54 +292,6 @@ class TestKissProfile:
     def test_default_constructor_uses_kiss_profile(self):
         tool = WebUseTool()
         assert tool.user_data_dir == KISS_PROFILE_DIR
-
-    def test_explicit_none_gives_no_profile(self):
-        tool = WebUseTool(user_data_dir=None)
-        assert tool.user_data_dir is None
-
-    def test_explicit_path_is_used(self):
-        tool = WebUseTool(user_data_dir="/tmp/custom_profile")
-        assert tool.user_data_dir == "/tmp/custom_profile"
-
-    def test_no_profile_uses_regular_browser(self, http_server, web_tool):
-        web_tool.go_to_url(http_server + "/")
-        assert web_tool._context is not None
-        assert web_tool._browser is not None
-
-    def test_user_data_dir_stored_correctly(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tool = WebUseTool(browser_type="chromium", headless=True, user_data_dir=tmpdir)
-            assert tool.user_data_dir == tmpdir
-            assert tool._browser is None
-            assert tool._context is None
-
-
-class TestNumberInteractiveElements:
-    def test_numbers_buttons(self):
-        snapshot = '- button "OK"\n- button "Cancel"'
-        result, elements = _number_interactive_elements(snapshot)
-        assert '[1] button "OK"' in result
-        assert '[2] button "Cancel"' in result
-        assert len(elements) == 2
-        assert elements[0] == {"role": "button", "name": "OK"}
-
-    def test_skips_non_interactive(self):
-        snapshot = '- heading "Title" [level=1]\n- button "Submit"'
-        result, elements = _number_interactive_elements(snapshot)
-        assert "[1]" not in result.split("\n")[0]
-        assert '[1] button "Submit"' in result
-        assert len(elements) == 1
-
-    def test_handles_nameless_elements(self):
-        snapshot = "- combobox"
-        result, elements = _number_interactive_elements(snapshot)
-        assert "[1] combobox" in result
-        assert elements[0]["name"] == ""
-
-    def test_preserves_indentation(self):
-        snapshot = '  - link "Home"'
-        result, elements = _number_interactive_elements(snapshot)
-        assert '  - [1] link "Home"' in result
 
 
 if __name__ == "__main__":

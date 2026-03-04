@@ -252,10 +252,15 @@ function activate(ctx){
     var http=require('http');
     return new Promise(function(resolve,reject){
       var req=http.request({hostname:'127.0.0.1',port:parseInt(readPort()),
-        path:p,method:'POST',headers:{'Content-Type':'application/json'}},function(res){
+        path:p,method:'POST',headers:{'Content-Type':'application/json'},
+        timeout:60000},function(res){
         var d='';res.on('data',function(c){d+=c});
-        res.on('end',function(){resolve(JSON.parse(d))});
+        res.on('end',function(){
+          try{resolve(JSON.parse(d))}
+          catch(e){reject(new Error('Bad response: '+d.substring(0,100)))}
+        });
       });
+      req.on('timeout',function(){req.destroy();reject(new Error('Timed out'))});
       req.on('error',reject);
       req.write(JSON.stringify(body||{}));req.end();
     });

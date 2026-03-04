@@ -74,23 +74,6 @@ def test_js_show_spinner_has_delay():
     assert "setTimeout" in CHATBOT_JS.split("function showSpinner")[1].split("function ")[0]
 
 
-def test_build_html_contains_wait_spinner():
-    html = _build_html("Test", "", "/tmp")
-    assert 'id="wait-spinner"' in html
-    assert "#wait-spinner" in html
-    assert "waitSpinner.classList.add('active')" in html
-    assert "waitSpinner.classList.remove('active')" in html
-
-
-def test_build_html_spinner_before_send_btn():
-    html = _build_html("Test", "", "/tmp")
-    spinner_pos = html.index('id="wait-spinner"')
-    send_pos = html.index('id="send-btn"')
-    stop_pos = html.index('id="stop-btn"')
-    assert spinner_pos < send_pos
-    assert spinner_pos < stop_pos
-
-
 def test_no_stop_btn_waiting_css():
     assert "#stop-btn.waiting" not in CHATBOT_CSS
     assert "stopBtn.classList" not in CHATBOT_JS

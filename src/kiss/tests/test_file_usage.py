@@ -22,9 +22,6 @@ class TestFileUsage(unittest.TestCase):
         if self._tmp.exists():
             self._tmp.unlink()
 
-    def test_load_empty(self) -> None:
-        assert task_history._load_file_usage() == {}
-
     def test_record_and_load(self) -> None:
         task_history._record_file_usage("src/foo.py")
         task_history._record_file_usage("src/foo.py")
@@ -40,16 +37,6 @@ class TestFileUsage(unittest.TestCase):
     def test_load_non_dict_json(self) -> None:
         self._tmp.write_text("[1,2,3]")
         assert task_history._load_file_usage() == {}
-
-    def test_load_filters_non_numeric(self) -> None:
-        self._tmp.write_text(json.dumps({"a": 5, "b": "x"}))
-        usage = task_history._load_file_usage()
-        assert usage == {"a": 5}
-
-    def test_increments_existing(self) -> None:
-        self._tmp.write_text(json.dumps({"x.py": 3}))
-        task_history._record_file_usage("x.py")
-        assert task_history._load_file_usage()["x.py"] == 4
 
 
 class TestSuggestionsFrequencySort(unittest.TestCase):

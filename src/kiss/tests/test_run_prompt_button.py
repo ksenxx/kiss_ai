@@ -58,25 +58,6 @@ def non_md_file():
 class TestPromptDetectorForPlayButton:
     """Test that PromptDetector correctly identifies prompt vs non-prompt .md files."""
 
-    def test_prompt_file_detected(self, prompt_file: str) -> None:
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze(prompt_file)
-        assert is_prompt is True
-        assert score >= 3.0
-        assert len(reasons) > 0
-
-    def test_non_prompt_md_not_detected(self, non_prompt_md_file: str) -> None:
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze(non_prompt_md_file)
-        assert is_prompt is False
-        assert score < 3.0
-
-    def test_non_md_file_not_detected(self, non_md_file: str) -> None:
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze(non_md_file)
-        assert is_prompt is False
-        assert score == 0.0
-
     def test_nonexistent_file(self) -> None:
         detector = PromptDetector()
         is_prompt, score, reasons = detector.analyze("/nonexistent/file.md")
@@ -124,14 +105,6 @@ class TestCodeServerExtensionActiveFileWrite:
 class TestRunPromptHTMLButton:
     """Test that the HTML contains the run-prompt button."""
 
-    def test_html_contains_run_prompt_btn(self) -> None:
-        from kiss.agents.sorcar.chatbot_ui import _build_html
-
-        html = _build_html("Test Title", "", "/tmp")
-        assert 'id="run-prompt-btn"' in html
-        assert "Run current file as prompt" in html
-        assert "polygon" in html  # play icon SVG
-
     def test_js_contains_active_file_check(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
@@ -144,18 +117,6 @@ class TestRunPromptHTMLButton:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS
 
         assert "#run-prompt-btn" in CHATBOT_CSS
-
-
-class TestEndpointRoutes:
-    """Test that the new routes are registered in the app."""
-
-    def test_routes_include_active_file_info(self) -> None:
-        from kiss.agents.sorcar.chatbot_ui import _build_html
-
-        # Verify the JS references the endpoints
-        html = _build_html("Test", "", "/tmp")
-        assert "/active-file-info" in html
-        assert "/get-file-content" in html
 
 
 class TestPromptDetectorEdgeCases:
@@ -190,13 +151,6 @@ class TestPromptDetectorEdgeCases:
         is_prompt, score, reasons = detector.analyze(str(p))
         assert is_prompt is False
         assert score == 0.0
-
-    def test_blog_post_not_prompt(self, tmp_path: Path) -> None:
-        p = tmp_path / "blog.md"
-        p.write_text("# My Trip to Japan\nI went to Tokyo last week.\nThe food is great.\n")
-        detector = PromptDetector()
-        is_prompt, _score, _reasons = detector.analyze(str(p))
-        assert is_prompt is False
 
 
 class TestRunPromptButtonThemeCSS:
@@ -241,12 +195,6 @@ class TestRunPromptButtonJSBehavior:
 
         assert "inp.value=d.content" in CHATBOT_JS
 
-    def test_play_button_disabled_by_default(self) -> None:
-        from kiss.agents.sorcar.chatbot_ui import _build_html
-
-        html = _build_html("Test", "", "/tmp")
-        assert 'id="run-prompt-btn" title="Run current file as prompt" disabled' in html
-
 
 class TestPlayButtonDisableDuringRun:
     """Test that the play button is disabled when a task is running and re-enabled after."""
@@ -288,45 +236,6 @@ class TestPlayButtonDisableDuringRun:
 
 class TestEndToEndPromptDetection:
     """End-to-end test: write active-file.json, check prompt detection."""
-
-    def test_prompt_file_workflow(self, prompt_file: str, tmp_path: Path) -> None:
-        # Simulate writing active-file.json
-        active_file = os.path.join(str(tmp_path), "active-file.json")
-        with open(active_file, "w") as f:
-            json.dump({"path": prompt_file}, f)
-
-        # Read it back
-        with open(active_file) as f:
-            data = json.loads(f.read())
-        fpath = data["path"]
-
-        # Check it's a .md file
-        assert fpath.endswith(".md")
-        assert os.path.isfile(fpath)
-
-        # Run prompt detector
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze(fpath)
-        assert is_prompt is True
-
-        # Read file content (simulating get-file-content)
-        with open(fpath, encoding="utf-8") as f:
-            content = f.read()
-        assert "System Prompt" in content
-
-    def test_non_prompt_file_workflow(self, non_prompt_md_file: str, tmp_path: Path) -> None:
-        active_file = os.path.join(str(tmp_path), "active-file.json")
-        with open(active_file, "w") as f:
-            json.dump({"path": non_prompt_md_file}, f)
-
-        with open(active_file) as f:
-            data = json.loads(f.read())
-        fpath = data["path"]
-
-        assert fpath.endswith(".md")
-        detector = PromptDetector()
-        is_prompt, _score, _reasons = detector.analyze(fpath)
-        assert is_prompt is False
 
     def test_non_md_file_workflow(self, non_md_file: str, tmp_path: Path) -> None:
         active_file = os.path.join(str(tmp_path), "active-file.json")

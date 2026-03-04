@@ -161,7 +161,7 @@ def run_chatbot(
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
-    cs_data_dir = str(_KISS_DIR / f"code-server-data-{time.time()}")
+    cs_data_dir = str(_KISS_DIR / "code-server-data")
     cs_binary = shutil.which("code-server")
     if cs_binary:
         ext_changed = _setup_code_server(cs_data_dir)
@@ -750,51 +750,59 @@ def run_chatbot(
 
     async def commit(request: Request) -> JSONResponse:
         def _do_commit() -> dict[str, str]:
-            subprocess.run(["git", "add", "-A"], cwd=actual_work_dir)
-            diff_stat = subprocess.run(
-                ["git", "diff", "--cached", "--stat"],
-                capture_output=True,
-                text=True,
-                cwd=actual_work_dir,
-            )
-            if not diff_stat.stdout.strip():
-                return {"error": "No changes to commit"}
-            diff_detail = subprocess.run(
-                ["git", "diff", "--cached"],
-                capture_output=True,
-                text=True,
-                cwd=actual_work_dir,
-            )
-            message = _generate_commit_msg(diff_detail.stdout)
-            commit_env = {
-                **os.environ,
-                "GIT_COMMITTER_NAME": "KISS Sorcar",
-                "GIT_COMMITTER_EMAIL": "ksen@berkeley.edu",
-            }
-            result = subprocess.run(
-                ["git", "commit", "-m", message, "--author=KISS Sorcar <ksen@berkeley.edu>"],
-                capture_output=True,
-                text=True,
-                cwd=actual_work_dir,
-                env=commit_env,
-            )
-            if result.returncode != 0:
-                return {"error": result.stderr.strip()}
-            return {"status": "ok", "message": message}
+            try:
+                subprocess.run(["git", "add", "-A"], cwd=actual_work_dir)
+                diff_stat = subprocess.run(
+                    ["git", "diff", "--cached", "--stat"],
+                    capture_output=True,
+                    text=True,
+                    cwd=actual_work_dir,
+                )
+                if not diff_stat.stdout.strip():
+                    return {"error": "No changes to commit"}
+                diff_detail = subprocess.run(
+                    ["git", "diff", "--cached"],
+                    capture_output=True,
+                    text=True,
+                    cwd=actual_work_dir,
+                )
+                message = _generate_commit_msg(diff_detail.stdout)
+                commit_env = {
+                    **os.environ,
+                    "GIT_COMMITTER_NAME": "KISS Sorcar",
+                    "GIT_COMMITTER_EMAIL": "ksen@berkeley.edu",
+                }
+                result = subprocess.run(
+                    ["git", "commit", "-m", message, "--author=KISS Sorcar <ksen@berkeley.edu>"],
+                    capture_output=True,
+                    text=True,
+                    cwd=actual_work_dir,
+                    env=commit_env,
+                )
+                if result.returncode != 0:
+                    return {"error": result.stderr.strip()}
+                return {"status": "ok", "message": message}
+            except Exception as e:
+                logger.debug("Exception caught", exc_info=True)
+                return {"error": str(e)}
 
         return await _thread_json_response(_do_commit)
 
     async def push(request: Request) -> JSONResponse:
         def _do_push() -> dict[str, str]:
-            result = subprocess.run(
-                ["git", "push"],
-                capture_output=True,
-                text=True,
-                cwd=actual_work_dir,
-            )
-            if result.returncode != 0:
-                return {"error": result.stderr.strip() or "Push failed"}
-            return {"status": "ok"}
+            try:
+                result = subprocess.run(
+                    ["git", "push"],
+                    capture_output=True,
+                    text=True,
+                    cwd=actual_work_dir,
+                )
+                if result.returncode != 0:
+                    return {"error": result.stderr.strip() or "Push failed"}
+                return {"status": "ok"}
+            except Exception as e:
+                logger.debug("Exception caught", exc_info=True)
+                return {"error": str(e)}
 
         return await _thread_json_response(_do_push)
 
@@ -811,28 +819,28 @@ def run_chatbot(
         """Generate a git commit message from current diff and fill the SCM input."""
 
         def _generate() -> dict[str, str]:
-            diff_result = subprocess.run(
-                ["git", "diff"],
-                capture_output=True,
-                text=True,
-                cwd=actual_work_dir,
-            )
-            cached_result = subprocess.run(
-                ["git", "diff", "--cached"],
-                capture_output=True,
-                text=True,
-                cwd=actual_work_dir,
-            )
-            diff_text = (diff_result.stdout + cached_result.stdout).strip()
-            untracked_files = "\n".join(sorted(_capture_untracked(actual_work_dir)))
-            if not diff_text and not untracked_files:
-                return {"error": "No changes detected"}
-            context_parts = []
-            if diff_text:
-                context_parts.append(f"Diff:\n{diff_text[:4000]}")
-            if untracked_files:
-                context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
             try:
+                diff_result = subprocess.run(
+                    ["git", "diff"],
+                    capture_output=True,
+                    text=True,
+                    cwd=actual_work_dir,
+                )
+                cached_result = subprocess.run(
+                    ["git", "diff", "--cached"],
+                    capture_output=True,
+                    text=True,
+                    cwd=actual_work_dir,
+                )
+                diff_text = (diff_result.stdout + cached_result.stdout).strip()
+                untracked_files = "\n".join(sorted(_capture_untracked(actual_work_dir)))
+                if not diff_text and not untracked_files:
+                    return {"error": "No changes detected"}
+                context_parts = []
+                if diff_text:
+                    context_parts.append(f"Diff:\n{diff_text[:4000]}")
+                if untracked_files:
+                    context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
                 msg = _generate_commit_msg("\n\n".join(context_parts), detailed=True)
                 scm_pending = os.path.join(cs_data_dir, "pending-scm-message.json")
                 with open(scm_pending, "w") as f:

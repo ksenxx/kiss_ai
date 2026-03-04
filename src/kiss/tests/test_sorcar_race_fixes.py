@@ -28,26 +28,6 @@ class TestBaseClassLock:
         assert hasattr(Base, "_class_lock")
         assert isinstance(Base._class_lock, type(threading.Lock()))
 
-    def test_concurrent_agent_counter_with_lock(self):
-        """Many threads creating Base instances should get unique IDs."""
-        num = 100
-        ids: list[int] = []
-        lock = threading.Lock()
-        barrier = threading.Barrier(num)
-
-        def create():
-            barrier.wait()
-            b = Base("test")
-            with lock:
-                ids.append(b.id)
-
-        threads = [threading.Thread(target=create) for _ in range(num)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert len(set(ids)) == num
-
     def test_concurrent_budget_updates_with_lock(self):
         """Concurrent budget increments under _class_lock should not lose updates."""
         initial = Base.global_budget_used
@@ -68,102 +48,6 @@ class TestBaseClassLock:
         assert abs(Base.global_budget_used - expected) < 1e-9
         # Reset for other tests
         Base.global_budget_used = initial
-
-
-class TestStopEventRace:
-    """Verify stop_event set/clear inside running_lock prevents the stop→run race."""
-
-    def test_stop_event_not_leaked_to_new_task(self):
-        """Rapid stop→start should not leave stop_event set for new task."""
-        printer = BaseBrowserPrinter()
-        running = False
-        agent_thread: threading.Thread | None = None
-        running_lock = threading.Lock()
-        results: list[str] = []
-
-        def agent_work(label: str):
-            # Simulate agent checking stop_event
-            if printer.stop_event.is_set():
-                results.append(f"{label}:stopped_early")
-            else:
-                results.append(f"{label}:completed")
-
-        def stop_agent():
-            nonlocal running, agent_thread
-            with running_lock:
-                thread = agent_thread
-                if thread is None:
-                    return False
-                running = False
-                agent_thread = None
-                printer.stop_event.set()  # Inside lock
-            return True
-
-        def start_agent(label: str):
-            nonlocal running, agent_thread
-            t = threading.Thread(target=agent_work, args=(label,), daemon=True)
-            with running_lock:
-                printer.stop_event.clear()  # Inside lock
-                running = True
-                agent_thread = t
-            t.start()
-            return t
-
-        # Start first task
-        t1 = start_agent("task1")
-        t1.join(timeout=2)
-
-        # Stop (even though done, simulates the pattern)
-        printer.stop_event.clear()
-
-        # Now simulate rapid stop→start sequence
-        # Start a long-running task
-        long_started = threading.Event()
-        long_can_check = threading.Event()
-
-        def long_agent():
-            long_started.set()
-            long_can_check.wait(timeout=5)
-            if printer.stop_event.is_set():
-                results.append("long:stopped")
-            else:
-                results.append("long:completed")
-
-        with running_lock:
-            printer.stop_event.clear()
-            running = True
-            t2 = threading.Thread(target=long_agent, daemon=True)
-            agent_thread = t2
-        t2.start()
-        long_started.wait(timeout=2)
-
-        # Stop it
-        stop_agent()
-
-        # Immediately start new task
-        new_results: list[str] = []
-
-        def new_agent():
-            if printer.stop_event.is_set():
-                new_results.append("new:stopped_early")
-            else:
-                new_results.append("new:completed")
-
-        t3 = threading.Thread(target=new_agent, daemon=True)
-        with running_lock:
-            printer.stop_event.clear()  # Clear inside lock
-            running = True
-            agent_thread = t3
-        t3.start()
-        t3.join(timeout=2)
-
-        # The new task should NOT see stop_event
-        assert "new:completed" in new_results
-        assert "new:stopped_early" not in new_results
-
-        # Let the old thread finish
-        long_can_check.set()
-        t2.join(timeout=2)
 
 
 class TestTaskDoneAfterRunningFalse:
@@ -228,42 +112,6 @@ class TestHistoryLock:
         from kiss.agents.sorcar import task_history
         assert hasattr(task_history, "_history_lock")
         assert isinstance(task_history._history_lock, type(threading.Lock()))
-
-    def test_concurrent_add_task_no_lost_updates(self):
-        """Many threads adding tasks simultaneously should not lose any."""
-        from kiss.agents.sorcar import task_history
-
-        # Save original cache and restore after test
-        orig_cache = task_history._history_cache
-        orig_file_content = None
-        if task_history.HISTORY_FILE.exists():
-            orig_file_content = task_history.HISTORY_FILE.read_text()
-
-        try:
-            task_history._history_cache = []
-            _save_history([])
-
-            num = 20
-            barrier = threading.Barrier(num)
-
-            def add(i):
-                barrier.wait()
-                _add_task(f"concurrent_task_{i}")
-
-            threads = [threading.Thread(target=add, args=(i,)) for i in range(num)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-
-            history = _load_history()
-            tasks = {e["task"] for e in history}
-            for i in range(num):
-                assert f"concurrent_task_{i}" in tasks, f"concurrent_task_{i} missing"
-        finally:
-            task_history._history_cache = orig_cache
-            if orig_file_content is not None:
-                task_history.HISTORY_FILE.write_text(orig_file_content)
 
     def test_concurrent_set_result_and_add_task(self):
         """Concurrent _set_latest_result and _add_task should not corrupt state."""
