@@ -383,7 +383,7 @@ def run_chatbot(
                 args=(task, result_text),
                 daemon=True,
             ).start()
-        except _StopRequested:
+        except (KeyboardInterrupt, _StopRequested):
             result_text = "(stopped)"
             with running_lock:
                 if agent_thread is not current_thread:
@@ -423,8 +423,9 @@ def run_chatbot(
     def stop_agent() -> bool:
         """Kill the current agent thread and reset state for a new task.
 
-        Immediately resets running state so a new agent thread can be started.
-        Injects _StopRequested into the old thread to clean it up.
+        Sets the printer's stop_event so the agent stops at the next
+        printer.print() or token_callback() check.  Also injects
+        _StopRequested via PyThreadState_SetAsyncExc as a fallback.
         """
         nonlocal running, agent_thread
         with running_lock:
@@ -433,6 +434,7 @@ def run_chatbot(
                 return False
             running = False
             agent_thread = None
+        printer.stop_event.set()
         import ctypes
 
         tid = thread.ident
@@ -506,6 +508,7 @@ def run_chatbot(
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
+        printer.stop_event.clear()
         t = threading.Thread(
             target=run_agent_thread,
             args=(task, model, attachments),

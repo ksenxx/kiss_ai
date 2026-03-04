@@ -1,10 +1,12 @@
 """Tests for the stop-agent-and-restart threading behavior in sorcar.py."""
 
+import asyncio
 import ctypes
 import threading
 import time
 from collections.abc import Callable
 
+from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.sorcar import _StopRequested
 
 
@@ -687,3 +689,94 @@ def test_stress_interleaved_start_stop_from_many_threads():
 
     time.sleep(0.2)
     ctrl.assert_idle()
+
+
+# ---------------------------------------------------------------------------
+# Tests for BaseBrowserPrinter.stop_event integration
+# ---------------------------------------------------------------------------
+
+
+def test_printer_stop_event_raises_in_print():
+    """Setting stop_event causes printer.print() to raise KeyboardInterrupt."""
+    printer = BaseBrowserPrinter()
+    printer.stop_event.set()
+    raised = False
+    try:
+        printer.print("hello", type="text")
+    except KeyboardInterrupt:
+        raised = True
+    assert raised
+
+
+def test_printer_stop_event_raises_in_token_callback():
+    """Setting stop_event causes token_callback() to raise KeyboardInterrupt."""
+    printer = BaseBrowserPrinter()
+    printer.stop_event.set()
+    raised = False
+    try:
+        asyncio.run(printer.token_callback("token"))
+    except KeyboardInterrupt:
+        raised = True
+    assert raised
+
+
+def test_printer_stop_event_clear_allows_normal_operation():
+    """Cleared stop_event allows print() and token_callback() to work normally."""
+    printer = BaseBrowserPrinter()
+    printer.stop_event.clear()
+    printer.print("hello", type="text")
+    asyncio.run(printer.token_callback("token"))
+
+
+def test_printer_stop_event_stops_agent_loop_in_thread():
+    """Full integration: stop_event interrupts a thread doing printer.print() in a loop."""
+    printer = BaseBrowserPrinter()
+    printer.stop_event.clear()
+    stopped = threading.Event()
+    started = threading.Event()
+
+    def agent_loop():
+        started.set()
+        try:
+            for i in range(10000):
+                printer.print(f"Step {i}", type="text")
+                time.sleep(0.001)
+        except KeyboardInterrupt:
+            stopped.set()
+
+    t = threading.Thread(target=agent_loop, daemon=True)
+    t.start()
+    started.wait(timeout=2)
+    time.sleep(0.05)
+    printer.stop_event.set()
+    t.join(timeout=3)
+    assert stopped.is_set()
+    assert not t.is_alive()
+
+
+def test_printer_stop_event_reusable_across_tasks():
+    """stop_event can be set/cleared across multiple task cycles."""
+    printer = BaseBrowserPrinter()
+
+    for _ in range(5):
+        printer.stop_event.clear()
+        stopped = threading.Event()
+        started = threading.Event()
+
+        def agent_loop():
+            started.set()
+            try:
+                while True:
+                    printer.print("working", type="text")
+                    time.sleep(0.001)
+            except KeyboardInterrupt:
+                stopped.set()
+
+        t = threading.Thread(target=agent_loop, daemon=True)
+        t.start()
+        started.wait(timeout=2)
+        time.sleep(0.02)
+        printer.stop_event.set()
+        t.join(timeout=3)
+        assert stopped.is_set()
+        assert not t.is_alive()

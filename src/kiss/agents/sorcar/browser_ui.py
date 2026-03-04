@@ -398,6 +398,7 @@ class BaseBrowserPrinter(Printer):
         self._bash_buffer: list[str] = []
         self._bash_last_flush = 0.0
         self._bash_flush_timer: threading.Timer | None = None
+        self.stop_event = threading.Event()
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
@@ -486,6 +487,10 @@ class BaseBrowserPrinter(Printer):
             event["summary"] = str(parsed["summary"])
         self.broadcast(event)
 
+    def _check_stop(self) -> None:
+        if self.stop_event.is_set():
+            raise KeyboardInterrupt("Agent stop requested")
+
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
         """Render content by broadcasting SSE events to connected browser clients.
 
@@ -499,6 +504,7 @@ class BaseBrowserPrinter(Printer):
         Returns:
             str: Extracted text from stream events, or empty string.
         """
+        self._check_stop()
         if type == "text":
             from io import StringIO
 
@@ -562,6 +568,7 @@ class BaseBrowserPrinter(Printer):
         Args:
             token: The text token to broadcast.
         """
+        self._check_stop()
         if token:
             delta_type = (
                 "thinking_delta" if self._current_block_type == "thinking" else "text_delta"

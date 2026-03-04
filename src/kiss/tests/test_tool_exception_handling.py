@@ -70,7 +70,7 @@ def test_keyboard_interrupt_propagates() -> None:
     assert caught, "KeyboardInterrupt should propagate"
 
 
-def test_base_exception_subclass_caught() -> None:
+def test_base_exception_subclass_propagates() -> None:
     class CustomBaseError(BaseException):
         pass
 
@@ -84,13 +84,15 @@ def test_base_exception_subclass_caught() -> None:
 
     agent = _make_agent()
     agent._add_functions([finish, custom_tool])
-    name, response = agent._execute_tool({"name": "custom_tool", "arguments": {"x": "a"}})
-    assert name == "custom_tool"
-    assert "Failed to call" in response
-    assert "custom base error" in response
+    caught = False
+    try:
+        agent._execute_tool({"name": "custom_tool", "arguments": {"x": "a"}})
+    except CustomBaseError:
+        caught = True
+    assert caught, "BaseException subclasses should propagate"
 
 
-def test_generator_exit_caught() -> None:
+def test_generator_exit_propagates() -> None:
     def gen_exit_tool(x: str) -> str:
         """Tool that raises GeneratorExit.
 
@@ -101,9 +103,12 @@ def test_generator_exit_caught() -> None:
 
     agent = _make_agent()
     agent._add_functions([finish, gen_exit_tool])
-    name, response = agent._execute_tool({"name": "gen_exit_tool", "arguments": {"x": "a"}})
-    assert name == "gen_exit_tool"
-    assert "Failed to call" in response
+    caught = False
+    try:
+        agent._execute_tool({"name": "gen_exit_tool", "arguments": {"x": "a"}})
+    except GeneratorExit:
+        caught = True
+    assert caught, "GeneratorExit should propagate"
 
 
 def _parse_summarizer_result(summarizer_result: str) -> str:
