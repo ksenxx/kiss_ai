@@ -26,6 +26,7 @@ from kiss.agents.sorcar.code_server import (
     _prepare_merge_view,
     _scan_files,
     _setup_code_server,
+    _snapshot_files,
 )
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
@@ -240,6 +241,7 @@ def run_chatbot(
 
     html_page = _build_html(title, code_server_url, actual_work_dir)
     shutdown_timer: threading.Timer | None = None
+    shutdown_lock = threading.Lock()
 
     def refresh_file_cache() -> None:
         nonlocal file_cache
@@ -353,12 +355,15 @@ def run_chatbot(
 
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
+        pre_file_hashes: dict[str, str] = {}
         result_text = ""
+        done_event: dict[str, str] | None = None
         try:
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
+            pre_file_hashes = _snapshot_files(actual_work_dir, set(pre_hunks.keys()))
             active_file = _read_active_file(cs_data_dir)
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
@@ -374,27 +379,13 @@ def run_chatbot(
                 **extra_kwargs,
             )
             result_text = result or ""
-            with running_lock:
-                if agent_thread is not current_thread:
-                    return
-            printer.broadcast({"type": "task_done"})
-            threading.Thread(
-                target=generate_followup,
-                args=(task, result_text),
-                daemon=True,
-            ).start()
+            done_event = {"type": "task_done"}
         except (KeyboardInterrupt, _StopRequested):
             result_text = "(stopped)"
-            with running_lock:
-                if agent_thread is not current_thread:
-                    return
-            printer.broadcast({"type": "task_stopped"})
+            done_event = {"type": "task_stopped"}
         except Exception as e:
             result_text = f"(error: {e})"
-            with running_lock:
-                if agent_thread is not current_thread:
-                    return
-            printer.broadcast({"type": "task_error", "text": str(e)})
+            done_event = {"type": "task_error", "text": str(e)}
         finally:
             _set_latest_result(result_text)
             _append_task_to_md(task, result_text)
@@ -403,12 +394,23 @@ def run_chatbot(
                     return
                 running = False
                 agent_thread = None
+            # Broadcast AFTER setting running=False so clients can
+            # immediately submit a new task without getting a 409.
+            if done_event:
+                printer.broadcast(done_event)
+            if done_event and done_event.get("type") == "task_done":
+                threading.Thread(
+                    target=generate_followup,
+                    args=(task, result_text),
+                    daemon=True,
+                ).start()
             try:
                 merge_result = _prepare_merge_view(
                     actual_work_dir,
                     cs_data_dir,
                     pre_hunks,
                     pre_untracked,
+                    pre_file_hashes,
                 )
                 if merge_result.get("status") == "opened":
                     printer.broadcast({"type": "merge_started"})
@@ -434,7 +436,9 @@ def run_chatbot(
                 return False
             running = False
             agent_thread = None
-        printer.stop_event.set()
+            # Set stop_event inside the lock so a concurrent run_task()
+            # that clears it won't race with this set().
+            printer.stop_event.set()
         import ctypes
 
         tid = thread.ident
@@ -465,11 +469,12 @@ def run_chatbot(
         nonlocal shutdown_timer
         if printer.has_clients():
             return
-        if shutdown_timer is not None:
-            shutdown_timer.cancel()
-        shutdown_timer = threading.Timer(1.0, _do_shutdown)
-        shutdown_timer.daemon = True
-        shutdown_timer.start()
+        with shutdown_lock:
+            if shutdown_timer is not None:
+                shutdown_timer.cancel()
+            shutdown_timer = threading.Timer(1.0, _do_shutdown)
+            shutdown_timer.daemon = True
+            shutdown_timer.start()
 
     async def index(request: Request) -> HTMLResponse:
         return HTMLResponse(html_page)
@@ -508,7 +513,6 @@ def run_chatbot(
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
-        printer.stop_event.clear()
         t = threading.Thread(
             target=run_agent_thread,
             args=(task, model, attachments),
@@ -517,6 +521,9 @@ def run_chatbot(
         with running_lock:
             if running:
                 return JSONResponse({"error": "Agent is already running"}, status_code=409)
+            # Clear stop_event inside the lock so it can't race with
+            # stop_agent() setting it in the same lock.
+            printer.stop_event.clear()
             running = True
             agent_thread = t
         t.start()

@@ -173,5 +173,20 @@ def test_clear_event_appends_active_file_to_user_msg():
     )
 
 
+def test_model_picker_shrinks_on_zoom():
+    """#model-picker must shrink to prevent send button overflow on zoom."""
+    idx = CHATBOT_CSS.index("#model-picker{")
+    block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+    assert "min-width:0" in block
+    assert "overflow:hidden" in block
+
+
+def test_input_actions_no_shrink():
+    """#input-actions needs flex-shrink:0 so send button stays visible."""
+    idx = CHATBOT_CSS.index("#input-actions{")
+    block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+    assert "flex-shrink:0" in block
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
