@@ -53,11 +53,13 @@ SYSTEM_PROMPT = f"""
 - Each function should do one thing well
 - Use clear, descriptive names
 - Public methods MUST have full documentation
+- Once you finish the task, DO NOT write documentations unless the task specifically requires it.
 - You MUST check and test the code you have written except for formatting/typing changes
 
 ## Testing Instructions
 - Run lint and typecheckers and fix any lint and typecheck errors
-- Carefully read the code, find and fix inconsistencies, errors, and AI slop in the code
+- Carefully read the code, find and fix redundancies, duplications, 
+  inconsistencies, errors, and AI slop in the code
 - Generate comprehensive tests so that you achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, or any form of test doubles
 - Integration tests are HIGHLY encouraged
@@ -67,7 +69,7 @@ SYSTEM_PROMPT = f"""
   optimizing the code for performance
 - Each test should be independent and verify actual behavior
 
-## Use tools when you need to:
+## Use web tools when you need to:
 - Look up API documentation or library usage from the internet
 - Find examples of similar implementations
 - Understand existing code in the project
@@ -77,7 +79,8 @@ SYSTEM_PROMPT = f"""
 ### Self-Improvement Loop
 - Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
   with instructions and rules for yourself if you have learned any major lessons
-  during the task execution.
+  during the task execution.  Also compact the lessons you have learned
+  into concise instructions and rules for you to follow.
 - Review lessons when the agent starts
 
 ## After you have implemented the task, aggresively and carefully simplify and clean up the code
