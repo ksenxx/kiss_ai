@@ -15,6 +15,7 @@ from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
+from kiss.docker.docker_manager import DockerManager
 
 
 class SorcarAgent(RelentlessAgent):
@@ -23,6 +24,7 @@ class SorcarAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
+        self.docker_manager: DockerManager | None = None
 
     def _get_tools(self) -> list:
         printer = self.printer
@@ -42,7 +44,6 @@ class SorcarAgent(RelentlessAgent):
     def _reset(
         self,
         model_name: str | None,
-        summarizer_model_name: str | None,
         max_sub_sessions: int | None,
         max_steps: int | None,
         max_budget: float | None,
@@ -51,14 +52,9 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        cfg = config_module.DEFAULT_CONFIG.assistant.sorcar_agent
+        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
         super()._reset(
             model_name=model_name if model_name is not None else cfg.model_name,
-            summarizer_model_name=(
-                summarizer_model_name
-                if summarizer_model_name is not None
-                else cfg.summarizer_model_name
-            ),
             max_sub_sessions=(
                 max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
             ),
@@ -73,7 +69,6 @@ class SorcarAgent(RelentlessAgent):
     def run(  # type: ignore[override]
         self,
         model_name: str | None = None,
-        summarizer_model_name: str | None = None,
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
         max_steps: int | None = None,
@@ -91,8 +86,6 @@ class SorcarAgent(RelentlessAgent):
 
         Args:
             model_name: LLM model to use. Defaults to config value.
-            summarizer_model_name: LLM model for summarizing trajectories on failure.
-                Defaults to config value.
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
             max_steps: Maximum steps per sub-session. Defaults to config value.
@@ -109,7 +102,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        cfg = config_module.DEFAULT_CONFIG.assistant.sorcar_agent
+        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
         actual_headless = headless if headless is not None else cfg.headless
         self.web_use_tool = WebUseTool(headless=actual_headless)
 
@@ -134,7 +127,6 @@ class SorcarAgent(RelentlessAgent):
                     )
             return super().run(
                 model_name=model_name,
-                summarizer_model_name=summarizer_model_name,
                 system_instructions=system_instructions,
                 prompt_template=(
                     prompt + f"\n\n- The default file path: {current_editor_file}"
@@ -149,7 +141,7 @@ class SorcarAgent(RelentlessAgent):
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,
                 verbose=verbose,
-                tools_factory=self._get_tools,
+                tools=self._get_tools(),
                 attachments=attachments,
             )
         finally:
@@ -165,9 +157,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
         "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
-    )
-    parser.add_argument(
-        "--summarizer_model_name", type=str, default="claude-haiku-4-5", help="LLM model name"
     )
     parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
     parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
@@ -210,7 +199,6 @@ password 'For AI Assistant.' and read the messages.
         result = agent.run(
             prompt_template=task_description,
             model_name=args.model_name,
-            summarizer_model_name=args.summarizer_model_name,
             max_steps=args.max_steps,
             max_budget=args.max_budget,
             work_dir=work_dir,

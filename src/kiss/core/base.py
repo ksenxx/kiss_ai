@@ -48,6 +48,7 @@ SYSTEM_PROMPT = f"""
 ## Code Style Guidelines
 - Write simple, clean, and readable code with minimal indirection
 - Avoid unnecessary object attributes, local variables, and config variables
+- Avoid tight coupling between files and modules.
 - Avoid object/struct attribute redirections
 - No redundant abstractions or duplicate code
 - Each function should do one thing well
@@ -58,7 +59,7 @@ SYSTEM_PROMPT = f"""
 
 ## Testing Instructions
 - Run lint and typecheckers and fix any lint and typecheck errors
-- Carefully read the code, find and fix redundancies, duplications, 
+- Carefully read the code, find and fix redundancies, duplications,
   inconsistencies, errors, and AI slop in the code
 - Generate comprehensive tests so that you achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, or any form of test doubles
@@ -73,14 +74,15 @@ SYSTEM_PROMPT = f"""
 - Look up API documentation or library usage from the internet
 - Find examples of similar implementations
 - Understand existing code in the project
-- Use the internet to augment recent knowledge and to perform web based tasks
+- Augment recent knowledge and to perform web based tasks
 - Read papers from the internet to understand concepts and algorithms
 
 ### Self-Improvement Loop
 - Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
-  with instructions and rules for yourself if you have learned any major lessons
+  with instructions and rules for yourself ONLY IF you have learned any major lessons
   during the task execution.  Also compact the lessons you have learned
   into concise instructions and rules for you to follow.
+- The lessons MUST NOT be specific to a task, but about agent behavior.
 - Review lessons when the agent starts
 
 ## After you have implemented the task, aggresively and carefully simplify and clean up the code
@@ -115,6 +117,7 @@ class Base:
         self.id = Base.agent_counter
         Base.agent_counter += 1
         self.base_dir = ""
+        self.printer: Printer | None = None
 
     def set_printer(
         self,

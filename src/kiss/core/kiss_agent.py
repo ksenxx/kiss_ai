@@ -360,9 +360,7 @@ class KISSAgent(Base):
             if function_name not in self.function_map:  # pragma: no cover
                 raise KISSError(f"Function {function_name} is not a registered tool")
             function_response = str(self.function_map[function_name](**function_args))
-        except KeyboardInterrupt:
-            raise
-        except BaseException as e:
+        except (Exception, SystemExit, BaseException) as e:
             fn = self.function_map.get(function_name)
             sig = inspect.signature(fn) if fn else None
             sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""

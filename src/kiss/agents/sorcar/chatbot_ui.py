@@ -1798,6 +1798,44 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
             "</div>"
         )
 
+    _s25 = (
+        ' viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        ' stroke-width="2.5" stroke-linecap="round"'
+        ' stroke-linejoin="round"'
+    )
+    _s20 = (
+        ' viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        ' stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round"'
+    )
+    _svg_accept = f'<svg{_s25}><polyline points="20 6 9 17 4 12"/></svg>'
+    _svg_reject = (
+        f'<svg{_s25}><line x1="18" y1="6" x2="6" y2="18"/>'
+        '<line x1="6" y1="6" x2="18" y2="18"/></svg>'
+    )
+    _svg_prev = f'<svg{_s25}><polyline points="15 18 9 12 15 6"/></svg>'
+    _svg_next = f'<svg{_s25}><polyline points="9 18 15 12 9 6"/></svg>'
+    _svg_accept_all = (
+        f'<svg{_s25}><polyline points="18 7 9.5 17 6 13"/>'
+        '<polyline points="22 7 13.5 17 12 15.3"/></svg>'
+    )
+    _svg_reject_all = (
+        f'<svg{_s25}><line x1="17" y1="5" x2="7" y2="15"/>'
+        '<line x1="7" y1="5" x2="17" y2="15"/>'
+        '<line x1="17" y1="9" x2="7" y2="19"/>'
+        '<line x1="7" y1="9" x2="17" y2="19"/></svg>'
+    )
+    _svg_commit = (
+        f'<svg{_s20}><circle cx="12" cy="12" r="4"/>'
+        '<line x1="1.05" y1="12" x2="7" y2="12"/>'
+        '<line x1="17.01" y1="12" x2="22.96" y2="12"/></svg>'
+    )
+    _svg_push = (
+        f'<svg{_s20}><line x1="12" y1="19" x2="12" y2="5"/>'
+        '<polyline points="5 12 12 5 19 12"/></svg>'
+    )
+    _sep = '<span class="mt-sep"></span>'
+
     return (
         HTML_HEAD.format(title=title, css=css)
         + f"""<body>
@@ -1805,17 +1843,17 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
   <div id="editor-panel" style="width:75%;flex-shrink:0">
     {editor_content}
     <div id="merge-toolbar">
-      <button onclick="mergeAction('accept')" title="Accept current change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></button>
-      <button onclick="mergeAction('reject')" title="Reject current change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-      <span class="mt-sep"></span>
-      <button onclick="mergeAction('prev')" title="Previous change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-      <button onclick="mergeAction('next')" title="Next change"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
-      <span class="mt-sep"></span>
-      <button onclick="mergeAction('accept-all')" title="Accept all remaining changes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 7 9.5 17 6 13"/><polyline points="22 7 13.5 17 12 15.3"/></svg></button>
-      <button onclick="mergeAction('reject-all')" title="Reject all remaining changes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="5" x2="7" y2="15"/><line x1="7" y1="5" x2="17" y2="15"/><line x1="17" y1="9" x2="7" y2="19"/><line x1="7" y1="9" x2="17" y2="19"/></svg></button>
-      <span class="mt-sep"></span>
-      <button id="commit-btn" onclick="mergeCommit()" title="Commit changes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/></svg></button>
-      <button id="push-btn" onclick="mergePush()" title="Push to remote"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+      <button onclick="mergeAction('accept')" title="Accept current change">{_svg_accept}</button>
+      <button onclick="mergeAction('reject')" title="Reject current change">{_svg_reject}</button>
+      {_sep}
+      <button onclick="mergeAction('prev')" title="Previous change">{_svg_prev}</button>
+      <button onclick="mergeAction('next')" title="Next change">{_svg_next}</button>
+      {_sep}
+      <button onclick="mergeAction('accept-all')" title="Accept all">{_svg_accept_all}</button>
+      <button onclick="mergeAction('reject-all')" title="Reject all">{_svg_reject_all}</button>
+      {_sep}
+      <button id="commit-btn" onclick="mergeCommit()" title="Commit changes">{_svg_commit}</button>
+      <button id="push-btn" onclick="mergePush()" title="Push to remote">{_svg_push}</button>
     </div>
   </div>
   <div id="divider"></div>

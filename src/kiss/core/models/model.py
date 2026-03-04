@@ -105,10 +105,10 @@ def _get_callback_loop() -> asyncio.AbstractEventLoop:
         _callback_helper_ready.clear()
         t = threading.Thread(target=run_loop, daemon=True)
         t.start()
-    _callback_helper_ready.wait(timeout=5)
-    if _callback_helper_loop is None or _callback_helper_loop.is_closed():
-        raise RuntimeError("Callback helper loop failed to start")
-    return _callback_helper_loop
+        _callback_helper_ready.wait(timeout=5)
+        if _callback_helper_loop is None or _callback_helper_loop.is_closed():
+            raise RuntimeError("Callback helper loop failed to start")
+        return _callback_helper_loop
 
 
 class Model(ABC):
