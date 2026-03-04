@@ -68,7 +68,7 @@ python -m kiss.agents.sorcar.sorcar
 
 # What is KISS and KISS Sorcar? How It Started
 
-During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet very powerful agentic framework**. It took me 18 days to implement KISS using both AI and manual coding. The motivation for the KISS project came after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. I started the KISS project with the quest "What is possible (with modern AI)?" and "What is possible by a mid-career SWE/PL Professor in a couple of months using modern AI?". Since then 2 months have passed and KISS has evolved into a simple yet powerful IDE, called **KISS Sorcar** **(a free alternative to Cursor or Antigravity)** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support. I provide support and maintain the framework with long-term commitment. The project incorporates software engineering principles and practices developed over my 30 years of experience in the field. I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTHROPIC_API_KEY` (best model for Sorcar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
+During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet very powerful agentic framework**. It took me 18 days to implement KISS using both AI and manual coding. The motivation for the KISS project came after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. I started the KISS project with the quest "What is possible (with modern AI)?" and "What is possible by a mid-career SWE/PL Professor in a couple of months using modern AI?". Since then 2 months have passed and KISS has evolved into a simple yet powerful IDE, called **KISS Sorcar** **(a free alternative to Cursor or Antigravity)** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support.  Although I wrote most of the code (manually and using AI), Marius Momeu, helped me to identify critical bugs in the core and sorcar.  I provide support and maintain the framework with long-term commitment. The project incorporates software engineering principles and practices developed over my 30 years of experience in the field.  I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTHROPIC_API_KEY` (best model for Sorcar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
 
 #whatispossible #KISSSorcar
 
@@ -184,7 +184,7 @@ KISS Sorcar features:
 
 ## 🔧 Using Repo Optimizer
 
-**This is one of the most important and useful features of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `AssistantAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
+**This is one of the most important and useful features of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
 
 ```bash
 # Optimize a program for speed and cost
@@ -208,8 +208,6 @@ uv run python -m kiss.agents.coding_agents.repo_optimizer \
 1. If repeated errors are observed, fixes the code and reruns
 1. Once the command succeeds, analyzes output and optimizes the source to minimize the specified metrics
 1. Repeats until the metrics are reduced significantly
-
-📖 **For the full story of how the repo optimizer self-optimized the RelentlessCodingAgent, see [BLOG.md](src/kiss/agents/coding_agents/BLOG.md)**
 
 ## 🎨 Output Formatting
 
@@ -290,7 +288,7 @@ KISS is a lightweight, yet powerful, multi agent framework that implements a ReA
 - **Multi-Tool Execution**: Agents can execute multiple tool calls in a single step for faster task completion
 - **Relentless Agent**: Single-agent coding system with smart auto-continuation for long-running tasks
 - **Browser-Based Assistant**: Interactive web UI for agents with real-time streaming and task history
-- **Repo Optimizer**: Uses AssistantAgent to iteratively optimize code in your project for speed and cost (💡 new idea)
+- **Repo Optimizer**: Uses SorcarAgent to iteratively optimize code in your project for speed and cost (💡 new idea)
 - **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
 - **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
 - **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
@@ -458,7 +456,7 @@ kiss/
 ├── src/kiss/
 │   ├── agents/          # Agent implementations
 │   │   ├── sorcar/                 # Sorcar agent with coding + browser tools
-│   │   │   ├── assistant_agent.py      # AssistantAgent with coding and browser automation
+│   │   │   ├── sorcar_agent.py         # SorcarAgent with coding and browser automation
 │   │   │   ├── sorcar.py              # Browser-based Sorcar UI
 │   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
 │   │   │   ├── chatbot_ui.py           # Chatbot UI templates: CSS, JavaScript, HTML
@@ -469,11 +467,10 @@ kiss/
 │   │   │   ├── web_use_tool.py         # WebUseTool with Playwright-based browser automation
 │   │   │   └── config.py               # Sorcar agent configuration
 │   │   ├── coding_agents/          # Coding agents for software development tasks
-│   │   │   ├── repo_optimizer.py          # Iterative code optimizer using AssistantAgent
+│   │   │   ├── repo_optimizer.py          # Iterative code optimizer using SorcarAgent
 │   │   │   ├── repo_agent.py              # Repo-level task agent
 │   │   │   ├── agent_optimizer.py         # Meta-optimizer for agent source code
-│   │   │   ├── config.py                  # Coding agent configuration
-│   │   │   └── BLOG.md                    # Blog post about self-optimization
+│   │   │   └── config.py                  # Coding agent configuration
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
 │   │   │   ├── gepa.py
 │   │   │   ├── config.py
@@ -488,7 +485,6 @@ kiss/
 │   │   │   ├── agent_evolver.py
 │   │   │   ├── improver_agent.py
 │   │   │   ├── config.py
-│   │   │   ├── BLOG.md
 │   │   │   └── README.md
 │   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent (deprecated)
 │   │   │   ├── agent_evolver.py
@@ -516,6 +512,7 @@ kiss/
 │   │   └── docker_manager.py
 │   ├── scripts/         # Utility scripts
 │   │   ├── check.py                    # Code quality check script
+│   │   ├── fix.py                      # Code fix/formatting script
 │   │   ├── generate_api_docs.py        # API documentation generator
 │   │   └── update_models.py            # Model info updater script
 │   ├── tests/           # Test suite
@@ -534,6 +531,7 @@ kiss/
 │   │   ├── test_core_branch_coverage.py
 │   │   ├── test_current_editor_file.py
 │   │   ├── test_docker_manager.py
+│   │   ├── test_error_handling.py
 │   │   ├── test_evolver_progress_callback.py
 │   │   ├── test_file_usage.py
 │   │   ├── test_gemini_model_internals.py
@@ -545,22 +543,29 @@ kiss/
 │   │   ├── test_kiss_agent_coverage.py
 │   │   ├── test_kiss_agent_non_agentic.py
 │   │   ├── test_magic_config_button.py
+│   │   ├── test_merge_view_second_change.py
 │   │   ├── test_model_base_class.py
 │   │   ├── test_model_implementations.py
 │   │   ├── test_multimodal.py
 │   │   ├── test_print_to_browser.py
 │   │   ├── test_print_to_console.py
+│   │   ├── test_race_conditions.py
 │   │   ├── test_run_prompt_button.py
 │   │   ├── test_scan_files_order.py
 │   │   ├── test_scm_commit_message.py
 │   │   ├── test_set_prompt_curly_braces.py
+│   │   ├── test_sorcar_race_fixes.py
+│   │   ├── test_stop_agent_thread.py
 │   │   ├── test_system_prompt.py
 │   │   ├── test_token_callback.py
 │   │   ├── test_tool_exception_handling.py
 │   │   ├── test_useful_tools.py
 │   │   ├── test_vscode_panel.py
 │   │   ├── test_web_use_tool.py
-│   │   └── integration_test_*.py       # Integration tests
+│   │   ├── integration_test_assistant_agent.py
+│   │   ├── integration_test_gmail_login.py
+│   │   ├── integration_test_google_search.py
+│   │   └── integration_test_web_use_tool.py
 │   ├── _version.py       # Single source of truth for package version
 │   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
@@ -573,9 +578,6 @@ kiss/
 │   ├── test_fresh_lib_install.sh   # Fresh library install test
 │   └── test_fresh_repo_install.sh  # Fresh repo install test
 ├── API.md               # KISSAgent API reference
-├── BLOG.md              # Blog post about the KISS framework
-├── CLAUDE.md            # Code style guidelines for LLM assistants
-├── CLAUDE-PROMPT.md     # Prompt guidelines for LLM assistants
 ├── example_prompt.md    # Example prompt for the assistant
 ├── install.sh           # Installation script
 ├── LICENSE              # Apache-2.0 license
