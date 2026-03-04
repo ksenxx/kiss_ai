@@ -15,6 +15,9 @@ from google.genai import types
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment, Model, TokenCallback
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class GeminiModel(Model):
     """A model that uses Google's GenAI API (Gemini)."""
@@ -125,6 +128,7 @@ class GeminiModel(Model):
                     else:
                         response_dict = {"result": content}
                 except json.JSONDecodeError:
+                    logger.debug("Exception caught", exc_info=True)
                     response_dict = {"result": content}
 
                 # Include thought_signature if we have one for this tool call
@@ -341,4 +345,5 @@ class GeminiModel(Model):
             # Response has embeddings (list), we take the first one
             return list(response.embeddings[0].values)
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e

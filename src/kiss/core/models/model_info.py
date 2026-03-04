@@ -17,19 +17,26 @@ from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, TokenCallback
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 try:
     from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 except ImportError:
+    logger.debug("Exception caught", exc_info=True)
     OpenAICompatibleModel = None  # type: ignore[assignment,misc]
 
 try:
     from kiss.core.models.anthropic_model import AnthropicModel
 except ImportError:
+    logger.debug("Exception caught", exc_info=True)
     AnthropicModel = None  # type: ignore[assignment,misc]
 
 try:
     from kiss.core.models.gemini_model import GeminiModel
 except ImportError:
+    logger.debug("Exception caught", exc_info=True)
     GeminiModel = None  # type: ignore[assignment,misc]
 
 

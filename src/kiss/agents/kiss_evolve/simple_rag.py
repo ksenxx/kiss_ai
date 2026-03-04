@@ -15,6 +15,9 @@ import numpy as np
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import model
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SimpleRAG:
     """Simple and elegant RAG system for document storage and retrieval.
@@ -90,6 +93,7 @@ class SimpleRAG:
             embedding = self._model.get_embedding(text, embedding_model=self.embedding_model_name)
             return np.array(embedding, dtype=np.float32)
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             raise KISSError(f"Failed to generate embedding: {e}") from e
 
     def add_documents(self, documents: list[dict[str, Any]], batch_size: int = 100) -> None:
