@@ -18,6 +18,9 @@ from kiss.core import config as config_module
 from kiss.core.models.model import Model
 from kiss.core.utils import get_config_value
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class CodeVariant:
@@ -563,6 +566,7 @@ combine the best aspects of two code variants to create an improved version.
             # Catch all exceptions since evaluation_fn may execute arbitrary
             # code that could raise any exception type. Set fitness to 0.0 to
             # mark as failed.
+            logger.debug("Exception caught", exc_info=True)
             variant.fitness = 0.0
             variant.evaluation_error = str(e)
             variant.metrics = {}

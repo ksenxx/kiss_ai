@@ -17,6 +17,10 @@ from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.docker.docker_manager import DockerManager
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 TASK_PROMPT = """# Task
 
 {task_description}
@@ -145,6 +149,7 @@ class RelentlessAgent(Base):
                     attachments=attachments if trial == 0 else None,
                 )
             except Exception as exc:
+                logger.debug("Exception caught", exc_info=True)
                 try:
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")
                     summarizer_result = summarizer_agent.run(
@@ -163,8 +168,10 @@ class RelentlessAgent(Base):
                             else summarizer_result
                         )
                     except Exception:
+                        logger.debug("Exception caught", exc_info=True)
                         summary_text = summarizer_result
                 except Exception:
+                    logger.debug("Exception caught", exc_info=True)
                     summary_text = f"Agent failed: {exc}"
                 result = yaml.dump(
                     {"success": False, "summary": summary_text},
@@ -177,6 +184,7 @@ class RelentlessAgent(Base):
             try:
                 payload = yaml.safe_load(result)
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 payload = {}
             if not isinstance(payload, dict):
                 payload = {}

@@ -27,14 +27,11 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: DockerManager | None = None
 
     def _get_tools(self) -> list:
-        printer = self.printer
-
         def _stream(text: str) -> None:
-            if printer:
-                printer.print(text, type="bash_stream")
+            if self.printer:
+                self.printer.print(text, type="bash_stream")
 
-        stream_cb = _stream if printer else None
-        useful_tools = UsefulTools(stream_callback=stream_cb)
+        useful_tools = UsefulTools(stream_callback=_stream)
         bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
         tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool:

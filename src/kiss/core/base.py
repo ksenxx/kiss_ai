@@ -21,6 +21,9 @@ from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import Printer
 from kiss.core.utils import config_to_dict
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
     """Use literal block style for multiline strings in YAML output."""
@@ -151,6 +154,7 @@ class Base:
         try:
             max_tokens = get_max_context_length(self.model_name)
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             max_tokens = None
 
         return {

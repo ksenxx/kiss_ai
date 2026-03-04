@@ -18,6 +18,10 @@ from pathlib import Path
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import config as config_module
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
 
 AGENT_EVOLVER_PROMPT_PART1 = """
@@ -221,6 +225,7 @@ class ImproverAgent:
         try:
             return ImprovementReport.load(path)
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             return None
 
     def _format_report_for_prompt(self, report: ImprovementReport | None) -> str:
@@ -373,6 +378,7 @@ class ImproverAgent:
                 headless=True,
             )
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             print(f"Error during improvement: {e}")
             # Clean up partially failed target folder
             if Path(work_dir).exists():

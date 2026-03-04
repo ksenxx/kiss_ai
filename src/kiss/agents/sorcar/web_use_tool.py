@@ -12,6 +12,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _AUTO_DETECT = "auto"
 KISS_PROFILE_DIR = str(Path.home() / ".kiss" / "browser_profile")
 
@@ -144,10 +148,12 @@ class WebUseTool:
         try:
             self._page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             pass
         try:
             self._page.wait_for_load_state("networkidle", timeout=3000)
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             pass
 
     def _check_for_new_tab(self) -> None:
@@ -181,6 +187,7 @@ class WebUseTool:
                 if locator.nth(i).is_visible():
                     return locator.nth(i)
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 continue
         return locator.first
 
@@ -215,6 +222,7 @@ class WebUseTool:
             self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error navigating to {url}: {e}"
 
     def click(self, element_id: int, action: str = "click") -> str:
@@ -246,6 +254,7 @@ class WebUseTool:
                 self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error clicking element {element_id}: {e}"
 
     def type_text(self, element_id: int, text: str, press_enter: bool = False) -> str:
@@ -273,6 +282,7 @@ class WebUseTool:
                 self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error typing into element {element_id}: {e}"
 
     def press_key(self, key: str) -> str:
@@ -290,6 +300,7 @@ class WebUseTool:
             self._page.wait_for_timeout(300)
             return self._get_ax_tree()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error pressing key '{key}': {e}"
 
     def scroll(self, direction: str = "down", amount: int = 3) -> str:
@@ -313,6 +324,7 @@ class WebUseTool:
             self._page.wait_for_timeout(300)
             return self._get_ax_tree()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error scrolling {direction}: {e}"
 
     def screenshot(self, file_path: str = "screenshot.png") -> str:
@@ -333,6 +345,7 @@ class WebUseTool:
             self._page.screenshot(path=str(path), full_page=False)
             return f"Screenshot saved to {path}"
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error taking screenshot: {e}"
 
     def get_page_content(self, text_only: bool = False) -> str:
@@ -354,6 +367,7 @@ class WebUseTool:
                 return f"Page: {title}\nURL: {url}\n\n{body}"
             return self._get_ax_tree()
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error getting page content: {e}"
 
     def close(self) -> str:
@@ -369,6 +383,7 @@ class WebUseTool:
             if self._playwright:
                 self._playwright.stop()
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             pass
         self._page = None
         self._context = None

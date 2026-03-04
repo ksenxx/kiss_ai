@@ -13,6 +13,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _CS_SETTINGS = {
     "workbench.startupEditor": "none",
     "workbench.tips.enabled": False,
@@ -127,7 +131,10 @@ function activate(ctx){
     var h=s.hunks[idx];
     if(h.oc>0){
       var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
-      if(!ed)return;
+      if(!ed){
+        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+        ed=await vscode.window.showTextDocument(doc,{preview:false});
+      }
       await delLines(ed,h.os,h.oc);
       var rm=h.oc;
       s.hunks.splice(idx,1);
@@ -141,7 +148,10 @@ function activate(ctx){
     var h=s.hunks[idx];
     if(h.nc>0){
       var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
-      if(!ed)return;
+      if(!ed){
+        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+        ed=await vscode.window.showTextDocument(doc,{preview:false});
+      }
       await delLines(ed,h.ns,h.nc);
       var rm=h.nc;
       s.hunks.splice(idx,1);
@@ -404,7 +414,15 @@ function activate(ctx){
       }
     }
     var firstFp=Object.keys(ms)[0];
-    if(firstFp&&ms[firstFp].hunks.length)curHunk={fp:firstFp,idx:0};
+    if(firstFp&&ms[firstFp].hunks.length){
+      curHunk={fp:firstFp,idx:0};
+      var firstDoc=await vscode.workspace.openTextDocument(vscode.Uri.file(firstFp));
+      var firstEd=await vscode.window.showTextDocument(firstDoc,{preview:false});
+      var fh=ms[firstFp].hunks[0];
+      var fl=fh.nc>0?fh.ns:fh.os;
+      firstEd.revealRange(new vscode.Range(fl,0,fl,0),vscode.TextEditorRevealType.InCenter);
+      firstEd.selection=new vscode.Selection(fl,0,fl,0);
+    }
     else curHunk=null;
     vscode.window.showInformationMessage(
       'Reviewing '+data.files.length+' file(s). '
@@ -440,6 +458,7 @@ def _install_copilot_extension(data_dir: str) -> None:
             timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError):
+        logger.debug("Exception caught", exc_info=True)
         pass
 
 
@@ -455,6 +474,7 @@ def _setup_code_server(data_dir: str) -> bool:
     try:
         existing = json.loads(settings_file.read_text()) if settings_file.exists() else {}
     except (json.JSONDecodeError, OSError):
+        logger.debug("Exception caught", exc_info=True)
         existing = {}
     if "workbench.colorTheme" not in existing:
         existing["workbench.colorTheme"] = "Default Dark Modern"
@@ -573,6 +593,7 @@ def _scan_files(work_dir: str) -> list[str]:
             for d in dirs:
                 paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
     except OSError:
+        logger.debug("Exception caught", exc_info=True)
         pass
     return paths
 
@@ -630,6 +651,7 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
         try:
             result[fname] = hashlib.md5(fpath.read_bytes()).hexdigest()
         except OSError:
+            logger.debug("Exception caught", exc_info=True)
             pass
     return result
 
@@ -650,6 +672,7 @@ def _prepare_merge_view(
             try:
                 current_hash = hashlib.md5(fpath.read_bytes()).hexdigest()
             except OSError:
+                logger.debug("Exception caught", exc_info=True)
                 continue
             if current_hash == pre_file_hashes[fname]:
                 # Content unchanged by agent — skip this file
@@ -678,6 +701,7 @@ def _prepare_merge_view(
             if line_count:
                 file_hunks[fname] = [{"bs": 0, "bc": 0, "cs": 0, "cc": line_count}]
         except (OSError, UnicodeDecodeError):
+            logger.debug("Exception caught", exc_info=True)
             pass
     if not file_hunks:
         return {"error": "No changes"}

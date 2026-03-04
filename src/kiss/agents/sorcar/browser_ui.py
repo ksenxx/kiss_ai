@@ -11,6 +11,9 @@ import yaml
 
 from kiss.core.printer import Printer, extract_extras, extract_path_and_lang, truncate_result
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 def find_free_port() -> int:
     """Find and return an available TCP port on localhost.
@@ -432,6 +435,7 @@ class BaseBrowserPrinter(Printer):
         try:
             data = yaml.safe_load(raw)
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             return None
         if isinstance(data, dict) and "summary" in data:
             return data
@@ -468,6 +472,7 @@ class BaseBrowserPrinter(Printer):
             try:
                 self._clients.remove(cq)
             except ValueError:
+                logger.debug("Exception caught", exc_info=True)
                 pass
 
     def has_clients(self) -> bool:
@@ -644,6 +649,7 @@ class BaseBrowserPrinter(Printer):
                 try:
                     tool_input = json.loads(self._tool_json_buffer)
                 except (json.JSONDecodeError, ValueError):
+                    logger.debug("Exception caught", exc_info=True)
                     tool_input = {"_raw": self._tool_json_buffer}
                 self._format_tool_call(self._tool_name, tool_input)
             else:

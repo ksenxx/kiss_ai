@@ -7,6 +7,10 @@ import threading
 import time
 from pathlib import Path
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.json"
 PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
@@ -93,6 +97,7 @@ def _load_history() -> list[dict[str, str]]:
                     _history_cache = result
                     return result
             except (json.JSONDecodeError, OSError):
+                logger.debug("Exception caught", exc_info=True)
                 pass
         _save_history_unlocked(list(SAMPLE_TASKS))
         return _history_cache  # type: ignore[return-value]
@@ -106,6 +111,7 @@ def _save_history_unlocked(entries: list[dict[str, str]]) -> None:
         _ensure_kiss_dir()
         HISTORY_FILE.write_text(json.dumps(_history_cache, indent=2))
     except OSError:
+        logger.debug("Exception caught", exc_info=True)
         pass
 
 
@@ -132,6 +138,7 @@ def _load_proposals() -> list[str]:
             if isinstance(data, list):
                 return [str(t) for t in data if isinstance(t, str) and t.strip()][:5]
         except (json.JSONDecodeError, OSError):
+            logger.debug("Exception caught", exc_info=True)
             pass
     return []
 
@@ -141,6 +148,7 @@ def _save_proposals(proposals: list[str]) -> None:
         _ensure_kiss_dir()
         PROPOSALS_FILE.write_text(json.dumps(proposals))
     except OSError:
+        logger.debug("Exception caught", exc_info=True)
         pass
 
 
@@ -151,6 +159,7 @@ def _load_json_dict(path: Path) -> dict:
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, OSError):
+            logger.debug("Exception caught", exc_info=True)
             pass
     return {}
 
@@ -180,6 +189,7 @@ def _record_model_usage(model: str) -> None:
         _ensure_kiss_dir()
         MODEL_USAGE_FILE.write_text(json.dumps(usage))
     except OSError:
+        logger.debug("Exception caught", exc_info=True)
         pass
 
 
@@ -198,6 +208,7 @@ def _record_file_usage(path: str) -> None:
         _ensure_kiss_dir()
         FILE_USAGE_FILE.write_text(json.dumps(usage))
     except OSError:
+        logger.debug("Exception caught", exc_info=True)
         pass
 
 
@@ -220,6 +231,7 @@ def _add_task(task: str) -> None:
                                 result.append(t)
                         _history_cache = result
                 except (json.JSONDecodeError, OSError):
+                    logger.debug("Exception caught", exc_info=True)
                     pass
             if _history_cache is None:
                 _history_cache = list(SAMPLE_TASKS)
