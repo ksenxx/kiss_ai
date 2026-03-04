@@ -282,7 +282,7 @@ def _should_skip(path: Path) -> bool:
 def _find_def_in_file(path: Path, name: str) -> ClassInfo | FuncInfo | None:
     if not path.exists():
         return None
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.ClassDef) and node.name == name:
             return _extract_class(node)
@@ -295,7 +295,7 @@ SKIP_FUNCTIONS = {"main"}
 
 
 def _extract_public_from_file(path: Path) -> tuple[list[ClassInfo], list[FuncInfo]]:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     classes: list[ClassInfo] = []
     functions: list[FuncInfo] = []
     for node in ast.iter_child_nodes(tree):
@@ -319,7 +319,7 @@ def discover_modules() -> list[ModuleDoc]:
         if _should_skip(init_path):
             continue
         module_name = _file_to_module(init_path)
-        source = init_path.read_text()
+        source = init_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         all_list = _parse_all_list(tree)
         doc = _get_summary(tree)
@@ -370,7 +370,7 @@ def discover_modules() -> list[ModuleDoc]:
         functions = [f for f in functions if f.name not in already]
         if not classes and not functions:
             continue
-        doc = _get_summary(ast.parse(py_file.read_text()))
+        doc = _get_summary(ast.parse(py_file.read_text(encoding="utf-8")))
         modules.append(
             ModuleDoc(
                 name=module_name,
@@ -522,7 +522,8 @@ def _render_args_returns(lines: list[str], doc: ParsedDoc, indent: str = "") -> 
 def main() -> int:
     modules = discover_modules()
     markdown = generate_markdown(modules)
-    OUTPUT.write_text(markdown)
+    # Always emit UTF-8 so mdformat/check behave consistently on Windows.
+    OUTPUT.write_text(markdown, encoding="utf-8")
     subprocess.run(["uv", "run", "mdformat", str(OUTPUT)], check=True)
     print(f"Generated {OUTPUT.relative_to(PROJECT_ROOT)} ({len(modules)} modules)")
     return 0

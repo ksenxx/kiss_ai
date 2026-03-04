@@ -3,8 +3,10 @@
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
-from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS, _build_html
+from kiss.agents.sorcar.sorcar import _resolve_requested_file_path
 
 
 def test_commit_author_in_assistant_source():
@@ -28,10 +30,24 @@ def test_commit_committer_env_in_assistant_source():
     assert '"GIT_COMMITTER_EMAIL": "ksen@berkeley.edu"' in source
 
 
+def test_push_button_in_html():
+    """The merge toolbar must include a Push button."""
+    html = _build_html("Test", "", "/tmp")
+    assert 'id="push-btn"' in html
+    assert "mergePush()" in html
+
+
 def test_push_js_function_exists():
     """The JS must define mergePush function that calls /push endpoint."""
     assert "function mergePush()" in CHATBOT_JS
     assert "fetch('/push'" in CHATBOT_JS
+
+
+def test_commit_button_still_exists():
+    """The commit button must still be present alongside push."""
+    html = _build_html("Test", "", "/tmp")
+    assert 'id="commit-btn"' in html
+    assert "mergeCommit()" in html
 
 
 def test_push_button_shows_pushing_state():
@@ -47,6 +63,25 @@ def test_push_route_in_assistant_source():
 
     source = inspect.getsource(sorcar)
     assert 'Route("/push"' in source
+
+
+def test_resolve_requested_file_path_relative():
+    """Relative paths should resolve under work_dir."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        resolved = _resolve_requested_file_path("a/b.txt", tmpdir)
+        assert resolved == str((Path(tmpdir) / "a" / "b.txt").resolve())
+
+
+def test_resolve_requested_file_path_windows_absolute_like():
+    """Drive-letter paths should stay absolute instead of being joined to work_dir."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        win_abs = r"C:\Users\Test\file.txt"
+        resolved = _resolve_requested_file_path(win_abs, tmpdir)
+        if os.name == "nt":
+            assert resolved.lower() == os.path.abspath(win_abs).lower()
+        else:
+            # Non-Windows treats this as relative text; preserve current platform semantics.
+            assert resolved == os.path.abspath(os.path.join(tmpdir, win_abs))
 
 
 def test_git_commit_with_kiss_sorcar_attribution():

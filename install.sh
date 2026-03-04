@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# This installer targets Unix-like shells. On Windows, follow
+# the PowerShell steps in README.md instead.
+
 # Install uv (Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 

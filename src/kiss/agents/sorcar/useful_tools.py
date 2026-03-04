@@ -1,9 +1,13 @@
 """Useful tools for agents: file editing and bash execution."""
 
 import logging
+import os
 import re
 import shlex
+import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -19,6 +23,44 @@ def _truncate_output(output: str, max_chars: int) -> str:
         + f"\n\n... [truncated {len(output) - max_chars} chars] ...\n\n"
         + output[-half:]
     )
+
+
+def _detect_shell_prefix(
+    *,
+    os_name: str | None = None,
+    environ: dict[str, str] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> list[str]:
+    """Return the shell invocation prefix for command execution.
+
+    On Windows, prefer Git Bash when present because many agent commands use
+    bash syntax. Fallback is cmd.exe for baseline compatibility.
+    """
+    resolved_os = os_name or os.name
+    env = environ if environ is not None else os.environ
+
+    if resolved_os == "nt":
+        # Prefer Git Bash, not the WSL launcher at System32\bash.exe.
+        program_roots = [
+            env.get("ProgramW6432"),
+            env.get("ProgramFiles"),
+            env.get("ProgramFiles(x86)"),
+        ]
+        for root in program_roots:
+            if not root:
+                continue
+            for rel in ("Git\\bin\\bash.exe", "Git\\usr\\bin\\bash.exe"):
+                candidate = os.path.join(root, rel)
+                if os.path.isfile(candidate):
+                    return [candidate, "-lc"]
+
+        bash_on_path = which("bash")
+        if bash_on_path and "windows\\system32\\bash.exe" not in bash_on_path.lower():
+            return [bash_on_path, "-lc"]
+        return [env.get("COMSPEC", "cmd.exe"), "/c"]
+
+    shell = env.get("SHELL") or which("sh") or "sh"
+    return [shell, "-c"]
 
 
 EDIT_SCRIPT = r"""
@@ -172,6 +214,79 @@ echo "----------------------------------------"
 exit 0
 """
 
+# Cross-platform edit implementation used when bash isn't available
+# (most Windows setups) while preserving the same external behavior.
+EDIT_SCRIPT_PYTHON = r"""
+import pathlib
+import sys
+
+
+def _main() -> None:
+    if len(sys.argv) != 5:
+        print("Error: Invalid number of arguments", file=sys.stderr)
+        sys.exit(1)
+
+    file_path = pathlib.Path(sys.argv[1])
+    old_string = sys.argv[2]
+    new_string = sys.argv[3]
+    replace_all = sys.argv[4].lower() == "true"
+
+    if not file_path.is_absolute():
+        print("Error: file_path must be absolute, not relative", file=sys.stderr)
+        sys.exit(1)
+    if not file_path.is_file():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        sys.exit(2)
+    if old_string == new_string:
+        print("Error: new_string must be different from old_string", file=sys.stderr)
+        sys.exit(1)
+
+    content = file_path.read_text()
+    occurrence_count = content.count(old_string)
+
+    print(f"File: {file_path}")
+    print(f"Looking for: '{old_string}'")
+    print(f"Replacing with: '{new_string}'")
+    print(f"Occurrences found: {occurrence_count}")
+    print(f"Replace all: {str(replace_all).lower()}")
+    print("")
+
+    if replace_all:
+        if occurrence_count == 0:
+            print("Error: String not found in file", file=sys.stderr)
+            sys.exit(3)
+        updated = content.replace(old_string, new_string)
+        replaced_count = occurrence_count
+    else:
+        if occurrence_count == 0:
+            print("Error: String not found in file", file=sys.stderr)
+            sys.exit(3)
+        if occurrence_count > 1:
+            print(f"Error: String appears {occurrence_count} times (not unique)", file=sys.stderr)
+            print("Hint: Use replace_all=true to replace all occurrences", file=sys.stderr)
+            sys.exit(3)
+        updated = content.replace(old_string, new_string, 1)
+        replaced_count = 1
+
+    file_path.write_text(updated)
+
+    if replaced_count == 1:
+        print("Successfully replaced 1 occurrence")
+    else:
+        print(f"Successfully replaced {replaced_count} occurrence(s)")
+    print("")
+    print("Changed section:")
+    print("----------------------------------------")
+    for line_number, line in enumerate(updated.splitlines(), start=1):
+        if new_string in line:
+            print(f"{line_number}:{line}")
+    print("----------------------------------------")
+
+
+if __name__ == "__main__":
+    _main()
+"""
+
 
 DISALLOWED_BASH_COMMANDS = {
     ".",
@@ -232,6 +347,8 @@ class UsefulTools:
         stream_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.stream_callback = stream_callback
+        # Resolve shell once at startup so behavior is stable for this session.
+        self.shell_prefix = _detect_shell_prefix()
 
     def Read(  # noqa: N802
         self,
@@ -300,11 +417,44 @@ class UsefulTools:
         """
 
         resolved = Path(file_path).resolve()
+        replace_all_str = "true" if replace_all else "false"
 
-        # Create a temporary script file
-        import tempfile
+        # Windows commonly lacks bash; run a Python edit helper instead.
+        bash_path = shutil.which("bash")
+        if os.name == "nt" or bash_path is None:
+            command = [
+                sys.executable,
+                "-c",
+                EDIT_SCRIPT_PYTHON,
+                str(resolved),
+                old_string,
+                new_string,
+                replace_all_str,
+            ]
+            try:
+                result = subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+                return result.stdout
+            except subprocess.TimeoutExpired:
+                return "Error: Command execution timeout"
+            except subprocess.CalledProcessError as e:
+                error_msg = e.stderr.strip() if e.stderr else str(e)
+                return f"Error: {error_msg}"
+            except Exception as e:  # pragma: no cover
+                return f"Error: {e}"
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".sh",
+            delete=False,
+            encoding="utf-8",
+            newline="\n",
+        ) as f:
             f.write(EDIT_SCRIPT)
             script_path = f.name
 
@@ -313,9 +463,8 @@ class UsefulTools:
             Path(script_path).chmod(0o755)
 
             # Build command with arguments
-            replace_all_str = "true" if replace_all else "false"
             command = [
-                "/bin/bash",
+                bash_path,
                 script_path,
                 str(resolved),
                 old_string,
@@ -380,8 +529,8 @@ class UsefulTools:
 
         try:
             result = subprocess.run(
-                command,
-                shell=True,
+                [*self.shell_prefix, command],
+                shell=False,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -401,8 +550,8 @@ class UsefulTools:
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
         assert self.stream_callback is not None
         process = subprocess.Popen(
-            command,
-            shell=True,
+            [*self.shell_prefix, command],
+            shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

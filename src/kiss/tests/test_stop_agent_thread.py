@@ -64,10 +64,9 @@ def test_abandoned_thread_does_not_interfere_with_new_thread():
             events.append(f"{task_name}_stopped")
         finally:
             with lock:
-                if agent_thread is not current:
-                    return
-                running = False
-                agent_thread = None
+                if agent_thread is current:
+                    running = False
+                    agent_thread = None
 
     with lock:
         running = True
@@ -247,6 +246,7 @@ class _AgentController:
     def _thread_body(self, work: Callable[[], None], tag: str) -> None:
         current = threading.current_thread()
         result = "ok"
+        should_cleanup = False
         try:
             work()
             with self.lock:
@@ -267,11 +267,12 @@ class _AgentController:
             self.events.append(f"{tag}:error")
         finally:
             with self.lock:
-                if self.agent_thread is not current:
-                    return
-                self.running = False
-                self.agent_thread = None
-            self.events.append(f"{tag}:cleanup:{result}")
+                if self.agent_thread is current:
+                    self.running = False
+                    self.agent_thread = None
+                    should_cleanup = True
+            if should_cleanup:
+                self.events.append(f"{tag}:cleanup:{result}")
 
     def assert_idle(self) -> None:
         with self.lock:
@@ -432,6 +433,7 @@ def test_finally_runs_for_abandoned_thread_but_guard_prevents_reset():
     def worker():
         nonlocal running, agent_thread
         current = threading.current_thread()
+        should_reset_state = False
         try:
             while True:
                 time.sleep(0.01)
@@ -440,11 +442,12 @@ def test_finally_runs_for_abandoned_thread_but_guard_prevents_reset():
         finally:
             finally_ran.set()
             with lock:
-                if agent_thread is not current:
-                    return
-                running = False
-                agent_thread = None
-            state_was_reset.set()
+                if agent_thread is current:
+                    running = False
+                    agent_thread = None
+                    should_reset_state = True
+            if should_reset_state:
+                state_was_reset.set()
 
     with lock:
         running = True

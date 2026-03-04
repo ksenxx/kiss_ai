@@ -11,6 +11,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Keep log markers ASCII-only so Windows consoles using cp1252
+# don't fail with UnicodeEncodeError.
+OK = "[OK]"
+FAIL = "[FAIL]"
+RUN = "[RUN]"
+
 
 def run_command(cmd: list[str], description: str) -> bool:
     """Run a command and return True if successful.
@@ -29,9 +35,9 @@ def run_command(cmd: list[str], description: str) -> bool:
 
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
-        print(f"\n❌ {description} failed with exit code {result.returncode}")
+        print(f"\n{FAIL} {description} failed with exit code {result.returncode}")
         return False
-    print(f"\n✅ {description} passed")
+    print(f"\n{OK} {description} passed")
     return True
 
 
@@ -143,7 +149,7 @@ def clean_build_artifacts() -> None:
     if removed_count == 0:
         print("  No artifacts to clean.")
     else:
-        print(f"\n✅ Cleaned {removed_count} items")
+        print(f"\n{OK} Cleaned {removed_count} items")
 
 
 def main() -> int:
@@ -197,7 +203,7 @@ def main() -> int:
     if md_files:
         checks.append((["uv", "run", "mdformat", "--check", *md_files], "Lint markdown (mdformat)"))
 
-    print("\n🔍 Running all code quality checks...\n")
+    print(f"\n{RUN} Running all code quality checks...\n")
 
     all_passed = True
     for cmd, description in checks:
@@ -207,12 +213,12 @@ def main() -> int:
 
     if all_passed:
         print("\n" + "=" * 60)
-        print("✅ All checks passed!")
+        print(f"{OK} All checks passed!")
         print("=" * 60 + "\n")
         return 0
     else:
         print("\n" + "=" * 60)
-        print("❌ Some checks failed. Please fix the errors above.")
+        print(f"{FAIL} Some checks failed. Please fix the errors above.")
         print("=" * 60 + "\n")
         return 1
 

@@ -286,6 +286,23 @@ export TOGETHER_API_KEY="your-key-here"
 export OPENROUTER_API_KEY="your-key-here"
 ```
 
+```powershell
+# Windows (PowerShell) quick path
+# Install uv from https://docs.astral.sh/uv/getting-started/installation/
+git clone https://github.com/ksenxx/kiss_ai.git
+cd kiss_ai
+uv venv --python 3.13
+uv sync
+
+# Optional API keys
+$env:GEMINI_API_KEY = "your-key-here"
+$env:OPENAI_API_KEY = "your-key-here"
+$env:ANTHROPIC_API_KEY = "your-key-here"
+```
+
+For ongoing Windows-specific behavior and compatibility decisions, see
+`docs/Windows/WINDOWS.md`.
+
 ### Selective Installation (Dependency Groups)
 
 KISS supports selective installation via dependency groups for minimal footprints:

@@ -81,6 +81,17 @@ def _clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'")
 
 
+def _resolve_requested_file_path(requested_path: str, work_dir: str) -> str:
+    """Resolve a user-provided file path against the current work directory.
+
+    Accept absolute paths across platforms (including Windows drive/UNC paths)
+    and resolve relative paths under work_dir.
+    """
+    if os.path.isabs(requested_path):
+        return os.path.abspath(requested_path)
+    return os.path.abspath(os.path.join(work_dir, requested_path))
+
+
 def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
     if detailed:
         prompt = (
@@ -405,40 +416,42 @@ def run_chatbot(
         finally:
             _set_latest_result(result_text)
             _append_task_to_md(task, result_text)
+            should_finalize = False
             with running_lock:
-                if agent_thread is not current_thread:
-                    return
-                running = False
-                agent_thread = None
-            # Broadcast AFTER setting running=False so clients can
-            # immediately submit a new task without getting a 409.
-            if done_event:
-                printer.broadcast(done_event)
-            if done_event and done_event.get("type") == "task_done":
-                threading.Thread(
-                    target=generate_followup,
-                    args=(task, result_text),
-                    daemon=True,
-                ).start()
-            try:
-                merge_result = _prepare_merge_view(
-                    actual_work_dir,
-                    cs_data_dir,
-                    pre_hunks,
-                    pre_untracked,
-                    pre_file_hashes,
-                )
-                if merge_result.get("status") == "opened":
-                    printer.broadcast({"type": "merge_started"})
-            except Exception:
-                logger.debug("Exception caught", exc_info=True)
-                pass
-            refresh_file_cache()
-            try:
-                refresh_proposed_tasks()
-            except Exception:
-                logger.debug("Exception caught", exc_info=True)
-                pass
+                if agent_thread is current_thread:
+                    running = False
+                    agent_thread = None
+                    should_finalize = True
+            if should_finalize:
+                # Broadcast AFTER setting running=False so clients can
+                # immediately submit a new task without getting a 409.
+                if done_event:
+                    printer.broadcast(done_event)
+                if done_event and done_event.get("type") == "task_done":
+                    threading.Thread(
+                        target=generate_followup,
+                        args=(task, result_text),
+                        daemon=True,
+                    ).start()
+                try:
+                    merge_result = _prepare_merge_view(
+                        actual_work_dir,
+                        cs_data_dir,
+                        pre_hunks,
+                        pre_untracked,
+                        pre_file_hashes,
+                    )
+                    if merge_result.get("status") == "opened":
+                        printer.broadcast({"type": "merge_started"})
+                except Exception:
+                    logger.debug("Exception caught", exc_info=True)
+                    pass
+                refresh_file_cache()
+                try:
+                    refresh_proposed_tasks()
+                except Exception:
+                    logger.debug("Exception caught", exc_info=True)
+                    pass
 
     def stop_agent() -> bool:
         """Kill the current agent thread and reset state for a new task.
@@ -717,7 +730,8 @@ def run_chatbot(
         rel = body.get("path", "").strip()
         if not rel:
             return JSONResponse({"error": "No path"}, status_code=400)
-        full = rel if rel.startswith("/") else os.path.join(actual_work_dir, rel)
+        # Use OS-aware absolute-path detection so Windows paths like C:\... work.
+        full = _resolve_requested_file_path(rel, actual_work_dir)
         if not os.path.isfile(full):
             return JSONResponse({"error": "File not found"}, status_code=404)
         pending = os.path.join(cs_data_dir, "pending-open.json")

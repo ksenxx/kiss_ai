@@ -67,6 +67,10 @@ class TestUtils:
         with pytest.raises(KISSError, match="Could not find"):
             read_project_file_from_package("nonexistent_file.txt")
 
+    def test_read_project_file_accepts_backslash_separators(self):
+        content = read_project_file(r"kiss\__init__.py")
+        assert "__version__" in content
+
 
 class TestModelHelpers:
     def _create_model(self):
