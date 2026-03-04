@@ -36,15 +36,11 @@ class AgentConfig(BaseModel):
     )
 
 
-class AssistantConfig(BaseModel):
+class SorcarConfig(BaseModel):
     sorcar_agent: AgentConfig = Field(
         default_factory=AgentConfig,
-        description="Configuration for Assistant Agent",
-    )
-    relentless_agent: AgentConfig = Field(
-        default_factory=AgentConfig,
-        description="Configuration for Relentless Agent",
+        description="Configuration for Sorcar Agent",
     )
 
 
-add_config("assistant", AssistantConfig)
+add_config("sorcar", SorcarConfig)

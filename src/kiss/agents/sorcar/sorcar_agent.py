@@ -15,6 +15,7 @@ from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
+from kiss.docker.docker_manager import DockerManager
 
 
 class SorcarAgent(RelentlessAgent):
@@ -23,6 +24,7 @@ class SorcarAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
+        self.docker_manager: DockerManager | None = None
 
     def _get_tools(self) -> list:
         printer = self.printer
@@ -51,7 +53,7 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        cfg = config_module.DEFAULT_CONFIG.assistant.sorcar_agent
+        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
         super()._reset(
             model_name=model_name if model_name is not None else cfg.model_name,
             summarizer_model_name=(
@@ -109,7 +111,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        cfg = config_module.DEFAULT_CONFIG.assistant.sorcar_agent
+        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
         actual_headless = headless if headless is not None else cfg.headless
         self.web_use_tool = WebUseTool(headless=actual_headless)
 
@@ -149,7 +151,7 @@ class SorcarAgent(RelentlessAgent):
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,
                 verbose=verbose,
-                tools_factory=self._get_tools,
+                tools=self._get_tools(),
                 attachments=attachments,
             )
         finally:
