@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -613,21 +614,58 @@ def _capture_untracked(work_dir: str) -> set[str]:
     return {line.strip() for line in result.stdout.split("\n") if line.strip()}
 
 
+def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
+    """Return MD5 hex digests for filenames (relative to work_dir) that exist on disk.
+
+    Args:
+        work_dir: Root directory.
+        fnames: Set of relative file paths to snapshot.
+
+    Returns:
+        Dict mapping filename to hex digest of its content.
+    """
+    result: dict[str, str] = {}
+    for fname in fnames:
+        fpath = Path(work_dir) / fname
+        try:
+            result[fname] = hashlib.md5(fpath.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return result
+
+
 def _prepare_merge_view(
     work_dir: str,
     data_dir: str,
     pre_hunks: dict[str, list[tuple[int, int, int, int]]],
     pre_untracked: set[str],
+    pre_file_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     post_hunks = _parse_diff_hunks(work_dir)
     file_hunks: dict[str, list[dict[str, int]]] = {}
     for fname, hunks in post_hunks.items():
-        pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
-        filtered = [
-            {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
-            for bs, bc, cs, cc in hunks
-            if (bs, bc) not in pre
-        ]
+        if pre_file_hashes is not None and fname in pre_file_hashes:
+            # File had pre-existing changes — check if agent actually modified it
+            fpath = Path(work_dir) / fname
+            try:
+                current_hash = hashlib.md5(fpath.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            if current_hash == pre_file_hashes[fname]:
+                # Content unchanged by agent — skip this file
+                continue
+            # Content changed — include ALL hunks (agent modified already-changed lines)
+            filtered = [
+                {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
+                for bs, bc, cs, cc in hunks
+            ]
+        else:
+            pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
+            filtered = [
+                {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
+                for bs, bc, cs, cc in hunks
+                if (bs, bc) not in pre
+            ]
         if filtered:
             file_hunks[fname] = filtered
     new_files = _capture_untracked(work_dir) - pre_untracked

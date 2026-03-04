@@ -26,6 +26,7 @@ from kiss.agents.sorcar.code_server import (
     _prepare_merge_view,
     _scan_files,
     _setup_code_server,
+    _snapshot_files,
 )
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
@@ -354,6 +355,7 @@ def run_chatbot(
 
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
+        pre_file_hashes: dict[str, str] = {}
         result_text = ""
         done_event: dict[str, str] | None = None
         try:
@@ -361,6 +363,7 @@ def run_chatbot(
             printer.broadcast({"type": "tasks_updated"})
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
+            pre_file_hashes = _snapshot_files(actual_work_dir, set(pre_hunks.keys()))
             active_file = _read_active_file(cs_data_dir)
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
@@ -407,6 +410,7 @@ def run_chatbot(
                     cs_data_dir,
                     pre_hunks,
                     pre_untracked,
+                    pre_file_hashes,
                 )
                 if merge_result.get("status") == "opened":
                     printer.broadcast({"type": "merge_started"})
