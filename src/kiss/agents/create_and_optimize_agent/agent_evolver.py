@@ -106,6 +106,10 @@ from kiss.agents.create_and_optimize_agent.improver_agent import (
 from kiss.core import config as config_module
 from kiss.core.utils import get_config_value
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
 
 
@@ -526,6 +530,7 @@ class AgentEvolver:
                 result: dict[str, Any] = agent_module.agent_run(self.task_description)
                 return result
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 return {
                     "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
                 }
