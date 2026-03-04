@@ -7,6 +7,9 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _truncate_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
@@ -183,6 +186,7 @@ def _extract_leading_command_name(part: str) -> str | None:
     try:
         tokens = shlex.split(part)
     except ValueError:
+        logger.debug("Exception caught", exc_info=True)
         return None
     if not tokens:
         return None
@@ -252,6 +256,7 @@ class UsefulTools:
                 )
             return text
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Write(  # noqa: N802
@@ -271,6 +276,7 @@ class UsefulTools:
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} bytes to {file_path}"
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Edit(  # noqa: N802
@@ -328,18 +334,22 @@ class UsefulTools:
             )
             return result.stdout
         except subprocess.TimeoutExpired:
+            logger.debug("Exception caught", exc_info=True)
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
             # Include stderr which contains the actual error message from the script
+            logger.debug("Exception caught", exc_info=True)
             error_msg = e.stderr.strip() if e.stderr else str(e)
             return f"Error: {error_msg}"
         except Exception as e:  # pragma: no cover
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
         finally:
             # Clean up temporary script
             try:
                 Path(script_path).unlink()
             except Exception:  # pragma: no cover
+                logger.debug("Exception caught", exc_info=True)
                 pass
 
     def Bash(  # noqa: N802
@@ -380,10 +390,13 @@ class UsefulTools:
             )
             return _truncate_output(result.stdout, max_output_chars)
         except subprocess.TimeoutExpired:
+            logger.debug("Exception caught", exc_info=True)
             return "Error: Command execution timeout"
         except subprocess.CalledProcessError as e:
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
         except Exception as e:  # pragma: no cover
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:

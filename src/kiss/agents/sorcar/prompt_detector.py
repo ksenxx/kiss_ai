@@ -1,6 +1,9 @@
 import re
 from pathlib import Path
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class PromptDetector:
     """
@@ -63,6 +66,7 @@ class PromptDetector:
         try:
             raw_content = path.read_text(encoding="utf-8")
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return False, 0.0, [f"Error reading file: {str(e)}"]
 
         score = 0.0

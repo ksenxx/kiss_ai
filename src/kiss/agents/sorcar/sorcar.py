@@ -53,6 +53,10 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.relentless_agent import RelentlessAgent
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _FAST_MODEL = "gemini-2.0-flash"
 _COMMIT_MODEL = "gemini-2.0-flash"
 
@@ -69,6 +73,7 @@ def _read_active_file(cs_data_dir: str) -> str:
         if path and os.path.isfile(path):
             return path
     except (OSError, json.JSONDecodeError):
+        logger.debug("Exception caught", exc_info=True)
         pass
     return ""
 
@@ -101,6 +106,7 @@ def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
         )
         return _clean_llm_output(raw)
     except Exception:
+        logger.debug("Exception caught", exc_info=True)
         return ""
 
 
@@ -166,6 +172,7 @@ def run_chatbot(
             with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
                 port_in_use = True
         except (ConnectionRefusedError, OSError):
+            logger.debug("Exception caught", exc_info=True)
             pass
 
         workdir_file = Path(cs_data_dir) / "workdir"
@@ -173,6 +180,7 @@ def run_chatbot(
         try:
             prev_workdir = workdir_file.read_text().strip() if workdir_file.exists() else ""
         except OSError:
+            logger.debug("Exception caught", exc_info=True)
             pass
         workdir_changed = prev_workdir != actual_work_dir
 
@@ -191,6 +199,7 @@ def run_chatbot(
                         os.kill(int(pid_str.strip()), 15)
                 time.sleep(1.5)
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 pass
             port_in_use = False
         if port_in_use:
@@ -228,6 +237,7 @@ def run_chatbot(
                         code_server_url = cs_url
                         break
                 except (ConnectionRefusedError, OSError):
+                    logger.debug("Exception caught", exc_info=True)
                     time.sleep(0.5)
             if code_server_url:
                 printer.print(f"code-server running at {code_server_url}")
@@ -237,6 +247,7 @@ def run_chatbot(
             try:
                 workdir_file.write_text(actual_work_dir)
             except OSError:
+                logger.debug("Exception caught", exc_info=True)
                 pass
 
     html_page = _build_html(title, code_server_url, actual_work_dir)
@@ -276,6 +287,7 @@ def run_chatbot(
             proposals = json.loads(result[start:end])
             proposals = [str(p) for p in proposals if isinstance(p, str) and p.strip()][:5]
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             proposals = []
         with proposed_lock:
             proposed_tasks = proposals
@@ -310,6 +322,7 @@ def run_chatbot(
                     }
                 )
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             pass
 
     def _watch_theme_file() -> None:
@@ -319,6 +332,7 @@ def run_chatbot(
             if theme_file.exists():
                 last_mtime = theme_file.stat().st_mtime
         except OSError:
+            logger.debug("Exception caught", exc_info=True)
             pass
         while not shutting_down.is_set():
             try:
@@ -331,6 +345,7 @@ def run_chatbot(
                         colors = _THEME_PRESETS.get(kind, _THEME_PRESETS["dark"])
                         printer.broadcast({"type": "theme_changed", **colors})
             except (OSError, json.JSONDecodeError):
+                logger.debug("Exception caught", exc_info=True)
                 pass
             shutting_down.wait(1.0)
 
@@ -381,9 +396,11 @@ def run_chatbot(
             result_text = result or ""
             done_event = {"type": "task_done"}
         except (KeyboardInterrupt, _StopRequested):
+            logger.debug("Exception caught", exc_info=True)
             result_text = "(stopped)"
             done_event = {"type": "task_stopped"}
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             result_text = f"(error: {e})"
             done_event = {"type": "task_error", "text": str(e)}
         finally:
@@ -415,11 +432,13 @@ def run_chatbot(
                 if merge_result.get("status") == "opened":
                     printer.broadcast({"type": "merge_started"})
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 pass
             refresh_file_cache()
             try:
                 refresh_proposed_tasks()
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 pass
 
     def stop_agent() -> bool:
@@ -457,6 +476,7 @@ def run_chatbot(
             try:
                 cs_proc.wait()
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 cs_proc.kill()
 
     def _do_shutdown() -> None:
@@ -488,10 +508,12 @@ def run_chatbot(
                     try:
                         event = cq.get_nowait()
                     except queue.Empty:
+                        logger.debug("Exception caught", exc_info=True)
                         await asyncio.sleep(0.05)
                         continue
                     yield f"data: {json.dumps(event)}\n\n"
             except asyncio.CancelledError:
+                logger.debug("Exception caught", exc_info=True)
                 pass
             finally:
                 printer.remove_client(cq)
@@ -641,6 +663,7 @@ def run_chatbot(
                     s = s[len(query) :]
                 return s
             except Exception:
+                logger.debug("Exception caught", exc_info=True)
                 return ""
 
         suggestion = await asyncio.to_thread(_generate)
@@ -686,6 +709,7 @@ def run_chatbot(
                 data = json.loads(theme_file.read_text())
                 kind = data.get("kind", "dark")
             except (json.JSONDecodeError, OSError):
+                logger.debug("Exception caught", exc_info=True)
                 pass
         return JSONResponse(_THEME_PRESETS.get(kind, _THEME_PRESETS["dark"]))
 
@@ -815,6 +839,7 @@ def run_chatbot(
                     json.dump({"message": msg}, f)
                 return {"message": msg}
             except Exception as e:
+                logger.debug("Exception caught", exc_info=True)
                 return {"error": str(e)}
 
         return await _thread_json_response(_generate)
@@ -846,6 +871,7 @@ def run_chatbot(
                 content = f.read()
             return JSONResponse({"content": content})
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def generate_config_message(request: Request) -> JSONResponse:
@@ -889,6 +915,7 @@ def run_chatbot(
                 )
                 return {"message": result.strip()}
             except Exception as e:
+                logger.debug("Exception caught", exc_info=True)
                 return {"error": str(e)}
 
         return await _thread_json_response(_generate, error_status=500)
@@ -929,6 +956,7 @@ def run_chatbot(
     try:
         (_KISS_DIR / "assistant-port").write_text(str(port))
     except OSError:
+        logger.debug("Exception caught", exc_info=True)
         pass
     url = f"http://127.0.0.1:{port}"
     printer.print(f"{title} running at {url}")
@@ -960,6 +988,7 @@ def run_chatbot(
     try:
         server.run()
     except KeyboardInterrupt:
+        logger.debug("Exception caught", exc_info=True)
         pass
     _cleanup()
     os._exit(0)

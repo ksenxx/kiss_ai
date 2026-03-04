@@ -17,6 +17,10 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Type alias for the async token streaming callback.
 TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
 
@@ -142,6 +146,7 @@ class Model(ABC):
         try:
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
+            logger.debug("Exception caught", exc_info=True)
             running_loop = None
         if running_loop and running_loop.is_running():
             helper_loop = _get_callback_loop()

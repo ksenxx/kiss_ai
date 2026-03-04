@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
@@ -46,6 +50,7 @@ def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
             with urlopen(req, timeout=60, context=_SSL_CTX) as resp:
                 return json.loads(resp.read())
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             if attempt == 2:
                 raise
             time.sleep(2**attempt)
@@ -251,6 +256,7 @@ def test_generate(model_name: str) -> bool:
         text, _ = m.generate()
         return bool(text and text.strip())
     except Exception:
+        logger.debug("Exception caught", exc_info=True)
         return False
 
 
@@ -263,6 +269,7 @@ def test_embedding(model_name: str) -> bool:
         vec = m.get_embedding("Hello world")
         return isinstance(vec, list) and len(vec) > 0
     except Exception:
+        logger.debug("Exception caught", exc_info=True)
         return False
 
 
@@ -278,6 +285,7 @@ def test_function_calling(model_name: str) -> bool:
         try:
             return str(eval(expression))
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             return "error"
 
     try:
@@ -286,6 +294,7 @@ def test_function_calling(model_name: str) -> bool:
         calls, _, _ = m.generate_and_process_with_tools({"calculator": calculator})
         return len(calls) > 0
     except Exception:
+        logger.debug("Exception caught", exc_info=True)
         return False
 
 
