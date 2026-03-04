@@ -18,6 +18,9 @@ from kiss.core.printer import (
     truncate_result,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ConsolePrinter(Printer):
     def __init__(self, file: Any = None) -> None:
@@ -40,6 +43,7 @@ class ConsolePrinter(Printer):
         try:
             data = yaml.safe_load(raw)
         except Exception:
+            logger.debug("Exception caught", exc_info=True)
             return raw
         if not isinstance(data, dict) or "summary" not in data:
             return raw
@@ -237,6 +241,7 @@ class ConsolePrinter(Printer):
                 try:
                     tool_input = json.loads(self._tool_json_buffer)
                 except (json.JSONDecodeError, ValueError):
+                    logger.debug("Exception caught", exc_info=True)
                     tool_input = {"_raw": self._tool_json_buffer}
                 self._format_tool_call(self._tool_name, tool_input)
             else:

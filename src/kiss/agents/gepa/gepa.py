@@ -34,6 +34,9 @@ from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.utils import get_config_value, get_template_field_names
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class GEPAPhase(Enum):
     """Enum representing the current phase of GEPA optimization."""
@@ -643,6 +646,7 @@ class GEPA:
         try:
             placeholders = set(get_template_field_names(normalized))
         except ValueError:
+            logger.debug("Exception caught", exc_info=True)
             return fallback
         if placeholders != self.valid_placeholders:
             return fallback

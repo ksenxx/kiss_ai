@@ -17,6 +17,10 @@ from openai import OpenAI
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment, Model, TokenCallback
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # DeepSeek R1 reasoning models use <think>...</think> tags for chain-of-thought
 # These models need text-based tool calling instead of native function calling
 DEEPSEEK_REASONING_MODELS = {
@@ -155,6 +159,7 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                     if function_calls:
                         return function_calls
             except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
                 continue
 
     # Also try to parse the entire content as JSON (in case model outputs clean JSON)
@@ -171,6 +176,7 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                         }
                     )
     except json.JSONDecodeError:
+        logger.debug("Exception caught", exc_info=True)
         pass
 
     return function_calls
@@ -284,6 +290,7 @@ class OpenAICompatibleModel(Model):
             try:
                 arguments = json.loads(tc["arguments"])
             except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
                 arguments = {}
             function_calls.append({"id": tc["id"], "name": tc["name"], "arguments": arguments})
             raw_tool_calls.append(
@@ -315,6 +322,7 @@ class OpenAICompatibleModel(Model):
             try:
                 arguments = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
                 arguments = {}
             function_calls.append({"id": tc.id, "name": tc.function.name, "arguments": arguments})
             raw_tool_calls.append(
@@ -600,4 +608,5 @@ class OpenAICompatibleModel(Model):
             response = self.client.embeddings.create(model=model_to_use, input=text)
             return list(response.data[0].embedding)
         except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
             raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e

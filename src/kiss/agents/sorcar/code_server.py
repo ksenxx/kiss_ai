@@ -13,6 +13,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _CS_SETTINGS = {
     "workbench.startupEditor": "none",
     "workbench.tips.enabled": False,
@@ -440,6 +444,7 @@ def _install_copilot_extension(data_dir: str) -> None:
             timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError):
+        logger.debug("Exception caught", exc_info=True)
         pass
 
 
@@ -455,6 +460,7 @@ def _setup_code_server(data_dir: str) -> bool:
     try:
         existing = json.loads(settings_file.read_text()) if settings_file.exists() else {}
     except (json.JSONDecodeError, OSError):
+        logger.debug("Exception caught", exc_info=True)
         existing = {}
     if "workbench.colorTheme" not in existing:
         existing["workbench.colorTheme"] = "Default Dark Modern"
@@ -573,6 +579,7 @@ def _scan_files(work_dir: str) -> list[str]:
             for d in dirs:
                 paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
     except OSError:
+        logger.debug("Exception caught", exc_info=True)
         pass
     return paths
 
@@ -630,6 +637,7 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
         try:
             result[fname] = hashlib.md5(fpath.read_bytes()).hexdigest()
         except OSError:
+            logger.debug("Exception caught", exc_info=True)
             pass
     return result
 
@@ -650,6 +658,7 @@ def _prepare_merge_view(
             try:
                 current_hash = hashlib.md5(fpath.read_bytes()).hexdigest()
             except OSError:
+                logger.debug("Exception caught", exc_info=True)
                 continue
             if current_hash == pre_file_hashes[fname]:
                 # Content unchanged by agent — skip this file
@@ -678,6 +687,7 @@ def _prepare_merge_view(
             if line_count:
                 file_hunks[fname] = [{"bs": 0, "bc": 0, "cs": 0, "cc": line_count}]
         except (OSError, UnicodeDecodeError):
+            logger.debug("Exception caught", exc_info=True)
             pass
     if not file_hunks:
         return {"error": "No changes"}
