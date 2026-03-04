@@ -44,7 +44,6 @@ class SorcarAgent(RelentlessAgent):
     def _reset(
         self,
         model_name: str | None,
-        summarizer_model_name: str | None,
         max_sub_sessions: int | None,
         max_steps: int | None,
         max_budget: float | None,
@@ -56,11 +55,6 @@ class SorcarAgent(RelentlessAgent):
         cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
         super()._reset(
             model_name=model_name if model_name is not None else cfg.model_name,
-            summarizer_model_name=(
-                summarizer_model_name
-                if summarizer_model_name is not None
-                else cfg.summarizer_model_name
-            ),
             max_sub_sessions=(
                 max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
             ),
@@ -75,7 +69,6 @@ class SorcarAgent(RelentlessAgent):
     def run(  # type: ignore[override]
         self,
         model_name: str | None = None,
-        summarizer_model_name: str | None = None,
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
         max_steps: int | None = None,
@@ -93,8 +86,6 @@ class SorcarAgent(RelentlessAgent):
 
         Args:
             model_name: LLM model to use. Defaults to config value.
-            summarizer_model_name: LLM model for summarizing trajectories on failure.
-                Defaults to config value.
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
             max_steps: Maximum steps per sub-session. Defaults to config value.
@@ -136,7 +127,6 @@ class SorcarAgent(RelentlessAgent):
                     )
             return super().run(
                 model_name=model_name,
-                summarizer_model_name=summarizer_model_name,
                 system_instructions=system_instructions,
                 prompt_template=(
                     prompt + f"\n\n- The default file path: {current_editor_file}"
@@ -167,9 +157,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
         "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
-    )
-    parser.add_argument(
-        "--summarizer_model_name", type=str, default="claude-haiku-4-5", help="LLM model name"
     )
     parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
     parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
@@ -212,7 +199,6 @@ password 'For AI Assistant.' and read the messages.
         result = agent.run(
             prompt_template=task_description,
             model_name=args.model_name,
-            summarizer_model_name=args.summarizer_model_name,
             max_steps=args.max_steps,
             max_budget=args.max_budget,
             work_dir=work_dir,
