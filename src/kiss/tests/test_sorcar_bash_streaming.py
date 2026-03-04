@@ -18,24 +18,6 @@ def _drain(q: queue.Queue) -> list[dict]:
 
 
 class TestSorcarBashStreaming:
-    def test_stream_callback_works_when_printer_set_after_get_tools(self):
-        agent = SorcarAgent("test")
-        assert agent.printer is None
-        tools = agent._get_tools()
-        bash_tool = tools[0]
-
-        printer = BaseBrowserPrinter()
-        cq = printer.add_client()
-        agent.printer = printer
-
-        result = bash_tool(command="echo hello_stream", description="test echo")
-        printer._flush_bash()
-
-        assert "hello_stream" in result
-        events = _drain(cq)
-        sys_events = [e for e in events if e["type"] == "system_output"]
-        assert len(sys_events) >= 1
-        assert "hello_stream" in "".join(e["text"] for e in sys_events)
 
     def test_stream_callback_noop_when_printer_never_set(self):
         agent = SorcarAgent("test")

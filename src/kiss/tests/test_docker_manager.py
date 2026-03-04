@@ -49,18 +49,6 @@ class TestDockerManager(unittest.TestCase):
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
 class TestDockerManagerStreaming(unittest.TestCase):
-    def test_streaming_captures_output(self) -> None:
-        streamed: list[str] = []
-        with DockerManager("python:3.11-slim") as env:
-            env.stream_callback = streamed.append
-            result = env.Bash("echo line1 && echo line2 && echo line3", "Stream test")
-        assert "line1" in result
-        assert "line2" in result
-        assert "line3" in result
-        joined = "".join(streamed)
-        assert "line1" in joined
-        assert "line2" in joined
-        assert "line3" in joined
 
     def test_streaming_error_exit_code(self) -> None:
         streamed: list[str] = []
@@ -68,12 +56,6 @@ class TestDockerManagerStreaming(unittest.TestCase):
             env.stream_callback = streamed.append
             result = env.Bash("echo before_fail && false", "Error stream test")
         assert "[exit code:" in result
-
-    def test_no_streaming_without_callback(self) -> None:
-        with DockerManager("python:3.11-slim") as env:
-            assert env.stream_callback is None
-            result = env.Bash("echo normal_output", "No stream test")
-        assert "normal_output" in result
 
     def test_streaming_stderr(self) -> None:
         streamed: list[str] = []

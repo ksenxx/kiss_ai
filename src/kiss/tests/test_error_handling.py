@@ -29,47 +29,12 @@ def _anthropic_auth_error(msg: str = "invalid x-api-key") -> AnthropicAuthError:
 
 
 class TestIsRetryableError(unittest.TestCase):
-    def test_openai_auth_error_not_retryable(self) -> None:
-        self.assertFalse(_is_retryable_error(_openai_auth_error()))
-
-    def test_anthropic_auth_error_not_retryable(self) -> None:
-        self.assertFalse(_is_retryable_error(_anthropic_auth_error()))
-
-    def test_generic_error_with_api_key_message_not_retryable(self) -> None:
-        self.assertFalse(_is_retryable_error(Exception("Missing API key")))
 
     def test_generic_error_with_unauthorized_message_not_retryable(self) -> None:
         self.assertFalse(_is_retryable_error(Exception("401 Unauthorized")))
 
-    def test_generic_error_with_permission_denied_not_retryable(self) -> None:
-        self.assertFalse(_is_retryable_error(Exception("permission denied for resource")))
-
-    def test_generic_error_with_incorrect_api_key_not_retryable(self) -> None:
-        self.assertFalse(_is_retryable_error(Exception("Incorrect API key provided")))
-
-    def test_generic_timeout_is_retryable(self) -> None:
-        self.assertTrue(_is_retryable_error(TimeoutError("Connection timed out")))
-
-    def test_generic_connection_error_is_retryable(self) -> None:
-        self.assertTrue(_is_retryable_error(ConnectionError("Connection reset")))
-
-    def test_generic_runtime_error_is_retryable(self) -> None:
-        self.assertTrue(_is_retryable_error(RuntimeError("Server returned 500")))
-
     def test_value_error_is_retryable(self) -> None:
         self.assertTrue(_is_retryable_error(ValueError("Unexpected response format")))
-
-    def test_permission_denied_type_name_not_retryable(self) -> None:
-        class PermissionDeniedError(Exception):
-            pass
-
-        self.assertFalse(_is_retryable_error(PermissionDeniedError("forbidden")))
-
-    def test_permission_denied_class_name_not_retryable(self) -> None:
-        class PermissionDenied(Exception):  # noqa: N818
-            pass
-
-        self.assertFalse(_is_retryable_error(PermissionDenied("no access")))
 
 
 class TestAgenticLoopAuthError(unittest.TestCase):

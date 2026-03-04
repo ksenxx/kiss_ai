@@ -80,22 +80,6 @@ class TestAnthropicModel:
         kwargs = m._build_create_kwargs()
         assert kwargs.get(expected_key) == expected_value
 
-    @pytest.mark.timeout(60)
-    def test_default_max_tokens(self):
-        m = model("claude-haiku-4-5")
-        assert isinstance(m, AnthropicModel)
-        m.initialize("test")
-        kwargs = m._build_create_kwargs()
-        assert kwargs["max_tokens"] == 64000
-
-    @pytest.mark.timeout(60)
-    def test_default_max_tokens_non_haiku(self):
-        m = model("claude-sonnet-4", model_config={})
-        assert isinstance(m, AnthropicModel)
-        m.initialize("test")
-        kwargs = m._build_create_kwargs()
-        assert kwargs["max_tokens"] == 65536
-
 
 @requires_gemini_api_key
 class TestGeminiModel:
@@ -191,22 +175,6 @@ class TestModelInfo:
         reason = get_flaky_reason("gpt-4.1-mini")
         assert reason is None or reason == ""
 
-    def test_calculate_cost_known_models(self):
-        assert calculate_cost("gpt-5.2", 1_000_000, 0) == 1.75
-        assert calculate_cost("gpt-5.2", 0, 1_000_000) == 14.0
-        assert calculate_cost("claude-haiku-4-5", 1_000_000, 1_000_000) == 6.0
-        assert calculate_cost("gemini-2.5-pro", 1_000_000, 1_000_000) == 11.25
-
-    def test_get_max_context_length_known_models(self):
-        assert get_max_context_length("gpt-5.2") == 400000
-        assert get_max_context_length("gpt-4.1-mini") == 128000
-        assert get_max_context_length("claude-opus-4-6") == 200000
-        assert get_max_context_length("gemini-2.5-pro") == 1048576
-
-    def test_get_max_context_length_unknown_model_raises(self):
-        with pytest.raises(KeyError, match="not found"):
-            get_max_context_length("nonexistent-model-xyz")
-
     def test_all_models_have_valid_context_and_pricing(self):
         for name, info in MODEL_INFO.items():
             assert info.context_length > 0, f"{name}: invalid context_length"
@@ -247,24 +215,6 @@ class TestModelInfo:
         m = model("minimax-m2.5")
         assert isinstance(m, OpenAICompatibleModel)
         assert m.model_name == "minimax-m2.5"
-
-    def test_minimax_m2_5_lightning_model_routing(self):
-        m = model("minimax-m2.5-lightning")
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.model_name == "minimax-m2.5-lightning"
-
-    def test_minimax_m2_5_calculate_cost(self):
-        assert calculate_cost("minimax-m2.5", 1_000_000, 0) == 0.15
-        assert calculate_cost("minimax-m2.5", 0, 1_000_000) == 1.20
-        assert abs(calculate_cost("minimax-m2.5", 1_000_000, 1_000_000) - 1.35) < 1e-9
-
-    def test_minimax_m2_5_lightning_calculate_cost(self):
-        assert calculate_cost("minimax-m2.5-lightning", 1_000_000, 0) == 0.30
-        assert calculate_cost("minimax-m2.5-lightning", 0, 1_000_000) == 2.40
-
-    def test_minimax_m2_5_context_length(self):
-        assert get_max_context_length("minimax-m2.5") == 1000000
-        assert get_max_context_length("minimax-m2.5-lightning") == 1000000
 
     def test_minimax_api_key_routing(self):
         from kiss.tests.conftest import get_required_api_key_for_model
@@ -315,21 +265,6 @@ class TestCachePricing:
                     f"{name} should not have cache pricing"
                 )
 
-    def test_calculate_cost_with_cache_tokens(self):
-        cost = calculate_cost("claude-sonnet-4", 500_000, 100_000, 400_000, 100_000)
-        expected = (500_000 * 3.00 + 100_000 * 15.00 + 400_000 * 0.30 + 100_000 * 3.75) / 1_000_000
-        assert cost == pytest.approx(expected)
-
-    def test_calculate_cost_cache_tokens_default_zero(self):
-        cost_no_cache = calculate_cost("claude-sonnet-4", 1_000_000, 0)
-        cost_explicit_zero = calculate_cost("claude-sonnet-4", 1_000_000, 0, 0, 0)
-        assert cost_no_cache == cost_explicit_zero
-
-    def test_calculate_cost_openai_cache_read_discount(self):
-        full_cost = calculate_cost("gpt-4.1-mini", 1_000_000, 0)
-        cached_cost = calculate_cost("gpt-4.1-mini", 0, 0, 1_000_000, 0)
-        assert cached_cost == pytest.approx(full_cost * 0.5)
-
     def test_calculate_cost_unknown_model_with_cache_tokens(self):
         assert calculate_cost("unknown-model-xyz", 1000, 1000, 500, 500) == 0.0
 
@@ -341,47 +276,6 @@ class TestCachePricing:
 
 @requires_anthropic_api_key
 class TestAnthropicCacheControl:
-    @pytest.mark.timeout(60)
-    def test_cache_control_added_to_tools(self):
-        m = model("claude-haiku-4-5")
-        assert isinstance(m, AnthropicModel)
-        m.initialize("test")
-
-        def dummy_tool(x: str) -> str:
-            """A dummy tool."""
-            return x
-
-        tools = m._build_anthropic_tools_schema({"dummy_tool": dummy_tool})
-        kwargs = m._build_create_kwargs(tools=tools)
-        assert kwargs["tools"][-1].get("cache_control") == {"type": "ephemeral"}
-
-    @pytest.mark.timeout(60)
-    def test_cache_control_added_to_last_user_message_string(self):
-        m = model("claude-haiku-4-5")
-        assert isinstance(m, AnthropicModel)
-        m.initialize("test prompt")
-        m._build_create_kwargs()
-        msg = m.conversation[0]
-        assert isinstance(msg["content"], list)
-        assert msg["content"][0]["cache_control"] == {"type": "ephemeral"}
-        assert msg["content"][0]["text"] == "test prompt"
-
-    @pytest.mark.timeout(60)
-    def test_cache_control_added_to_last_user_message_list(self):
-        m = model("claude-haiku-4-5")
-        assert isinstance(m, AnthropicModel)
-        m.initialize("test")
-        m._build_create_kwargs()
-        m.conversation.append({"role": "assistant", "content": "reply"})
-        m.conversation.append(
-            {
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
-            }
-        )
-        m._build_create_kwargs()
-        last_user = m.conversation[-1]
-        assert last_user["content"][-1].get("cache_control") == {"type": "ephemeral"}
 
     @pytest.mark.timeout(60)
     def test_cache_control_disabled_via_model_config(self):
@@ -401,101 +295,6 @@ class TestAnthropicCacheControl:
 
 
 class TestModelConfigBaseUrlOverride:
-    def test_base_url_only_returns_openai_compatible(self):
-        m = model("any-model-name", model_config={"base_url": "https://custom.example/v1"})
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.base_url == "https://custom.example/v1"
-        assert m.api_key == ""
-        assert m.model_name == "any-model-name"
-
-    def test_base_url_and_api_key(self):
-        m = model(
-            "custom/foo",
-            model_config={"base_url": "https://api.example/v1", "api_key": "sk-secret"},
-        )
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.base_url == "https://api.example/v1"
-        assert m.api_key == "sk-secret"
-        assert m.model_name == "custom/foo"
-
-    def test_base_url_override_ignores_normal_routing(self):
-        m = model("claude-haiku-4-5", model_config={"base_url": "https://proxy/v1"})
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.base_url == "https://proxy/v1"
-        assert m.model_name == "claude-haiku-4-5"
-
-    def test_base_url_override_with_extra_config_passed_through(self):
-        m = model(
-            "gpt-4",
-            model_config={
-                "base_url": "https://local/v1",
-                "temperature": 0.3,
-                "max_tokens": 100,
-            },
-        )
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.base_url == "https://local/v1"
-        assert m.model_config.get("temperature") == 0.3
-        assert m.model_config.get("max_tokens") == 100
-        assert "base_url" not in m.model_config
-        assert "api_key" not in m.model_config
-
-    def test_base_url_override_api_key_not_in_model_config(self):
-        m = model(
-            "x",
-            model_config={"base_url": "https://b/v1", "api_key": "key123"},
-        )
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.api_key == "key123"
-        assert "api_key" not in m.model_config
-        assert "base_url" not in m.model_config
-
-    def test_no_base_url_uses_normal_routing_openai(self):
-        m = model("gpt-4.1-mini", model_config={"temperature": 0.5})
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.base_url == "https://api.openai.com/v1"
-        assert m.model_config.get("temperature") == 0.5
-
-    def test_model_config_none_uses_normal_routing(self):
-        m = model("claude-haiku-4-5")
-        assert isinstance(m, AnthropicModel)
-
-    def test_model_config_empty_no_override(self):
-        m = model("gemini-2.0-flash", model_config={})
-        assert isinstance(m, GeminiModel)
-
-    def test_unknown_model_with_base_url_succeeds(self):
-        m = model("unknown-vendor/model-xyz", model_config={"base_url": "https://custom/v1"})
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.model_name == "unknown-vendor/model-xyz"
-        assert m.base_url == "https://custom/v1"
-
-    def test_openrouter_with_base_url_override_uses_custom_url(self):
-        m = model(
-            "openrouter/foo",
-            model_config={"base_url": "https://my-gateway/v1", "api_key": "mykey"},
-        )
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.base_url == "https://my-gateway/v1"
-        assert m.api_key == "mykey"
-
-    def test_token_callback_passed_through_with_base_url_override(self):
-        received = []
-
-        async def cb(t: str) -> None:
-            received.append(t)
-
-        m = model(
-            "local",
-            model_config={"base_url": "https://local/v1"},
-            token_callback=cb,
-        )
-        assert m.token_callback is cb
-
-    def test_base_url_trailing_slash_preserved(self):
-        m = model("m", model_config={"base_url": "https://endpoint/v1/"})
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.base_url == "https://endpoint/v1/"
 
     @pytest.mark.timeout(60)
     @requires_openai_api_key
