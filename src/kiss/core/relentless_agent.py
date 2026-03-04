@@ -79,7 +79,7 @@ class RelentlessAgent(Base):
         verbose: bool | None = None,
     ) -> None:
         global_cfg = config_module.DEFAULT_CONFIG
-        cfg = global_cfg.assistant.relentless_agent
+        cfg = global_cfg.relentless_agent
         default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
@@ -212,10 +212,10 @@ class RelentlessAgent(Base):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         verbose: bool | None = None,
-        tools_factory: Callable[[], list[Callable[..., Any]]] | None = None,
+        tools: list[Callable[..., Any]] | None = None,
         attachments: list[Attachment] | None = None,
     ) -> str:
-        """Run the agent with tools created by tools_factory (called after _reset).
+        """Run the agent with the provided tools.
 
         Args:
             model_name: LLM model to use. Defaults to config value.
@@ -232,7 +232,7 @@ class RelentlessAgent(Base):
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
             verbose: Whether to print output to console. Defaults to config verbose setting.
-            tools_factory: Callable that returns the list of tools for the agent.
+            tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
         Returns:
@@ -252,8 +252,6 @@ class RelentlessAgent(Base):
         self.system_instructions = system_instructions
         self.task_description = prompt_template.format(**(arguments or {}))
 
-        tools = tools_factory() if tools_factory else []
-
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:
                 self.docker_manager = docker_mgr
@@ -265,7 +263,7 @@ class RelentlessAgent(Base):
 
                     docker_mgr.stream_callback = _docker_stream
                 try:
-                    return self.perform_task(tools, attachments=attachments)
+                    return self.perform_task(tools or [], attachments=attachments)
                 finally:
                     self.docker_manager = None
-        return self.perform_task(tools, attachments=attachments)
+        return self.perform_task(tools or [], attachments=attachments)

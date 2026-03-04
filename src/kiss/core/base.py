@@ -58,7 +58,7 @@ SYSTEM_PROMPT = f"""
 
 ## Testing Instructions
 - Run lint and typecheckers and fix any lint and typecheck errors
-- Carefully read the code, find and fix redundancies, duplications, 
+- Carefully read the code, find and fix redundancies, duplications,
   inconsistencies, errors, and AI slop in the code
 - Generate comprehensive tests so that you achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, or any form of test doubles
@@ -115,6 +115,7 @@ class Base:
         self.id = Base.agent_counter
         Base.agent_counter += 1
         self.base_dir = ""
+        self.printer: Printer | None = None
 
     def set_printer(
         self,

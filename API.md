@@ -94,6 +94,8 @@ ______________________________________________________________________
 
 ##### `class APIKeysConfig(BaseModel)`
 
+##### `class RelentlessAgentConfig(BaseModel)`
+
 ##### `class DockerConfig(BaseModel)`
 
 ______________________________________________________________________
@@ -685,7 +687,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
-- **run** — Run the agent with tools created by tools_factory (called after \_reset).<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools_factory: Callable[[], list[Callable[..., Any]]] | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Run the agent with the provided tools.<br/>`run(model_name: str | None = None, summarizer_model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools: list[Callable[..., Any]] | None = None, attachments: list[Attachment] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `summarizer_model_name`: LLM model for summarizing trajectories on failure. Defaults to config value.
@@ -699,7 +701,7 @@ ______________________________________________________________________
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
-  - `tools_factory`: Callable that returns the list of tools for the agent.
+  - `tools`: List of callable tools available to the agent during execution.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
@@ -751,7 +753,7 @@ ______________________________________________________________________
 
 ##### `class AgentConfig(BaseModel)`
 
-##### `class AssistantConfig(BaseModel)`
+##### `class SorcarConfig(BaseModel)`
 
 ______________________________________________________________________
 

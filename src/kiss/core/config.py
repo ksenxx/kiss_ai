@@ -71,6 +71,29 @@ class AgentConfig(BaseModel):
     )
 
 
+class RelentlessAgentConfig(BaseModel):
+    model_name: str = Field(
+        default="claude-opus-4-6",
+        description="LLM model to use",
+    )
+    summarizer_model_name: str = Field(
+        default="claude-haiku-4-5",
+        description="LLM model to use for summarizing trajectories on failure",
+    )
+    max_steps: int = Field(
+        default=25,
+        description="Maximum steps per sub-session",
+    )
+    max_budget: float = Field(
+        default=200.0,
+        description="Maximum budget in USD",
+    )
+    max_sub_sessions: int = Field(
+        default=200,
+        description="Maximum number of sub-sessions for auto-continuation",
+    )
+
+
 class DockerConfig(BaseModel):
     client_shared_path: str = Field(
         default="/testbed", description="Path inside Docker container for shared volume"
@@ -80,6 +103,10 @@ class DockerConfig(BaseModel):
 class Config(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig, description="Agent configuration")
     docker: DockerConfig = Field(default_factory=DockerConfig, description="Docker configuration")
+    relentless_agent: RelentlessAgentConfig = Field(
+        default_factory=RelentlessAgentConfig,
+        description="Configuration for RelentlessAgent",
+    )
 
 
 DEFAULT_CONFIG: Any = Config()
