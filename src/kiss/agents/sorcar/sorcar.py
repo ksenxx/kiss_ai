@@ -29,6 +29,7 @@ from kiss.agents.sorcar.code_server import (
 )
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
+    SAMPLE_TASKS,
     _add_task,
     _append_task_to_md,
     _init_task_history_md,
@@ -51,6 +52,9 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.relentless_agent import RelentlessAgent
 
+_FAST_MODEL = "gemini-2.0-flash"
+_COMMIT_MODEL = "claude-haiku-4-5"
+
 
 class _StopRequested(BaseException):
     pass
@@ -70,6 +74,30 @@ def _read_active_file(cs_data_dir: str) -> str:
 
 def _clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'")
+
+
+def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
+    if detailed:
+        prompt = (
+            "Generate a nicely formatted, informative git commit message for "
+            "these changes. Use conventional commit format with a clear subject "
+            "line (type: description) and optionally a body with bullet points "
+            "for multiple changes. Return ONLY the commit message text, no "
+            "quotes or markdown fences.\n\n{context}"
+        )
+    else:
+        prompt = (
+            "Generate a concise git commit message (1-2 lines) for these changes. "
+            "Return ONLY the commit message text, no quotes.\n\n{context}"
+        )
+    agent = KISSAgent("Commit Message Generator")
+    raw = agent.run(
+        model_name=_COMMIT_MODEL,
+        prompt_template=prompt,
+        arguments={"context": diff_text[:4000]},
+        is_agentic=False,
+    )
+    return _clean_llm_output(raw)
 
 
 def _model_vendor_order(name: str) -> int:
@@ -226,7 +254,7 @@ def run_chatbot(
         agent = KISSAgent("Task Proposer")
         try:
             result = agent.run(
-                model_name="gemini-2.0-flash",
+                model_name=_FAST_MODEL,
                 prompt_template=(
                     "Based on these past tasks a developer has worked on, suggest 5 new "
                     "tasks they might want to do next. Tasks should be natural follow-ups, "
@@ -253,7 +281,7 @@ def run_chatbot(
         try:
             agent = KISSAgent("Followup Proposer")
             raw = agent.run(
-                model_name="gemini-2.0-flash",
+                model_name=_FAST_MODEL,
                 prompt_template=(
                     "A developer just completed this task:\n"
                     "Task: {task}\n"
@@ -311,6 +339,8 @@ def run_chatbot(
         nonlocal running, agent_thread
         from kiss.core.models.model import Attachment
 
+        current_thread = threading.current_thread()
+
         parsed_attachments: list[Attachment] | None = None
         if attachments:
             parsed_attachments = []
@@ -341,6 +371,9 @@ def run_chatbot(
                 **extra_kwargs,
             )
             result_text = result or ""
+            with running_lock:
+                if agent_thread is not current_thread:
+                    return
             printer.broadcast({"type": "task_done"})
             threading.Thread(
                 target=generate_followup,
@@ -349,14 +382,22 @@ def run_chatbot(
             ).start()
         except _StopRequested:
             result_text = "(stopped)"
+            with running_lock:
+                if agent_thread is not current_thread:
+                    return
             printer.broadcast({"type": "task_stopped"})
         except Exception as e:
             result_text = f"(error: {e})"
+            with running_lock:
+                if agent_thread is not current_thread:
+                    return
             printer.broadcast({"type": "task_error", "text": str(e)})
         finally:
             _set_latest_result(result_text)
             _append_task_to_md(task, result_text)
             with running_lock:
+                if agent_thread is not current_thread:
+                    return
                 running = False
                 agent_thread = None
             try:
@@ -377,20 +418,27 @@ def run_chatbot(
                 pass
 
     def stop_agent() -> bool:
-        nonlocal agent_thread
+        """Kill the current agent thread and reset state for a new task.
+
+        Immediately resets running state so a new agent thread can be started.
+        Injects _StopRequested into the old thread to clean it up.
+        """
+        nonlocal running, agent_thread
         with running_lock:
             thread = agent_thread
-        if thread is None or not thread.is_alive():
-            return False
+            if thread is None or not thread.is_alive():
+                return False
+            running = False
+            agent_thread = None
         import ctypes
 
         tid = thread.ident
-        if tid is None:
-            return False
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid),
-            ctypes.py_object(_StopRequested),
-        )
+        if tid is not None:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(tid),
+                ctypes.py_object(_StopRequested),
+            )
+        printer.broadcast({"type": "task_stopped"})
         return True
 
     def _cleanup() -> None:
@@ -447,18 +495,12 @@ def run_chatbot(
 
     async def run_task(request: Request) -> JSONResponse:
         nonlocal running, agent_thread, selected_model
-        with running_lock:
-            if running:
-                return JSONResponse({"error": "Agent is already running"}, status_code=409)
-            running = True
         body = await request.json()
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
         attachments = body.get("attachments")
         selected_model = model
         if not task:
-            with running_lock:
-                running = False
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
         t = threading.Thread(
@@ -467,6 +509,9 @@ def run_chatbot(
             daemon=True,
         )
         with running_lock:
+            if running:
+                return JSONResponse({"error": "Agent is already running"}, status_code=409)
+            running = True
             agent_thread = t
         t.start()
         return JSONResponse({"status": "started"})
@@ -528,7 +573,10 @@ def run_chatbot(
 
     async def proposed_tasks_endpoint(request: Request) -> JSONResponse:
         with proposed_lock:
-            return JSONResponse(list(proposed_tasks))
+            tasks_list = list(proposed_tasks)
+        if not tasks_list:
+            tasks_list = [t["task"] for t in SAMPLE_TASKS[:5]]
+        return JSONResponse(tasks_list)
 
     def _fast_complete(raw_query: str, query: str) -> str:
         query_lower = query.lower()
@@ -561,7 +609,7 @@ def run_chatbot(
             agent = KISSAgent("Autocomplete")
             try:
                 result = agent.run(
-                    model_name="gemini-2.0-flash",
+                    model_name=_FAST_MODEL,
                     prompt_template=(
                         "You are an inline autocomplete engine for a coding assistant. "
                         "Given the user's partial input and their past task history, "
@@ -651,7 +699,7 @@ def run_chatbot(
         if action == "all-done":
             printer.broadcast({"type": "merge_ended"})
             return JSONResponse({"status": "ok"})
-        if action not in ("prev", "next", "accept-all", "reject-all"):
+        if action not in ("prev", "next", "accept-all", "reject-all", "accept", "reject"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
         pending = os.path.join(cs_data_dir, "pending-action.json")
         with open(pending, "w") as f:
@@ -684,17 +732,7 @@ def run_chatbot(
                 text=True,
                 cwd=actual_work_dir,
             )
-            agent = KISSAgent("Commit Message Generator")
-            message = agent.run(
-                model_name="claude-haiku-4-5",
-                prompt_template=(
-                    "Generate a concise git commit message (1-2 lines) for these changes. "
-                    "Return ONLY the commit message text, no quotes.\n\n{diff}"
-                ),
-                arguments={"diff": diff_detail.stdout[:4000]},
-                is_agentic=False,
-            )
-            message = _clean_llm_output(message)
+            message = _generate_commit_msg(diff_detail.stdout)
             commit_env = {
                 **os.environ,
                 "GIT_COMMITTER_NAME": "KISS Sorcar",
@@ -761,22 +799,8 @@ def run_chatbot(
                 context_parts.append(f"Diff:\n{diff_text[:4000]}")
             if untracked_files:
                 context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
-            context = "\n\n".join(context_parts)
-            agent = KISSAgent("Commit Message Generator")
             try:
-                message = agent.run(
-                    model_name="claude-haiku-4-5",
-                    prompt_template=(
-                        "Generate a nicely formatted, informative git commit message for "
-                        "these changes. Use conventional commit format with a clear subject "
-                        "line (type: description) and optionally a body with bullet points "
-                        "for multiple changes. Return ONLY the commit message text, no "
-                        "quotes or markdown fences.\n\n{context}"
-                    ),
-                    arguments={"context": context},
-                    is_agentic=False,
-                )
-                msg = _clean_llm_output(message)
+                msg = _generate_commit_msg("\n\n".join(context_parts), detailed=True)
                 scm_pending = os.path.join(cs_data_dir, "pending-scm-message.json")
                 with open(scm_pending, "w") as f:
                     json.dump({"message": msg}, f)
@@ -840,7 +864,7 @@ def run_chatbot(
             agent = KISSAgent("Config Message Generator")
             try:
                 result = agent.run(
-                    model_name="gemini-2.0-flash",
+                    model_name=_FAST_MODEL,
                     prompt_template=(
                         "You are a helpful assistant. Given the following configuration "
                         "information about a coding assistant environment, generate a "

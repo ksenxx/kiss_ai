@@ -167,6 +167,11 @@ def main() -> int:
         action="store_true",
         help="Only clean build artifacts, do not run checks",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Run additional checks including pyright type checking",
+    )
     args = parser.parse_args()
 
     if not args.no_clean:
@@ -184,6 +189,9 @@ def main() -> int:
         (["uv", "run", "ruff", "check", "src/"], "Lint code (ruff)"),
         (["uv", "run", "mypy", "src/"], "Type check (mypy)"),
     ]
+
+    if args.full:
+        checks.append((["uv", "run", "pyright", "src/"], "Type check (pyright)"))
 
     # Add markdown lint check if there are markdown files
     if md_files:
