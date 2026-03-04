@@ -161,7 +161,7 @@ def run_chatbot(
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
-    cs_data_dir = str(_KISS_DIR / "code-server-data")
+    cs_data_dir = str(_KISS_DIR / f"code-server-data-{time.time()}")
     cs_binary = shutil.which("code-server")
     if cs_binary:
         ext_changed = _setup_code_server(cs_data_dir)

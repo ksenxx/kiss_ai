@@ -420,7 +420,7 @@ class UsefulTools:
         try:
             chunks: list[str] = []
             assert process.stdout is not None
-            for line in process.stdout:
+            for line in iter(process.stdout.readline, ""):
                 chunks.append(line)
                 self.stream_callback(line)
             process.wait()
