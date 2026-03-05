@@ -5,6 +5,7 @@
 
 """Docker library for managing Docker containers and executing commands."""
 
+import logging
 import os
 import shlex
 import shutil
@@ -17,8 +18,6 @@ from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
-
-import logging
 
 logger = logging.getLogger(__name__)
 

@@ -5,9 +5,9 @@
 
 """Model implementations for different LLM providers."""
 
-from kiss.core.models.model import Attachment, Model
-
 import logging
+
+from kiss.core.models.model import Attachment, Model
 
 logger = logging.getLogger(__name__)
 

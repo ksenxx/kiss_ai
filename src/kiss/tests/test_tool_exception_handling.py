@@ -18,39 +18,6 @@ def _make_agent() -> KISSAgent:
     return agent
 
 
-def test_regular_exception_caught() -> None:
-    def bad_tool(x: str) -> str:
-        """Tool that raises RuntimeError.
-
-        Args:
-            x: Input.
-        """
-        raise RuntimeError("boom")
-
-    agent = _make_agent()
-    agent._add_functions([finish, bad_tool])
-    name, response = agent._execute_tool({"name": "bad_tool", "arguments": {"x": "a"}})
-    assert name == "bad_tool"
-    assert "Failed to call" in response
-    assert "boom" in response
-
-
-def test_system_exit_caught() -> None:
-    def exit_tool(x: str) -> str:
-        """Tool that raises SystemExit.
-
-        Args:
-            x: Input.
-        """
-        raise SystemExit(1)
-
-    agent = _make_agent()
-    agent._add_functions([finish, exit_tool])
-    name, response = agent._execute_tool({"name": "exit_tool", "arguments": {"x": "a"}})
-    assert name == "exit_tool"
-    assert "Failed to call" in response
-
-
 def test_keyboard_interrupt_propagates() -> None:
     def interrupt_tool(x: str) -> str:
         """Tool that raises KeyboardInterrupt.
@@ -70,47 +37,6 @@ def test_keyboard_interrupt_propagates() -> None:
     assert caught, "KeyboardInterrupt should propagate"
 
 
-def test_base_exception_subclass_propagates() -> None:
-    class CustomBaseError(BaseException):
-        pass
-
-    def custom_tool(x: str) -> str:
-        """Tool that raises a BaseException subclass.
-
-        Args:
-            x: Input.
-        """
-        raise CustomBaseError("custom base error")
-
-    agent = _make_agent()
-    agent._add_functions([finish, custom_tool])
-    caught = False
-    try:
-        agent._execute_tool({"name": "custom_tool", "arguments": {"x": "a"}})
-    except CustomBaseError:
-        caught = True
-    assert caught, "BaseException subclasses should propagate"
-
-
-def test_generator_exit_propagates() -> None:
-    def gen_exit_tool(x: str) -> str:
-        """Tool that raises GeneratorExit.
-
-        Args:
-            x: Input.
-        """
-        raise GeneratorExit()
-
-    agent = _make_agent()
-    agent._add_functions([finish, gen_exit_tool])
-    caught = False
-    try:
-        agent._execute_tool({"name": "gen_exit_tool", "arguments": {"x": "a"}})
-    except GeneratorExit:
-        caught = True
-    assert caught, "GeneratorExit should propagate"
-
-
 def _parse_summarizer_result(summarizer_result: str) -> str:
     """Replicate the summarizer YAML parsing logic from relentless_agent.perform_task."""
     try:
@@ -122,16 +48,6 @@ def _parse_summarizer_result(summarizer_result: str) -> str:
         )
     except Exception:
         return summarizer_result
-
-
-def test_summarizer_yaml_valid_dict_with_result() -> None:
-    raw = yaml.dump({"result": "Task completed successfully"})
-    assert _parse_summarizer_result(raw) == "Task completed successfully"
-
-
-def test_summarizer_yaml_valid_dict_without_result_key() -> None:
-    raw = yaml.dump({"other": "some value"})
-    assert _parse_summarizer_result(raw) == raw
 
 
 def test_summarizer_yaml_invalid_yaml() -> None:
@@ -147,11 +63,6 @@ def test_summarizer_yaml_invalid_yaml() -> None:
 
 def test_summarizer_yaml_plain_text() -> None:
     raw = "This is just plain text summary of the work done."
-    assert _parse_summarizer_result(raw) == raw
-
-
-def test_summarizer_yaml_returns_list() -> None:
-    raw = yaml.dump(["item1", "item2"])
     assert _parse_summarizer_result(raw) == raw
 
 

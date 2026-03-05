@@ -40,23 +40,6 @@ class TestGeminiModelConversationConversion:
         assert any(content.role == "model" for content in contents)
         assert any(content.role == "user" for content in contents)
 
-    def test_add_function_results_fallback_ids_and_usage_info(self):
-        model = self._model()
-        model.set_usage_info_for_messages("Usage: 10 tokens")
-        model.conversation = []
-
-        model.add_function_results_to_conversation_and_return([("tool_a", {"result": "ok"})])
-        assert model.conversation[-1]["tool_call_id"].startswith("call_tool_a_")
-        assert "Usage: 10 tokens" in model.conversation[-1]["content"]
-
-    def test_add_message_appends_usage_info(self):
-        model = self._model()
-        model.set_usage_info_for_messages("Usage: 5 tokens")
-        model.conversation = []
-
-        model.add_message_to_conversation("user", "Hi")
-        assert "Usage: 5 tokens" in model.conversation[-1]["content"]
-
     def test_extract_token_counts_no_usage(self):
         model = self._model()
 

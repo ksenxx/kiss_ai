@@ -1,30 +1,73 @@
-import xml.etree.ElementTree as ET
+"""Find redundant tests using branch coverage with dynamic contexts.
 
-def analyze_redundancy(coverage_file="coverage.xml"):
-    tree = ET.parse(coverage_file)
-    root = tree.getroot()
+A test is redundant if the set of branches (arcs) it covers is a subset
+of the branches covered by the remaining tests in the suite.  Tests are
+removed iteratively (smallest arc-set first) so the final set is safe
+to delete without losing any branch coverage.
 
-    coverage_data = {}
-    for class_element in root.findall(".//class"):
-        class_name = class_element.get("name")
-        for method_element in class_element.findall(".//method"):
-            method_name = method_element.get("name")
-            method_signature = f"{class_name}.{method_name}"
-            covered_lines = set()
-            for line_element in method_element.findall(".//line"):
-                if line_element.get("hits") != "0":
-                    covered_lines.add(int(line_element.get("number")))
-            coverage_data[method_signature] = covered_lines
+Requires: coverage.py database (.coverage) generated with
+  branch = true  and  dynamic_context = "test_function"
+"""
 
-    redundant_tests = []
-    for test1, coverage1 in coverage_data.items():
-        for test2, coverage2 in coverage_data.items():
-            if test1 != test2 and coverage1.issubset(coverage2):
-                redundant_tests.append((test1, test2))
-                print(f"Test {test1} is redundant because it's covered by {test2}")
+import coverage
 
-    if not redundant_tests:
-        print("No redundant tests found.")
+
+def _load_test_arcs(
+    coverage_file: str,
+) -> dict[str, set[tuple[str, int, int]]]:
+    cov = coverage.Coverage(data_file=coverage_file)
+    cov.load()
+    data = cov.get_data()
+    contexts = sorted(c for c in data.measured_contexts() if c)
+    test_arcs: dict[str, set[tuple[str, int, int]]] = {}
+    for ctx in contexts:
+        data.set_query_context(ctx)
+        arcs: set[tuple[str, int, int]] = set()
+        for src_file in data.measured_files():
+            file_arcs = data.arcs(src_file)
+            if file_arcs:
+                for from_line, to_line in file_arcs:
+                    arcs.add((src_file, from_line, to_line))
+        if arcs:
+            test_arcs[ctx] = arcs
+    return test_arcs
+
+
+def analyze_redundancy(coverage_file: str = ".coverage") -> list[str]:
+    test_arcs = _load_test_arcs(coverage_file)
+
+    arc_to_tests: dict[tuple[str, int, int], set[str]] = {}
+    for ctx, arcs in test_arcs.items():
+        for arc in arcs:
+            arc_to_tests.setdefault(arc, set()).add(ctx)
+
+    remaining = set(test_arcs)
+    redundant: list[str] = []
+
+    changed = True
+    while changed:
+        changed = False
+        candidates = []
+        for ctx in sorted(remaining):
+            is_redundant = all(
+                len(arc_to_tests[arc] & remaining) >= 2
+                for arc in test_arcs[ctx]
+            )
+            if is_redundant:
+                candidates.append(ctx)
+
+        if candidates:
+            victim = min(candidates, key=lambda c: len(test_arcs[c]))
+            remaining.discard(victim)
+            redundant.append(victim)
+            changed = True
+
+    print(f"Total test contexts: {len(test_arcs)}")
+    print(f"Redundant (safe to remove): {len(redundant)}")
+    for t in sorted(redundant):
+        print(f"  REDUNDANT: {t}")
+    return sorted(redundant)
+
 
 if __name__ == "__main__":
     analyze_redundancy()

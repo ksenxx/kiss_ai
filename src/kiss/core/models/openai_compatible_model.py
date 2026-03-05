@@ -7,6 +7,7 @@
 
 import inspect
 import json
+import logging
 import re
 import uuid
 from collections.abc import Callable
@@ -16,8 +17,6 @@ from openai import OpenAI
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment, Model, TokenCallback
-
-import logging
 
 logger = logging.getLogger(__name__)
 

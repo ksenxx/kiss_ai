@@ -33,51 +33,6 @@ class TestPrintStreamEvent(unittest.TestCase):
     def _event(self, evt_dict):
         return SimpleNamespace(event=evt_dict)
 
-    def test_text_delta_empty(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        text = p.print(
-            self._event(
-                {
-                    "type": "content_block_delta",
-                    "delta": {"type": "text_delta", "text": ""},
-                }
-            ),
-            type="stream_event",
-        )
-        assert text == ""
-        assert _drain(q) == []
-
-    def test_text_delta_nonempty_does_not_broadcast(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        text = p.print(
-            self._event(
-                {
-                    "type": "content_block_delta",
-                    "delta": {"type": "text_delta", "text": "Hello"},
-                }
-            ),
-            type="stream_event",
-        )
-        assert text == "Hello"
-        assert _drain(q) == []
-
-    def test_thinking_delta_does_not_broadcast(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        text = p.print(
-            self._event(
-                {
-                    "type": "content_block_delta",
-                    "delta": {"type": "thinking_delta", "thinking": "Let me think"},
-                }
-            ),
-            type="stream_event",
-        )
-        assert text == "Let me think"
-        assert _drain(q) == []
-
     def test_tool_use_stop_invalid_json(self):
         p = BaseBrowserPrinter()
         q = _subscribe(p)
@@ -93,15 +48,6 @@ class TestPrintStreamEvent(unittest.TestCase):
 
 
 class TestFormatToolCall(unittest.TestCase):
-    def test_truncates_long_extra_values(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        p._format_tool_call("Tool", {"extra_key": "x" * 300})
-        events = _drain(q)
-        extras = events[0]["extras"]
-        assert "extra_key" in extras
-        assert extras["extra_key"].endswith("...")
-        assert len(extras["extra_key"]) <= 204
 
     def test_with_description(self):
         p = BaseBrowserPrinter()
@@ -150,14 +96,6 @@ class TestPrintMessageDispatch(unittest.TestCase):
 
 
 class TestPrint(unittest.TestCase):
-    def test_print_broadcasts_text_delta(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        p.print("hello world")
-        events = _drain(q)
-        assert len(events) == 1
-        assert events[0]["type"] == "text_delta"
-        assert "hello world" in events[0]["text"]
 
     def test_print_empty_no_broadcast(self):
         p = BaseBrowserPrinter()
@@ -167,15 +105,6 @@ class TestPrint(unittest.TestCase):
 
 
 class TestTokenCallback(unittest.TestCase):
-    def test_token_callback_broadcasts_text_delta(self):
-        import asyncio
-
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        asyncio.run(p.token_callback("hello"))
-        events = _drain(q)
-        assert len(events) == 1
-        assert events[0] == {"type": "text_delta", "text": "hello"}
 
     def test_token_callback_empty_string_no_broadcast(self):
         import asyncio
@@ -184,28 +113,6 @@ class TestTokenCallback(unittest.TestCase):
         q = _subscribe(p)
         asyncio.run(p.token_callback(""))
         assert _drain(q) == []
-
-    def test_token_callback_during_thinking_broadcasts_thinking_delta(self):
-        import asyncio
-
-        p = BaseBrowserPrinter()
-        p._current_block_type = "thinking"
-        q = _subscribe(p)
-        asyncio.run(p.token_callback("deep thought"))
-        events = _drain(q)
-        assert len(events) == 1
-        assert events[0] == {"type": "thinking_delta", "text": "deep thought"}
-
-    def test_token_callback_during_text_broadcasts_text_delta(self):
-        import asyncio
-
-        p = BaseBrowserPrinter()
-        p._current_block_type = "text"
-        q = _subscribe(p)
-        asyncio.run(p.token_callback("regular"))
-        events = _drain(q)
-        assert len(events) == 1
-        assert events[0] == {"type": "text_delta", "text": "regular"}
 
 
 class TestStreamingFlow(unittest.TestCase):

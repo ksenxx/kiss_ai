@@ -79,32 +79,6 @@ def _create_minimal_pdf() -> bytes:
 
 
 class TestAttachment(unittest.TestCase):
-    def test_from_file_png(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            png_data = _create_png_bytes()
-            f.write(png_data)
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "image/png"
-            assert att.data == png_data
-
-    def test_from_file_jpeg(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            jpeg_data = _create_jpeg_bytes()
-            f.write(jpeg_data)
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "image/jpeg"
-            assert att.data == jpeg_data
-
-    def test_from_file_pdf(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            pdf_data = _create_minimal_pdf()
-            f.write(pdf_data)
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "application/pdf"
-            assert att.data == pdf_data
 
     def test_from_file_unsupported(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
@@ -113,45 +87,12 @@ class TestAttachment(unittest.TestCase):
             with pytest.raises(ValueError, match="Unsupported MIME type"):
                 Attachment.from_file(f.name)
 
-    def test_from_file_not_found(self) -> None:
-        with pytest.raises(FileNotFoundError):
-            Attachment.from_file("/nonexistent/file.png")
-
-    def test_to_base64(self) -> None:
-        import base64
-
-        data = b"test data"
-        att = Attachment(data=data, mime_type="image/png")
-        assert att.to_base64() == base64.b64encode(data).decode("ascii")
-
-    def test_to_data_url(self) -> None:
-        import base64
-
-        data = b"test data"
-        att = Attachment(data=data, mime_type="image/jpeg")
-        expected = f"data:image/jpeg;base64,{base64.b64encode(data).decode('ascii')}"
-        assert att.to_data_url() == expected
-
     def test_supported_mime_types(self) -> None:
         assert "image/jpeg" in SUPPORTED_MIME_TYPES
         assert "image/png" in SUPPORTED_MIME_TYPES
         assert "image/gif" in SUPPORTED_MIME_TYPES
         assert "image/webp" in SUPPORTED_MIME_TYPES
         assert "application/pdf" in SUPPORTED_MIME_TYPES
-
-    def test_from_file_gif(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as f:
-            f.write(b"GIF89a\x01\x00\x01\x00\x00\x00\x00;\x00")
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "image/gif"
-
-    def test_from_file_webp(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as f:
-            f.write(b"RIFF\x00\x00\x00\x00WEBP")
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "image/webp"
 
 
 class TestAttachmentFromFileExtensions(unittest.TestCase):
@@ -168,39 +109,6 @@ class TestAttachmentFromFileExtensions(unittest.TestCase):
 @requires_gemini_api_key
 class TestGeminiMultimodal(unittest.TestCase):
     """Integration tests for Gemini model with image attachments."""
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_describe_png_image(self) -> None:
-        png_data = _create_png_bytes(width=4, height=4, color=(255, 0, 0))
-        att = Attachment(data=png_data, mime_type="image/png")
-        agent = KISSAgent("Gemini Image Test")
-        result = agent.run(
-            model_name="gemini-2.0-flash",
-            prompt_template=(
-                "Describe this image. What color is it? Answer with just the color name."
-            ),
-            is_agentic=False,
-            max_budget=0.50,
-            attachments=[att],
-        )
-        assert result is not None
-        assert len(result) > 0
-        assert "red" in result.lower()
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_describe_pdf(self) -> None:
-        pdf_data = _create_minimal_pdf()
-        att = Attachment(data=pdf_data, mime_type="application/pdf")
-        agent = KISSAgent("Gemini PDF Test")
-        result = agent.run(
-            model_name="gemini-2.0-flash",
-            prompt_template=("What text does this PDF contain? Answer with just the text content."),
-            is_agentic=False,
-            max_budget=0.50,
-            attachments=[att],
-        )
-        assert result is not None
-        assert "hello" in result.lower() or "world" in result.lower()
 
     @pytest.mark.timeout(TEST_TIMEOUT)
     def test_multiple_attachments(self) -> None:
@@ -284,22 +192,6 @@ class TestOpenAIMultimodal(unittest.TestCase):
         assert result is not None
         assert len(result) > 0
         assert "blue" in result.lower()
-
-
-class TestNoAttachments(unittest.TestCase):
-    """Verify that passing no attachments still works (regression)."""
-
-    @requires_gemini_api_key
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_no_attachments(self) -> None:
-        agent = KISSAgent("No Attachment Test")
-        result = agent.run(
-            model_name="gemini-2.0-flash",
-            prompt_template="What is 3 + 5? Answer with just the number.",
-            is_agentic=False,
-            max_budget=0.50,
-        )
-        assert "8" in result
 
 
 if __name__ == "__main__":

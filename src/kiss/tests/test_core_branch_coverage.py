@@ -121,11 +121,6 @@ class TestModelInfoEdgeCases:
         with pytest.raises(KISSError, match="Unknown model name"):
             model("nonexistent-model-xyz")
 
-    def test_calculate_cost_unknown_model(self):
-        from kiss.core.models.model_info import calculate_cost
-
-        assert calculate_cost("unknown-model-xyz", 1000, 1000) == 0.0
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

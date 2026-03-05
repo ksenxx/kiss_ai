@@ -87,6 +87,7 @@ Algorithm EVOLVE():
 
 import importlib.util
 import json
+import logging
 import os
 import random
 import shutil
@@ -105,8 +106,6 @@ from kiss.agents.create_and_optimize_agent.improver_agent import (
 )
 from kiss.core import config as config_module
 from kiss.core.utils import get_config_value
-
-import logging
 
 logger = logging.getLogger(__name__)
 

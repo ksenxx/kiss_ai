@@ -1,6 +1,7 @@
 """Shared browser UI components for KISS agent viewers."""
 
 import json
+import logging
 import queue
 import socket
 import threading
@@ -10,8 +11,6 @@ from typing import Any
 import yaml
 
 from kiss.core.printer import Printer, extract_extras, extract_path_and_lang, truncate_result
-
-import logging
 
 logger = logging.getLogger(__name__)
 

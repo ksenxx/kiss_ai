@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -14,8 +15,6 @@ import numpy as np
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import model
-
-import logging
 
 logger = logging.getLogger(__name__)
 

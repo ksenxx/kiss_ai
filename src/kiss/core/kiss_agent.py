@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import time
 import traceback
 from collections.abc import Callable
@@ -18,8 +19,6 @@ from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
-
-import logging
 
 logger = logging.getLogger(__name__)
 

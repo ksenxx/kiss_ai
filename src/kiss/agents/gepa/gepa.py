@@ -22,6 +22,7 @@ Algorithm:
 """
 
 import json
+import logging
 import random
 import re
 from collections.abc import Callable
@@ -33,8 +34,6 @@ from kiss.agents.gepa.config import GEPAConfig  # type: ignore # noqa: F401
 from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.utils import get_config_value, get_template_field_names
-
-import logging
 
 logger = logging.getLogger(__name__)
 

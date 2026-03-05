@@ -6,13 +6,12 @@ with zero JavaScript injection to avoid bot detection.
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-
-import logging
 
 logger = logging.getLogger(__name__)
 
