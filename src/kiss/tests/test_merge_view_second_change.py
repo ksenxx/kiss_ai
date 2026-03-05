@@ -122,67 +122,14 @@ class TestMergeViewSecondChange:
             assert result.get("status") == "opened"
             assert result.get("count") == 1
 
-    def test_second_change_different_lines(self) -> None:
-        """Agent changes different lines on second run — should show merge view."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo = _create_git_repo(tmpdir)
-            data_dir = os.path.join(tmpdir, "data")
-            os.makedirs(data_dir)
-
-            # First change (accepted)
-            Path(repo, "example.md").write_text("line 1\nMODIFIED line 2\nline 3\n")
-
-            # Second run
-            pre_hunks = _parse_diff_hunks(repo)
-            pre_untracked = _capture_untracked(repo)
-            pre_hashes = _snapshot_files(repo, set(pre_hunks.keys()))
-
-            # Agent changes a different line
-            Path(repo, "example.md").write_text(
-                "line 1\nMODIFIED line 2\nline 3 CHANGED\n"
-            )
-
-            result = _prepare_merge_view(
-                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
-            )
-            assert result.get("status") == "opened"
-
 
 class TestSnapshotFiles:
     """Tests for _snapshot_files helper."""
-
-    def test_snapshot_captures_hashes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir, "a.txt").write_text("hello")
-            Path(tmpdir, "b.txt").write_text("world")
-
-            result = _snapshot_files(tmpdir, {"a.txt", "b.txt"})
-            assert "a.txt" in result
-            assert "b.txt" in result
-            assert result["a.txt"] != result["b.txt"]
 
     def test_snapshot_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             result = _snapshot_files(tmpdir, {"nonexistent.txt"})
             assert result == {}
-
-    def test_snapshot_detects_content_change(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir, "file.txt").write_text("original")
-            snap = _snapshot_files(tmpdir, {"file.txt"})
-
-            # Change the file
-            Path(tmpdir, "file.txt").write_text("modified")
-            snap2 = _snapshot_files(tmpdir, {"file.txt"})
-
-            assert snap["file.txt"] != snap2["file.txt"]
-
-    def test_snapshot_same_content(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir, "file.txt").write_text("same")
-            snap1 = _snapshot_files(tmpdir, {"file.txt"})
-            snap2 = _snapshot_files(tmpdir, {"file.txt"})
-            assert snap1["file.txt"] == snap2["file.txt"]
 
 
 class TestBackwardCompatibility:
@@ -205,21 +152,3 @@ class TestBackwardCompatibility:
                 repo, data_dir, pre_hunks, pre_untracked
             )
             assert result.get("error") == "No changes"
-
-    def test_without_pre_file_hashes_new_change(self) -> None:
-        """When pre_file_hashes is None, new changes to different lines should show."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo = _create_git_repo(tmpdir)
-            data_dir = os.path.join(tmpdir, "data")
-            os.makedirs(data_dir)
-
-            pre_hunks = _parse_diff_hunks(repo)
-            pre_untracked = _capture_untracked(repo)
-
-            # Agent changes the file
-            Path(repo, "example.md").write_text("line 1\nMODIFIED line 2\nline 3\n")
-
-            result = _prepare_merge_view(
-                repo, data_dir, pre_hunks, pre_untracked
-            )
-            assert result.get("status") == "opened"

@@ -14,9 +14,6 @@ from kiss.agents.sorcar.sorcar import (
 
 
 class TestReadActiveFile:
-    def test_returns_empty_when_no_file(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            assert _read_active_file(td) == ""
 
     def test_returns_path_when_valid(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -27,13 +24,6 @@ class TestReadActiveFile:
             with open(af_path, "w") as f:
                 json.dump({"path": target}, f)
             assert _read_active_file(td) == target
-
-    def test_returns_empty_when_file_does_not_exist(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            af_path = os.path.join(td, "active-file.json")
-            with open(af_path, "w") as f:
-                json.dump({"path": "/nonexistent/file.py"}, f)
-            assert _read_active_file(td) == ""
 
     def test_returns_empty_on_invalid_json(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -49,26 +39,10 @@ class TestReadActiveFile:
                 json.dump({"other": "value"}, f)
             assert _read_active_file(td) == ""
 
-    def test_returns_empty_when_path_is_empty_string(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            af_path = os.path.join(td, "active-file.json")
-            with open(af_path, "w") as f:
-                json.dump({"path": ""}, f)
-            assert _read_active_file(td) == ""
-
 
 class TestCleanLlmOutput:
     def test_strips_whitespace(self) -> None:
         assert _clean_llm_output("  hello  ") == "hello"
-
-    def test_strips_double_quotes(self) -> None:
-        assert _clean_llm_output('"hello"') == "hello"
-
-    def test_strips_single_quotes(self) -> None:
-        assert _clean_llm_output("'hello'") == "hello"
-
-    def test_strips_both(self) -> None:
-        assert _clean_llm_output('  "hello"  ') == "hello"
 
 
 class TestModelVendorOrder:

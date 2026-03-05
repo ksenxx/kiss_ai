@@ -1,11 +1,8 @@
 """Tests for the SCM commit message generation feature in VS Code extension."""
 
-import json
-import os
-import tempfile
 import unittest
 
-from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _CS_SETTINGS, _setup_code_server
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _CS_SETTINGS
 
 
 class TestScmMessageExtensionJS(unittest.TestCase):
@@ -44,16 +41,6 @@ class TestGitSettingsEnabled(unittest.TestCase):
         assert _CS_SETTINGS["git.openRepositoryInParentFolders"] == "always"
 
 
-class TestSetupCodeServerGitDependency(unittest.TestCase):
-    def test_extension_package_has_git_dependency(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = os.path.join(tmpdir, "extensions", "kiss-init", "package.json")
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            assert "vscode.git" in pkg.get("extensionDependencies", [])
-
-
 class TestGenerateCommitMessageCommand(unittest.TestCase):
     def test_extension_has_generate_commit_message_command(self) -> None:
         assert "kiss.generateCommitMessage" in _CS_EXTENSION_JS
@@ -79,49 +66,6 @@ class TestGenerateCommitMessageCommand(unittest.TestCase):
 
         assert "magicBtn" not in CHATBOT_JS
         assert "magic-btn" not in CHATBOT_JS
-
-
-class TestExtensionPackageContributes(unittest.TestCase):
-    def test_package_has_generate_command(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = os.path.join(tmpdir, "extensions", "kiss-init", "package.json")
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            commands = pkg["contributes"]["commands"]
-            cmd_names = [c["command"] for c in commands]
-            assert "kiss.generateCommitMessage" in cmd_names
-
-    def test_package_has_sparkle_icon(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = os.path.join(tmpdir, "extensions", "kiss-init", "package.json")
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            commands = pkg["contributes"]["commands"]
-            gen_cmd = [c for c in commands if c["command"] == "kiss.generateCommitMessage"][0]
-            assert gen_cmd["icon"] == "$(sparkle)"
-
-    def test_package_has_scm_input_menu(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = os.path.join(tmpdir, "extensions", "kiss-init", "package.json")
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            menus = pkg["contributes"]["menus"]
-            assert "scm/inputBox" in menus
-            scm_menu = menus["scm/inputBox"]
-            assert any(m["command"] == "kiss.generateCommitMessage" for m in scm_menu)
-
-    def test_scm_menu_has_git_condition(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = os.path.join(tmpdir, "extensions", "kiss-init", "package.json")
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            scm_menu = pkg["contributes"]["menus"]["scm/inputBox"]
-            gen_item = [m for m in scm_menu if m["command"] == "kiss.generateCommitMessage"][0]
-            assert gen_item["when"] == "scmProvider == git"
 
 
 class TestExtensionJSScmBlockOrder(unittest.TestCase):

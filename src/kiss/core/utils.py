@@ -5,6 +5,7 @@
 
 """Utility functions for the KISS core module."""
 
+import logging
 from pathlib import Path
 from string import Formatter as StringFormatter
 from typing import Any, cast
@@ -13,8 +14,6 @@ import yaml
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
-
-import logging
 
 logger = logging.getLogger(__name__)
 

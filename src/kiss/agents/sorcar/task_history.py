@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
-
-import logging
 
 logger = logging.getLogger(__name__)
 

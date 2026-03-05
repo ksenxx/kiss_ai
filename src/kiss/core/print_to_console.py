@@ -1,6 +1,7 @@
 """Console output formatting for KISS agents."""
 
 import json
+import logging
 import sys
 from typing import Any
 
@@ -17,8 +18,6 @@ from kiss.core.printer import (
     extract_path_and_lang,
     truncate_result,
 )
-
-import logging
 
 logger = logging.getLogger(__name__)
 

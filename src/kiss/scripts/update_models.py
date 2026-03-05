@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import logging
 import os
 import re
 import ssl
@@ -25,8 +26,6 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
-
-import logging
 
 logger = logging.getLogger(__name__)
 

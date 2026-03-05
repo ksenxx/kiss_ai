@@ -11,13 +11,12 @@ FLAKY MODEL MARKERS:
 - Models with comments like "SLOW" may timeout on some requests
 """
 
+import logging
 from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, TokenCallback
-
-import logging
 
 logger = logging.getLogger(__name__)
 

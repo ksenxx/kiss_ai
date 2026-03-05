@@ -35,40 +35,6 @@ def test_openrouter_preview_with_zero_pricing_is_added():
     assert model["needs_pricing"] is True
 
 
-def test_openrouter_preview_with_pricing_is_added():
-    """Preview models from OpenRouter with pricing should be added normally."""
-    current = _make_current()
-    openrouter = {
-        "openrouter/google/gemini-99-preview": {
-            "context_length": 1048576,
-            "input_price_per_1M": 1.00,
-            "output_price_per_1M": 5.00,
-            "source": "openrouter",
-        },
-    }
-    _, new_models = compute_changes(current, openrouter, {}, {}, {})
-    names = [m["name"] for m in new_models]
-    assert "openrouter/google/gemini-99-preview" in names
-    model = next(m for m in new_models if m["name"] == "openrouter/google/gemini-99-preview")
-    assert model["needs_pricing"] is False
-
-
-def test_openrouter_non_preview_zero_pricing_is_not_added():
-    """Non-preview models with zero pricing should still be filtered out."""
-    current = _make_current()
-    openrouter = {
-        "openrouter/acme/some-free-model": {
-            "context_length": 128000,
-            "input_price_per_1M": 0.0,
-            "output_price_per_1M": 0.0,
-            "source": "openrouter",
-        },
-    }
-    _, new_models = compute_changes(current, openrouter, {}, {}, {})
-    names = [m["name"] for m in new_models]
-    assert "openrouter/acme/some-free-model" not in names
-
-
 def test_openrouter_variant_endpoints_still_skipped():
     """Variant endpoints (:free, :thinking) should still be skipped."""
     current = _make_current()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -16,8 +17,6 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.docker.docker_manager import DockerManager
-
-import logging
 
 logger = logging.getLogger(__name__)
 

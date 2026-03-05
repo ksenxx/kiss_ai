@@ -7,6 +7,7 @@
 """Simple Flask server for visualizing agent trajectories."""
 
 import argparse
+import logging
 import sys
 import threading
 import time
@@ -16,8 +17,6 @@ from pathlib import Path
 
 import yaml
 from flask import Flask, jsonify, render_template
-
-import logging
 
 logger = logging.getLogger(__name__)
 

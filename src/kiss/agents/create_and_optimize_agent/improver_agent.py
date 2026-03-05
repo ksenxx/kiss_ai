@@ -11,14 +11,13 @@ or OpenAI Codex) to improve the code to reduce token usage and execution time.
 """
 
 import json
+import logging
 import shutil
 import time
 from pathlib import Path
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import config as config_module
-
-import logging
 
 logger = logging.getLogger(__name__)
 

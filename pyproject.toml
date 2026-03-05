@@ -119,6 +119,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "redundancy_check: marks tests for redundancy check",
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
