@@ -68,9 +68,11 @@ python -m kiss.agents.sorcar.sorcar
 
 # What is KISS and KISS Sorcar? How It Started
 
-During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet very powerful agentic framework**. It took me 18 days to implement KISS using both AI and manual coding. The motivation for the KISS project came after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. I started the KISS project with the quest "What is possible (with modern AI)?" and "What is possible by a mid-career SWE/PL Professor in a couple of months using modern AI?". Since then 2 months have passed and KISS has evolved into a simple yet powerful IDE, called **KISS Sorcar** **(a free alternative to Cursor or Antigravity)** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support. Although I wrote most of the code (manually and using AI), Marius Momeu, helped me to identify critical bugs in the core and sorcar. I provide support and maintain the framework with long-term commitment. The project incorporates software engineering principles and practices developed over my 30 years of experience in the field. I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTHROPIC_API_KEY` (best model for Sorcar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in 2 weeks.
+During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet very powerful agentic framework**. It took me 18 days to implement KISS using both AI and manual coding. The motivation for the KISS project came after teaching the class [Disrupting Systems Research with AI](https://ucbsky.github.io/ucbsky-cs294-264-fall2025/course-website.html) in the Fall of 2025 at UC Berkeley. I started the KISS project with the quest "What is possible (with modern AI)?" and "What is possible by a mid-career SWE/PL Professor in a couple of months using modern AI?". Since then 2 months have passed and KISS has evolved into a simple yet powerful IDE, called **KISS Sorcar** **(a free alternative to Cursor or Antigravity)** (dedicated to the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)). It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** and **multimodal** support. Although I wrote most of the code (manually and using AI), Marius Momeu, helped me to identify critical bugs in the core and sorcar. I provide support and maintain the framework with long-term commitment. The project incorporates software engineering principles and practices developed over my 30 years of experience in the field. I will write them up once I get time, but in the meantime, if you are interested, please play with **KISS Sorcar** and see **"what is possible?"** You will find some sample commands when you run the `curl` command above after setting your `ANTHROPIC_API_KEY` (best model for Sorcar), `GEMINI_API_KEY` (required for autocomplete support in KISS Sorcar) in your `.bashrc` or `.zshrc`. Now I use KISS Sorcar to develop itself. I am rapidly adding features to KISS Sorcar using KISS Sorcar. So stay tuned for feature updates regularly including **a safe version of openclaw** added to KISS Sorcar in a month.
 
 #whatispossible #KISSSorcar
+
+![KISS Sorcar Screenshot](assets/KISSSorcar.png)
 
 # Introduction to KISS
 
@@ -276,7 +278,7 @@ The visualizer provides:
 - **Message Display**: Clean, organized view of agent conversations
 - **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
 
-![Trajectory Visualizer](assets/image-0478c494-2550-4bbe-8559-f205a4544bec.png)
+![Trajectory Visualizer](assets/KISSTrajectory.png)
 
 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
@@ -514,6 +516,7 @@ kiss/
 │   │   ├── check.py                    # Code quality check script
 │   │   ├── fix.py                      # Code fix/formatting script
 │   │   ├── generate_api_docs.py        # API documentation generator
+│   │   ├── redundancy_analyzer.py      # Code redundancy analyzer
 │   │   └── update_models.py            # Model info updater script
 │   ├── tests/           # Test suite
 │   │   ├── conftest.py
@@ -542,7 +545,6 @@ kiss/
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_coverage.py
 │   │   ├── test_kiss_agent_non_agentic.py
-│   │   ├── test_magic_config_button.py
 │   │   ├── test_merge_view_second_change.py
 │   │   ├── test_model_base_class.py
 │   │   ├── test_model_implementations.py
@@ -553,12 +555,13 @@ kiss/
 │   │   ├── test_run_prompt_button.py
 │   │   ├── test_scan_files_order.py
 │   │   ├── test_scm_commit_message.py
-│   │   ├── test_set_prompt_curly_braces.py
+│   │   ├── test_sorcar_bash_streaming.py
 │   │   ├── test_sorcar_race_fixes.py
 │   │   ├── test_stop_agent_thread.py
 │   │   ├── test_system_prompt.py
 │   │   ├── test_token_callback.py
 │   │   ├── test_tool_exception_handling.py
+│   │   ├── test_update_models_preview.py
 │   │   ├── test_useful_tools.py
 │   │   ├── test_vscode_panel.py
 │   │   ├── test_web_use_tool.py
@@ -677,7 +680,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
 ### Code Quality
 
 - `uv run check` - Run all code quality checks (fresh dependency install, build, lint, and type check)
-- `uv run check --clean` - Run all code quality checks (fresh dependency install, build, lint, and type check after removing previous build options)
+- `uv run check --clean-only` - Only clean build artifacts, do not run checks
 - `uv run ruff format src/` - Format code with ruff (line-length: 100, target: py313)
 - `uv run ruff check src/` - Lint code with ruff (selects: E, F, W, I, N, UP)
 - `uv run mypy src/` - Type check with mypy (python_version: 3.13)
