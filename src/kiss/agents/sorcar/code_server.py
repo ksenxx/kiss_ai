@@ -912,7 +912,8 @@ def _prepare_merge_view(
             ]
         if filtered:
             file_hunks[fname] = filtered
-    new_files = _capture_untracked(work_dir) - pre_untracked
+    current_untracked = _capture_untracked(work_dir)
+    new_files = current_untracked - pre_untracked
     for fname in new_files:
         fpath = Path(work_dir) / fname
         try:

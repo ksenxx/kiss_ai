@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -19,6 +20,39 @@ from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
 from kiss.docker.docker_manager import DockerManager
+
+_WEB_TASK_HINTS = (
+    "browser",
+    "website",
+    "web page",
+    "navigate",
+    "click",
+    "login",
+    "log in",
+    "form",
+    "internet",
+    "url",
+)
+
+
+def _should_enable_browser_tools(task_text: str) -> bool:
+    """Return True when the task appears to need browser automation."""
+    override = os.environ.get("KISS_SORCAR_BROWSER_TOOLS", "auto").strip().lower()
+    if override in {"1", "true", "yes", "on", "always"}:
+        return True
+    if override in {"0", "false", "no", "off", "never"}:
+        return False
+    lowered = task_text.lower()
+    if re.search(r"https?://\S+", lowered) or "www." in lowered:
+        return True
+    for hint in _WEB_TASK_HINTS:
+        if " " in hint:
+            if hint in lowered:
+                return True
+            continue
+        if re.search(rf"\b{re.escape(hint)}\b", lowered):
+            return True
+    return False
 
 
 class SorcarAgent(RelentlessAgent):
@@ -132,8 +166,16 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        self.web_use_tool = WebUseTool(
-            wait_for_user_callback=self._wait_for_user_callback,
+        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
+        actual_headless = headless if headless is not None else cfg.headless
+        self.web_use_tool = (
+            WebUseTool(
+                headless=actual_headless,
+                wait_for_user_callback=self._wait_for_user_callback,
+                ask_user_question_callback=self._ask_user_question_callback,
+            )
+            if _should_enable_browser_tools(prompt_template)
+            else None
         )
 
         try:

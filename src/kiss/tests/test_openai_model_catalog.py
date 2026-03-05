@@ -8,6 +8,7 @@ def test_openai_catalog_includes_current_ids():
         "chatgpt-4o-latest",
         "gpt-4-turbo-preview",
         "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
         "gpt-audio-1.5",
         "gpt-realtime-1.5",
         "o1-preview",

@@ -119,6 +119,23 @@ def _clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'")
 
 
+def _new_utility_agent(name: str) -> KISSAgent:
+    """Create a non-task utility agent without trajectory persistence."""
+    agent = KISSAgent(name)
+    agent.save_trajectory = False
+    return agent
+
+
+def _should_warn_no_changes(
+    done_event: dict[str, str] | None,
+    merge_result: dict[str, Any],
+) -> bool:
+    """Return True when task reported completion but produced no file changes."""
+    if not done_event or done_event.get("type") != "task_done":
+        return False
+    return merge_result.get("error") == "No changes"
+
+
 def _resolve_requested_file_path(requested_path: str, work_dir: str) -> str:
     """Resolve a user-provided file path against the current work directory.
 
@@ -272,7 +289,7 @@ def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
             "Generate a concise git commit message (1-2 lines) for these changes. "
             "Return ONLY the commit message text, no quotes.\n\n{context}"
         )
-    agent = KISSAgent("Commit Message Generator")
+    agent = _new_utility_agent("Commit Message Generator")
     try:
         raw = agent.run(
             model_name=_COMMIT_MODEL,
@@ -298,6 +315,22 @@ def _model_vendor_order(name: str) -> int:
     if name.startswith("openrouter/"):
         return 4
     return 5
+
+
+def _model_provider_key(name: str) -> str:
+    if model_info_module.is_codex_provider_model(name):
+        return "codex"
+    if name.startswith("claude-"):
+        return "anthropic"
+    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
+        return "openai"
+    if name.startswith("gemini-"):
+        return "gemini"
+    if name.startswith("minimax-"):
+        return "minimax"
+    if name.startswith("openrouter/"):
+        return "openrouter"
+    return "together"
 
 
 def run_chatbot(
@@ -550,9 +583,44 @@ def run_chatbot(
         nonlocal file_cache
         file_cache = _scan_files(actual_work_dir)
 
+    def refresh_proposed_tasks() -> None:
+        nonlocal proposed_tasks
+        history = _load_history()
+        if not history:  # pragma: no cover – empty history on fresh install
+            with proposed_lock:
+                proposed_tasks = []
+            printer.broadcast({"type": "proposed_updated"})
+            return
+        task_list = "\n".join(f"- {e['task']}" for e in history[:20])
+        agent = _new_utility_agent("Task Proposer")
+        try:
+            result = agent.run(
+                model_name=_FAST_MODEL,
+                prompt_template=(
+                    "Based on these past tasks a developer has worked on, suggest 5 new "
+                    "tasks they might want to do next. Tasks should be natural follow-ups, "
+                    "related improvements, or complementary work.\n\n"
+                    "Past tasks:\n{task_list}\n\n"
+                    "Return ONLY a JSON array of 5 short task description strings. "
+                    'Example: ["Add unit tests for X", "Refactor Y module"]'
+                ),
+                arguments={"task_list": task_list},
+                is_agentic=False,
+            )
+            start = result.index("[")
+            end = result.index("]", start) + 1
+            proposals = json.loads(result[start:end])
+            proposals = [str(p) for p in proposals if isinstance(p, str) and p.strip()][:5]
+        except Exception:  # pragma: no cover – LLM API failure
+            logger.debug("Exception caught", exc_info=True)
+            proposals = []
+        with proposed_lock:
+            proposed_tasks = proposals
+        _save_proposals(proposals)
+        printer.broadcast({"type": "proposed_updated"})
     def generate_followup(task: str, result: str) -> None:
         try:
-            agent = KISSAgent("Followup Proposer")
+            agent = _new_utility_agent("Followup Proposer")
             raw = agent.run(
                 model_name=_FAST_MODEL,
                 prompt_template=(
@@ -619,7 +687,6 @@ def run_chatbot(
 
     threading.Thread(target=_watch_periodic, daemon=True).start()
 
-<<<<<<< HEAD
     def _wait_for_user_browser(instruction: str, url: str) -> None:
         nonlocal user_action_event
         event = threading.Event()
@@ -654,7 +721,7 @@ def run_chatbot(
         user_question_event = None
         user_question_answer = ""
         return answer
-=======
+
     def _oauth_html(title: str, message: str, ok: bool) -> bytes:
         color = "#10a37f" if ok else "#d9534f"
         return (
@@ -790,7 +857,6 @@ def run_chatbot(
         oauth_callback_thread = threading.Thread(target=_run_server, daemon=True)
         oauth_callback_thread.start()
         return True, ""
->>>>>>> c03cfd1 (feat(codex): add native OAuth auth flow and Sorcar auth controls)
 
     def run_agent_thread(
         task: str,
@@ -832,6 +898,12 @@ def run_chatbot(
             active_file = _read_active_file(cs_data_dir)
             printer.start_recording()
             printer.broadcast({"type": "clear", "active_file": active_file})
+            printer.broadcast(
+                {
+                    "type": "system_output",
+                    "text": f"Task started with model {model_name}. Waiting for tool activity...",
+                }
+            )
             agent = agent_factory("Chatbot")
             if hasattr(agent, '_wait_for_user_callback'):
                 agent._wait_for_user_callback = _wait_for_user_browser  # type: ignore[attr-defined]
@@ -906,6 +978,17 @@ def run_chatbot(
                     with running_lock:
                         merging = True
                     printer.broadcast({"type": "merge_started"})
+            except Exception:  # pragma: no cover – merge view error
+                if _should_warn_no_changes(done_event, merge_result):
+                    printer.broadcast(
+                        {
+                            "type": "system_output",
+                            "text": (
+                                "Task reported completion but no file changes were detected. "
+                                "Review the result summary for hallucinated completion."
+                            ),
+                        }
+                    )
             except Exception:  # pragma: no cover – merge view error
                 logger.debug("Exception caught", exc_info=True)
             refresh_file_cache()
@@ -1307,7 +1390,7 @@ def run_chatbot(
                 context_parts.append(
                     "Active file ({active_path}):\n{active_content}"
                 )
-            agent = KISSAgent("Autocomplete")
+            agent = _new_utility_agent("Autocomplete")
             try:
                 result = agent.run(
                     model_name=_FAST_MODEL,
@@ -1355,6 +1438,7 @@ def run_chatbot(
                         "inp": info.input_price_per_1M,
                         "out": info.output_price_per_1M,
                         "uses": usage.get(name, 0),
+                        "provider": _model_provider_key(name),
                     }
                 )
         models_list.sort(
@@ -1780,6 +1864,52 @@ def run_chatbot(
             logger.debug("Exception caught", exc_info=True)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def generate_config_message(request: Request) -> JSONResponse:
+        body = await request.json()
+        model = body.get("model", selected_model)
+
+        def _generate() -> dict[str, str]:
+            cfg = config_module.DEFAULT_CONFIG
+            total = _count_history()
+            recent_entries = _load_history(limit=5)
+            info_parts = [
+                f"Work directory: {actual_work_dir}",
+                f"Selected model: {model}",
+                f"Max steps: {cfg.sorcar.sorcar_agent.max_steps}",
+                f"Max budget: ${cfg.sorcar.sorcar_agent.max_budget:.2f}",
+                f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
+                f"Headless browser: {cfg.sorcar.sorcar_agent.headless}",
+                f"Code-server: {'running' if code_server_url else 'not available'}",
+                f"Tasks completed: {total}",
+            ]
+            recent = [str(e["task"]) for e in recent_entries]
+            if recent:  # pragma: no branch – history always has SAMPLE_TASKS fallback
+                info_parts.append("Recent tasks: " + "; ".join(recent))
+            config_info = "\n".join(info_parts)
+
+            agent = _new_utility_agent("Config Message Generator")
+            try:
+                result = agent.run(
+                    model_name=_FAST_MODEL,
+                    prompt_template=(
+                        "You are a helpful assistant. Given the following configuration "
+                        "information about a coding assistant environment, generate a "
+                        "short, nicely formatted, informative status message that a "
+                        "developer would find useful. Include key details like the "
+                        "model, work directory, budget, and recent activity. "
+                        "Keep it concise (3-5 lines) and use emoji for visual appeal. "
+                        "Return ONLY the message text, no quotes or markdown fences.\n\n"
+                        "Configuration:\n{config_info}"
+                    ),
+                    arguments={"config_info": config_info},
+                    is_agentic=False,
+                )
+                return {"message": result.strip()}
+            except Exception as e:  # pragma: no cover – LLM API failure
+                logger.debug("Exception caught", exc_info=True)
+                return {"error": str(e)}
+
+        return await _thread_json_response(_generate, error_status=500)
     app = Starlette(
         routes=[
             Route("/", index),
@@ -1799,6 +1929,7 @@ def run_chatbot(
             Route("/merge-action", merge_action, methods=["POST"]),
             Route("/record-file-usage", record_file_usage_endpoint, methods=["POST"]),
             Route("/generate-commit-message", generate_commit_message, methods=["POST"]),
+            Route("/generate-config-message", generate_config_message, methods=["POST"]),
             Route("/active-file-info", active_file_info),
             Route("/get-file-content", get_file_content),
             Route("/refresh-files", refresh_files, methods=["POST"]),

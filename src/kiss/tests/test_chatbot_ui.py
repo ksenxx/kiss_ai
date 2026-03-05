@@ -70,5 +70,19 @@ def test_model_vendor_groups_chatgpt_under_openai():
     assert "^(chatgpt|gpt|o[134]|codex|computer-use)" in CHATBOT_JS
 
 
+def test_model_provider_selector_present_in_html():
+    html = _build_html("Test", "", "/tmp")
+    assert 'id="model-provider"' in html
+    assert '<option value="codex">Codex</option>' in html
+    assert '<option value="openai">OpenAI API</option>' in html
+
+
+def test_model_provider_js_has_codex_catalog_and_filtering():
+    assert "function modelProviderKey(m)" in CHATBOT_JS
+    assert "gpt-5.3-codex-spark" in CHATBOT_JS
+    assert "if(!modelMatchesProvider(m))return;" in CHATBOT_JS
+    assert "providerPinned=true;" in CHATBOT_JS
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -294,6 +294,7 @@ class CodexCliModel(Model):
                 input=prompt,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout_seconds,
                 check=False,
             )

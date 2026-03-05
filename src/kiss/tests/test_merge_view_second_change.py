@@ -122,3 +122,164 @@ class TestMergeViewExcludesPreExistingDiffs:
                 file_names = [f["name"] for f in manifest["files"]]
                 assert "example.md" not in file_names
 
+    def test_untracked_file_modified_shows_only_agent_changes(self) -> None:
+        """When an untracked file existed before the task and the agent
+        modifies it, only the agent's changes should appear."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # Create an untracked file before the task
+            Path(repo, "notes.txt").write_text("note 1\nnote 2\nnote 3\n")
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(
+                repo, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(
+                repo, data_dir, pre_untracked | set(pre_hunks.keys())
+            )
+            assert "notes.txt" in pre_untracked
+
+            # Agent modifies only line 2 of the untracked file
+            Path(repo, "notes.txt").write_text("note 1\nMODIFIED note 2\nnote 3\n")
+
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result.get("status") == "opened"
+            import json
+            manifest = json.loads(
+                (Path(data_dir) / "pending-merge.json").read_text()
+            )
+            notes_files = [f for f in manifest["files"] if f["name"] == "notes.txt"]
+            assert len(notes_files) == 1
+            hunks = notes_files[0]["hunks"]
+            # Should show only the modified line, not the entire file as new
+            assert len(hunks) == 1
+            assert hunks[0]["bc"] == 1  # 1 old line
+            assert hunks[0]["cc"] == 1  # 1 new line
+
+    def test_preexisting_untracked_file_edit_is_detected(self) -> None:
+        """Editing an untracked file that existed before run should open merge view."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # File exists before agent run and is already untracked.
+            Path(repo, "scratch.txt").write_text("alpha\n")
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(repo, set(pre_hunks.keys()) | pre_untracked)
+
+            # Agent modifies same untracked file during the run.
+            Path(repo, "scratch.txt").write_text("alpha\nbeta\n")
+
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result.get("status") == "opened"
+            assert result.get("count") == 1
+
+    def test_second_change_different_lines(self) -> None:
+        """Agent changes different lines on second run — should show merge view."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # First change (accepted)
+            Path(repo, "example.md").write_text("line 1\nMODIFIED line 2\nline 3\n")
+
+            # Second run
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(repo, set(pre_hunks.keys()))
+
+            # Agent changes a different line
+            Path(repo, "example.md").write_text(
+                "line 1\nMODIFIED line 2\nline 3 CHANGED\n"
+            )
+
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result.get("status") == "opened"
+
+class TestDiffFiles:
+    """Tests for _diff_files helper."""
+
+    def test_diff_identical_files(self) -> None:
+        """Identical files produce no hunks."""
+        from kiss.agents.sorcar.code_server import _diff_files
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = os.path.join(tmpdir, "a.txt")
+            f2 = os.path.join(tmpdir, "b.txt")
+            Path(f1).write_text("hello\nworld\n")
+            Path(f2).write_text("hello\nworld\n")
+            assert _diff_files(f1, f2) == []
+
+    def test_diff_one_line_changed(self) -> None:
+        """Changing one line produces one hunk."""
+        from kiss.agents.sorcar.code_server import _diff_files
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = os.path.join(tmpdir, "a.txt")
+            f2 = os.path.join(tmpdir, "b.txt")
+            Path(f1).write_text("hello\nworld\n")
+            Path(f2).write_text("hello\nEARTH\n")
+            hunks = _diff_files(f1, f2)
+            assert len(hunks) == 1
+            bs, bc, cs, cc = hunks[0]
+            assert bc == 1
+            assert cc == 1
+
+    def test_diff_line_added(self) -> None:
+        """Adding a line produces a hunk with bc=0."""
+        from kiss.agents.sorcar.code_server import _diff_files
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = os.path.join(tmpdir, "a.txt")
+            f2 = os.path.join(tmpdir, "b.txt")
+            Path(f1).write_text("hello\nworld\n")
+            Path(f2).write_text("hello\nworld\nnew line\n")
+            hunks = _diff_files(f1, f2)
+            assert len(hunks) == 1
+            bs, bc, cs, cc = hunks[0]
+            assert bc == 0
+            assert cc == 1
+
+    def test_diff_line_removed(self) -> None:
+        """Removing a line produces a hunk with cc=0."""
+        from kiss.agents.sorcar.code_server import _diff_files
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = os.path.join(tmpdir, "a.txt")
+            f2 = os.path.join(tmpdir, "b.txt")
+            Path(f1).write_text("hello\nworld\ngoodbye\n")
+            Path(f2).write_text("hello\ngoodbye\n")
+            hunks = _diff_files(f1, f2)
+            assert len(hunks) == 1
+            bs, bc, cs, cc = hunks[0]
+            assert bc == 1
+            assert cc == 0
+
+
+class TestModifiedUntrackedFile:
+    """Tests for merge view detecting modifications to pre-existing untracked files."""
+
+    def test_save_untracked_base_skips_large_files(self) -> None:
+        """Files > 2MB should not be saved."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            Path(repo, "big.bin").write_bytes(b"x" * 3_000_000)
+            _save_untracked_base(repo, data_dir, {"big.bin"})
+            assert not (_untracked_base_dir() / "big.bin").exists()

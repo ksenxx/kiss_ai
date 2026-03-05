@@ -215,6 +215,10 @@ class CodexNativeModel(Model):
             headers["ChatGPT-Account-Id"] = account_id
         return headers
 
+    def _default_timeout_seconds(self) -> float:
+        """Return transport timeout tuned by Codex model tier."""
+        return 20.0 if "spark" in self.model_name else 90.0
+
     def _post_responses_request(self, body: dict[str, Any]) -> dict[str, Any]:
         access_token = self.oauth_manager.get_access_token()
         if not access_token:
@@ -223,7 +227,9 @@ class CodexNativeModel(Model):
                 "KISS_CODEX_AUTH_FILE to a valid auth.json."
             )
 
-        timeout_seconds = float(self.model_config.get("timeout_seconds", 180))
+        timeout_seconds = float(
+            self.model_config.get("timeout_seconds", self._default_timeout_seconds())
+        )
         body_bytes = json.dumps(body).encode("utf-8")
 
         for attempt in range(2):
@@ -256,6 +262,7 @@ class CodexNativeModel(Model):
         content_parts: list[str] = []
         usage: dict[str, int] = {}
         completed_response: dict[str, Any] = {}
+        early_tool_exit = bool(self.model_config.get("early_tool_exit", True))
 
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -278,6 +285,26 @@ class CodexNativeModel(Model):
                 delta = event.get("delta")
                 if isinstance(delta, str) and delta:
                     content_parts.append(delta)
+                    if early_tool_exit:
+                        candidate = "".join(content_parts)
+                        if _parse_text_based_tool_calls(candidate):
+                            return {
+                                "output_text": candidate,
+                                "usage": usage,
+                                "response": completed_response,
+                            }
+                continue
+
+            if event_type in {"response.text.done", "response.output_text.done"}:
+                text_done = event.get("text")
+                if isinstance(text_done, str) and text_done:
+                    content_parts.append(text_done)
+                    if early_tool_exit and _parse_text_based_tool_calls(text_done):
+                        return {
+                            "output_text": text_done,
+                            "usage": usage,
+                            "response": completed_response,
+                        }
                 continue
 
             if event_type in {"response.error", "response.failed", "error"}:

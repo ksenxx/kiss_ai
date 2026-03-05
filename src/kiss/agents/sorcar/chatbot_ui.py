@@ -211,6 +211,20 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   flex-direction:column;
 }
 #model-dropdown.open{display:flex}
+#model-filter{
+  display:flex;align-items:center;gap:8px;padding:8px 14px;
+  border-bottom:1px solid rgba(255,255,255,0.06);
+}
+#model-filter label{
+  font-size:10px;text-transform:uppercase;letter-spacing:0.05em;
+  color:rgba(255,255,255,0.35);flex-shrink:0;
+}
+#model-provider{
+  flex:1;background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.78);
+  border:1px solid rgba(255,255,255,0.1);border-radius:7px;
+  font-size:11px;font-family:inherit;padding:5px 7px;outline:none;
+}
+#model-provider:focus{border-color:rgba(88,166,255,0.45)}
 #auth-panel{
   position:fixed;left:0;top:0;right:auto;min-width:320px;max-width:420px;
   background:rgba(18,18,20,0.97);backdrop-filter:blur(20px);
@@ -277,6 +291,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   border-bottom:1px solid rgba(255,255,255,0.04);
   position:sticky;top:0;z-index:1;
 }
+.model-empty{padding:10px 14px;font-size:11px;color:rgba(255,255,255,0.45)}
 #upload-btn{
   background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
   border:1px solid rgba(255,255,255,0.08);border-radius:8px;
@@ -651,10 +666,14 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel #task-input,#assistant-panel #ghost-overlay{font-size:11px}
 #assistant-panel #input-footer{margin-top:5px;padding-top:5px}
 #assistant-panel #model-btn{font-size:11px;padding:4px 8px;border-radius:6px}
+#assistant-panel #model-filter{padding:6px 10px;gap:6px}
+#assistant-panel #model-filter label{font-size:9px}
+#assistant-panel #model-provider{font-size:10px;padding:4px 6px;border-radius:6px}
 #assistant-panel #model-search{font-size:11px;padding:7px 10px}
 #assistant-panel .model-item{font-size:11px;padding:5px 10px}
 #assistant-panel .model-cost{font-size:9px}
 #assistant-panel .model-group-hdr{font-size:9px;padding:4px 10px 3px}
+#assistant-panel .model-empty{font-size:10px;padding:7px 10px}
 #assistant-panel #auth-panel{min-width:270px;max-width:320px;padding:8px 9px;gap:6px}
 #assistant-panel .auth-head{font-size:10px}
 #assistant-panel .auth-summary{font-size:10px;padding:6px 8px}
@@ -809,6 +828,15 @@ body{background:var(--bg)}
   background:rgba(var(--bg2-rgb),0.97);
   border:1px solid var(--border);box-shadow:0 -4px 24px rgba(0,0,0,0.4);
 }
+#assistant-panel #model-filter{border-bottom:1px solid rgba(var(--fg-rgb),0.08)}
+#assistant-panel #model-filter label{color:rgba(var(--fg-rgb),0.45)}
+#assistant-panel #model-provider{
+  background:rgba(var(--fg-rgb),0.04);
+  color:rgba(var(--fg-rgb),0.8);
+  border:1px solid rgba(var(--fg-rgb),0.15);
+}
+#assistant-panel #model-provider:focus{border-color:rgba(var(--accent-rgb),0.45)}
+#assistant-panel #model-provider option{background:var(--surface);color:var(--text)}
 #assistant-panel #model-search{
   border-bottom:1px solid rgba(var(--fg-rgb),0.08);color:rgba(var(--fg-rgb),0.8);
 }
@@ -825,6 +853,7 @@ body{background:var(--bg)}
   color:rgba(var(--fg-rgb),0.3);background:rgba(var(--bg2-rgb),0.97);
   border-bottom:1px solid rgba(var(--fg-rgb),0.05);
 }
+#assistant-panel .model-empty{color:rgba(var(--fg-rgb),0.45)}
 #assistant-panel #auth-panel{
   background:rgba(var(--bg2-rgb),0.97);
   border:1px solid var(--border);box-shadow:0 -4px 24px rgba(0,0,0,0.4);
@@ -1037,9 +1066,11 @@ var histSearch=document.getElementById('history-search');
 var allTasks=[];
 var modelLabel=document.getElementById('model-label');
 var modelDD=document.getElementById('model-dropdown');
+var modelProvider=document.getElementById('model-provider');
 var modelSearch=document.getElementById('model-search');
 var modelList=document.getElementById('model-list');
 var allModels=[],selectedModel='',modelDDIdx=-1;
+var selectedProvider='all',providerPinned=false;
 var authPanel=document.getElementById('auth-panel');
 var authSummary=document.getElementById('auth-summary');
 var authDetails=document.getElementById('auth-details');
@@ -1381,17 +1412,53 @@ function loadModels(){
       selectedModel=d.selected;
       modelLabel.textContent=selectedModel;
     }
-    renderModelList('');
+    if(modelProvider){
+      if(!providerPinned&&selectedModel){
+        var selectedEntry=allModels.find(function(m){return m.name===selectedModel});
+        if(selectedEntry){
+          selectedProvider=modelProviderKey(selectedEntry);
+          modelProvider.value=selectedProvider;
+        }
+      }else{
+        selectedProvider=modelProvider.value||selectedProvider;
+      }
+    }
+    renderModelList(modelSearch.value||'');
     if(authPanel.classList.contains('open'))loadAuthStatus();
   }).catch(function(){});
 }
-function modelVendor(name){
-  if(name.startsWith('claude-'))return'Anthropic';
-  if(/^(chatgpt|gpt|o[134]|codex|computer-use)/.test(name)&&!name.startsWith('openai/'))return'OpenAI';
-  if(name.startsWith('gemini-'))return'Gemini';
-  if(name.startsWith('minimax-'))return'MiniMax';
-  if(name.startsWith('openrouter/'))return'OpenRouter';
+function _isCodexCatalogName(name){
+  return name==='gpt-5.3-codex'
+    ||name==='gpt-5.3-codex-spark'
+    ||name==='gpt-5.2-codex'
+    ||name==='gpt-5.1-codex-max'
+    ||name==='gpt-5.2'
+    ||name==='gpt-5.1-codex-mini';
+}
+function modelProviderKey(m){
+  if(m&&m.provider)return m.provider;
+  var name=(m&&m.name)?m.name:String(m||'');
+  if(_isCodexCatalogName(name))return'codex';
+  if(name.startsWith('claude-'))return'anthropic';
+  if(/^(chatgpt|gpt|o[134]|codex|computer-use)/.test(name)&&!name.startsWith('openai/'))return'openai';
+  if(name.startsWith('gemini-'))return'gemini';
+  if(name.startsWith('minimax-'))return'minimax';
+  if(name.startsWith('openrouter/'))return'openrouter';
+  return'together';
+}
+function modelVendor(m){
+  var provider=modelProviderKey(m);
+  if(provider==='codex')return'Codex';
+  if(provider==='anthropic')return'Anthropic';
+  if(provider==='openai')return'OpenAI API';
+  if(provider==='gemini')return'Gemini';
+  if(provider==='minimax')return'MiniMax';
+  if(provider==='openrouter')return'OpenRouter';
   return'Together AI';
+}
+function modelMatchesProvider(m){
+  if(selectedProvider==='all')return true;
+  return modelProviderKey(m)===selectedProvider;
 }
 function renderModelItem(m){
   var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
@@ -1405,10 +1472,17 @@ function renderModelList(q){
   var ql=q.toLowerCase();
   var used=[],rest=[];
   allModels.forEach(function(m){
+    if(!modelMatchesProvider(m))return;
     if(ql&&m.name.toLowerCase().indexOf(ql)<0)return;
     if(m.uses>0)used.push(m);else rest.push(m);
   });
   used.sort(function(a,b){return b.uses-a.uses});
+  if(!used.length&&!rest.length){
+    var empty=mkEl('div','model-empty');
+    empty.textContent='No models for selected provider.';
+    modelList.appendChild(empty);
+    return;
+  }
   if(used.length){
     var hdr=mkEl('div','model-group-hdr');
     hdr.textContent='Recently Used';
@@ -1417,7 +1491,7 @@ function renderModelList(q){
   }
   var lastVendor='';
   rest.forEach(function(m){
-    var v=modelVendor(m.name);
+    var v=modelVendor(m);
     if(v!==lastVendor){
       var hdr=mkEl('div','model-group-hdr');
       hdr.textContent=v;
@@ -1598,6 +1672,13 @@ authRefreshBtn.addEventListener('click',function(){loadAuthStatus('refresh')});
 authLoginBtn.addEventListener('click',function(){loadAuthStatus('login')});
 authLogoutBtn.addEventListener('click',function(){loadAuthStatus('logout')});
 window.addEventListener('resize',positionAuthPanel);
+if(modelProvider){
+  modelProvider.addEventListener('change',function(){
+    selectedProvider=this.value||'all';
+    providerPinned=true;
+    renderModelList(modelSearch.value);
+  });
+}
 modelSearch.addEventListener('input',function(){renderModelList(this.value)});
 modelSearch.addEventListener('keydown',function(e){
   var items=modelList.querySelectorAll('.model-item');
@@ -2348,6 +2429,19 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
               </div>
             </div>
             <div id="model-dropdown">
+              <div id="model-filter">
+                <label for="model-provider">Provider</label>
+                <select id="model-provider">
+                  <option value="all">All</option>
+                  <option value="codex">Codex</option>
+                  <option value="openai">OpenAI API</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="minimax">MiniMax</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="together">Together AI</option>
+                </select>
+              </div>
               <input type="text" id="model-search"
                 placeholder="Search models\u2026" autocomplete="off"/>
               <div id="model-list"></div>

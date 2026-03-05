@@ -14,6 +14,8 @@ import traceback
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
@@ -38,6 +40,7 @@ _NON_RETRYABLE_PHRASES = (
     "could not resolve authentication",
 )
 MAX_CONSECUTIVE_ERRORS = 3
+MAX_CONSECUTIVE_NO_TOOL_CALLS = 3
 
 
 def _is_retryable_error(e: Exception) -> bool:
@@ -61,6 +64,8 @@ class KISSAgent(Base):
     budget_used: float
     step_count: int
     total_tokens_used: int
+    consecutive_no_tool_calls: int
+    non_finish_tool_calls_executed: int
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -99,6 +104,8 @@ class KISSAgent(Base):
         self.budget_used = 0.0
         self.session_info = session_info
         self.run_start_timestamp = int(time.time())
+        self.consecutive_no_tool_calls = 0
+        self.non_finish_tool_calls_executed = 0
 
     def _set_prompt(
         self,
@@ -305,9 +312,28 @@ class KISSAgent(Base):
         self.model.set_usage_info_for_messages(usage_info)
 
         if not function_calls:
+            self.consecutive_no_tool_calls += 1
             self._add_message(
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
+            if self.printer and response_text.strip():
+                self.printer.print(response_text, type="text")
+            if not response_text.strip() and self._response_usage_is_zero(response):
+                raise KISSError(
+                    "Model returned an empty response with zero token usage. "
+                    "This backend run is likely unhealthy."
+                )
+            if self.printer:
+                self.printer.print(
+                    "Model returned no tool calls; retrying with stricter instructions.",
+                    type="usage_info",
+                )
+            if self.consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
+                raise KISSError(
+                    "Model produced no tool calls for "
+                    f"{self.consecutive_no_tool_calls} consecutive steps. "
+                    "Try a different model or transport."
+                )
             retry_msg = (
                 "**Your response MUST have at least one function call. "
                 "Your response has 0 function calls.**"
@@ -315,6 +341,7 @@ class KISSAgent(Base):
             self._add_message("user", retry_msg)
             self.model.add_message_to_conversation("user", retry_msg)
             return None
+        self.consecutive_no_tool_calls = 0
 
         if self.printer:
             self.printer.print(usage_info, type="usage_info")
@@ -322,6 +349,7 @@ class KISSAgent(Base):
         call_reprs = []
         function_results: list[tuple[str, dict[str, Any]]] = []
         finish_result: str | None = None
+        non_finish_call_count = 0
 
         for fc in function_calls:
             name, response_str = self._execute_tool(fc)
@@ -332,6 +360,8 @@ class KISSAgent(Base):
             function_results.append((name, {"result": response_str}))
             if name == "finish":
                 finish_result = response_str
+            else:
+                non_finish_call_count += 1
 
         model_content = (
             response_text + "\n" + "\n".join(call_reprs) + "\n```text\n" + usage_info + "\n```\n"
@@ -343,12 +373,51 @@ class KISSAgent(Base):
             "\n\n".join(f"[{name}]: {result['result']}" for name, result in function_results),
             tool_call_timestamp,
         )
+        self.non_finish_tool_calls_executed += non_finish_call_count
 
         if finish_result is not None:
+            if self._is_successful_finish_without_work(finish_result, non_finish_call_count):
+                retry_msg = (
+                    "finish(success=True) was called before any non-finish tools were executed. "
+                    "You must perform real file/tool work first, then call finish."
+                )
+                self._add_message("user", retry_msg)
+                self.model.add_message_to_conversation("user", retry_msg)
+                if self.printer:
+                    self.printer.print(retry_msg, type="usage_info")
+                return None
             return finish_result
 
         self.model.add_function_results_to_conversation_and_return(function_results)
         return None
+
+    @staticmethod
+    def _response_usage_is_zero(response: Any) -> bool:
+        if not isinstance(response, dict):
+            return False
+        usage = response.get("usage")
+        if not isinstance(usage, dict):
+            return False
+        return all(int(usage.get(k, 0) or 0) == 0 for k in ("input_tokens", "output_tokens"))
+
+    def _is_successful_finish_without_work(
+        self,
+        finish_result: str,
+        non_finish_call_count: int,
+    ) -> bool:
+        if non_finish_call_count > 0 or self.non_finish_tool_calls_executed > 0:
+            return False
+        try:
+            payload = yaml.safe_load(finish_result)
+        except Exception:
+            logger.debug("Exception caught", exc_info=True)
+            return False
+        if not isinstance(payload, dict):
+            return False
+        success = payload.get("success", False)
+        if isinstance(success, str):
+            return success.lower() in {"true", "1", "yes"}
+        return bool(success)
 
     def _execute_tool(
         self,
