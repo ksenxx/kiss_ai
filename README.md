@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.3-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.4-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -73,6 +73,8 @@ During my winter vacation of 2025, I developed KISS--a **stupidly simple, yet ve
 #whatispossible #KISSSorcar
 
 ![KISS Sorcar Screenshot](assets/KISSSorcar.png)
+
+A video demo of KISS Sorcar can be found at [here](https://youtube.com/watch?v=XWLpNJlUgZo) and a older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
 
 # Introduction to KISS
 
