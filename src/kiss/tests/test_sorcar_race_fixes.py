@@ -11,7 +11,6 @@ Verifies:
 import threading
 import time
 
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.task_history import (
     _add_task,
     _load_history,

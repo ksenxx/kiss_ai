@@ -1,7 +1,6 @@
 """Tests that SorcarAgent bash streaming works when tools are created before printer is set."""
 
 import queue
-import time
 
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent

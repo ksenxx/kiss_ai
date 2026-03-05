@@ -33,6 +33,7 @@ execute_todo(todo_id):
 from __future__ import annotations
 
 import base64
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,8 +43,6 @@ from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.docker.docker_manager import DockerManager
-
-import logging
 
 logger = logging.getLogger(__name__)
 

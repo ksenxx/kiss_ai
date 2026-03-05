@@ -15,7 +15,6 @@ from kiss.core.models.model_info import (
     _mi,
     calculate_cost,
     get_flaky_reason,
-    get_max_context_length,
     is_model_flaky,
     model,
 )
@@ -184,7 +183,6 @@ class TestModelInfo:
                 assert info.output_price_per_1M == 0.0, f"{name}: embedding should have 0 output"
 
     def test_text_embedding_004_is_gemini(self):
-        from kiss.core.models.gemini_model import GeminiModel
 
         m = model("text-embedding-004")
         assert isinstance(m, GeminiModel)

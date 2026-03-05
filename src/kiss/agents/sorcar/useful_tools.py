@@ -1,13 +1,12 @@
 """Useful tools for agents: file editing and bash execution."""
 
+import logging
 import re
 import shlex
 import subprocess
 import threading
 from collections.abc import Callable
 from pathlib import Path
-
-import logging
 
 logger = logging.getLogger(__name__)
 

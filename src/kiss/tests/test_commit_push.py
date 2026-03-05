@@ -4,7 +4,7 @@ import os
 import subprocess
 import tempfile
 
-from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS, _build_html
+from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
 
 def test_commit_author_in_assistant_source():

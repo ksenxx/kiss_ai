@@ -6,7 +6,6 @@ global_budget_used, _bash_buffer, and _callback_helper_loop.
 
 import queue
 import threading
-import time
 
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.core.base import Base

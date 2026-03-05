@@ -14,6 +14,7 @@ This module evolves the SelfEvolvingMultiAgent to optimize for:
 from __future__ import annotations
 
 import importlib.resources
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,8 +28,6 @@ from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.utils import get_config_value
 from kiss.docker.docker_manager import DockerManager
-
-import logging
 
 logger = logging.getLogger(__name__)
 

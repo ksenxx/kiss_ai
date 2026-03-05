@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import queue
 import shutil
@@ -52,8 +53,6 @@ from kiss.core.models.model_info import (
     get_available_models,
 )
 from kiss.core.relentless_agent import RelentlessAgent
-
-import logging
 
 logger = logging.getLogger(__name__)
 

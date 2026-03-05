@@ -22,8 +22,6 @@ def model_name(request: pytest.FixtureRequest) -> str:
     return str(request.config.getoption("--model"))
 
 
-import pytest
-
 @pytest.mark.redundancy_check
 class TestAModel(unittest.TestCase):
     model_name = DEFAULT_MODEL
