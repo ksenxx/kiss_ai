@@ -5,6 +5,7 @@
 
 """KISSEvolve: Evolutionary Algorithm Discovery using LLMs."""
 
+import logging
 import math
 import random
 from collections.abc import Callable
@@ -17,8 +18,6 @@ from kiss.agents.kiss_evolve.simple_rag import SimpleRAG
 from kiss.core import config as config_module
 from kiss.core.models.model import Model
 from kiss.core.utils import get_config_value
-
-import logging
 
 logger = logging.getLogger(__name__)
 

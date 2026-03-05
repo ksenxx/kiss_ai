@@ -1,11 +1,8 @@
 """Tests for the SCM commit message generation feature in VS Code extension."""
 
-import json
-import os
-import tempfile
 import unittest
 
-from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _CS_SETTINGS, _setup_code_server
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _CS_SETTINGS
 
 
 class TestScmMessageExtensionJS(unittest.TestCase):

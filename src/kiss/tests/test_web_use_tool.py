@@ -11,7 +11,6 @@ import pytest
 from kiss.agents.sorcar.web_use_tool import (
     KISS_PROFILE_DIR,
     WebUseTool,
-    _number_interactive_elements,
 )
 
 FORM_PAGE = b"""<!DOCTYPE html>

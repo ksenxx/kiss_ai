@@ -3,8 +3,7 @@
 import unittest
 from typing import Any
 
-from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress
-from kiss.tests.conftest import requires_openai_api_key
+from kiss.agents.gepa import GEPA
 
 
 def create_deterministic_sequential_wrapper():

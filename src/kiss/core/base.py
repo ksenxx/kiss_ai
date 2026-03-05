@@ -6,6 +6,7 @@
 """Base agent class with common functionality for all KISS agents."""
 
 import json
+import logging
 import sys
 import threading
 import time
@@ -20,8 +21,6 @@ from kiss.core.models.model_info import get_max_context_length
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import Printer
 from kiss.core.utils import config_to_dict
-
-import logging
 
 logger = logging.getLogger(__name__)
 

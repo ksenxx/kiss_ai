@@ -5,6 +5,7 @@
 
 """Gemini model implementation for Google's GenAI models."""
 
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -14,8 +15,6 @@ from google.genai import types
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment, Model, TokenCallback
-
-import logging
 
 logger = logging.getLogger(__name__)
 
