@@ -113,13 +113,10 @@ That's a fully functional AI agent that uses tools. No annotations. No boilerpla
 Well, you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well-established agent frameworks?**" Here is my response:
 
 - **KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.**
-- **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) and [Agent Optimizer](src/kiss/agents/coding_agents/agent_optimizer.py) which enable you to optimize a repository of code (and AI agents) for your metric of choice (e.g., cost and running time or test coverage or code quality/readability).**
 - **It has the GEPA prompt optimizer built-in with a simple API.**
 - **It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.**
 - **No bloat and simple codebase.**
-- **Optimization strategies can be written in plain English.**
-- **New techniques will be incorporated to the framework as I research them.**
-- **The project effectively applies various programming language and software engineering principles and concepts that I learned since 1995.**
+- **New techniques will be incorporated to the framework as we research them.**
 
 ## 🤝 Multi-Agent Orchestration is Function Composition
 
@@ -225,7 +222,7 @@ def finish(
 
 ```
 
-The agent will automatically use your custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
+The agent will automatically use the custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
 
 ## 📊 Trajectory Saving and Visualization
 
@@ -262,30 +259,6 @@ The visualizer provides:
 
 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
-## 📖 Features of The KISS Framework
-
-KISS is a lightweight, yet powerful, multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
-
-- **Simple Architecture**: Clean, minimal core that's easy to understand and extend
-- **Multi-Tool Execution**: Agents can execute multiple tool calls in a single step for faster task completion
-- **Relentless Agent**: Single-agent coding system with smart auto-continuation for long-running tasks
-- **Browser-Based Assistant**: Interactive web UI for agents with real-time streaming and task history
-- **Repo Optimizer**: Uses SorcarAgent to iteratively optimize code in your project for speed and cost (💡 new idea)
-- **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
-- **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
-- **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
-- **Native Function Calling**: Seamless tool integration using native function calling APIs (OpenAI, Anthropic, Gemini, Together AI, and OpenRouter)
-- **Docker Integration**: Built-in Docker manager for running agents in isolated environments
-- **Trajectory Tracking**: Automatic saving of agent execution trajectories with unified state management
-- **Structured Result Display**: Console and browser printers parse YAML result content to show success/failure status with markdown rendering
-- **Token Streaming**: Real-time token streaming via async callback for all providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter), including thinking/reasoning tokens and tool execution output
-- **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
-- **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
-- **Multimodal Support**: Attach images (JPEG, PNG, GIF, WebP) and PDFs to prompts across all model providers
-- **Self-Evolution**: Framework for agents to evolve and refine other multi agents
-- **RAG Support**: Simple retrieval-augmented generation system with in-memory vector store
-- **Useful Agents**: Pre-built utility agents including prompt refinement and general bash execution agents
-- **Trajectory Visualization**: Web-based visualizer for viewing agent execution trajectories with modern UI
 
 ## 📦 Developer Installation
 
