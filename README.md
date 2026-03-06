@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.5-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.6-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -66,15 +66,15 @@ pip install kiss-agent-framework
 python -m kiss.agents.sorcar.sorcar
 ```
 
-# What is KISS and KISS Sorcar? How It Started
+# Introduction to KISS Sorcar
 
-**KISS Sorcar** (named after the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity. It runs **locally** as a VSCode IDE and in the chatbox you can give any natural language command. The good part is that it is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. 
+**KISS Sorcar** (named after the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity. It runs **locally** as a VSCode IDE. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. 
 
 #whatispossible #KISSSorcar
 
 ![KISS Sorcar Screenshot](assets/KISSSorcar.png)
 
-A video demo of KISS Sorcar can be found at [here](https://youtube.com/watch?v=XWLpNJlUgZo) and a older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
+A video demo of KISS Sorcar can be found [here](https://youtube.com/watch?v=XWLpNJlUgZo) and an older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
 
 # Introduction to KISS
 
@@ -113,13 +113,10 @@ That's a fully functional AI agent that uses tools. No annotations. No boilerpla
 Well, you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well-established agent frameworks?**" Here is my response:
 
 - **KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.**
-- **KISS comes with [Repo Optimizer](src/kiss/agents/coding_agents/repo_optimizer.py) and [Agent Optimizer](src/kiss/agents/coding_agents/agent_optimizer.py) which enable you to optimize a repository of code (and AI agents) for your metric of choice (e.g., cost and running time or test coverage or code quality/readability).**
 - **It has the GEPA prompt optimizer built-in with a simple API.**
 - **It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.**
 - **No bloat and simple codebase.**
-- **Optimization strategies can be written in plain English.**
-- **New techniques will be incorporated to the framework as I research them.**
-- **The project effectively applies various programming language and software engineering principles and concepts that I learned since 1995.**
+- **New techniques will be incorporated to the framework as we research them.**
 
 ## 🤝 Multi-Agent Orchestration is Function Composition
 
@@ -164,31 +161,9 @@ print(final)
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
 
-## 💬 KISS Sorcar
-
-KISS includes a browser-based IDE, called KISS Sorcar, for writing code and performing general tasks. It provides a rich web IDE which is free, open-source, and runs locally.
-
-```bash
-# Launch the assistant (opens browser automatically)
-uv run sorcar
-
-# Or with a custom working directory
-uv run sorcar ./my-project
-
-# Or with a specific default model
-uv run sorcar --model_name "claude-opus-4-6"
-```
-
-KISS Sorcar features:
-
-- **Real-time streaming**: See agent thinking, tool calls, and results as they happen
-- **Task history**: Previously submitted tasks are saved and available via autocomplete
-- **Multimodal input**: Attach images (JPEG, PNG, GIF, WebP) and PDFs via upload, drag-and-drop, or paste
-- **Modern UI**: Dark theme with collapsible sections for tool calls and thinking
-
 ## 🔧 Using Repo Optimizer
 
-**This is one of the most important and useful features of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
+The `RepoOptimizer` (`repo_optimizer.py`) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
 
 ```bash
 # Optimize a program for speed and cost
@@ -247,7 +222,7 @@ def finish(
 
 ```
 
-The agent will automatically use your custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
+The agent will automatically use the custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
 
 ## 📊 Trajectory Saving and Visualization
 
@@ -284,30 +259,6 @@ The visualizer provides:
 
 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
-## 📖 Features of The KISS Framework
-
-KISS is a lightweight, yet powerful, multi agent framework that implements a ReAct (Reasoning and Acting) loop for LLM agents. The framework provides:
-
-- **Simple Architecture**: Clean, minimal core that's easy to understand and extend
-- **Multi-Tool Execution**: Agents can execute multiple tool calls in a single step for faster task completion
-- **Relentless Agent**: Single-agent coding system with smart auto-continuation for long-running tasks
-- **Browser-Based Assistant**: Interactive web UI for agents with real-time streaming and task history
-- **Repo Optimizer**: Uses SorcarAgent to iteratively optimize code in your project for speed and cost (💡 new idea)
-- **GEPA Implementation From Scratch**: Genetic-Pareto prompt optimization for compound AI systems
-- **KISSEvolve Implementation From Scratch**: Evolutionary algorithm discovery framework with LLM-guided mutation and crossover
-- **Model Agnostic**: Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter)
-- **Native Function Calling**: Seamless tool integration using native function calling APIs (OpenAI, Anthropic, Gemini, Together AI, and OpenRouter)
-- **Docker Integration**: Built-in Docker manager for running agents in isolated environments
-- **Trajectory Tracking**: Automatic saving of agent execution trajectories with unified state management
-- **Structured Result Display**: Console and browser printers parse YAML result content to show success/failure status with markdown rendering
-- **Token Streaming**: Real-time token streaming via async callback for all providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter), including thinking/reasoning tokens and tool execution output
-- **Token Usage Tracking**: Built-in token usage tracking with automatic context length detection and step counting
-- **Budget Tracking**: Automatic cost tracking and budget monitoring across all agent runs
-- **Multimodal Support**: Attach images (JPEG, PNG, GIF, WebP) and PDFs to prompts across all model providers
-- **Self-Evolution**: Framework for agents to evolve and refine other multi agents
-- **RAG Support**: Simple retrieval-augmented generation system with in-memory vector store
-- **Useful Agents**: Pre-built utility agents including prompt refinement and general bash execution agents
-- **Trajectory Visualization**: Web-based visualizer for viewing agent execution trajectories with modern UI
 
 ## 📦 Developer Installation
 
