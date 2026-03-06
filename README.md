@@ -164,31 +164,9 @@ print(final)
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
 
-## 💬 KISS Sorcar
-
-KISS includes a browser-based IDE, called KISS Sorcar, for writing code and performing general tasks. It provides a rich web IDE which is free, open-source, and runs locally.
-
-```bash
-# Launch the assistant (opens browser automatically)
-uv run sorcar
-
-# Or with a custom working directory
-uv run sorcar ./my-project
-
-# Or with a specific default model
-uv run sorcar --model_name "claude-opus-4-6"
-```
-
-KISS Sorcar features:
-
-- **Real-time streaming**: See agent thinking, tool calls, and results as they happen
-- **Task history**: Previously submitted tasks are saved and available via autocomplete
-- **Multimodal input**: Attach images (JPEG, PNG, GIF, WebP) and PDFs via upload, drag-and-drop, or paste
-- **Modern UI**: Dark theme with collapsible sections for tool calls and thinking
-
 ## 🔧 Using Repo Optimizer
 
-**This is one of the most important and useful features of KISS.** The `RepoOptimizer` (`repo_optimizer.py`) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
+The `RepoOptimizer` (`repo_optimizer.py`) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
 
 ```bash
 # Optimize a program for speed and cost
