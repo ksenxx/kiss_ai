@@ -443,6 +443,40 @@ _MS_GALLERY = (
 )
 
 
+def _disable_copilot_scm_button(data_dir: str) -> None:
+    """Remove Copilot's 'generate commit message' button from the SCM input box.
+
+    Modifies the Copilot Chat extension's package.json to set the scm/inputBox
+    menu entry's ``when`` clause to ``"false"``, preventing it from appearing.
+    This ensures only the KISSAgent's generate button is visible.
+    """
+    ext_base = Path(data_dir) / "extensions"
+    if not ext_base.is_dir():
+        return
+    for ext_dir in ext_base.iterdir():
+        if not ext_dir.is_dir() or not ext_dir.name.startswith("github.copilot-chat-"):
+            continue
+        pkg_path = ext_dir / "package.json"
+        if not pkg_path.exists():
+            continue
+        try:
+            pkg = json.loads(pkg_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        scm_items = pkg.get("contributes", {}).get("menus", {}).get("scm/inputBox", [])
+        modified = False
+        for item in scm_items:
+            if item.get("command") == "github.copilot.git.generateCommitMessage":
+                if item.get("when") != "false":
+                    item["when"] = "false"
+                    modified = True
+        if modified:
+            try:
+                pkg_path.write_text(json.dumps(pkg))
+            except OSError:
+                logger.debug("Exception caught", exc_info=True)
+
+
 def _install_copilot_extension(data_dir: str) -> None:
     """Install GitHub Copilot extension if not already present."""
     ext_base = Path(data_dir) / "extensions"
@@ -464,6 +498,7 @@ def _install_copilot_extension(data_dir: str) -> None:
     except (subprocess.TimeoutExpired, OSError):
         logger.debug("Exception caught", exc_info=True)
         pass
+    _disable_copilot_scm_button(data_dir)
 
 
 def _setup_code_server(data_dir: str) -> bool:
@@ -565,6 +600,7 @@ def _setup_code_server(data_dir: str) -> bool:
     old_content = ext_file.read_text() if ext_file.exists() else ""
     ext_file.write_text(_CS_EXTENSION_JS)
 
+    _disable_copilot_scm_button(data_dir)
     threading.Thread(target=_install_copilot_extension, args=(data_dir,), daemon=True).start()
 
     return old_content != _CS_EXTENSION_JS

@@ -28,20 +28,4 @@ if [[ -n "${GEMINI_API_KEY}" ]]; then
   exit 1
 fi
 
-if [[ -n "${ANTHROPIC_API_KEY}" ]]; then
-  uv run sorcar --model_name "claude-opus-4-6"
-elif [[ -n "${OPENAI_API_KEY}" ]]; then
-  uv run sorcar --model_name "gpt-5.2"
-elif [[ -n "${GEMINI_API_KEY}" ]]; then
-  uv run sorcar --model_name "gemini-3.1-pro-preview"
-elif [[ -n "${TOGETHER_API_KEY}" ]]; then
-  uv run sorcar --model_name "moonshotai/Kimi-K2.5"
-elif [[ -n "${OPENROUTER_API_KEY}" ]]; then
-  uv run sorcar --model_name "openrouter/anthropic/claude-opus-4-6"
-elif [[ -n "${MINIMAX_API_KEY}" ]]; then
-  uv run sorcar --model_name "minimax-m2.5"
-else
-  echo "❌ Unexpected error: no API key detected even after check."
-  exit 1
-fi
-
+uv run sorcar
