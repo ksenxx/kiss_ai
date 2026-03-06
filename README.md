@@ -66,7 +66,7 @@ pip install kiss-agent-framework
 python -m kiss.agents.sorcar.sorcar
 ```
 
-# Intrudction to KISS Sorcar
+# Introduction to KISS Sorcar
 
 **KISS Sorcar** (named after the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity. It runs **locally** as a VSCode IDE. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. 
 
@@ -74,7 +74,7 @@ python -m kiss.agents.sorcar.sorcar
 
 ![KISS Sorcar Screenshot](assets/KISSSorcar.png)
 
-A video demo of KISS Sorcar can be found at [here](https://youtube.com/watch?v=XWLpNJlUgZo) and a older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
+A video demo of KISS Sorcar can be found [here](https://youtube.com/watch?v=XWLpNJlUgZo) and an older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
 
 # Introduction to KISS
 
