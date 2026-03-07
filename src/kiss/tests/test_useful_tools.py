@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import signal
 import tempfile
 from pathlib import Path
 
@@ -89,12 +90,13 @@ class TestUsefulTools:
         assert result.startswith("Error:")
         assert "String not found" in result
 
-    def test_edit_timeout(self, tools):
+    def test_edit_replace_all_large_file(self, tools):
         ut, test_dir = tools
-        test_file = test_dir / "timeout_edit.txt"
+        test_file = test_dir / "large_edit.txt"
         test_file.write_text("a" * 5_000_000)
-        result = ut.Edit(str(test_file), "a", "b", replace_all=True, timeout_seconds=0.0001)
-        assert result == "Error: Command execution timeout"
+        result = ut.Edit(str(test_file), "a", "b", replace_all=True)
+        assert "Successfully replaced" in result
+        assert test_file.read_text() == "b" * 5_000_000
 
     def test_edit_success(self, tools):
         ut, test_dir = tools
@@ -159,12 +161,44 @@ def streaming_tools(temp_test_dir):
     return ut, temp_test_dir, streamed
 
 
-class TestBashStreaming:
+@pytest.fixture(params=[False, True], ids=["nonstreaming", "streaming"])
+def any_tools(request, temp_test_dir):
+    if request.param:
+        return UsefulTools(stream_callback=lambda _: None), temp_test_dir
+    return UsefulTools(), temp_test_dir
 
-    def test_streaming_handles_error(self, streaming_tools):
-        ut, _, streamed = streaming_tools
+
+class TestBashBothPaths:
+    """Tests that apply identically to both streaming and non-streaming Bash paths."""
+
+    def test_error_exit_code(self, any_tools):
+        ut, _ = any_tools
         result = ut.Bash("false", "Failing command")
         assert result.startswith("Error (exit code")
+
+    def test_output_truncation(self, any_tools):
+        ut, test_dir = any_tools
+        big_file = test_dir / "big.txt"
+        big_file.write_text("X" * 200)
+        result = ut.Bash(f"cat {big_file}", "Cat big", max_output_chars=50)
+        assert "truncated" in result
+
+    def test_timeout(self, any_tools):
+        ut, _ = any_tools
+        result = ut.Bash("sleep 10", "Slow command", timeout_seconds=0.1)
+        assert result == "Error: Command execution timeout"
+
+    def test_timeout_compound_command(self, any_tools):
+        ut, _ = any_tools
+        result = ut.Bash(
+            "sleep 30; echo done",
+            "Compound cmd timeout",
+            timeout_seconds=0.5,
+        )
+        assert result == "Error: Command execution timeout"
+
+
+class TestBashStreaming:
 
     def test_streaming_error_includes_output(self, streaming_tools):
         ut, test_dir, streamed = streaming_tools
@@ -176,56 +210,21 @@ class TestBashStreaming:
         assert "stream_partial" in result
         assert "exit code 1" in result
 
-    def test_streaming_timeout(self, streaming_tools):
-        ut, _, _ = streaming_tools
-        result = ut.Bash("sleep 10", "Slow command", timeout_seconds=0.1)
-        assert result == "Error: Command execution timeout"
-
-    def test_streaming_timeout_compound_command(self, streaming_tools):
-        """Compound commands spawn child processes that must also be killed on timeout."""
-        ut, _, _ = streaming_tools
-        result = ut.Bash(
-            "sleep 30; echo done",
-            "Compound cmd timeout",
-            timeout_seconds=0.5,
-        )
-        assert result == "Error: Command execution timeout"
-
     def test_streaming_output(self, streaming_tools):
         ut, _, streamed = streaming_tools
         result = ut.Bash("echo hello", "echo test")
         assert "hello" in result
         assert any("hello" in s for s in streamed)
 
-    def test_streaming_output_truncation(self, streaming_tools):
-        ut, test_dir, _ = streaming_tools
-        big_file = test_dir / "big.txt"
-        big_file.write_text("X" * 200)
-        result = ut.Bash(
-            f"cat {big_file}", "Cat big", max_output_chars=50
-        )
-        assert "truncated" in result
-
-
-class TestBashTimeoutNonStreaming:
-
-    def test_timeout_compound_command(self, tools):
-        """Non-streaming: compound commands with child processes timeout correctly."""
-        ut, _ = tools
-        result = ut.Bash(
-            "sleep 30; echo done",
-            "Compound cmd timeout",
-            timeout_seconds=0.5,
-        )
-        assert result == "Error: Command execution timeout"
-
 
 class TestAdversarial:
     """Adversarial tests to try to break the Popen/killpg changes."""
 
-    def test_timeout_kills_background_children(self, tools):
+    def test_timeout_kills_background_children(self, any_tools):
         """Background child processes must be killed on timeout, not just the shell."""
-        ut, test_dir = tools
+        import time
+
+        ut, test_dir = any_tools
         pid_file = test_dir / "bg_child.pid"
         script = test_dir / "bg_child.sh"
         script.write_text(
@@ -234,7 +233,6 @@ class TestAdversarial:
         script.chmod(0o755)
         result = ut.Bash(str(script), "bg child timeout", timeout_seconds=1)
         assert result == "Error: Command execution timeout"
-        import time
         time.sleep(0.5)
         if pid_file.exists():
             child_pid = int(pid_file.read_text().strip())
@@ -247,36 +245,13 @@ class TestAdversarial:
             except ProcessLookupError:
                 pass
 
-    def test_streaming_timeout_kills_background_children(self, streaming_tools):
-        """Streaming: background child processes must be killed on timeout."""
-        ut, test_dir, _ = streaming_tools
-        pid_file = test_dir / "sbg_child.pid"
-        script = test_dir / "sbg_child.sh"
-        script.write_text(
-            f"#!/bin/bash\nsleep 100 &\necho $! > {pid_file}\nwait\n"
-        )
-        script.chmod(0o755)
-        result = ut.Bash(str(script), "streaming bg child", timeout_seconds=1)
-        assert result == "Error: Command execution timeout"
-        import time
-        time.sleep(0.5)
-        if pid_file.exists():
-            child_pid = int(pid_file.read_text().strip())
-            try:
-                os.kill(child_pid, 0)
-                os.kill(child_pid, signal.SIGKILL)
-                raise AssertionError(
-                    f"Streaming bg child {child_pid} survived timeout!"
-                )
-            except ProcessLookupError:
-                pass
-
-    def test_nonstreaming_interrupt_kills_child(self, tools):
-        """KeyboardInterrupt during non-streaming Bash must kill the child process group."""
+    def test_interrupt_kills_child(self, any_tools):
+        """KeyboardInterrupt must kill the child process group."""
         import _thread
+        import threading
         import time
 
-        ut, test_dir = tools
+        ut, test_dir = any_tools
         pid_file = test_dir / "interrupt_child.pid"
         script = test_dir / "interrupt_target.sh"
         script.write_text(
@@ -296,58 +271,10 @@ class TestAdversarial:
             if child_pid:
                 _thread.interrupt_main()
 
-        import threading
         t = threading.Thread(target=send_interrupt, daemon=True)
         t.start()
         try:
             ut.Bash(str(script), "interruptible", timeout_seconds=30)
-        except KeyboardInterrupt:
-            pass
-        t.join(timeout=5)
-
-        if child_pid is None:
-            pytest.skip("Script didn't start in time")
-
-        time.sleep(0.3)
-        try:
-            os.kill(child_pid, 0)
-            os.kill(child_pid, signal.SIGKILL)
-            raise AssertionError(
-                f"Child process {child_pid} survived KeyboardInterrupt!"
-            )
-        except ProcessLookupError:
-            pass
-
-    def test_streaming_interrupt_kills_child(self, streaming_tools):
-        """Streaming path properly kills child on KeyboardInterrupt (has BaseException handler)."""
-        import _thread
-        import time
-
-        ut, test_dir, _ = streaming_tools
-        pid_file = test_dir / "sinterrupt_child.pid"
-        script = test_dir / "sinterrupt_target.sh"
-        script.write_text(
-            f"#!/bin/bash\necho $$ > {pid_file}\nsleep 100\n"
-        )
-        script.chmod(0o755)
-
-        child_pid = None
-
-        def send_interrupt():
-            nonlocal child_pid
-            for _ in range(20):
-                time.sleep(0.1)
-                if pid_file.exists():
-                    child_pid = int(pid_file.read_text().strip())
-                    break
-            if child_pid:
-                _thread.interrupt_main()
-
-        import threading
-        t = threading.Thread(target=send_interrupt, daemon=True)
-        t.start()
-        try:
-            ut.Bash(str(script), "streaming interruptible", timeout_seconds=30)
         except KeyboardInterrupt:
             pass
         t.join(timeout=5)
@@ -363,10 +290,7 @@ class TestAdversarial:
             os.kill(child_pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-
-        assert not alive, (
-            f"Streaming child {child_pid} survived KeyboardInterrupt!"
-        )
+        assert not alive, f"Child {child_pid} survived KeyboardInterrupt!"
 
     def test_nonstreaming_communicate_no_timeout_after_kill(self, tools):
         """After killpg, the second process.communicate() has no timeout.
@@ -398,11 +322,12 @@ class TestAdversarial:
         for _ in range(20):
             ut.Bash("echo ok", "rapid fire")
         time.sleep(0.5)
-        zombies = os.popen("ps aux | grep defunct | grep -v grep").read().strip()
-        assert zombies == "", f"Zombie processes found:\n{zombies}"
-
-
-import signal
+        my_pid = os.getpid()
+        zombies = os.popen(
+            f"ps -o pid=,stat=,ppid= -p $(pgrep -P {my_pid} 2>/dev/null) 2>/dev/null"
+            " | grep Z"
+        ).read().strip()
+        assert zombies == "", f"Zombie child processes found:\n{zombies}"
 
 
 class TestBugs:

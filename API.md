@@ -480,13 +480,12 @@ ______________________________________________________________________
   - `file_path`: Path to the file to write.
   - `content`: The full content to write to the file.
 
-- **Edit** — Performs precise string replacements in files with exact matching.<br/>`Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str`
+- **Edit** — Performs precise string replacements in files with exact matching.<br/>`Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> str`
 
   - `file_path`: Absolute path to the file to modify.
   - `old_string`: Exact text to find and replace.
   - `new_string`: Replacement text, must differ from old_string.
   - `replace_all`: If True, replace all occurrences.
-  - `timeout_seconds`: Timeout in seconds for the edit command.
   - **Returns:** The output of the edit operation.
 
 - **Bash** — Runs a bash command and returns its output.<br/>`Bash(command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str`
