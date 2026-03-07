@@ -108,8 +108,8 @@ class SorcarAgent(RelentlessAgent):
             system_instructions = SYSTEM_PROMPT + f"\nTask History File: {history_path}\n"
             prompt = prompt_template
             if attachments:
-                img_count = sum(1 for a in attachments if a.mime_type.startswith("image/"))
                 pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")
+                img_count = sum(1 for a in attachments if a.mime_type.startswith("image/"))
                 parts = []
                 if img_count:
                     parts.append(f"{img_count} image(s)")
