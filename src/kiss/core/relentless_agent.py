@@ -24,12 +24,14 @@ TASK_PROMPT = """# Task
 
 {task_description}
 
-# Instructions
-- **At step {step_threshold}: you MUST call finish(success=False,
-  summary="detailed summary of work done so far")** if the task is
-  not complete and you are at risk of running out of steps.
+# MOST IMPORTANT INSTRUCTIONS
+- **At step {step_threshold}: you MUST call finish(success=False, \
+summary="precise chronologically-ordered list of things the agent did \
+with the reason for doing that along with relevant code snippets")** \
+if the task is not complete and you are at risk of running out of steps.
 - Work dir: {work_dir}
 - Current process PID: {current_pid} — NEVER kill this process.
+
 {previous_progress}
 """
 
@@ -40,7 +42,7 @@ CONTINUATION_PROMPT = """
 
 # Continue
 - Complete the rest of the task.
-- Don't redo completed work.
+- **DON'T** redo completed work.
 """
 
 SUMMARIZER_PROMPT = """
@@ -57,8 +59,10 @@ def finish(success: bool, summary: str) -> str:
     """Finish execution with status and summary.
 
     Args:
-        success: True if successful, False otherwise.
-        summary: Detailed summary of work done so far.
+        success: True if successful, False otherwise
+        summary: precise chronologically-ordered list of things the
+            agent did with the reason for doing that along with
+            relevant code snippets
     """
     if isinstance(success, str):
         success = success.lower() in ("true", "1", "yes")
@@ -127,8 +131,8 @@ class RelentlessAgent(Base):
         progress_section = ""
         summary = ""
         current_pid = str(os.getpid())
-        for trial in range(self.max_sub_sessions):
-            executor = KISSAgent(f"{self.name} Trial-{trial}")
+        for session in range(self.max_sub_sessions):
+            executor = KISSAgent(f"{self.name} Session-{session}")
             try:
                 result = executor.run(
                     model_name=self.model_name,
@@ -145,7 +149,7 @@ class RelentlessAgent(Base):
                     max_steps=self.max_steps,
                     max_budget=self.max_budget,
                     printer=self.printer,
-                    attachments=attachments if trial == 0 else None,
+                    attachments=attachments if session == 0 else None,
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)

@@ -706,8 +706,8 @@ ______________________________________________________________________
 
 **`finish`** — Finish execution with status and summary.<br/>`def finish(success: bool, summary: str) -> str`
 
-- `success`: True if successful, False otherwise.
-- `summary`: Detailed summary of work done so far.
+- `success`: True if successful, False otherwise
+- `summary`: precise chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets
 
 ______________________________________________________________________
 

@@ -116,7 +116,7 @@ class TestDisableCopilotScmButton:
         data_dir = tmp_path / "data"
         chat_dir = data_dir / "extensions" / "github.copilot-chat-0.36.2"
         chat_dir.mkdir(parents=True)
-        pkg = {"contributes": {"menus": {}}}
+        pkg: dict[str, object] = {"contributes": {"menus": {}}}
         (chat_dir / "package.json").write_text(json.dumps(pkg))
 
         _disable_copilot_scm_button(str(data_dir))  # should not crash

@@ -122,14 +122,15 @@ class SorcarAgent(RelentlessAgent):
                         f"Examine them directly — do NOT use browser tools "
                         f"to view or screenshot these attachments."
                     )
+            if current_editor_file:
+                prompt += (
+                    "\n\n- The path of the file open in the editor is "
+                    f"{current_editor_file}"
+                )
             return super().run(
                 model_name=model_name,
                 system_instructions=system_instructions,
-                prompt_template=(
-                    prompt + f"\n\n- The default file path: {current_editor_file}"
-                    if current_editor_file
-                    else prompt
-                ),
+                prompt_template=prompt,
                 arguments=arguments,
                 max_steps=max_steps,
                 max_budget=max_budget,

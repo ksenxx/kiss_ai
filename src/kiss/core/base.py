@@ -46,6 +46,7 @@ SYSTEM_PROMPT = f"""
   task from the task history. DO NOT WRITE/EDIT the task history.
 - Call finish(success=True, summary="detailed summary of what was accomplished")
   immediately when task is complete.
+- Run Bash tool with timeout.  Double timeout if the commands timesout.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 
 ## Code Style Guidelines
@@ -92,6 +93,7 @@ SYSTEM_PROMPT = f"""
  - Remove unnecessary conditional checks
  - Make sure that the code is still working correctly
  - Simplify and clean up the test code
+ - Remove all tempoary files you created
 """
 
 
