@@ -1,8 +1,10 @@
 """Useful tools for agents: file editing and bash execution."""
 
 import logging
+import os
 import re
 import shlex
+import signal
 import subprocess
 import threading
 from collections.abc import Callable
@@ -13,12 +15,17 @@ logger = logging.getLogger(__name__)
 def _truncate_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
         return output
-    half = max_chars // 2
-    return (
-        output[:half]
-        + f"\n\n... [truncated {len(output) - max_chars} chars] ...\n\n"
-        + output[-half:]
-    )
+    worst_msg = f"\n\n... [truncated {len(output)} chars] ...\n\n"
+    if max_chars < len(worst_msg):
+        return output[:max_chars]
+    remaining = max_chars - len(worst_msg)
+    head = remaining // 2
+    tail = remaining - head
+    dropped = len(output) - head - tail
+    msg = f"\n\n... [truncated {dropped} chars] ...\n\n"
+    if tail:
+        return output[:head] + msg + output[-tail:]
+    return output[:head] + msg
 
 
 EDIT_SCRIPT = r"""
@@ -166,7 +173,7 @@ fi
 echo ""
 echo "Changed section:"
 echo "----------------------------------------"
-grep -Fn -C 2 "$NEW_STRING" "$FILE_PATH" || echo "(No context available)"
+grep -Fn -C 2 -- "$NEW_STRING" "$FILE_PATH" || echo "(No context available)"
 echo "----------------------------------------"
 
 exit 0
@@ -178,7 +185,12 @@ DISALLOWED_BASH_COMMANDS = {
     "env",
     "eval",
     "exec",
+    "source",
 }
+
+
+_SHELL_PREFIX_TOKENS = frozenset(("!", "{", "}", "(", ")", "&"))
+_REDIRECT_RE = re.compile(r"^[0-9]*[<>][<>&]*")
 
 
 def _extract_leading_command_name(part: str) -> str | None:
@@ -193,17 +205,76 @@ def _extract_leading_command_name(part: str) -> str | None:
     i = 0
     while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*", tokens[i]):
         i += 1
+
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _SHELL_PREFIX_TOKENS:
+            i += 1
+            continue
+        m = _REDIRECT_RE.match(token)
+        if m:
+            if m.end() < len(token):
+                i += 1
+            else:
+                i += 2
+            continue
+        break
+
     if i >= len(tokens):
         return None
-    return tokens[i].split("/")[-1]
+    name = tokens[i].lstrip("({")
+    if not name:
+        return None
+    return name.split("/")[-1]
+
+
+def _split_respecting_quotes(command: str, pattern: re.Pattern[str]) -> list[str]:
+    """Split *command* on *pattern* while skipping quoted and escaped regions."""
+    segments: list[str] = []
+    current: list[str] = []
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\":
+            current.append(command[i : i + 2])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            j = i + 1
+            while j < len(command):
+                if command[j] == "\\" and quote == '"':
+                    j += 2
+                    continue
+                if command[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            current.append(command[i:j])
+            i = j
+            continue
+        m = pattern.match(command, i)
+        if m:
+            segments.append("".join(current))
+            current = []
+            i = m.end()
+            continue
+        current.append(ch)
+        i += 1
+    segments.append("".join(current))
+    return segments
+
+
+_CONTROL_RE = re.compile(r"&&|\|\||;|\n|(?<![<>|&])&(?![&>])")
+_PIPE_RE = re.compile(r"(?<!>)\|(?!\|)")
 
 
 def _extract_command_names(command: str) -> list[str]:
     names: list[str] = []
     stripped_command = _strip_heredocs(command)
-    segments = re.split(r"&&|\|\||;", stripped_command)
+    segments = _split_respecting_quotes(stripped_command, _CONTROL_RE)
     for segment in segments:
-        for part in re.split(r"(?<!>)\|(?!\|)", segment):
+        for part in _split_respecting_quotes(segment, _PIPE_RE):
             name = _extract_leading_command_name(part.strip())
             if name:
                 names.append(name)
@@ -217,11 +288,25 @@ def _strip_heredocs(command: str) -> str:
     so that heredoc body text is not parsed as command arguments.
     """
     return re.sub(
-        r"<<-?\s*'?\"?(\w+)'?\"?\s*\n.*?\n\s*\1\b",
+        r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n(?:.*?\n)*?[ \t]*\1[ \t]*(?=\n|$)",
         "",
         command,
         flags=re.DOTALL,
     )
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 class UsefulTools:
@@ -273,7 +358,7 @@ class UsefulTools:
             resolved = Path(file_path).resolve()
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content)
-            return f"Successfully wrote {len(content)} bytes to {file_path}"
+            return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -379,21 +464,36 @@ class UsefulTools:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 shell=True,
-                check=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout_seconds,
+                start_new_session=True,
             )
-            return _truncate_output(result.stdout, max_output_chars)
-        except subprocess.TimeoutExpired:
-            logger.debug("Exception caught", exc_info=True)
-            return "Error: Command execution timeout"
-        except subprocess.CalledProcessError as e:
-            logger.debug("Exception caught", exc_info=True)
-            return f"Error: {e}"
+            try:
+                stdout, _ = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process)
+                try:
+                    process.communicate(timeout=5)
+                except Exception:
+                    pass
+                return "Error: Command execution timeout"
+            except BaseException:
+                _kill_process_group(process)
+                try:
+                    process.communicate(timeout=5)
+                except Exception:
+                    pass
+                raise
+            if process.returncode != 0:
+                msg = f"Error (exit code {process.returncode}):"
+                if stdout:
+                    msg += f"\n{stdout}"
+                return _truncate_output(msg, max_output_chars)
+            return _truncate_output(stdout, max_output_chars)
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -406,13 +506,14 @@ class UsefulTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         timed_out = False
 
         def _kill() -> None:
             nonlocal timed_out
             timed_out = True
-            process.kill()
+            _kill_process_group(process)
 
         timer = threading.Timer(timeout_seconds, _kill)
         timer.start()
@@ -422,7 +523,13 @@ class UsefulTools:
             for line in iter(process.stdout.readline, ""):
                 chunks.append(line)
                 self.stream_callback(line)
-            process.wait()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process)
+        except BaseException:
+            _kill_process_group(process)
+            raise
         finally:
             timer.cancel()
 
@@ -432,6 +539,9 @@ class UsefulTools:
         output = "".join(chunks)
 
         if process.returncode != 0:
-            return f"Error: {subprocess.CalledProcessError(process.returncode, command)}"
+            msg = f"Error (exit code {process.returncode}):"
+            if output:
+                msg += f"\n{output}"
+            return _truncate_output(msg, max_output_chars)
 
         return _truncate_output(output, max_output_chars)
