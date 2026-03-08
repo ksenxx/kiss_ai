@@ -19,9 +19,11 @@ uv venv --python 3.13
 source .venv/bin/activate
 uv sync
 
-if [[ -n "${ANTHROPIC_API_KEY}" ]]; then
+if [[ -z "${ANTHROPIC_API_KEY}" ]]; then
   echo "KISS Sorcar requires ANTHROPIC_API_KEY in the environment" 
+  exit 1
 fi
-if [[ -n "${GEMINI_API_KEY}" ]]; then
+if [[ -z "${GEMINI_API_KEY}" ]]; then
   echo "KISS Sorcar requires GEMINI_API_KEY in the environment"
+  exit 1
 fi
