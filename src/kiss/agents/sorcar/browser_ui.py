@@ -391,6 +391,46 @@ HTML_HEAD = r"""<!DOCTYPE html>
 """
 
 
+_DISPLAY_EVENT_TYPES = frozenset({
+    "clear", "thinking_start", "thinking_delta", "thinking_end",
+    "text_delta", "text_end", "tool_call", "tool_result",
+    "system_output", "result", "prompt", "usage_info",
+    "task_done", "task_error", "task_stopped",
+    "followup_suggestion",
+})
+
+
+def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive delta events of the same type to reduce storage size.
+
+    Consecutive thinking_delta, text_delta, and system_output events are
+    combined by concatenating their ``text`` fields.
+
+    Args:
+        events: List of event dicts to coalesce.
+
+    Returns:
+        A new list with consecutive same-type delta events merged.
+    """
+    if not events:
+        return events
+    result: list[dict[str, Any]] = []
+    merge_types = ("thinking_delta", "text_delta", "system_output")
+    for ev in events:
+        t = ev.get("type", "")
+        if (
+            result
+            and t == result[-1].get("type")
+            and t in merge_types
+            and "text" in ev
+            and "text" in result[-1]
+        ):
+            result[-1] = {**result[-1], "text": result[-1]["text"] + ev["text"]}
+        else:
+            result.append(ev)
+    return result
+
+
 class BaseBrowserPrinter(Printer):
     def __init__(self) -> None:
         self._clients: list[queue.Queue[dict[str, Any]]] = []
@@ -403,6 +443,9 @@ class BaseBrowserPrinter(Printer):
         self._bash_last_flush = 0.0
         self._bash_flush_timer: threading.Timer | None = None
         self.stop_event = threading.Event()
+        self._recording = False
+        self._recorded_events: list[dict[str, Any]] = []
+        self._recording_lock = threading.Lock()
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
@@ -440,12 +483,34 @@ class BaseBrowserPrinter(Printer):
             return data
         return None
 
+    def start_recording(self) -> None:
+        """Start recording broadcast events for chat history replay."""
+        with self._recording_lock:
+            self._recording = True
+            self._recorded_events = []
+
+    def stop_recording(self) -> list[dict[str, Any]]:
+        """Stop recording and return captured display events, coalesced.
+
+        Returns:
+            List of display-relevant events with consecutive deltas merged.
+        """
+        with self._recording_lock:
+            self._recording = False
+            raw = self._recorded_events
+            self._recorded_events = []
+        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
+        return _coalesce_events(filtered)
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send an SSE event dict to all connected clients.
 
         Args:
             event: The event dictionary to broadcast.
         """
+        with self._recording_lock:
+            if self._recording:
+                self._recorded_events.append(event)
         with self._lock:
             for cq in self._clients:
                 cq.put(event)

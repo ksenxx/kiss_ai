@@ -256,18 +256,20 @@ class TestTaskHistory:
         assert history[0]["task"] == "task1"
         assert history[1]["task"] == "task2"
 
-    def test_set_latest_result(self) -> None:
+    def test_set_latest_chat_events(self) -> None:
         th._add_task("my_task")
-        th._set_latest_result("done!")
+        events: list[dict[str, object]] = [{"type": "text_delta", "text": "done!"}]
+        th._set_latest_chat_events(events)
         history = th._load_history()
-        assert history[0]["result"] == "done!"
+        assert history[0]["chat_events"] == events
 
-    def test_set_latest_result_empty_history(self) -> None:
-        # With sample tasks loaded, set result on first
+    def test_set_latest_chat_events_empty_history(self) -> None:
+        # With sample tasks loaded, set events on first
         th._load_history()
-        th._set_latest_result("result_text")
+        events: list[dict[str, object]] = [{"type": "result", "text": "result_text"}]
+        th._set_latest_chat_events(events)
         assert th._history_cache is not None
-        assert th._history_cache[0]["result"] == "result_text"
+        assert th._history_cache[0]["chat_events"] == events
 
     # --- proposals ---
     def test_load_save_proposals(self) -> None:
@@ -362,7 +364,7 @@ class TestTaskHistory:
         def set_results():
             try:
                 for _ in range(20):
-                    th._set_latest_result("result")
+                    th._set_latest_chat_events([{"type": "text_delta", "text": "result"}])
             except Exception as e:
                 errors.append(e)
 
@@ -2469,14 +2471,15 @@ class TestTaskHistoryBranches:
         try:
             # Should not raise despite OSError
             th._save_history([{"task": "test", "result": ""}])
+            th._save_history([{"task": "test", "chat_events": []}])
         finally:
             os.chmod(str(kiss_dir), 0o755)
 
-    def test_set_latest_result_empty_cache(self) -> None:
-        """_set_latest_result with empty cache does nothing.
-        Covers branch 129->exit."""
+    def test_set_latest_chat_events_empty_cache(self) -> None:
+        """_set_latest_chat_events with empty cache does nothing.
+        Covers branch where cache is empty."""
         th._history_cache = []
-        th._set_latest_result("some result")
+        th._set_latest_chat_events([{"type": "text_delta", "text": "some result"}])
         assert th._history_cache == []
 
     def test_load_proposals_json_decode_error(self) -> None:

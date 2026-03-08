@@ -45,7 +45,7 @@ from kiss.agents.sorcar.task_history import (
     _record_file_usage,
     _record_model_usage,
     _save_proposals,
-    _set_latest_result,
+    _set_latest_chat_events,
 )
 from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
@@ -380,6 +380,7 @@ def run_chatbot(
             )
             _save_untracked_base(actual_work_dir, cs_data_dir, pre_untracked)
             active_file = _read_active_file(cs_data_dir)
+            printer.start_recording()
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
             extra_kwargs = dict(agent_kwargs or {})
@@ -404,16 +405,20 @@ def run_chatbot(
             result_text = f"(error: {e})"
             done_event = {"type": "task_error", "text": str(e)}
         finally:
-            _set_latest_result(result_text)
+            chat_events = printer.stop_recording()
             _append_task_to_md(task, result_text)
             with running_lock:
                 if agent_thread is not current_thread:
+                    # Stopped externally; stop_agent already broadcast
+                    # task_stopped which is captured in chat_events.
+                    _set_latest_chat_events(chat_events)
                     return
                 running = False
                 agent_thread = None
             # Broadcast AFTER setting running=False so clients can
             # immediately submit a new task without getting a 409.
             if done_event:
+                chat_events.append(done_event)
                 printer.broadcast(done_event)
                 if done_event.get("type") == "task_done":
                     threading.Thread(
@@ -421,6 +426,7 @@ def run_chatbot(
                         args=(task, result_text),
                         daemon=True,
                     ).start()
+            _set_latest_chat_events(chat_events)
             try:
                 merge_result = _prepare_merge_view(
                     actual_work_dir,
@@ -580,7 +586,7 @@ def run_chatbot(
         q_lower = query.lower()
         results = []
         for entry in _load_history():
-            task = entry["task"]
+            task = str(entry["task"])
             if q_lower in task.lower():
                 results.append({"type": "task", "text": task})
                 if len(results) >= 5:
@@ -602,21 +608,38 @@ def run_chatbot(
         return JSONResponse(results)
 
     async def tasks(request: Request) -> JSONResponse:
-        return JSONResponse(_load_history())
+        history = _load_history()
+        return JSONResponse([
+            {"task": e["task"], "has_events": bool(e.get("chat_events"))}
+            for e in history
+        ])
+
+    async def task_events(request: Request) -> JSONResponse:
+        """Return recorded chat events for a task by index."""
+        try:
+            idx = int(request.query_params.get("index", "0"))
+        except (ValueError, TypeError):
+            return JSONResponse({"events": [], "task": ""})
+        history = _load_history()
+        if 0 <= idx < len(history):
+            entry = history[idx]
+            events = entry.get("chat_events", [])
+            return JSONResponse({"events": events, "task": entry["task"]})
+        return JSONResponse({"events": [], "task": ""})
 
     async def proposed_tasks_endpoint(request: Request) -> JSONResponse:
         with proposed_lock:
             tasks_list = list(proposed_tasks)
         if not tasks_list:
-            tasks_list = [t["task"] for t in SAMPLE_TASKS[:5]]
+            tasks_list = [str(t["task"]) for t in SAMPLE_TASKS[:5]]
         return JSONResponse(tasks_list)
 
     def _fast_complete(raw_query: str, query: str) -> str:
         query_lower = query.lower()
         for entry in _load_history():
-            task = entry.get("task", "")
+            task = str(entry.get("task", ""))
             if task.lower().startswith(query_lower) and len(task) > len(query):
-                return task[len(query) :]
+                return task[len(query):]
         words = raw_query.split()
         last_word = words[-1] if words else ""
         if last_word and len(last_word) >= 2:
@@ -897,7 +920,7 @@ def run_chatbot(
                 f"Code-server: {'running' if code_server_url else 'not available'}",
                 f"Tasks completed: {len(history)}",
             ]
-            recent = [e["task"] for e in history[:5]] if history else []
+            recent = [str(e["task"]) for e in history[:5]] if history else []
             if recent:
                 info_parts.append("Recent tasks: " + "; ".join(recent))
             config_info = "\n".join(info_parts)
@@ -946,6 +969,7 @@ def run_chatbot(
             Route("/suggestions", suggestions),
             Route("/complete", complete),
             Route("/tasks", tasks),
+            Route("/task-events", task_events),
             Route("/proposed_tasks", proposed_tasks_endpoint),
             Route("/models", models_endpoint),
             Route("/theme", theme),

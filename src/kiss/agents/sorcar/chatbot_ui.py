@@ -1588,19 +1588,73 @@ function loadTasks(){
 }
 function renderTasks(q){
   rl.innerHTML='';
-  var ql=q.toLowerCase(),filtered=[];
-  allTasks.forEach(function(t){
+  var ql=q.toLowerCase(),any=false;
+  allTasks.forEach(function(t,idx){
     var txt=typeof t==='string'?t:(t.task||'');
-    if(!ql||txt.toLowerCase().indexOf(ql)>=0)filtered.push(txt);
-  });
-  if(!filtered.length){rl.innerHTML='<div class="sidebar-empty">'
-    +(ql?'No matches':'No recent tasks')+'</div>';return}
-  filtered.forEach(function(taskText){
+    var hasEvents=typeof t==='object'&&t.has_events;
+    if(ql&&txt.toLowerCase().indexOf(ql)<0)return;
+    any=true;
     var d=mkEl('div','sidebar-item');
-    d.textContent=taskText;d.title=taskText;
-    d.addEventListener('click',function(){inp.value=taskText;inp.focus();toggleSidebar()});
+    d.textContent=txt;d.title=txt;
+    d.addEventListener('click',function(){
+      if(hasEvents){replayTaskEvents(idx,txt)}
+      else{inp.value=txt;inp.focus()}
+      toggleSidebar();
+    });
     rl.appendChild(d);
   });
+  if(!any){rl.innerHTML='<div class="sidebar-empty">'
+    +(ql?'No matches':'No recent tasks')+'</div>'}
+}
+function replayTaskEvents(idx,taskText){
+  O.innerHTML='';state=mkS();_scrollLock=false;
+  llmPanel=null;llmPanelState=mkS();lastToolName='';pendingPanel=false;
+  suggestionsEl=null;
+  fetch('/task-events?index='+idx)
+    .then(function(r){return r.json()})
+    .then(function(data){
+      if(!data.events||!data.events.length){inp.value=taskText;inp.focus();return}
+      var activeFile='';
+      data.events.forEach(function(ev){if(ev.type==='clear'&&ev.active_file)activeFile=ev.active_file});
+      var msgText=taskText;
+      if(activeFile)msgText+='\n\nCurrently open file in editor: '+activeFile;
+      showUserMsg({text:msgText,images:[]});
+      data.events.forEach(function(ev){
+        var t=ev.type;
+        if(t==='clear'||t==='tasks_updated'||t==='proposed_updated'
+          ||t==='theme_changed'||t==='focus_chatbox'||t==='merge_started'
+          ||t==='merge_ended')return;
+        if(t==='task_done')return;
+        if(t==='task_error'){
+          var err=mkEl('div','ev tr err');
+          err.innerHTML='<div class="rl fail">ERROR</div>'+esc(ev.text||'Unknown error');
+          O.appendChild(err);return;
+        }
+        if(t==='task_stopped'){
+          var stEl=mkEl('div','ev tr err');
+          stEl.innerHTML='<div class="rl fail">STOPPED</div>Agent execution stopped by user';
+          O.appendChild(stEl);return;
+        }
+        if(t==='followup_suggestion'){
+          var fu=mkEl('div','followup-bar');fu.title=ev.text;
+          fu.innerHTML='<span class="fu-label">Suggested next</span>'
+            +'<span class="fu-text">'+esc(ev.text)+'</span>';
+          fu.addEventListener('click',function(){inp.value=ev.text;inp.focus()});
+          O.appendChild(fu);return;
+        }
+        if(t==='tool_call'){lastToolName=ev.name||'';llmPanel=null;llmPanelState=mkS();pendingPanel=false}
+        if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true}
+        if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
+          llmPanel=mkEl('div','llm-panel');O.appendChild(llmPanel);llmPanelState=mkS();pendingPanel=false;
+        }
+        var target=O,tState=state;
+        if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
+          ||t==='text_delta'||t==='text_end')){target=llmPanel;tState=llmPanelState}
+        handleOutputEvent(ev,target,tState);
+        if(target===llmPanel&&llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+      });
+      O.scrollTo({top:O.scrollHeight,behavior:'instant'});
+    }).catch(function(err){console.error('Replay error:',err);inp.value=taskText;inp.focus()});
 }
 histSearch.addEventListener('input',function(){renderTasks(this.value)});
 function loadProposed(){

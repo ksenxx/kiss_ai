@@ -433,6 +433,12 @@ ______________________________________________________________________
 
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
+- **start_recording** — Start recording broadcast events for chat history replay.<br/>`start_recording() -> None`
+
+- **stop_recording** — Stop recording and return captured display events, coalesced.<br/>`stop_recording() -> list[dict[str, Any]]`
+
+  - **Returns:** List of display-relevant events with consecutive deltas merged.
+
 - **broadcast** — Send an SSE event dict to all connected clients.<br/>`broadcast(event: dict[str, Any]) -> None`
 
   - `event`: The event dictionary to broadcast.
