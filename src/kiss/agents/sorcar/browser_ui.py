@@ -81,13 +81,16 @@ OUTPUT_CSS = r"""
 .tc-h{
   padding:9px 14px;background:var(--surface2);
   display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;
+  flex-wrap:wrap;
 }
 .tc-h:hover{background:rgba(48,54,61,.8)}
 .tc-h .chv{color:var(--dim);transition:transform .2s;font-size:11px;flex-shrink:0}
 .tc-h .chv.open{transform:rotate(90deg)}
 .tn{font-weight:600;font-size:13px;color:var(--accent)}
-.tp{font-size:12px;color:var(--cyan);font-family:'SF Mono','Fira Code',monospace}
-.td{font-size:11px;color:var(--dim);font-style:italic}
+.tp{font-size:12px;color:var(--cyan);font-family:'SF Mono','Fira Code',monospace;
+  word-break:break-all;min-width:0}
+.td{font-size:11px;color:var(--dim);font-style:italic;
+  word-break:break-word;min-width:0}
 .tc-b{
   padding:10px 14px;max-height:300px;overflow-y:auto;
   font-family:'SF Mono','Fira Code',monospace;font-size:11px;line-height:1.5;
@@ -169,7 +172,7 @@ OUTPUT_CSS = r"""
   padding:4px 12px;background:var(--surface);font-size:11px;
   color:var(--dim);font-style:italic;
   font-family:'SF Mono','Fira Code',monospace;
-  white-space:nowrap;overflow-x:auto;
+  white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;
 }
 .empty-msg{
   text-align:center;color:var(--dim);

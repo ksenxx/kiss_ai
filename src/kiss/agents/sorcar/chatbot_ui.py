@@ -1100,6 +1100,18 @@ function handleEvent(ev){
   case'proposed_updated':loadProposed();loadWelcome();break;
   case'theme_changed':applyTheme(ev);break;
   case'focus_chatbox':window.focus();inp.focus();break;
+  case'external_run':
+    running=true;inp.disabled=true;
+    runPromptBtn.disabled=true;
+    btn.style.display='none';
+    stopBtn.style.display='inline-flex';
+    D.classList.add('running');hideAC();startTimer();
+    inp.style.height='auto';inp.style.overflowY='hidden';
+    inp.value='';
+    pendingUserMsg={text:ev.text,images:[]};
+    pendingFiles=[];renderFileChips();
+    showSpinner();loadModels();
+    break;
   case'merge_started':document.getElementById('merge-toolbar').style.display='flex';break;
   case'merge_ended':document.getElementById('merge-toolbar').style.display='none';inp.focus();break;
   case'clear':

@@ -502,7 +502,6 @@ def run_chatbot(
         with shutdown_lock:
             if shutdown_timer is not None:
                 shutdown_timer.cancel()
-            shutdown_timer = threading.Timer(1.0, _do_shutdown)
             shutdown_timer = threading.Timer(5.0, _do_shutdown)
             shutdown_timer.daemon = True
             shutdown_timer.start()
@@ -515,8 +514,14 @@ def run_chatbot(
 
         async def generate() -> AsyncGenerator[str]:
             last_heartbeat = time.monotonic()
+            disconnect_check_counter = 0
             try:
                 while not shutting_down.is_set():
+                    disconnect_check_counter += 1
+                    if disconnect_check_counter >= 20:
+                        disconnect_check_counter = 0
+                        if await request.is_disconnected():
+                            break
                     try:
                         event = cq.get_nowait()
                     except queue.Empty:
@@ -562,6 +567,37 @@ def run_chatbot(
                 return JSONResponse({"error": "Agent is already running"}, status_code=409)
             # Clear stop_event inside the lock so it can't race with
             # stop_agent() setting it in the same lock.
+            printer.stop_event.clear()
+            running = True
+            agent_thread = t
+        t.start()
+        return JSONResponse({"status": "started"})
+
+    async def run_selection(request: Request) -> JSONResponse:
+        """Run the agent on text selected in the VS Code editor.
+
+        Broadcasts an ``external_run`` event so the chatbox UI enters
+        running state and displays the selected text as a user message,
+        then starts the agent thread with the selected text as the task.
+        """
+        nonlocal running, agent_thread
+        body = await request.json()
+        text = body.get("text", "").strip()
+        if not text:
+            return JSONResponse({"error": "No text selected"}, status_code=400)
+        model = selected_model
+        _record_model_usage(model)
+        if model not in _INTERNAL_MODELS:
+            _record_model_usage(model)
+        printer.broadcast({"type": "external_run", "text": text})
+        t = threading.Thread(
+            target=run_agent_thread,
+            args=(text, model, None),
+            daemon=True,
+        )
+        with running_lock:
+            if running:
+                return JSONResponse({"error": "Agent is already running"}, status_code=409)
             printer.stop_event.clear()
             running = True
             agent_thread = t
@@ -967,6 +1003,7 @@ def run_chatbot(
             Route("/", index),
             Route("/events", events),
             Route("/run", run_task, methods=["POST"]),
+            Route("/run-selection", run_selection, methods=["POST"]),
             Route("/stop", stop_task, methods=["POST"]),
             Route("/open-file", open_file, methods=["POST"]),
             Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
