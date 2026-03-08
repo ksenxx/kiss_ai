@@ -47,7 +47,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 ## Installation and Launching KISS Sorcar
 
 ```bash
-export ANTHROPIC_API_KEY="your-key-here" # Recommended
+export ANTHROPIC_API_KEY="your-key-here" # used by Sorcar
 export GEMINI_API_KEY="your-key-here" # used for autocomplete support
 export OPENAI_API_KEY="your-key-here" # Optional
 export OPENROUTER_API_KEY="your-key-here" # Optional
@@ -68,7 +68,7 @@ python -m kiss.agents.sorcar.sorcar
 
 # Introduction to KISS Sorcar
 
-**KISS Sorcar** (named after the [Famous Bengali Magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general pupose agent with web browsing capabilities**. It runs **locally** as a VSCode IDE. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support.
+**KISS Sorcar** (named after the [Famous Bengali Magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general pupose agent with web browsing capabilities**. It runs **locally** as a VSCode IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**.  KISS Sorcar has been on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
 #whatispossible #KISSSorcar
 
