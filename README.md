@@ -70,7 +70,7 @@ cd kiss_ai
 
 
 # To install as a library
-curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/installlib.sh | sh
 # To launch sorcar
 cd myproject
 uv run sorcar
@@ -507,20 +507,23 @@ kiss/
 │   │   ├── redundancy_analyzer.py      # Code redundancy analyzer
 │   │   └── update_models.py            # Model info updater script
 │   ├── tests/           # Test suite
+│   │   ├── _sorcar_test_server.py
 │   │   ├── conftest.py
 │   │   ├── run_all_models_test.py          # Run tests across all models
 │   │   ├── test_a_model.py
 │   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
-│   │   ├── test_bash_stream_flush.py
+│   │   ├── test_chat_history_events.py
 │   │   ├── test_chatbot_tasks.py
 │   │   ├── test_chatbot_ui_spinner.py
 │   │   ├── test_chatbot_ui.py
 │   │   ├── test_cli_options.py
+│   │   ├── test_code_server_integration.py
 │   │   ├── test_code_server_keybinding.py
 │   │   ├── test_commit_push.py
 │   │   ├── test_core_branch_coverage.py
 │   │   ├── test_current_editor_file.py
+│   │   ├── test_disable_copilot_scm.py
 │   │   ├── test_docker_manager.py
 │   │   ├── test_error_handling.py
 │   │   ├── test_evolver_progress_callback.py
@@ -541,10 +544,14 @@ kiss/
 │   │   ├── test_print_to_console.py
 │   │   ├── test_race_conditions.py
 │   │   ├── test_run_prompt_button.py
-│   │   ├── test_scan_files_order.py
 │   │   ├── test_scm_commit_message.py
 │   │   ├── test_sorcar_bash_streaming.py
+│   │   ├── test_sorcar_coverage.py
+│   │   ├── test_sorcar_file_task.py
+│   │   ├── test_sorcar_integration.py
 │   │   ├── test_sorcar_race_fixes.py
+│   │   ├── test_sorcar_run_selection.py
+│   │   ├── test_sorcar_text_wrap.py
 │   │   ├── test_stop_agent_thread.py
 │   │   ├── test_system_prompt.py
 │   │   ├── test_token_callback.py
@@ -611,7 +618,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
   - `model_name`: Model for task execution (default: "claude-opus-4-6")
-  - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 200)
+  - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 2000)
   - `max_steps`: Maximum steps per sub-session (default: 25)
   - `max_budget`: Maximum budget in USD (default: 200.0)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
