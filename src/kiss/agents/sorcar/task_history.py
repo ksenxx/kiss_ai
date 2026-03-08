@@ -21,62 +21,64 @@ def _ensure_kiss_dir() -> None:
     _KISS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-SAMPLE_TASKS = [
-    {"task": "run 'uv run check' and fix", "result": ""},
+_HistoryEntry = dict[str, object]
+
+SAMPLE_TASKS: list[_HistoryEntry] = [
+    {"task": "run 'uv run check' and fix", "chat_events": []},
     {
         "task": (
             "plan a trip to Yosemite over the weekend based on warnings and hotel availability"
         ),
-        "result": "",
+        "chat_events": [],
     },
     {
         "task": ("find the cheapest afternoon non-stop flight from SFO to NYC around March 15"),
-        "result": "",
+        "chat_events": [],
     },
     {
         "task": (
             "run <<command>> in the background, monitor output,"
             " fix errors, and optimize the code iteratively. "
         ),
-        "result": "",
+        "chat_events": [],
     },
     {
         "task": (
             "implement and validate results from the research"
             " paper https://arxiv.org/pdf/2505.10961 using relentless_coding_agent and kiss_agent"
         ),
-        "result": "",
+        "chat_events": [],
     },
     {
         "task": (
             "develop an automated evaluation framework for agent performance against benchmarks"
         ),
-        "result": "",
+        "chat_events": [],
     },
     {
         "task": (
             "launch a browser, research technical innovations, and compile a document incrementally"
         ),
-        "result": "",
+        "chat_events": [],
     },
     {
         "task": (
             "read all *.md files, check consistency with the code, and fix any inconsistencies"
         ),
-        "result": "",
+        "chat_events": [],
     },
     {
         "task": ("remove duplicate or redundant tests while ensuring coverage doesn't decrease"),
-        "result": "",
+        "chat_events": [],
     },
 ]
 
 
-_history_cache: list[dict[str, str]] | None = None
+_history_cache: list[_HistoryEntry] | None = None
 _history_lock = threading.Lock()
 
 
-def _load_history_unlocked() -> list[dict[str, str]]:
+def _load_history_unlocked() -> list[_HistoryEntry]:
     """Load task history from cache or disk. Must be called with _history_lock held."""
     global _history_cache
     if _history_cache is not None:
@@ -86,7 +88,7 @@ def _load_history_unlocked() -> list[dict[str, str]]:
             data = json.loads(HISTORY_FILE.read_text())
             if isinstance(data, list) and data:
                 seen: set[str] = set()
-                result: list[dict[str, str]] = []
+                result: list[_HistoryEntry] = []
                 for t in data[:MAX_HISTORY]:
                     task_str = t["task"]
                     if task_str not in seen:
@@ -100,13 +102,13 @@ def _load_history_unlocked() -> list[dict[str, str]]:
     return _history_cache  # type: ignore[return-value]
 
 
-def _load_history() -> list[dict[str, str]]:
+def _load_history() -> list[_HistoryEntry]:
     """Load task history from cache or disk. Thread-safe."""
     with _history_lock:
         return _load_history_unlocked()
 
 
-def _save_history_unlocked(entries: list[dict[str, str]]) -> None:
+def _save_history_unlocked(entries: list[_HistoryEntry]) -> None:
     """Save history to cache and disk. Must be called with _history_lock held."""
     global _history_cache
     _history_cache = entries[:MAX_HISTORY]
@@ -117,17 +119,18 @@ def _save_history_unlocked(entries: list[dict[str, str]]) -> None:
         logger.debug("Exception caught", exc_info=True)
 
 
-def _save_history(entries: list[dict[str, str]]) -> None:
+def _save_history(entries: list[_HistoryEntry]) -> None:
     """Save history to cache and disk. Thread-safe."""
     with _history_lock:
         _save_history_unlocked(entries)
 
 
-def _set_latest_result(result: str) -> None:
-    """Set the result of the most recent task. Thread-safe."""
+def _set_latest_chat_events(events: list[dict[str, object]]) -> None:
+    """Set the chat events of the most recent task. Thread-safe."""
     with _history_lock:
         if _history_cache:
-            _history_cache[0]["result"] = result
+            _history_cache[0]["chat_events"] = events
+            _history_cache[0].pop("result", None)
             _save_history_unlocked(_history_cache)
 
 
@@ -213,7 +216,7 @@ def _add_task(task: str) -> None:
         _load_history_unlocked()
         assert _history_cache is not None
         history = [e for e in _history_cache if e["task"] != task]
-        history.insert(0, {"task": task, "result": ""})
+        history.insert(0, {"task": task, "chat_events": []})
         _save_history_unlocked(history[:MAX_HISTORY])
 
 

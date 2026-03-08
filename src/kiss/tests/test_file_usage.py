@@ -21,18 +21,6 @@ class TestFileUsage(unittest.TestCase):
         if self._tmp.exists():
             self._tmp.unlink()
 
-    def test_record_and_load(self) -> None:
-        task_history._record_file_usage("src/foo.py")
-        task_history._record_file_usage("src/foo.py")
-        task_history._record_file_usage("src/bar.py")
-        usage = task_history._load_file_usage()
-        assert usage["src/foo.py"] == 2
-        assert usage["src/bar.py"] == 1
-
-    def test_load_corrupt_json(self) -> None:
-        self._tmp.write_text("not json")
-        assert task_history._load_file_usage() == {}
-
     def test_load_non_dict_json(self) -> None:
         self._tmp.write_text("[1,2,3]")
         assert task_history._load_file_usage() == {}

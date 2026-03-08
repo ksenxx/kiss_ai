@@ -24,5 +24,10 @@ artifacts/
 .cursorrules
 .coverage_per_test
 *.log
-
+.coverage*
+.cursorrules
+.cursor
+.claude
+.ipynb_checkpoints
+screenshots/    
 

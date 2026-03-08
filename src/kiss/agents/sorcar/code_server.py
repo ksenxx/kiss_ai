@@ -310,6 +310,18 @@ function activate(ctx){
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.toggleFocus',function(){
     firePost('/focus-chatbox',{});
   }));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.runSelection',function(){
+    var ed=vscode.window.activeTextEditor;
+    if(!ed)return;
+    var sel=ed.document.getText(ed.selection);
+    if(!sel||!sel.trim()){vscode.window.showInformationMessage('No text selected');return;}
+    if(!readPort()){vscode.window.showErrorMessage('Assistant server not found');return;}
+    postAssistant('/run-selection',{text:sel.trim()}).then(function(body){
+      if(body.error)vscode.window.showErrorMessage('Run selection failed: '+body.error);
+    }).catch(function(e){
+      vscode.window.showErrorMessage('Run selection error: '+e.message);
+    });
+  }));
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
     curHunk=null;
@@ -586,12 +598,18 @@ def _setup_code_server(data_dir: str) -> bool:
                             "icon": "$(sparkle)",
                         },
                         {"command": "kiss.toggleFocus", "title": "Toggle Focus to Chatbox"},
+                        {"command": "kiss.runSelection", "title": "Run Selection in Chatbox"},
                     ],
                     "keybindings": [
                         {
                             "command": "kiss.toggleFocus",
                             "key": "ctrl+k",
                             "mac": "cmd+k",
+                        },
+                        {
+                            "command": "kiss.runSelection",
+                            "key": "ctrl+l",
+                            "mac": "cmd+l",
                         },
                     ],
                     "menus": {

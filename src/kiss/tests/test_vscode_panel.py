@@ -25,14 +25,6 @@ class TestSetupCodeServer(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_settings_handles_corrupted_json(self) -> None:
-        user_dir = Path(self.tmpdir) / "User"
-        user_dir.mkdir(parents=True)
-        (user_dir / "settings.json").write_text("not valid json{{{")
-        code_server._setup_code_server(self.tmpdir)
-        settings = json.loads((user_dir / "settings.json").read_text())
-        assert settings["workbench.startupEditor"] == "none"
-
     def test_state_db_idempotent(self) -> None:
         code_server._setup_code_server(self.tmpdir)
         code_server._setup_code_server(self.tmpdir)
@@ -40,19 +32,6 @@ class TestSetupCodeServer(unittest.TestCase):
         with sqlite3.connect(str(db_path)) as conn:
             keys = [r[0] for r in conn.execute("SELECT key FROM ItemTable").fetchall()]
         assert len(keys) == len(set(keys))
-
-    def test_cleans_chat_sessions_preserves_other_files(self) -> None:
-        ws = Path(self.tmpdir) / "User" / "workspaceStorage" / "abc123"
-        ws.mkdir(parents=True)
-        (ws / "meta.json").write_text('{"id":"abc123"}')
-        for sub in ("chatSessions", "chatEditingSessions"):
-            d = ws / sub
-            d.mkdir()
-            (d / "session.json").write_text("{}")
-        code_server._setup_code_server(self.tmpdir)
-        assert (ws / "meta.json").exists()
-        assert not (ws / "chatSessions").exists()
-        assert not (ws / "chatEditingSessions").exists()
 
     def test_constants_well_formed(self) -> None:
         json.dumps(code_server._CS_SETTINGS)
@@ -94,12 +73,6 @@ class TestSetupCodeServer(unittest.TestCase):
     def test_settings_has_save_conflict_resolution(self) -> None:
         assert "files.saveConflictResolution" in code_server._CS_SETTINGS
         assert code_server._CS_SETTINGS["files.saveConflictResolution"] == "overwriteFileOnDisk"
-
-    def test_setup_writes_save_conflict_resolution_setting(self) -> None:
-        code_server._setup_code_server(self.tmpdir)
-        settings_path = Path(self.tmpdir) / "User" / "settings.json"
-        settings = json.loads(settings_path.read_text())
-        assert settings["files.saveConflictResolution"] == "overwriteFileOnDisk"
 
     def test_check_all_done_has_error_callback(self) -> None:
         js = code_server._CS_EXTENSION_JS

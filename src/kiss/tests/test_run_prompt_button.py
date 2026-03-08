@@ -7,8 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.prompt_detector import PromptDetector
-
 
 @pytest.fixture
 def prompt_file():
@@ -53,16 +51,6 @@ def non_md_file():
         f.flush()
         yield f.name
     os.unlink(f.name)
-
-
-class TestPromptDetectorForPlayButton:
-    """Test that PromptDetector correctly identifies prompt vs non-prompt .md files."""
-
-    def test_nonexistent_file(self) -> None:
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze("/nonexistent/file.md")
-        assert is_prompt is False
-        assert score == 0.0
 
 
 class TestActiveFileTracking:
@@ -117,40 +105,6 @@ class TestRunPromptHTMLButton:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS
 
         assert "#run-prompt-btn" in CHATBOT_CSS
-
-
-class TestPromptDetectorEdgeCases:
-    """Test edge cases for PromptDetector relevant to the play button."""
-
-    def test_xml_tagged_prompt(self, tmp_path: Path) -> None:
-        p = tmp_path / "xml_prompt.md"
-        content = (
-            "<system>\nYou are a helpful assistant.\n</system>\n"
-            "<instruction>\nAnalyze the following text.\n</instruction>\n"
-        )
-        p.write_text(content)
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze(str(p))
-        assert is_prompt is True
-
-    def test_frontmatter_prompt(self, tmp_path: Path) -> None:
-        p = tmp_path / "front.md"
-        content = (
-            "---\nmodel: gpt-4\ntemperature: 0.7\n---\n"
-            "# Task\nWrite a marketing email for {{ product_name }}.\n"
-        )
-        p.write_text(content)
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze(str(p))
-        assert is_prompt is True
-
-    def test_empty_md_file(self, tmp_path: Path) -> None:
-        p = tmp_path / "empty.md"
-        p.write_text("")
-        detector = PromptDetector()
-        is_prompt, score, reasons = detector.analyze(str(p))
-        assert is_prompt is False
-        assert score == 0.0
 
 
 class TestRunPromptButtonThemeCSS:

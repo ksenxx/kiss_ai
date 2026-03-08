@@ -356,6 +356,7 @@ class UsefulTools:
             raise
         finally:
             timer.cancel()
+            process.stdout.close()  # type: ignore[union-attr]
 
         if timed_out:
             return "Error: Command execution timeout"
