@@ -82,6 +82,33 @@ class TestSetupCodeServer(unittest.TestCase):
         assert "ad.action==='accept'" in js
         assert "ad.action==='reject'" in js
 
+    def test_extension_reverts_dirty_docs_in_open_merge(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "doc.isDirty" in js
+        assert "workbench.action.files.revert" in js
+
+    def test_extension_save_all_has_error_handling(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        assert "try{await vscode.workspace.saveAll(false);}catch(e){}" in js
+
+    def test_settings_has_save_conflict_resolution(self) -> None:
+        assert "files.saveConflictResolution" in code_server._CS_SETTINGS
+        assert code_server._CS_SETTINGS["files.saveConflictResolution"] == "overwriteFileOnDisk"
+
+    def test_setup_writes_save_conflict_resolution_setting(self) -> None:
+        code_server._setup_code_server(self.tmpdir)
+        settings_path = Path(self.tmpdir) / "User" / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        assert settings["files.saveConflictResolution"] == "overwriteFileOnDisk"
+
+    def test_check_all_done_has_error_callback(self) -> None:
+        js = code_server._CS_EXTENSION_JS
+        # checkAllDone should handle both success and error cases for saveAll
+        idx = js.index("function checkAllDone()")
+        snippet = js[idx : idx + 400]
+        assert ".then(function(){" in snippet
+        assert "},function(){" in snippet
+
 
 class TestBuildHtmlSplitLayout(unittest.TestCase):
 
@@ -102,7 +129,6 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 
     def test_merge_function(self) -> None:
         assert "function mergeAction" in self.html
-        assert "function mergeCommit" in self.html
 
     def test_divider_and_editor_functions(self) -> None:
         assert "isDragging" in self.html
@@ -265,6 +291,68 @@ class TestWelcomeChipCounts(unittest.TestCase):
         assert "proposed.slice(0,3)" not in html
         assert "tasks.slice(0,3)" not in html
         assert "items.slice(0,6)" not in html
+
+
+class TestFilePathDetection(unittest.TestCase):
+    """Tests for the file-path-opens-in-editor feature in submitTask."""
+
+    html: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.html = chatbot_ui._build_html("T", "http://x:1", "/w")
+
+    def test_looks_like_file_path_function_exists(self) -> None:
+        assert "function looksLikeFilePath" in self.html
+
+    def test_do_submit_task_function_exists(self) -> None:
+        assert "function doSubmitTask" in self.html
+
+    def test_submit_task_calls_open_file_for_file_paths(self) -> None:
+        # submitTask should call /open-file when looksLikeFilePath returns true
+        start = self.html.index("function submitTask()")
+        end = self.html.index("btn.addEventListener", start)
+        submit_fn = self.html[start:end]
+        assert "looksLikeFilePath(task)" in submit_fn
+        assert "'/open-file'" in submit_fn
+        assert "doSubmitTask(task)" in submit_fn
+
+    def test_looks_like_file_path_checks_absolute(self) -> None:
+        # The function checks for paths starting with /
+        start = self.html.index("function looksLikeFilePath")
+        end = self.html.index("function doSubmitTask", start)
+        fn = self.html[start:end]
+        assert "s.startsWith('/')" in fn
+
+    def test_looks_like_file_path_checks_relative(self) -> None:
+        start = self.html.index("function looksLikeFilePath")
+        end = self.html.index("function doSubmitTask", start)
+        fn = self.html[start:end]
+        assert "s.startsWith('./')" in fn
+        assert "s.startsWith('../')" in fn
+        assert "s.startsWith('~/')" in fn
+
+    def test_looks_like_file_path_checks_extension(self) -> None:
+        start = self.html.index("function looksLikeFilePath")
+        end = self.html.index("function doSubmitTask", start)
+        fn = self.html[start:end]
+        # Checks for file extension pattern
+        assert r"\.\w{1,10}$" in fn
+
+    def test_fallback_to_do_submit_on_open_file_failure(self) -> None:
+        # When /open-file returns non-ok, should fall back to doSubmitTask
+        start = self.html.index("function submitTask()")
+        end = self.html.index("btn.addEventListener", start)
+        submit_fn = self.html[start:end]
+        assert "if(r.ok){inp.value='';return}" in submit_fn
+        assert ".catch(function(){doSubmitTask(task)})" in submit_fn
+
+    def test_js_balanced_with_new_functions(self) -> None:
+        start = self.html.find("<script>")
+        end = self.html.find("</script>")
+        js = self.html[start:end]
+        assert js.count("{") == js.count("}")
+        assert js.count("(") == js.count(")")
 
 
 if __name__ == "__main__":

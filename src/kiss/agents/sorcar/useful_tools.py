@@ -1,8 +1,10 @@
 """Useful tools for agents: file editing and bash execution."""
 
 import logging
+import os
 import re
 import shlex
+import signal
 import subprocess
 import threading
 from collections.abc import Callable
@@ -10,167 +12,21 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 def _truncate_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
         return output
-    half = max_chars // 2
-    return (
-        output[:half]
-        + f"\n\n... [truncated {len(output) - max_chars} chars] ...\n\n"
-        + output[-half:]
-    )
-
-
-EDIT_SCRIPT = r"""
-#!/usr/bin/env bash
-#
-# Edit Tool - Claude Code Implementation
-# Performs precise string replacements in files with exact matching
-#
-# Usage: edit_tool.sh <file_path> <old_string> <new_string> [replace_all]
-#
-# Parameters:
-#   file_path    - Absolute path to the file to modify (required)
-#   old_string   - Exact text to find and replace (required)
-#   new_string   - Replacement text, must differ from old_string (required)
-#   replace_all  - If "true", replace all occurrences (optional, default: false)
-#
-# Exit codes:
-#   0 - Success
-#   1 - Invalid arguments
-#   2 - File not found
-#   3 - String not found or not unique
-#   4 - Read-before-edit validation failed
-
-set -euo pipefail
-
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Validate arguments
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    echo -e "${RED}Error: Invalid number of arguments${NC}" >&2
-    echo "Usage: $0 <file_path> <old_string> <new_string> [replace_all]" >&2
-    exit 1
-fi
-
-FILE_PATH="$1"
-OLD_STRING="$2"
-NEW_STRING="$3"
-REPLACE_ALL="${4:-false}"
-
-# Validate file path is absolute
-if [[ ! "$FILE_PATH" = /* ]]; then
-    echo -e "${RED}Error: file_path must be absolute, not relative${NC}" >&2
-    exit 1
-fi
-
-# Check if file exists
-if [ ! -f "$FILE_PATH" ]; then
-    echo -e "${RED}Error: File not found: $FILE_PATH${NC}" >&2
-    exit 2
-fi
-
-# Check if old_string and new_string are different
-if [ "$OLD_STRING" = "$NEW_STRING" ]; then
-    echo -e "${RED}Error: new_string must be different from old_string${NC}" >&2
-    exit 1
-fi
-
-# Create a state tracking directory (simulating session state)
-STATE_DIR="${HOME}/.claude-edit-state"
-mkdir -p "$STATE_DIR"
-
-# Check read-before-edit validation
-# In a real implementation, this would check session state
-# For demo purposes, we'll create a marker file when files are "read"
-if command -v md5sum &>/dev/null; then
-    FILE_HASH=$(echo -n "$FILE_PATH" | md5sum | cut -d' ' -f1)
-else
-    FILE_HASH=$(echo -n "$FILE_PATH" | md5 -q)
-fi
-READ_MARKER="$STATE_DIR/$FILE_HASH"
-
-if [ ! -f "$READ_MARKER" ]; then
-    echo -e "${YELLOW}Warning: File has not been read in this session${NC}" >&2
-    echo -e "${YELLOW}Creating read marker for demo purposes...${NC}" >&2
-    touch "$READ_MARKER"
-fi
-
-# Count literal occurrences of old_string (not just matching lines)
-export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
-OCCURRENCE_COUNT=$(python3 -c "
-import os
-file_path = os.environ['EDIT_FILE_PATH']
-old_string = os.environ['EDIT_OLD_STRING']
-with open(file_path, 'r') as f:
-    content = f.read()
-print(content.count(old_string))
-")
-
-echo "File: $FILE_PATH"
-echo "Looking for: '$OLD_STRING'"
-echo "Replacing with: '$NEW_STRING'"
-echo "Occurrences found: $OCCURRENCE_COUNT"
-echo "Replace all: $REPLACE_ALL"
-echo ""
-
-# Handle replacement based on mode
-export EDIT_NEW_STRING="$NEW_STRING"
-
-if [ "$REPLACE_ALL" = "true" ]; then
-    if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
-        echo -e "${RED}Error: String not found in file${NC}" >&2
-        exit 3
-    fi
-    REPLACE_COUNT=""
-else
-    if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
-        echo -e "${RED}Error: String not found in file${NC}" >&2
-        exit 3
-    elif [ "$OCCURRENCE_COUNT" -gt 1 ]; then
-        echo -e "${RED}Error: String appears $OCCURRENCE_COUNT times (not unique)${NC}" >&2
-        echo -e "${YELLOW}Hint: Use replace_all=true to replace all occurrences${NC}" >&2
-        exit 3
-    fi
-    REPLACE_COUNT="1"
-fi
-
-export EDIT_REPLACE_COUNT="$REPLACE_COUNT"
-python3 -c "
-import os
-file_path = os.environ['EDIT_FILE_PATH']
-old_string = os.environ['EDIT_OLD_STRING']
-new_string = os.environ['EDIT_NEW_STRING']
-count = int(os.environ['EDIT_REPLACE_COUNT']) if os.environ['EDIT_REPLACE_COUNT'] else -1
-with open(file_path, 'r') as f:
-    content = f.read()
-if count >= 0:
-    content = content.replace(old_string, new_string, count)
-else:
-    content = content.replace(old_string, new_string)
-with open(file_path, 'w') as f:
-    f.write(content)
-"
-
-if [ "$REPLACE_ALL" = "true" ]; then
-    echo -e "${GREEN}✓ Successfully replaced $OCCURRENCE_COUNT occurrence(s)${NC}"
-else
-    echo -e "${GREEN}✓ Successfully replaced 1 occurrence${NC}"
-fi
-
-# Show the changed section (context around the change)
-echo ""
-echo "Changed section:"
-echo "----------------------------------------"
-grep -Fn -C 2 "$NEW_STRING" "$FILE_PATH" || echo "(No context available)"
-echo "----------------------------------------"
-
-exit 0
-"""
+    worst_msg = f"\n\n... [truncated {len(output)} chars] ...\n\n"
+    if max_chars < len(worst_msg):
+        return output[:max_chars]
+    remaining = max_chars - len(worst_msg)
+    head = remaining // 2
+    tail = remaining - head
+    dropped = len(output) - head - tail
+    msg = f"\n\n... [truncated {dropped} chars] ...\n\n"
+    if tail:
+        return output[:head] + msg + output[-tail:]
+    return output[:head] + msg
 
 
 DISALLOWED_BASH_COMMANDS = {
@@ -178,7 +34,12 @@ DISALLOWED_BASH_COMMANDS = {
     "env",
     "eval",
     "exec",
+    "source",
 }
+
+
+_SHELL_PREFIX_TOKENS = frozenset(("!", "{", "}", "(", ")", "&"))
+_REDIRECT_RE = re.compile(r"^[0-9]*[<>][<>&]*")
 
 
 def _extract_leading_command_name(part: str) -> str | None:
@@ -193,17 +54,76 @@ def _extract_leading_command_name(part: str) -> str | None:
     i = 0
     while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*", tokens[i]):
         i += 1
+
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _SHELL_PREFIX_TOKENS:
+            i += 1
+            continue
+        m = _REDIRECT_RE.match(token)
+        if m:
+            if m.end() < len(token):
+                i += 1
+            else:
+                i += 2
+            continue
+        break
+
     if i >= len(tokens):
         return None
-    return tokens[i].split("/")[-1]
+    name = tokens[i].lstrip("({")
+    if not name:
+        return None
+    return name.split("/")[-1]
+
+
+def _split_respecting_quotes(command: str, pattern: re.Pattern[str]) -> list[str]:
+    """Split *command* on *pattern* while skipping quoted and escaped regions."""
+    segments: list[str] = []
+    current: list[str] = []
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\":
+            current.append(command[i : i + 2])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            j = i + 1
+            while j < len(command):
+                if command[j] == "\\" and quote == '"':
+                    j += 2
+                    continue
+                if command[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            current.append(command[i:j])
+            i = j
+            continue
+        m = pattern.match(command, i)
+        if m:
+            segments.append("".join(current))
+            current = []
+            i = m.end()
+            continue
+        current.append(ch)
+        i += 1
+    segments.append("".join(current))
+    return segments
+
+
+_CONTROL_RE = re.compile(r"&&|\|\||;|\n|(?<![<>|&])&(?![&>])")
+_PIPE_RE = re.compile(r"(?<!>)\|(?!\|)")
 
 
 def _extract_command_names(command: str) -> list[str]:
     names: list[str] = []
     stripped_command = _strip_heredocs(command)
-    segments = re.split(r"&&|\|\||;", stripped_command)
+    segments = _split_respecting_quotes(stripped_command, _CONTROL_RE)
     for segment in segments:
-        for part in re.split(r"(?<!>)\|(?!\|)", segment):
+        for part in _split_respecting_quotes(segment, _PIPE_RE):
             name = _extract_leading_command_name(part.strip())
             if name:
                 names.append(name)
@@ -217,11 +137,34 @@ def _strip_heredocs(command: str) -> str:
     so that heredoc body text is not parsed as command arguments.
     """
     return re.sub(
-        r"<<-?\s*'?\"?(\w+)'?\"?\s*\n.*?\n\s*\1\b",
+        r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n(?:.*?\n)*?[ \t]*\1[ \t]*(?=\n|$)",
         "",
         command,
         flags=re.DOTALL,
     )
+
+
+def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> str:
+    if returncode != 0:
+        msg = f"Error (exit code {returncode}):"
+        if output:
+            msg += f"\n{output}"
+        return _truncate_output(msg, max_output_chars)
+    return _truncate_output(output, max_output_chars)
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            process.kill()
+        except OSError:  # pragma: no cover — Popen.send_signal polls first in Python 3.13+
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover — unreachable after SIGKILL
+        pass
 
 
 class UsefulTools:
@@ -273,7 +216,7 @@ class UsefulTools:
             resolved = Path(file_path).resolve()
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content)
-            return f"Successfully wrote {len(content)} bytes to {file_path}"
+            return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -284,7 +227,6 @@ class UsefulTools:
         old_string: str,
         new_string: str,
         replace_all: bool = False,
-        timeout_seconds: float = 30,
     ) -> str:
         """Performs precise string replacements in files with exact matching.
 
@@ -293,63 +235,35 @@ class UsefulTools:
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
-            timeout_seconds: Timeout in seconds for the edit command.
 
         Returns:
             The output of the edit operation.
         """
-
-        resolved = Path(file_path).resolve()
-
-        # Create a temporary script file
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-            f.write(EDIT_SCRIPT)
-            script_path = f.name
-
         try:
-            # Make script executable
-            Path(script_path).chmod(0o755)
-
-            # Build command with arguments
-            replace_all_str = "true" if replace_all else "false"
-            command = [
-                "/bin/bash",
-                script_path,
-                str(resolved),
-                old_string,
-                new_string,
-                replace_all_str,
-            ]
-
-            # Execute with timeout for safety
-            result = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            logger.debug("Exception caught", exc_info=True)
-            return "Error: Command execution timeout"
-        except subprocess.CalledProcessError as e:
-            # Include stderr which contains the actual error message from the script
-            logger.debug("Exception caught", exc_info=True)
-            error_msg = e.stderr.strip() if e.stderr else str(e)
-            return f"Error: {error_msg}"
-        except Exception as e:  # pragma: no cover
+            resolved = Path(file_path).resolve()
+            if not resolved.is_file():
+                return f"Error: File not found: {file_path}"
+            if old_string == new_string:
+                return "Error: new_string must be different from old_string"
+            content = resolved.read_text()
+            count = content.count(old_string)
+            if count == 0:
+                return "Error: String not found in file"
+            if not replace_all and count > 1:
+                return (
+                    f"Error: String appears {count} times (not unique). "
+                    f"Use replace_all=True to replace all occurrences."
+                )
+            if replace_all:
+                new_content = content.replace(old_string, new_string)
+            else:
+                new_content = content.replace(old_string, new_string, 1)
+            resolved.write_text(new_content)
+            replaced = count if replace_all else 1
+            return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
+        except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
-        finally:
-            # Clean up temporary script
-            try:
-                Path(script_path).unlink()
-            except Exception:  # pragma: no cover
-                logger.debug("Exception caught", exc_info=True)
-                pass
 
     def Bash(  # noqa: N802
         self,
@@ -379,21 +293,31 @@ class UsefulTools:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 shell=True,
-                check=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout_seconds,
+                start_new_session=True,
             )
-            return _truncate_output(result.stdout, max_output_chars)
-        except subprocess.TimeoutExpired:
-            logger.debug("Exception caught", exc_info=True)
-            return "Error: Command execution timeout"
-        except subprocess.CalledProcessError as e:
-            logger.debug("Exception caught", exc_info=True)
-            return f"Error: {e}"
+            try:
+                stdout, _ = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process)
+                try:
+                    process.communicate(timeout=5)
+                except Exception:  # pragma: no cover — unreachable after SIGKILL
+                    pass
+                return "Error: Command execution timeout"
+            except BaseException:
+                _kill_process_group(process)
+                try:
+                    process.communicate(timeout=5)
+                except Exception:  # pragma: no cover — unreachable after SIGKILL + reap
+                    pass
+                raise
+            return _format_bash_result(process.returncode, stdout, max_output_chars)
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -406,13 +330,14 @@ class UsefulTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         timed_out = False
 
         def _kill() -> None:
             nonlocal timed_out
             timed_out = True
-            process.kill()
+            _kill_process_group(process)
 
         timer = threading.Timer(timeout_seconds, _kill)
         timer.start()
@@ -422,7 +347,13 @@ class UsefulTools:
             for line in iter(process.stdout.readline, ""):
                 chunks.append(line)
                 self.stream_callback(line)
-            process.wait()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:  # pragma: no cover
+                _kill_process_group(process)
+        except BaseException:
+            _kill_process_group(process)
+            raise
         finally:
             timer.cancel()
 
@@ -430,8 +361,4 @@ class UsefulTools:
             return "Error: Command execution timeout"
 
         output = "".join(chunks)
-
-        if process.returncode != 0:
-            return f"Error: {subprocess.CalledProcessError(process.returncode, command)}"
-
-        return _truncate_output(output, max_output_chars)
+        return _format_bash_result(process.returncode, output, max_output_chars)
