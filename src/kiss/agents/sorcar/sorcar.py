@@ -486,6 +486,9 @@ def run_chatbot(
     def _do_shutdown() -> None:
         if printer.has_clients():
             return
+        with running_lock:
+            if running:
+                return
         _cleanup()
         os._exit(0)
 
@@ -493,10 +496,14 @@ def run_chatbot(
         nonlocal shutdown_timer
         if printer.has_clients():
             return
+        with running_lock:
+            if running:
+                return
         with shutdown_lock:
             if shutdown_timer is not None:
                 shutdown_timer.cancel()
             shutdown_timer = threading.Timer(1.0, _do_shutdown)
+            shutdown_timer = threading.Timer(5.0, _do_shutdown)
             shutdown_timer.daemon = True
             shutdown_timer.start()
 
@@ -507,14 +514,20 @@ def run_chatbot(
         cq = printer.add_client()
 
         async def generate() -> AsyncGenerator[str]:
+            last_heartbeat = time.monotonic()
             try:
                 while not shutting_down.is_set():
                     try:
                         event = cq.get_nowait()
                     except queue.Empty:
+                        now = time.monotonic()
+                        if now - last_heartbeat >= 15.0:
+                            yield ": heartbeat\n\n"
+                            last_heartbeat = now
                         await asyncio.sleep(0.05)
                         continue
                     yield f"data: {json.dumps(event)}\n\n"
+                    last_heartbeat = time.monotonic()
             except asyncio.CancelledError:
                 logger.debug("Exception caught", exc_info=True)
             finally:

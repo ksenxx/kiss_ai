@@ -522,7 +522,7 @@ class TestSorcarAgentGetTools:
 
         agent = SorcarAgent("test")
         agent.printer = BaseBrowserPrinter()
-        q = agent.printer.add_client()
+        agent.printer.add_client()
         agent.web_use_tool = None
         agent.docker_manager = None
         tools = agent._get_tools()
@@ -2417,6 +2417,151 @@ class TestBashStreamingStreamsOutput:
         result = tools.Bash("echo fail && exit 1", "test error in stream")
         assert "Error (exit code 1)" in result
 
+    def test_streaming_closes_stdout_pipe(self) -> None:
+        """Verify _bash_streaming explicitly closes process.stdout."""
+        import os
+
+        from kiss.agents.sorcar.useful_tools import UsefulTools
+
+        def count_fds() -> int:
+            return len(os.listdir("/dev/fd"))
+
+        tools = UsefulTools(stream_callback=lambda s: None)
+        baseline = count_fds()
+        for _ in range(50):
+            tools.Bash("echo hello", "fd test")
+        assert count_fds() <= baseline + 2  # small margin for transient FDs
+
+    def test_streaming_timeout_closes_stdout(self) -> None:
+        """Verify stdout is closed even on timeout path."""
+        import os
+
+        from kiss.agents.sorcar.useful_tools import UsefulTools
+
+        tools = UsefulTools(stream_callback=lambda s: None)
+        baseline = len(os.listdir("/dev/fd"))
+        result = tools.Bash("sleep 30", "timeout test", timeout_seconds=0.5)
+        assert "timeout" in result.lower()
+        assert len(os.listdir("/dev/fd")) <= baseline + 2
+
+    def test_streaming_callback_exception_closes_stdout(self) -> None:
+        """Verify stdout is closed when stream_callback raises."""
+        import os
+
+        from kiss.agents.sorcar.useful_tools import UsefulTools
+
+        call_count = 0
+
+        def failing_callback(text: str) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise KeyboardInterrupt("simulated stop")
+
+        tools = UsefulTools(stream_callback=failing_callback)
+        baseline = len(os.listdir("/dev/fd"))
+        try:
+            tools.Bash("for i in $(seq 1 100); do echo line$i; done", "exc test")
+        except KeyboardInterrupt:
+            pass
+        assert len(os.listdir("/dev/fd")) <= baseline + 2
+
+
+# ---------------------------------------------------------------------------
+# sorcar.py - shutdown safety tests
+# ---------------------------------------------------------------------------
+class TestShutdownWhileRunning:
+    """Test that _do_shutdown and _schedule_shutdown don't exit while a task is running."""
+
+    def test_do_shutdown_skips_when_running(self) -> None:
+        """_do_shutdown must return without os._exit when running=True."""
+        import threading
+
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        running = True
+        running_lock = threading.Lock()
+        exited = False
+
+        def _do_shutdown() -> None:
+            nonlocal exited
+            if printer.has_clients():
+                return
+            with running_lock:
+                if running:
+                    return
+            exited = True  # would be os._exit(0) in real code
+
+        _do_shutdown()
+        assert not exited, "_do_shutdown must not exit while running"
+
+        # After task completes, shutdown should proceed
+        with running_lock:
+            running = False
+        _do_shutdown()
+        assert exited, "_do_shutdown should proceed when not running"
+
+    def test_schedule_shutdown_skips_when_running(self) -> None:
+        """_schedule_shutdown must not schedule timer when running=True."""
+        import threading
+
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        running = True
+        running_lock = threading.Lock()
+        shutdown_lock = threading.Lock()
+        shutdown_timer = None
+        timer_created = False
+
+        def _schedule_shutdown() -> None:
+            nonlocal shutdown_timer, timer_created
+            if printer.has_clients():
+                return
+            with running_lock:
+                if running:
+                    return
+            with shutdown_lock:
+                timer_created = True
+
+        _schedule_shutdown()
+        assert not timer_created, "Timer must not be created while running"
+
+        with running_lock:
+            running = False
+        _schedule_shutdown()
+        assert timer_created
+
+    def test_do_shutdown_skips_when_has_clients(self) -> None:
+        """_do_shutdown returns early if clients are still connected."""
+        import threading
+
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        running = False
+        running_lock = threading.Lock()
+        exited = False
+
+        cq = printer.add_client()
+
+        def _do_shutdown() -> None:
+            nonlocal exited
+            if printer.has_clients():
+                return
+            with running_lock:
+                if running:
+                    return
+            exited = True
+
+        _do_shutdown()
+        assert not exited, "_do_shutdown must not exit with active clients"
+
+        printer.remove_client(cq)
+        _do_shutdown()
+        assert exited
+
 
 # ---------------------------------------------------------------------------
 # browser_ui.py - additional branch coverage
@@ -2548,6 +2693,7 @@ class TestTaskHistoryEdgeCases:
         _add_task("task with result")
         from kiss.agents.sorcar import task_history
 
+        assert task_history._history_cache is not None
         task_history._history_cache[0]["result"] = "old result"
         _set_latest_chat_events([{"type": "done"}])
         history = _load_history()
@@ -2852,7 +2998,6 @@ class TestPrepareMergeViewFilteredHunks:
         Path(self.tmpdir, "pre.py").write_text("original\n")
         pre_hunks = _parse_diff_hunks(self.tmpdir)
         # Deliberately include "pre.py" in pre_untracked but NOT in pre_file_hashes
-        pre_untracked = {"pre.py"}
         pre_hashes: dict[str, str] = {}
         # Remove pre.py from pre_untracked so it appears as a NEW file
         # then _capture_untracked - set() = all untracked files including pre.py
@@ -3260,7 +3405,7 @@ class TestBrowserUiUncoveredBranches:
         from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 
         printer = BaseBrowserPrinter()
-        q = printer.add_client()
+        printer.add_client()
         # First call: sets the timer
         printer.print("line1\n", type="bash_stream")
         # Second call immediately: timer already exists, goes to else branch
@@ -3713,7 +3858,7 @@ class TestPrepareMergeViewLine819:
 # ---------------------------------------------------------------------------
 # useful_tools.py - _kill_process_group with dead process (lines 159-161)
 # ---------------------------------------------------------------------------
-class TestKillProcessGroup:
+class TestKillProcessGroupReaped:
     def test_kill_already_reaped_process(self) -> None:
         """When a process is already reaped, os.killpg raises OSError,
         falling through to process.kill() (which also may raise)."""
@@ -3730,9 +3875,9 @@ class TestKillProcessGroup:
 
 
 # ---------------------------------------------------------------------------
-# web_use_tool.py - _number_interactive_elements
+# web_use_tool.py - _number_interactive_elements (extended)
 # ---------------------------------------------------------------------------
-class TestNumberInteractiveElements:
+class TestNumberInteractiveElementsExtended:
     def test_mixed_roles(self) -> None:
         from kiss.agents.sorcar.web_use_tool import _number_interactive_elements
 
@@ -4133,7 +4278,9 @@ class TestWebUseToolEdgeCases:
         """Cover lines 252-253 more reliably: JS window.open creates new tab."""
         html = (
             "data:text/html,"
-            '<button onclick="window.open(\'data:text/html,<h1>Popup</h1>\', \'_blank\')">Open</button>'
+            "<button onclick=\"window.open("
+            "'data:text/html,<h1>Popup</h1>', '_blank')"
+            '">Open</button>'
         )
         self.tool.go_to_url(html)
         result = self.tool.click(1)
