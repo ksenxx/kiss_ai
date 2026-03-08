@@ -11,6 +11,7 @@ import queue
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import types
@@ -151,9 +152,11 @@ def run_chatbot(
     running = False
     running_lock = threading.Lock()
     shutting_down = threading.Event()
+    merging = False
     actual_work_dir = work_dir or os.getcwd()
     file_cache: list[str] = _scan_files(actual_work_dir)
     agent_thread: threading.Thread | None = None
+    current_stop_event: threading.Event | None = None
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
     selected_model = _load_last_model() or default_model
@@ -350,11 +353,15 @@ def run_chatbot(
     def run_agent_thread(
         task: str,
         model_name: str,
+        stop_ev: threading.Event,
         attachments: list | None = None,
     ) -> None:
-        nonlocal running, agent_thread
+        nonlocal running, agent_thread, merging
         from kiss.core.models.model import Attachment
 
+        # Install per-thread stop event so _check_stop() uses this
+        # thread's own event instead of the shared printer.stop_event.
+        printer._thread_local.stop_event = stop_ev
         current_thread = threading.current_thread()
 
         parsed_attachments: list[Attachment] | None = None
@@ -374,11 +381,12 @@ def run_chatbot(
             printer.broadcast({"type": "tasks_updated"})
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
-            pre_file_hashes = _snapshot_files(actual_work_dir, set(pre_hunks.keys()))
             pre_file_hashes = _snapshot_files(
                 actual_work_dir, set(pre_hunks.keys()) | pre_untracked
             )
-            _save_untracked_base(actual_work_dir, cs_data_dir, pre_untracked)
+            _save_untracked_base(
+                actual_work_dir, cs_data_dir, pre_untracked | set(pre_hunks.keys())
+            )
             active_file = _read_active_file(cs_data_dir)
             printer.start_recording()
             printer.broadcast({"type": "clear", "active_file": active_file})
@@ -405,13 +413,14 @@ def run_chatbot(
             result_text = f"(error: {e})"
             done_event = {"type": "task_error", "text": str(e)}
         finally:
+            printer._thread_local.stop_event = None
             chat_events = printer.stop_recording()
             _append_task_to_md(task, result_text)
             with running_lock:
                 if agent_thread is not current_thread:
                     # Stopped externally; stop_agent already broadcast
                     # task_stopped which is captured in chat_events.
-                    _set_latest_chat_events(chat_events)
+                    _set_latest_chat_events(chat_events, task=task)
                     return
                 running = False
                 agent_thread = None
@@ -426,7 +435,7 @@ def run_chatbot(
                         args=(task, result_text),
                         daemon=True,
                     ).start()
-            _set_latest_chat_events(chat_events)
+            _set_latest_chat_events(chat_events, task=task)
             try:
                 merge_result = _prepare_merge_view(
                     actual_work_dir,
@@ -436,6 +445,8 @@ def run_chatbot(
                     pre_file_hashes,
                 )
                 if merge_result.get("status") == "opened":
+                    with running_lock:
+                        merging = True
                     printer.broadcast({"type": "merge_started"})
             except Exception:
                 logger.debug("Exception caught", exc_info=True)
@@ -448,20 +459,23 @@ def run_chatbot(
     def stop_agent() -> bool:
         """Kill the current agent thread and reset state for a new task.
 
-        Sets the printer's stop_event so the agent stops at the next
-        printer.print() or token_callback() check.  Also injects
+        Sets the thread's per-thread stop event so the agent stops at
+        the next printer.print() or token_callback() check.  Also injects
         _StopRequested via PyThreadState_SetAsyncExc as a fallback.
         """
-        nonlocal running, agent_thread
+        nonlocal running, agent_thread, current_stop_event
         with running_lock:
             thread = agent_thread
             if thread is None or not thread.is_alive():
                 return False
             running = False
             agent_thread = None
-            # Set stop_event inside the lock so a concurrent run_task()
-            # that clears it won't race with this set().
-            printer.stop_event.set()
+            # Set the per-thread stop event so only this thread sees
+            # the stop signal.  New threads get their own fresh event.
+            stop_ev = current_stop_event
+            current_stop_event = None
+        if stop_ev is not None:
+            stop_ev.set()
         import ctypes
 
         tid = thread.ident
@@ -484,13 +498,19 @@ def run_chatbot(
                 cs_proc.kill()
 
     def _do_shutdown() -> None:
-        if printer.has_clients():
-            return
         with running_lock:
-            if running:
+            if running or printer.has_clients():
                 return
+            shutting_down.set()
         _cleanup()
         os._exit(0)
+
+    def _cancel_shutdown() -> None:
+        nonlocal shutdown_timer
+        with shutdown_lock:
+            if shutdown_timer is not None:
+                shutdown_timer.cancel()
+                shutdown_timer = None
 
     def _schedule_shutdown() -> None:
         nonlocal shutdown_timer
@@ -502,7 +522,7 @@ def run_chatbot(
         with shutdown_lock:
             if shutdown_timer is not None:
                 shutdown_timer.cancel()
-            shutdown_timer = threading.Timer(5.0, _do_shutdown)
+            shutdown_timer = threading.Timer(120.0, _do_shutdown)
             shutdown_timer.daemon = True
             shutdown_timer.start()
 
@@ -511,6 +531,7 @@ def run_chatbot(
 
     async def events(request: Request) -> StreamingResponse:
         cq = printer.add_client()
+        _cancel_shutdown()
 
         async def generate() -> AsyncGenerator[str]:
             last_heartbeat = time.monotonic()
@@ -526,7 +547,7 @@ def run_chatbot(
                         event = cq.get_nowait()
                     except queue.Empty:
                         now = time.monotonic()
-                        if now - last_heartbeat >= 15.0:
+                        if now - last_heartbeat >= 5.0:
                             yield ": heartbeat\n\n"
                             last_heartbeat = now
                         await asyncio.sleep(0.05)
@@ -542,11 +563,15 @@ def run_chatbot(
         return StreamingResponse(
             generate(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
         )
 
     async def run_task(request: Request) -> JSONResponse:
-        nonlocal running, agent_thread, selected_model
+        nonlocal running, agent_thread, selected_model, current_stop_event
         body = await request.json()
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
@@ -557,17 +582,21 @@ def run_chatbot(
         _record_model_usage(model)
         if model not in _INTERNAL_MODELS:
             _record_model_usage(model)
+        stop_ev = threading.Event()
         t = threading.Thread(
             target=run_agent_thread,
-            args=(task, model, attachments),
+            args=(task, model, stop_ev, attachments),
             daemon=True,
         )
         with running_lock:
+            if merging:
+                return JSONResponse(
+                    {"error": "Resolve all diffs in the merge view first"},
+                    status_code=409,
+                )
             if running:
                 return JSONResponse({"error": "Agent is already running"}, status_code=409)
-            # Clear stop_event inside the lock so it can't race with
-            # stop_agent() setting it in the same lock.
-            printer.stop_event.clear()
+            current_stop_event = stop_ev
             running = True
             agent_thread = t
         t.start()
@@ -580,7 +609,7 @@ def run_chatbot(
         running state and displays the selected text as a user message,
         then starts the agent thread with the selected text as the task.
         """
-        nonlocal running, agent_thread
+        nonlocal running, agent_thread, current_stop_event
         body = await request.json()
         text = body.get("text", "").strip()
         if not text:
@@ -589,18 +618,26 @@ def run_chatbot(
         _record_model_usage(model)
         if model not in _INTERNAL_MODELS:
             _record_model_usage(model)
-        printer.broadcast({"type": "external_run", "text": text})
+        stop_ev = threading.Event()
         t = threading.Thread(
             target=run_agent_thread,
-            args=(text, model, None),
+            args=(text, model, stop_ev, None),
             daemon=True,
         )
         with running_lock:
+            if merging:
+                return JSONResponse(
+                    {"error": "Resolve all diffs in the merge view first"},
+                    status_code=409,
+                )
             if running:
                 return JSONResponse({"error": "Agent is already running"}, status_code=409)
-            printer.stop_event.clear()
+            current_stop_event = stop_ev
             running = True
             agent_thread = t
+        # Broadcast AFTER lock confirms task will start, so clients
+        # never see external_run for a task that returns 409.
+        printer.broadcast({"type": "external_run", "text": text})
         t.start()
         return JSONResponse({"status": "started"})
 
@@ -796,9 +833,12 @@ def run_chatbot(
         return JSONResponse({"status": "ok"})
 
     async def merge_action(request: Request) -> JSONResponse:
+        nonlocal merging
         body = await request.json()
         action = body.get("action", "")
         if action == "all-done":
+            with running_lock:
+                merging = False
             printer.broadcast({"type": "merge_ended"})
             _cleanup_merge_data(cs_data_dir)
             return JSONResponse({"status": "ok"})
@@ -1038,12 +1078,27 @@ def run_chatbot(
     except OSError:
         logger.debug("Exception caught", exc_info=True)
     url = f"http://127.0.0.1:{port}"
+    print(f"{title} running at {url}", flush=True)
+    print(f"Work directory: {actual_work_dir}", flush=True)
     printer.print(f"{title} running at {url}")
     printer.print(f"Work directory: {actual_work_dir}")
 
     def _open_browser() -> None:
         time.sleep(2)
-        webbrowser.open(url)
+        try:
+            if not webbrowser.open(url):
+                logger.warning("webbrowser.open() returned False for %s", url)
+        except Exception:
+            logger.warning("Failed to open browser", exc_info=True)
+            if sys.platform == "darwin":
+                try:
+                    subprocess.Popen(
+                        ["open", url],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    logger.warning("Fallback 'open' command also failed", exc_info=True)
 
     threading.Thread(target=_open_browser, daemon=True).start()
     logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)

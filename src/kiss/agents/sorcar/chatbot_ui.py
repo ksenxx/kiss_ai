@@ -952,7 +952,7 @@ var allModels=[],selectedModel='',modelDDIdx=-1;
 var sidebar=document.getElementById('sidebar');
 var sidebarOverlay=document.getElementById('sidebar-overlay');
 var suggestionsEl=document.getElementById('suggestions');
-var running=false,_scrollLock=false;
+var running=false,_scrollLock=false,merging=false;
 var scrollRaf=0,state=mkS();
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
 var acTimer=null,histIdx=-1,histCache=[];
@@ -1073,21 +1073,49 @@ function setReady(label){
   running=false;D.classList.remove('running');
   stopTimer();removeSpinner();
   ST.textContent=label||'Ready';
-  inp.disabled=false;
+  if(!merging){inp.disabled=false;btn.disabled=false;uploadBtn.disabled=false;}
   btn.style.display='';
   stopBtn.style.display='none';
   checkActiveFile();
-  inp.focus();
+  if(!merging)inp.focus();
+}
+var _sseRetry=0,_sseMaxRetry=30000,_sseReconnTimer=null,_sseConnected=false;
+function _sseBackoff(){
+  var d=Math.min(1000*Math.pow(1.5,_sseRetry),_sseMaxRetry);_sseRetry++;return d;
+}
+function _showDisconnBanner(){
+  if(document.getElementById('disconn-banner'))return;
+  var b=mkEl('div','');b.id='disconn-banner';
+  b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;'
+    +'background:rgba(248,81,73,0.92);color:#fff;text-align:center;'
+    +'padding:8px 16px;font-size:13px;font-weight:500;backdrop-filter:blur(8px);'
+    +'-webkit-backdrop-filter:blur(8px)';
+  b.textContent='Connection lost. Reconnecting\u2026';
+  document.body.appendChild(b);
+}
+function _hideDisconnBanner(){
+  var b=document.getElementById('disconn-banner');
+  if(b)b.remove();
 }
 function connectSSE(){
-  if(evtSrc)evtSrc.close();
+  if(_sseReconnTimer){clearTimeout(_sseReconnTimer);_sseReconnTimer=null;}
+  if(evtSrc){try{evtSrc.close();}catch(x){}}
   evtSrc=new EventSource('/events');
-  evtSrc.onopen=function(){};
+  evtSrc.onopen=function(){
+    _sseRetry=0;_sseConnected=true;
+    _hideDisconnBanner();
+  };
   evtSrc.onmessage=function(e){
     var ev;try{ev=JSON.parse(e.data);}catch(x){return;}
     try{handleEvent(ev);}catch(err){console.error('Event error:',err,ev);}
   };
-  evtSrc.onerror=function(){};
+  evtSrc.onerror=function(){
+    _sseConnected=false;
+    try{evtSrc.close();}catch(x){}
+    _showDisconnBanner();
+    var delay=_sseBackoff();
+    _sseReconnTimer=setTimeout(connectSSE,delay);
+  };
 }
 function handleEvent(ev){
   var t=ev.type;
@@ -1112,8 +1140,18 @@ function handleEvent(ev){
     pendingFiles=[];renderFileChips();
     showSpinner();loadModels();
     break;
-  case'merge_started':document.getElementById('merge-toolbar').style.display='flex';break;
-  case'merge_ended':document.getElementById('merge-toolbar').style.display='none';inp.focus();break;
+  case'merge_started':
+    document.getElementById('merge-toolbar').style.display='flex';
+    merging=true;inp.disabled=true;
+    btn.disabled=true;uploadBtn.disabled=true;
+    inp.placeholder='Resolve all diffs in the merge view to continue\u2026';
+    break;
+  case'merge_ended':
+    document.getElementById('merge-toolbar').style.display='none';
+    merging=false;inp.disabled=false;
+    btn.disabled=false;uploadBtn.disabled=false;
+    inp.placeholder='Ask anything\u2026 (@ for files and cmd/ctrl-k to toggle)';
+    inp.focus();break;
   case'clear':
     O.innerHTML='';state=mkS();
     _scrollLock=false;
@@ -1299,7 +1337,7 @@ function doSubmitTask(task){
 }
 function submitTask(){
   var task=inp.value.trim();
-  if(!task||running)return;
+  if(!task||running||merging)return;
   var fileMatch=task.match(/^@(\S+)$/);
   if(fileMatch){openInEditor(fileMatch[1]);inp.value='';return}
   if(looksLikeFilePath(task)){
