@@ -25,10 +25,10 @@ TASK_PROMPT = """# Task
 {task_description}
 
 # MOST IMPORTANT INSTRUCTIONS
-- **At step {step_threshold}: you MUST call finish(success=False, \
+- **At step {step_threshold}: you MUST call finish(success=False, is_continue=True, \
 summary="precise chronologically-ordered list of things the agent did \
 with the reason for doing that along with relevant code snippets")** \
-if the task is not complete and you are at risk of running out of steps.
+if the task is not complete and you are at risk of running out of steps or context length.
 - Work dir: {work_dir}
 - Current process PID: {current_pid} — NEVER kill this process.
 
@@ -55,18 +55,24 @@ SUMMARIZER_PROMPT = """
 """
 
 
-def finish(success: bool, summary: str) -> str:
+def finish(success: bool, is_continue: bool, summary: str) -> str:
     """Finish execution with status and summary.
 
     Args:
-        success: True if successful, False otherwise
+        success: True if the agent has successfully completed the task, False otherwise
+        is_continue: True if the task is incomplete and should continue, False otherwise
         summary: precise chronologically-ordered list of things the
             agent did with the reason for doing that along with
             relevant code snippets
     """
     if isinstance(success, str):
         success = success.lower() in ("true", "1", "yes")
-    result: str = yaml.dump({"success": bool(success), "summary": summary}, sort_keys=False)
+    if isinstance(is_continue, str):
+        is_continue = is_continue.lower() in ("true", "1", "yes")
+    result: str = yaml.dump(
+        {"success": bool(success), "is_continue": bool(is_continue), "summary": summary},
+        sort_keys=False,
+    )
     return result
 
 
@@ -195,7 +201,12 @@ class RelentlessAgent(Base):
             success = payload.get("success", False)
             if isinstance(success, str):
                 success = success.lower() in ("true", "1", "yes")
-            if success:
+
+            is_continue = payload.get("is_continue", False)
+            if isinstance(is_continue, str):
+                is_continue = is_continue.lower() in ("true", "1", "yes")
+
+            if not is_continue or success:
                 return result
 
             summary = payload.get("summary", "")
