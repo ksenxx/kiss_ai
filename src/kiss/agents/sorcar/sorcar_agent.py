@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import tempfile
+from pathlib import Path
 
 import yaml
 
@@ -147,11 +149,12 @@ class SorcarAgent(RelentlessAgent):
                 self.web_use_tool.close()
 
 
-def main() -> None:
-    """Run a demo of the SorcarAgent with a sample Gmail task."""
-    import argparse
-    import time as time_mod
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser for main().
 
+    Returns:
+        Configured ArgumentParser instance.
+    """
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
         "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
@@ -172,21 +175,51 @@ def main() -> None:
         help="Print output to console",
     )
     parser.add_argument("--task", type=str, default=None, help="Prompt template/task description")
+    parser.add_argument(
+        "-f", type=str, default=None, help="Path to a file whose contents to use as the task"
+    )
+    return parser
 
-    args = parser.parse_args()
 
-    # Simple prompt default if not provided
-    if args.task is not None:
-        task_description = args.task
-    else:
-        task_description = """
+_DEFAULT_TASK = """
 can you login to gmail using the username 'kissagent1@gmail.com' and
 password 'For AI Assistant.' and read the messages.
 """
 
+
+def _resolve_task(args: argparse.Namespace) -> str:
+    """Determine the task description from parsed arguments.
+
+    Priority: -f file > --task string > default task.
+
+    Args:
+        args: Parsed argparse namespace with 'f' and 'task' attributes.
+
+    Returns:
+        The task description string.
+
+    Raises:
+        FileNotFoundError: If -f path does not exist.
+    """
+    if args.f is not None:
+        return Path(args.f).read_text()
+    if args.task is not None:
+        task: str = args.task
+        return task
+    return _DEFAULT_TASK
+
+
+def main() -> None:
+    """Run a demo of the SorcarAgent with a sample Gmail task."""
+    import time as time_mod
+
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+    task_description = _resolve_task(args)
+
     if args.work_dir is not None:
         work_dir = args.work_dir
-        os.makedirs(work_dir, exist_ok=True)
+        Path(work_dir).mkdir(parents=True, exist_ok=True)
     else:
         work_dir = tempfile.mkdtemp()
     agent = SorcarAgent("Sorcar Agent Test")

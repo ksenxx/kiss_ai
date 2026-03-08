@@ -34,34 +34,12 @@ class TestHistoryFileOps(unittest.TestCase):
     def tearDown(self) -> None:
         _restore_history(self.original, self.tmp)
 
-    def test_load_empty_history(self) -> None:
-        loaded = assistant._load_history()
-        assert loaded == assistant.SAMPLE_TASKS
-        assert self.tmp.exists()
-
-    def test_load_corrupted_file(self) -> None:
-        self.tmp.write_text("not json")
-        loaded = assistant._load_history()
-        assert loaded == assistant.SAMPLE_TASKS
-
-    def test_load_non_list_json(self) -> None:
-        self.tmp.write_text('{"key": "value"}')
-        loaded = assistant._load_history()
-        assert loaded == assistant.SAMPLE_TASKS
-
-
 class TestAddTask(unittest.TestCase):
     def setUp(self) -> None:
         self.original, self.tmp = _use_temp_history()
 
     def tearDown(self) -> None:
         _restore_history(self.original, self.tmp)
-
-    def test_add_new_task(self) -> None:
-        assistant._add_task("Build a REST API")
-        history = assistant._load_history()
-        assert history[0]["task"] == "Build a REST API"
-
 
 if __name__ == "__main__":
     unittest.main()

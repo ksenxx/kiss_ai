@@ -15,7 +15,7 @@ from kiss.agents.sorcar.task_history import (
     _add_task,
     _load_history,
     _save_history,
-    _set_latest_result,
+    _set_latest_chat_events,
 )
 from kiss.core.base import Base
 
@@ -112,8 +112,8 @@ class TestHistoryLock:
         assert hasattr(task_history, "_history_lock")
         assert isinstance(task_history._history_lock, type(threading.Lock()))
 
-    def test_concurrent_set_result_and_add_task(self):
-        """Concurrent _set_latest_result and _add_task should not corrupt state."""
+    def test_concurrent_set_chat_events_and_add_task(self):
+        """Concurrent _set_latest_chat_events and _add_task should not corrupt state."""
         from kiss.agents.sorcar import task_history
 
         orig_cache = task_history._history_cache
@@ -123,7 +123,7 @@ class TestHistoryLock:
 
         try:
             task_history._history_cache = None
-            _save_history([{"task": "initial_task", "result": ""}])
+            _save_history([{"task": "initial_task", "chat_events": []}])
             task_history._history_cache = None  # Force reload
 
             errors: list[Exception] = []
@@ -141,7 +141,7 @@ class TestHistoryLock:
                 barrier.wait()
                 for i in range(10):
                     try:
-                        _set_latest_result(f"result_{i}")
+                        _set_latest_chat_events([{"type": "text_delta", "text": f"result_{i}"}])
                     except Exception as e:
                         errors.append(e)
 

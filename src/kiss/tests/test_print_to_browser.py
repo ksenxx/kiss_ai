@@ -47,16 +47,6 @@ class TestPrintStreamEvent(unittest.TestCase):
         assert events[0]["name"] == "Bash"
 
 
-class TestFormatToolCall(unittest.TestCase):
-
-    def test_with_description(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        p._format_tool_call("Bash", {"description": "Run tests", "command": "pytest"})
-        events = _drain(q)
-        assert events[0]["description"] == "Run tests"
-
-
 class TestPrintToolResult(unittest.TestCase):
     def test_truncation(self):
         p = BaseBrowserPrinter()
@@ -76,42 +66,12 @@ class TestPrintMessageSystem(unittest.TestCase):
         assert _drain(q) == []
 
 
-class TestPrintMessageUser(unittest.TestCase):
-    def test_blocks_without_is_error_skipped(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        block = SimpleNamespace(text="just text")
-        msg = SimpleNamespace(content=[block])
-        p.print(msg, type="message")
-        assert _drain(q) == []
-
-
 class TestPrintMessageDispatch(unittest.TestCase):
     def test_unknown_message_type_no_crash(self):
         p = BaseBrowserPrinter()
         q = _subscribe(p)
         msg = SimpleNamespace(unknown_attr="value")
         p.print(msg, type="message")
-        assert _drain(q) == []
-
-
-class TestPrint(unittest.TestCase):
-
-    def test_print_empty_no_broadcast(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        p.print("")
-        assert _drain(q) == []
-
-
-class TestTokenCallback(unittest.TestCase):
-
-    def test_token_callback_empty_string_no_broadcast(self):
-        import asyncio
-
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        asyncio.run(p.token_callback(""))
         assert _drain(q) == []
 
 

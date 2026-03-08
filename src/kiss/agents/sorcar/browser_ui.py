@@ -81,13 +81,16 @@ OUTPUT_CSS = r"""
 .tc-h{
   padding:9px 14px;background:var(--surface2);
   display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;
+  flex-wrap:wrap;
 }
 .tc-h:hover{background:rgba(48,54,61,.8)}
 .tc-h .chv{color:var(--dim);transition:transform .2s;font-size:11px;flex-shrink:0}
 .tc-h .chv.open{transform:rotate(90deg)}
 .tn{font-weight:600;font-size:13px;color:var(--accent)}
-.tp{font-size:12px;color:var(--cyan);font-family:'SF Mono','Fira Code',monospace}
-.td{font-size:11px;color:var(--dim);font-style:italic}
+.tp{font-size:12px;color:var(--cyan);font-family:'SF Mono','Fira Code',monospace;
+  word-break:break-all;min-width:0}
+.td{font-size:11px;color:var(--dim);font-style:italic;
+  word-break:break-word;min-width:0}
 .tc-b{
   padding:10px 14px;max-height:300px;overflow-y:auto;
   font-family:'SF Mono','Fira Code',monospace;font-size:11px;line-height:1.5;
@@ -169,7 +172,7 @@ OUTPUT_CSS = r"""
   padding:4px 12px;background:var(--surface);font-size:11px;
   color:var(--dim);font-style:italic;
   font-family:'SF Mono','Fira Code',monospace;
-  white-space:nowrap;overflow-x:auto;
+  white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;
 }
 .empty-msg{
   text-align:center;color:var(--dim);
@@ -391,6 +394,46 @@ HTML_HEAD = r"""<!DOCTYPE html>
 """
 
 
+_DISPLAY_EVENT_TYPES = frozenset({
+    "clear", "thinking_start", "thinking_delta", "thinking_end",
+    "text_delta", "text_end", "tool_call", "tool_result",
+    "system_output", "result", "prompt", "usage_info",
+    "task_done", "task_error", "task_stopped",
+    "followup_suggestion",
+})
+
+
+def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive delta events of the same type to reduce storage size.
+
+    Consecutive thinking_delta, text_delta, and system_output events are
+    combined by concatenating their ``text`` fields.
+
+    Args:
+        events: List of event dicts to coalesce.
+
+    Returns:
+        A new list with consecutive same-type delta events merged.
+    """
+    if not events:
+        return events
+    result: list[dict[str, Any]] = []
+    merge_types = ("thinking_delta", "text_delta", "system_output")
+    for ev in events:
+        t = ev.get("type", "")
+        if (
+            result
+            and t == result[-1].get("type")
+            and t in merge_types
+            and "text" in ev
+            and "text" in result[-1]
+        ):
+            result[-1] = {**result[-1], "text": result[-1]["text"] + ev["text"]}
+        else:
+            result.append(ev)
+    return result
+
+
 class BaseBrowserPrinter(Printer):
     def __init__(self) -> None:
         self._clients: list[queue.Queue[dict[str, Any]]] = []
@@ -403,6 +446,9 @@ class BaseBrowserPrinter(Printer):
         self._bash_last_flush = 0.0
         self._bash_flush_timer: threading.Timer | None = None
         self.stop_event = threading.Event()
+        self._recording = False
+        self._recorded_events: list[dict[str, Any]] = []
+        self._recording_lock = threading.Lock()
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
@@ -440,12 +486,34 @@ class BaseBrowserPrinter(Printer):
             return data
         return None
 
+    def start_recording(self) -> None:
+        """Start recording broadcast events for chat history replay."""
+        with self._recording_lock:
+            self._recording = True
+            self._recorded_events = []
+
+    def stop_recording(self) -> list[dict[str, Any]]:
+        """Stop recording and return captured display events, coalesced.
+
+        Returns:
+            List of display-relevant events with consecutive deltas merged.
+        """
+        with self._recording_lock:
+            self._recording = False
+            raw = self._recorded_events
+            self._recorded_events = []
+        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
+        return _coalesce_events(filtered)
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send an SSE event dict to all connected clients.
 
         Args:
             event: The event dictionary to broadcast.
         """
+        with self._recording_lock:
+            if self._recording:
+                self._recorded_events.append(event)
         with self._lock:
             for cq in self._clients:
                 cq.put(event)
