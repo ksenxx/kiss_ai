@@ -251,7 +251,8 @@ class RelentlessAgent(Base):
             verbose,
         )
         self.system_instructions = system_instructions
-        self.task_description = prompt_template.format(**(arguments or {}))
+        args = arguments or {}
+        self.task_description = prompt_template.format(**args) if args else prompt_template
 
         if self.docker_image:
             with DockerManager(self.docker_image) as docker_mgr:

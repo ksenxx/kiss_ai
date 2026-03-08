@@ -185,7 +185,7 @@ class WebUseTool:
             try:
                 if locator.nth(i).is_visible():
                     return locator.nth(i)
-            except Exception:
+            except Exception:  # pragma: no cover — Playwright is_visible rarely throws
                 logger.debug("Exception caught", exc_info=True)
                 continue
         return locator.first

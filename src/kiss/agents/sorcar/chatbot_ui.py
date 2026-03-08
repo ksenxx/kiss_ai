@@ -179,7 +179,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   margin-top:10px;padding-top:10px;
   border-top:1px solid rgba(255,255,255,0.04);
 }
-#model-picker{position:relative;display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden}
+#model-picker{position:relative;display:flex;align-items:center;gap:4px;min-width:0;overflow:visible}
 #model-btn{
   background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
   border:1px solid rgba(255,255,255,0.08);border-radius:8px;
@@ -1260,11 +1260,12 @@ function showUserMsg(msg){
   um.innerHTML=html;
   O.appendChild(um);
 }
-function submitTask(){
-  var task=inp.value.trim();
-  if(!task||running)return;
-  var fileMatch=task.match(/^@(\S+)$/);
-  if(fileMatch){openInEditor(fileMatch[1]);inp.value='';return}
+function looksLikeFilePath(s){
+  if(s.startsWith('/')||s.startsWith('./')||s.startsWith('../')||s.startsWith('~/'))return true;
+  if(!/\s/.test(s)&&(s.indexOf('/')>=0||/\.\w{1,10}$/.test(s)))return true;
+  return false;
+}
+function doSubmitTask(task){
   running=true;inp.disabled=true;
   runPromptBtn.disabled=true;
   btn.style.display='none';
@@ -1286,6 +1287,21 @@ function submitTask(){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
     inp.value='';pendingFiles=[];renderFileChips();loadModels();
   }).catch(function(){setReady('Error');alert('Network error')});
+}
+function submitTask(){
+  var task=inp.value.trim();
+  if(!task||running)return;
+  var fileMatch=task.match(/^@(\S+)$/);
+  if(fileMatch){openInEditor(fileMatch[1]);inp.value='';return}
+  if(looksLikeFilePath(task)){
+    fetch('/open-file',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:task})}).then(function(r){
+      if(r.ok){inp.value='';return}
+      doSubmitTask(task);
+    }).catch(function(){doSubmitTask(task)});
+    return;
+  }
+  doSubmitTask(task);
 }
 btn.addEventListener('click',submitTask);
 stopBtn.addEventListener('click',function(){fetch('/stop',{method:'POST'}).catch(function(){})});
@@ -1667,29 +1683,7 @@ function mergeAction(action){
   fetch('/merge-action',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:action})}).catch(function(){});
 }
-function mergeCommit(){
-  var btn=document.getElementById('commit-btn');
-  btn.textContent='Committing...';btn.disabled=true;
-  fetch('/commit',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){
-    if(d.error)alert('Commit failed: '+d.error);
-    else{alert('Committed: '+d.message);
-      document.getElementById('merge-toolbar').style.display='none';}
-    btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;
-  }).catch(function(e){alert('Error: '+e);
-    btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;});
-}
-function mergePush(){
-  var btn=document.getElementById('push-btn');
-  btn.textContent='Pushing...';btn.disabled=true;
-  fetch('/push',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){
-    if(d.error)alert('Push failed: '+d.error);
-    else alert('Pushed to remote successfully');
-    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;
-  }).catch(function(e){alert('Error: '+e);
-    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;});
-}
+
 function hexToRgb(h){
   var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
   return r+','+g+','+b;
@@ -1825,15 +1819,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         '<line x1="17" y1="9" x2="7" y2="19"/>'
         '<line x1="7" y1="9" x2="17" y2="19"/></svg>'
     )
-    _svg_commit = (
-        f'<svg{_s20}><circle cx="12" cy="12" r="4"/>'
-        '<line x1="1.05" y1="12" x2="7" y2="12"/>'
-        '<line x1="17.01" y1="12" x2="22.96" y2="12"/></svg>'
-    )
-    _svg_push = (
-        f'<svg{_s20}><line x1="12" y1="19" x2="12" y2="5"/>'
-        '<polyline points="5 12 12 5 19 12"/></svg>'
-    )
+
     _sep = '<span class="mt-sep"></span>'
 
     return (
@@ -1851,9 +1837,6 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
       {_sep}
       <button onclick="mergeAction('accept-all')" title="Accept all">{_svg_accept_all}</button>
       <button onclick="mergeAction('reject-all')" title="Reject all">{_svg_reject_all}</button>
-      {_sep}
-      <button id="commit-btn" onclick="mergeCommit()" title="Commit changes">{_svg_commit}</button>
-      <button id="push-btn" onclick="mergePush()" title="Push to remote">{_svg_push}</button>
     </div>
   </div>
   <div id="divider"></div>
@@ -1892,7 +1875,8 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         <div id="input-wrap">
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
-            <textarea id="task-input" placeholder="Ask anything\u2026 (@ for files)" rows="3"
+            <textarea id="task-input" rows="3"
+              placeholder="Ask anything\u2026 (@ for files and cmd/ctrl-k to toggle)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple

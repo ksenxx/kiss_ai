@@ -23,8 +23,10 @@ from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter, find_free_port
 from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
+    _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
+    _save_untracked_base,
     _scan_files,
     _setup_code_server,
     _snapshot_files,
@@ -58,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 _FAST_MODEL = "gemini-2.0-flash"
 _COMMIT_MODEL = "gemini-2.0-flash"
+_INTERNAL_MODELS = frozenset({_FAST_MODEL, _COMMIT_MODEL})
 
 
 class _StopRequested(BaseException):
@@ -154,6 +157,8 @@ def run_chatbot(
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
     selected_model = _load_last_model() or default_model
+    last = _load_last_model()
+    selected_model = last if last and last not in _INTERNAL_MODELS else default_model
 
     _init_task_history_md()
 
@@ -370,6 +375,10 @@ def run_chatbot(
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
             pre_file_hashes = _snapshot_files(actual_work_dir, set(pre_hunks.keys()))
+            pre_file_hashes = _snapshot_files(
+                actual_work_dir, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(actual_work_dir, cs_data_dir, pre_untracked)
             active_file = _read_active_file(cs_data_dir)
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
@@ -522,6 +531,8 @@ def run_chatbot(
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
+        if model not in _INTERNAL_MODELS:
+            _record_model_usage(model)
         t = threading.Thread(
             target=run_agent_thread,
             args=(task, model, attachments),
@@ -717,6 +728,7 @@ def run_chatbot(
         action = body.get("action", "")
         if action == "all-done":
             printer.broadcast({"type": "merge_ended"})
+            _cleanup_merge_data(cs_data_dir)
             return JSONResponse({"status": "ok"})
         if action not in ("prev", "next", "accept-all", "reject-all", "accept", "reject"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
@@ -733,7 +745,6 @@ def run_chatbot(
         if "error" in result:
             return JSONResponse(result, status_code=error_status)
         return JSONResponse(result)
-
     async def commit(request: Request) -> JSONResponse:
         def _do_commit() -> dict[str, str]:
             try:
@@ -791,6 +802,7 @@ def run_chatbot(
                 return {"error": str(e)}
 
         return await _thread_json_response(_do_push)
+
 
     async def record_file_usage_endpoint(
         request: Request,
@@ -923,9 +935,9 @@ def run_chatbot(
             Route("/open-file", open_file, methods=["POST"]),
             Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
             Route("/focus-editor", focus_editor, methods=["POST"]),
-            Route("/merge-action", merge_action, methods=["POST"]),
             Route("/commit", commit, methods=["POST"]),
             Route("/push", push, methods=["POST"]),
+            Route("/merge-action", merge_action, methods=["POST"]),
             Route("/record-file-usage", record_file_usage_endpoint, methods=["POST"]),
             Route("/generate-commit-message", generate_commit_message, methods=["POST"]),
             Route("/generate-config-message", generate_config_message, methods=["POST"]),
