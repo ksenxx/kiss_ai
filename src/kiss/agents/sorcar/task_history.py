@@ -125,13 +125,31 @@ def _save_history(entries: list[_HistoryEntry]) -> None:
         _save_history_unlocked(entries)
 
 
-def _set_latest_chat_events(events: list[dict[str, object]]) -> None:
-    """Set the chat events of the most recent task. Thread-safe."""
+def _set_latest_chat_events(
+    events: list[dict[str, object]], task: str | None = None
+) -> None:
+    """Set the chat events of a task in history. Thread-safe.
+
+    Args:
+        events: The chat events to store.
+        task: If given, find the history entry by task name.
+              Otherwise update history[0].
+    """
     with _history_lock:
-        if _history_cache:
+        if not _history_cache:
+            return
+        if task:
+            for entry in _history_cache:
+                if entry["task"] == task:
+                    entry["chat_events"] = events
+                    entry.pop("result", None)
+                    break
+            else:
+                return
+        else:
             _history_cache[0]["chat_events"] = events
             _history_cache[0].pop("result", None)
-            _save_history_unlocked(_history_cache)
+        _save_history_unlocked(_history_cache)
 
 
 def _load_proposals() -> list[str]:

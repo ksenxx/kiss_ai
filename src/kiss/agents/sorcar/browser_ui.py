@@ -446,8 +446,8 @@ class BaseBrowserPrinter(Printer):
         self._bash_last_flush = 0.0
         self._bash_flush_timer: threading.Timer | None = None
         self.stop_event = threading.Event()
-        self._recording = False
-        self._recorded_events: list[dict[str, Any]] = []
+        self._thread_local = threading.local()
+        self._recordings: dict[int, list[dict[str, Any]]] = {}
         self._recording_lock = threading.Lock()
 
     def reset(self) -> None:
@@ -487,33 +487,40 @@ class BaseBrowserPrinter(Printer):
         return None
 
     def start_recording(self) -> None:
-        """Start recording broadcast events for chat history replay."""
+        """Start recording broadcast events for the calling thread.
+
+        Each thread gets its own independent recording buffer, so concurrent
+        agent threads do not interfere with each other's recordings.
+        """
+        tid = threading.current_thread().ident
         with self._recording_lock:
-            self._recording = True
-            self._recorded_events = []
+            if tid is not None:
+                self._recordings[tid] = []
 
     def stop_recording(self) -> list[dict[str, Any]]:
-        """Stop recording and return captured display events, coalesced.
+        """Stop recording for the calling thread and return its display events.
 
         Returns:
             List of display-relevant events with consecutive deltas merged.
         """
+        tid = threading.current_thread().ident
+        assert tid is not None
         with self._recording_lock:
-            self._recording = False
-            raw = self._recorded_events
-            self._recorded_events = []
+            raw = self._recordings.pop(tid, [])
         filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
         return _coalesce_events(filtered)
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send an SSE event dict to all connected clients.
 
+        The event is also appended to every active per-thread recording.
+
         Args:
             event: The event dictionary to broadcast.
         """
         with self._recording_lock:
-            if self._recording:
-                self._recorded_events.append(event)
+            for events_list in self._recordings.values():
+                events_list.append(event)
         with self._lock:
             for cq in self._clients:
                 cq.put(event)
@@ -567,7 +574,11 @@ class BaseBrowserPrinter(Printer):
         self.broadcast(event)
 
     def _check_stop(self) -> None:
-        if self.stop_event.is_set():
+        ev = getattr(self._thread_local, "stop_event", None)
+        if ev is not None:
+            if ev.is_set():
+                raise KeyboardInterrupt("Agent stop requested")
+        elif self.stop_event.is_set():
             raise KeyboardInterrupt("Agent stop requested")
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:

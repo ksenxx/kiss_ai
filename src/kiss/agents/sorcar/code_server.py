@@ -783,6 +783,34 @@ def _cleanup_merge_data(data_dir: str) -> None:
         shutil.rmtree(base_dir, ignore_errors=True)
 
 
+def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, int]]:
+    """Compute diff hunks between two files using diff -U0.
+
+    Args:
+        base_path: Path to the base (pre-task) file.
+        current_path: Path to the current (post-task) file.
+
+    Returns:
+        List of (base_start, base_count, current_start, current_count) tuples.
+    """
+    result = subprocess.run(
+        ["diff", "-U0", base_path, current_path],
+        capture_output=True,
+        text=True,
+    )
+    hunks: list[tuple[int, int, int, int]] = []
+    for line in result.stdout.split("\n"):
+        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        if hm:
+            hunks.append((
+                int(hm.group(1)),
+                int(hm.group(2)) if hm.group(2) is not None else 1,
+                int(hm.group(3)),
+                int(hm.group(4)) if hm.group(4) is not None else 1,
+            ))
+    return hunks
+
+
 def _prepare_merge_view(
     work_dir: str,
     data_dir: str,
@@ -791,6 +819,7 @@ def _prepare_merge_view(
     pre_file_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     post_hunks = _parse_diff_hunks(work_dir)
+    ub_dir = _untracked_base_dir()
     file_hunks: dict[str, list[dict[str, int]]] = {}
     for fname, hunks in post_hunks.items():
         if pre_file_hashes is not None and fname in pre_file_hashes:
@@ -804,10 +833,13 @@ def _prepare_merge_view(
             if current_hash == pre_file_hashes[fname]:
                 # Content unchanged by agent — skip this file
                 continue
-            # Content changed — include ALL hunks (agent modified already-changed lines)
+        saved_base = ub_dir / fname
+        if saved_base.is_file():
+            # Diff the saved pre-task copy against current to get only agent's changes
+            agent_hunks = _diff_files(str(saved_base), str(Path(work_dir) / fname))
             filtered = [
                 {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
-                for bs, bc, cs, cc in hunks
+                for bs, bc, cs, cc in agent_hunks
             ]
         else:
             pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
@@ -844,22 +876,31 @@ def _prepare_merge_view(
                 continue
             if current_hash == pre_file_hashes[fname]:
                 continue
-            try:
-                if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
-                    continue
-                line_count = len(fpath.read_text().splitlines())
-                if line_count:
-                    file_hunks[fname] = [
-                        {"bs": 0, "bc": 0, "cs": 0, "cc": line_count}
-                    ]
-            except (OSError, UnicodeDecodeError):
-                logger.debug("Exception caught", exc_info=True)
+            saved_base = ub_dir / fname
+            if saved_base.is_file():
+                agent_hunks = _diff_files(str(saved_base), str(fpath))
+                filtered = [
+                    {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
+                    for bs, bc, cs, cc in agent_hunks
+                ]
+                if filtered:
+                    file_hunks[fname] = filtered
+            else:
+                try:
+                    if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
+                        continue
+                    line_count = len(fpath.read_text().splitlines())
+                    if line_count:
+                        file_hunks[fname] = [
+                            {"bs": 0, "bc": 0, "cs": 0, "cc": line_count}
+                        ]
+                except (OSError, UnicodeDecodeError):
+                    logger.debug("Exception caught", exc_info=True)
     if not file_hunks:
         return {"error": "No changes"}
     merge_dir = Path(data_dir) / "merge-temp"
     if merge_dir.exists():
         shutil.rmtree(merge_dir)
-    ub_dir = _untracked_base_dir()
     manifest_files = []
     for fname, fh in file_hunks.items():
         current_path = Path(work_dir) / fname
