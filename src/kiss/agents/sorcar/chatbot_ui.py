@@ -1105,9 +1105,6 @@ function handleEvent(ev){
   case'clear':
     O.innerHTML='';state=mkS();
     _scrollLock=false;
-    if(ev.active_file&&pendingUserMsg){
-      pendingUserMsg.text+='\n\nCurrently open file in editor: '+ev.active_file;
-    }
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
   case'task_done':{
@@ -1617,7 +1614,6 @@ function replayTaskEvents(idx,taskText){
       var activeFile='';
       data.events.forEach(function(ev){if(ev.type==='clear'&&ev.active_file)activeFile=ev.active_file});
       var msgText=taskText;
-      if(activeFile)msgText+='\n\nCurrently open file in editor: '+activeFile;
       showUserMsg({text:msgText,images:[]});
       data.events.forEach(function(ev){
         var t=ev.type;
