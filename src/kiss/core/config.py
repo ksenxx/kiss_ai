@@ -85,7 +85,7 @@ class RelentlessAgentConfig(BaseModel):
         description="Maximum budget in USD",
     )
     max_sub_sessions: int = Field(
-        default=200,
+        default=2000,
         description="Maximum number of sub-sessions for auto-continuation",
     )
 
