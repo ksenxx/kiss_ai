@@ -1,4 +1,4 @@
-# RelentlessAgent: The Elegant Engine Behind Multi-Hour Agentic Tasks
+# RelentlessAgent: The Elegant Engine Behind Multi-Hour Agentic Tasks in KISS Sorcar IDE
 
 *How 280 lines of Python solve the hardest problem in agentic coding — and why it deliberately ignores the patterns everyone else uses.*
 
@@ -10,7 +10,7 @@ The `RelentlessAgent` (defined in `relentless_agent.py`) is the KISS framework's
 
 Cursor, Claude Code, and every other agentic coding tool eventually hit the same wall — the context window fills up, the model starts forgetting earlier decisions, and the work degrades or halts. The industry's response has been a growing stack of complexity: vector databases for long-term memory, RAG pipelines for retrieval, compaction APIs, embedding-based search, layered memory hierarchies (short-term, mid-term, long-term), and elaborate context management subsystems.
 
-The RelentlessAgent takes the opposite path. It uses a single, radical mechanism: **session boundaries with chronological progress summaries**. No memory databases. No embeddings. No compaction. Just plain Python, a for loop, and the insight that an LLM can summarize its own work better than any retrieval system can reconstruct it.
+The RelentlessAgent takes the opposite path. It uses a single, radical mechanism: **session boundaries with chronological progress summaries with explanations and relevant code snippets**. No memory databases. No embeddings. No compaction. Just plain Python, a for loop, and the insight that an LLM can summarize its own work better than any retrieval system can reconstruct it.
 
 ______________________________________________________________________
 
@@ -32,7 +32,7 @@ for session in range(self.max_sub_sessions):
     progress_section = CONTINUATION_PROMPT.format(progress_text=summary)
 ```
 
-Each sub-session is a fresh `KISSAgent` instance with a clean context window. It receives the original task description plus a progress summary from all previous sessions. When the task completes, the agent calls `finish(success=True, is_continue=False, summary="...")` and the loop exits. When it cannot finish within its step or context limit, it calls `finish(success=False, is_continue=True, summary="...")` with a detailed chronological account of what it did and why. The next sub-session picks up where the last one left off.
+Each sub-session is a fresh `KISSAgent` instance, which is a simple agent running a ReAct loop, with a clean context window. It receives the original task description plus a progress summary from all previous sessions. When the task completes, the agent calls `finish(success=True, is_continue=False, summary="...")` and the loop exits. When it cannot finish within its step or context limit, it calls `finish(success=False, is_continue=True, summary="...")` with a detailed chronological account of what it did and why. The next sub-session picks up where the last one left off.
 
 That is the entire continuation mechanism. There is no other trick.
 
@@ -108,7 +108,7 @@ self.budget_used += executor.budget_used
 self.total_tokens_used += executor.total_tokens_used
 ```
 
-This gives the RelentlessAgent global awareness of total spend across all sub-sessions, enabling hard budget caps that prevent runaway costs even when the agent runs for hours. The budget check happens at every step boundary inside `KISSAgent._check_limits()`, and the RelentlessAgent's own `max_budget` parameter governs the ceiling.
+This gives the RelentlessAgent awareness of total spend across all sub-sessions for tracking and reporting. Hard budget caps that prevent runaway costs operate at two levels: `max_budget` caps each individual sub-session (since each `KISSAgent` starts with `budget_used=0`), while the global budget (`Base.global_budget_used` checked against `config.agent.global_max_budget`) caps cumulative spending across all sub-sessions and agents in the process. Both checks happen at every step boundary inside `KISSAgent._check_limits()`.
 
 ### Docker Isolation
 
@@ -161,7 +161,7 @@ The RelentlessAgent's summary is written by the working agent itself, in the mom
 
 ### 3. 10,000 Sub-Sessions, Not One Long Conversation
 
-The default `max_sub_sessions` is 10,000. With 100 steps per session, that is 1,000,000 potential tool calls. No context window management is needed to reach this scale because each session is independent. Cursor and Claude Code can theoretically run indefinitely with compaction, but their effective capacity degrades with each cycle. The RelentlessAgent's capacity is flat — session 9,999 has exactly the same working memory as session 1.
+The default `max_sub_sessions` is 10,000. With 100 steps per session, that is 1,000,000 potential steps (each step can include multiple tool calls). No context window management is needed to reach this scale because each session is independent. Cursor and Claude Code can theoretically run indefinitely with compaction, but their effective capacity degrades with each cycle. The RelentlessAgent's capacity is flat — session 9,999 has exactly the same working memory as session 1.
 
 ### 4. Total Cost: 280 Lines
 
