@@ -178,8 +178,7 @@ main() {
     elif git merge-base --is-ancestor "$PUBLIC_HEAD" "$ORIGIN_HEAD"; then
         print_info "Origin is ahead of kiss_ai - proceeding with release"
     else
-        print_error "Origin and kiss_ai have diverged - please resolve manually"
-        exit 1
+        print_warn "Origin and kiss_ai have diverged - will force-push to sync"
     fi
 
     # Step 2: Bump version in _version.py and README.md
