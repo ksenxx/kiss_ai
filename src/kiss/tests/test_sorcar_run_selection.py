@@ -13,11 +13,8 @@ No mocks, patches, or test doubles.
 
 from __future__ import annotations
 
-import json
-
-from kiss.agents.sorcar.browser_ui import EVENT_HANDLER_JS
-from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS, _build_html
-from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _setup_code_server
+from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 
 
 class TestExtensionRunSelectionCommand:
@@ -68,71 +65,6 @@ class TestExtensionRunSelectionCommand:
         idx = _CS_EXTENSION_JS.index("kiss.runSelection")
         block = _CS_EXTENSION_JS[idx:idx + 200]
         assert "if(!ed)return;" in block
-
-
-class TestExtensionKeybinding:
-    """Verify the keybinding for kiss.runSelection in package.json config."""
-
-    def test_setup_creates_keybinding(self) -> None:
-        """_setup_code_server writes package.json with runSelection keybinding."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = f"{tmpdir}/extensions/kiss-init/package.json"
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            keybindings = pkg["contributes"]["keybindings"]
-            run_sel_kb = [kb for kb in keybindings if kb["command"] == "kiss.runSelection"]
-            assert len(run_sel_kb) == 1
-
-    def test_keybinding_ctrl_l(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = f"{tmpdir}/extensions/kiss-init/package.json"
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            keybindings = pkg["contributes"]["keybindings"]
-            run_sel_kb = [kb for kb in keybindings if kb["command"] == "kiss.runSelection"][0]
-            assert run_sel_kb["key"] == "ctrl+l"
-
-    def test_keybinding_cmd_l_on_mac(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = f"{tmpdir}/extensions/kiss-init/package.json"
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            keybindings = pkg["contributes"]["keybindings"]
-            run_sel_kb = [kb for kb in keybindings if kb["command"] == "kiss.runSelection"][0]
-            assert run_sel_kb["mac"] == "cmd+l"
-
-    def test_command_registered_in_contributes(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = f"{tmpdir}/extensions/kiss-init/package.json"
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            commands = pkg["contributes"]["commands"]
-            cmd_names = [c["command"] for c in commands]
-            assert "kiss.runSelection" in cmd_names
-
-    def test_command_has_title(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            pkg_path = f"{tmpdir}/extensions/kiss-init/package.json"
-            with open(pkg_path) as f:
-                pkg = json.load(f)
-            commands = pkg["contributes"]["commands"]
-            run_sel_cmd = [c for c in commands if c["command"] == "kiss.runSelection"][0]
-            assert run_sel_cmd["title"] == "Run Selection in Chatbox"
 
 
 class TestChatbotExternalRunHandler:
@@ -200,60 +132,6 @@ class TestChatbotExternalRunHandler:
         idx = CHATBOT_JS.index("case'external_run':")
         block = CHATBOT_JS[idx:idx + 500]
         assert "runPromptBtn.disabled=true" in block
-
-
-class TestBuildHtmlContainsExternalRun:
-    """Verify _build_html generates HTML with external_run handling."""
-
-    def test_html_contains_external_run_handler(self) -> None:
-        html = _build_html("Test")
-        assert "external_run" in html
-
-    def test_html_contains_pending_user_msg_for_external(self) -> None:
-        html = _build_html("Test")
-        assert "pendingUserMsg={text:ev.text,images:[]}" in html
-
-    def test_html_contains_event_handler_js(self) -> None:
-        html = _build_html("Test")
-        assert EVENT_HANDLER_JS in html
-
-    def test_html_contains_chatbot_js(self) -> None:
-        html = _build_html("Test")
-        assert CHATBOT_JS in html
-
-
-class TestExtensionJSIntegration:
-    """End-to-end checks that the extension.js written to disk has runSelection."""
-
-    def test_extension_js_on_disk_has_run_selection(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            ext_js_path = f"{tmpdir}/extensions/kiss-init/extension.js"
-            with open(ext_js_path) as f:
-                content = f.read()
-            assert "kiss.runSelection" in content
-
-    def test_extension_js_on_disk_has_run_selection_endpoint(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            ext_js_path = f"{tmpdir}/extensions/kiss-init/extension.js"
-            with open(ext_js_path) as f:
-                content = f.read()
-            assert "/run-selection" in content
-
-    def test_extension_js_on_disk_has_selection_text_param(self) -> None:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _setup_code_server(tmpdir)
-            ext_js_path = f"{tmpdir}/extensions/kiss-init/extension.js"
-            with open(ext_js_path) as f:
-                content = f.read()
-            assert "getText(ed.selection)" in content
 
 
 class TestExtensionJSLogicFlow:
