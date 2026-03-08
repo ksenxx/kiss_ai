@@ -24,6 +24,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
 - [Multi-Agent Orchestration](#-multi-agent-orchestration-is-function-composition)
 - [KISS Sorcar](#-kiss-sorcar)
+- [Key Features and Ideologies](#-key-features-and-ideologies-behind-kiss-and-sorcar)
 - [Repo Optimizer](#-using-repo-optimizer)
 - [Output Formatting](#-output-formatting)
 - [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
@@ -54,11 +55,18 @@ export OPENROUTER_API_KEY="your-key-here" # Optional
 export TOGETHER_API_KEY="your-key-here" # Optional
 ```
 
-You must provide at least one API key:
+You must provide ANTHROPIC_APY_KEY and GEMINI_API_KEY in the shell environment.
 
 ```bash
 # To install for development
 curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
+cd kiss_ai
+# To launch sorcar
+./sorcar
+# To use sorcar CLI
+./sorcar --task "Mutiply 45278*2983"
+# or
+./sorcar --f example_prompt.md
 
 
 # To install as a library
@@ -160,6 +168,32 @@ print(final)
 **That's it.** Each agent can use a different model. Each agent saves its own trajectory. And you compose them with the most powerful orchestration tool ever invented: **regular Python code**.
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
+
+## 💡 Key Features and Ideologies behind KISS and Sorcar
+
+### Key Features
+
+- **KISSAgent with ReAct Loop**: The core agent runs a generate-execute-observe loop with native function calling, automatic tool schema generation from Python function signatures and docstrings, trajectory saving, and per-step budget tracking.
+- **RelentlessAgent for Long-Running Tasks**: Extends `KISSAgent` with auto-continuation across multiple sub-sessions (up to 2000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new session with the logged context, enabling agents to run for hours to days.
+- **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, plus full browser automation via Playwright with accessibility-tree-based element selection.
+- **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
+- **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (400+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
+- **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
+- **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
+- **RepoOptimizer for Iterative Code Improvement**: Wraps `SorcarAgent` to run a command, monitor output in real time, fix errors, and iteratively optimize code for specified metrics — tracking tried ideas to avoid repeating failed approaches.
+- **Accessibility-Tree Browser Automation**: The `WebUseTool` uses Playwright's `aria_snapshot()` to extract the accessibility tree, numbers interactive elements for LLM reference, and avoids JavaScript injection to reduce bot detection.
+- **Dynamic Configuration System**: Uses Pydantic models with a `add_config()` pattern that lets each subsystem register its own config at import time, with automatic CLI argument generation from the schema.
+- **Trajectory Visualization**: A web-based UI for viewing complete agent execution histories including message flows, tool calls, token usage, and budget stats — with markdown rendering and syntax-highlighted code blocks.
+- **Docker Integration**: A `DockerManager` for running agent tasks in isolated containers with automatic image pulling, lifecycle management, port mapping, and cleanup.
+
+### Core Ideologies
+
+- **Radical Simplicity over Abstraction**: KISS rejects the layered abstraction and ceremony found in frameworks like LangChain, CrewAI, or DSPy. Agents are just functions, orchestration is plain Python function composition, and tools are ordinary callables — no decorators, annotations, or boilerplate required.
+- **No Bloat, No Overengineering**: Every function should do one thing well. After implementation, code is aggressively simplified — unnecessary attributes, variables, config options, conditional checks, and comments are removed. The codebase stays lean by design.
+- **No Mocks, No Patches, No Test Doubles**: Tests must use real inputs and verify real outputs. Integration tests are heavily favored over unit tests. This philosophy ensures tests validate actual behavior rather than implementation assumptions.
+- **100% Branch Coverage with Redundancy Detection**: The project targets full branch coverage and uses a custom `redundancy_analyzer.py` (powered by coverage.py's dynamic context feature) to identify and remove tests whose coverage is a strict subset of other tests — keeping the test suite minimal and meaningful.
+- **Self-Improvement Loop**: The Sorcar agent maintains a `LESSONS.md` file where it records rules and patterns learned during tasks, reviewing them at the start of each new task to avoid repeating mistakes.
+- **Free and Open-Source**: KISS Sorcar is a fully functional alternative to proprietary coding assistants like Cursor, with zero monthly subscription fees and complete source transparency under Apache 2.0.
 
 ## 🔧 Using Repo Optimizer
 

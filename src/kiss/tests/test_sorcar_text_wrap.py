@@ -122,66 +122,6 @@ class TestToolCallBroadcastLongContent:
                 break
         return events
 
-    def test_edit_long_path(self) -> None:
-        long_path = "/very/deep/nested/" + "subdir/" * 20 + "file.py"
-        self.printer.print(
-            "Edit",
-            type="tool_call",
-            tool_input={
-                "file_path": long_path,
-                "old_string": "a",
-                "new_string": "b",
-            },
-        )
-        events = self._drain()
-        tc = [e for e in events if e["type"] == "tool_call"]
-        assert len(tc) == 1
-        assert tc[0]["path"] == long_path
-        assert tc[0]["name"] == "Edit"
-
-    def test_read_long_path(self) -> None:
-        long_path = "/workspace/" + "a" * 200 + "/config.yaml"
-        self.printer.print(
-            "Read",
-            type="tool_call",
-            tool_input={"file_path": long_path},
-        )
-        events = self._drain()
-        tc = [e for e in events if e["type"] == "tool_call"]
-        assert len(tc) == 1
-        assert tc[0]["path"] == long_path
-
-    def test_write_long_path_and_description(self) -> None:
-        long_path = "/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u.txt"
-        long_desc = "Writing a very long description " * 10
-        self.printer.print(
-            "Write",
-            type="tool_call",
-            tool_input={
-                "file_path": long_path,
-                "content": "hello",
-                "description": long_desc,
-            },
-        )
-        events = self._drain()
-        tc = [e for e in events if e["type"] == "tool_call"]
-        assert len(tc) == 1
-        assert tc[0]["path"] == long_path
-        assert tc[0]["description"] == long_desc
-
-    def test_tool_call_no_path(self) -> None:
-        self.printer.print(
-            "Bash",
-            type="tool_call",
-            tool_input={"command": "echo hi"},
-        )
-        events = self._drain()
-        tc = [e for e in events if e["type"] == "tool_call"]
-        assert len(tc) == 1
-        assert "path" not in tc[0]
-        assert tc[0]["command"] == "echo hi"
-
-
 class TestUsageInfoBroadcastLongContent:
     """Verify usage_info events carry full long text."""
 
@@ -191,32 +131,6 @@ class TestUsageInfoBroadcastLongContent:
 
     def teardown_method(self) -> None:
         self.printer.remove_client(self.cq)
-
-    def test_long_usage_text(self) -> None:
-        long_text = (
-            "Steps: 42/100, Tokens: 123456/200000, "
-            "Budget: $1.2345/$200.00, "
-            "Global Budget: $5.6789/$200.00"
-        )
-        self.printer.print(long_text, type="usage_info")
-        event = self.cq.get_nowait()
-        assert event["type"] == "usage_info"
-        assert event["text"] == long_text
-
-    def test_very_long_usage_text(self) -> None:
-        long_text = "x" * 500
-        self.printer.print(long_text, type="usage_info")
-        event = self.cq.get_nowait()
-        assert event["type"] == "usage_info"
-        assert event["text"] == long_text
-
-    def test_multiline_usage_text(self) -> None:
-        text = "Line1: value\nLine2: value\nLine3: value"
-        self.printer.print(text, type="usage_info")
-        event = self.cq.get_nowait()
-        assert event["type"] == "usage_info"
-        assert event["text"] == text
-
 
 class TestChatbotCSSWrapping:
     """Verify CHATBOT_CSS overrides don't break wrapping."""
