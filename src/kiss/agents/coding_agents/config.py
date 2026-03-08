@@ -19,7 +19,7 @@ class RelentlessCodingAgentConfig(BaseModel):
         description="Maximum budget in USD for the Relentless Coding Agent",
     )
     max_sub_sessions: int = Field(
-        default=200,
+        default=2000,
         description="Maximum number of sub-sessions for auto-continuation",
     )
     verbose: bool = Field(
