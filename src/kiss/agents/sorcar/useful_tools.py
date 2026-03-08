@@ -159,11 +159,11 @@ def _kill_process_group(process: subprocess.Popen) -> None:
     except OSError:
         try:
             process.kill()
-        except OSError:
+        except OSError:  # pragma: no cover — Popen.send_signal polls first in Python 3.13+
             pass
     try:
         process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired:  # pragma: no cover — unreachable after SIGKILL
         pass
 
 
@@ -307,14 +307,14 @@ class UsefulTools:
                 _kill_process_group(process)
                 try:
                     process.communicate(timeout=5)
-                except Exception:
+                except Exception:  # pragma: no cover — unreachable after SIGKILL
                     pass
                 return "Error: Command execution timeout"
             except BaseException:
                 _kill_process_group(process)
                 try:
                     process.communicate(timeout=5)
-                except Exception:
+                except Exception:  # pragma: no cover — unreachable after SIGKILL + reap
                     pass
                 raise
             return _format_bash_result(process.returncode, stdout, max_output_chars)
@@ -349,7 +349,7 @@ class UsefulTools:
                 self.stream_callback(line)
             try:
                 process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired:  # pragma: no cover
                 _kill_process_group(process)
         except BaseException:
             _kill_process_group(process)
