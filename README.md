@@ -55,7 +55,7 @@ export OPENROUTER_API_KEY="your-key-here" # Optional
 export TOGETHER_API_KEY="your-key-here" # Optional
 ```
 
-You must provide ANTHROPIC_APY_KEY and GEMINI_API_KEY in the shell environment.
+You must provide ANTHROPIC_API_KEY and GEMINI_API_KEY in the shell environment.
 
 ```bash
 # To install for development
@@ -70,8 +70,10 @@ cd kiss_ai
 
 
 # To install as a library
-pip install kiss-agent-framework
-python -m kiss.agents.sorcar.sorcar
+curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
+# To launch sorcar
+cd myproject
+uv run sorcar
 ```
 
 # Introduction to KISS Sorcar
