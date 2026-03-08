@@ -1,5 +1,6 @@
 """Tests for merge view showing up on second file change after accepting first."""
 
+import json
 import os
 import subprocess
 import tempfile
@@ -9,7 +10,9 @@ from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _parse_diff_hunks,
     _prepare_merge_view,
+    _save_untracked_base,
     _snapshot_files,
+    _untracked_base_dir,
 )
 
 
@@ -130,6 +133,146 @@ class TestSnapshotFiles:
         with tempfile.TemporaryDirectory() as tmpdir:
             result = _snapshot_files(tmpdir, {"nonexistent.txt"})
             assert result == {}
+
+
+class TestModifiedUntrackedFile:
+    """Tests for merge view detecting modifications to pre-existing untracked files."""
+
+    def test_modified_untracked_file_detected(self) -> None:
+        """An untracked file that existed before the task and was modified
+        by the agent should appear in the merge view."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # Create an untracked file (simulating a file that already existed)
+            Path(repo, "untracked.py").write_text("line 1\nline 2\nline 3\n")
+
+            # Capture pre-state (file is already untracked)
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(
+                repo, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(repo, data_dir, pre_untracked)
+
+            assert "untracked.py" in pre_untracked
+            assert "untracked.py" in pre_hashes
+
+            # Agent modifies the untracked file
+            Path(repo, "untracked.py").write_text("line 1\nMODIFIED\nline 3\n")
+
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result.get("status") == "opened"
+            assert result.get("count") == 1
+
+            # Verify the manifest uses saved base content (not empty)
+            manifest = json.loads(
+                Path(data_dir, "pending-merge.json").read_text()
+            )
+            base_content = Path(manifest["files"][0]["base"]).read_text()
+            assert base_content == "line 1\nline 2\nline 3\n"
+
+    def test_unchanged_untracked_file_not_shown(self) -> None:
+        """An untracked file that was NOT modified by the agent should not
+        appear in the merge view."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            Path(repo, "untracked.py").write_text("line 1\n")
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(
+                repo, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(repo, data_dir, pre_untracked)
+
+            # Agent does NOT modify the untracked file
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result.get("error") == "No changes"
+
+    def test_save_untracked_base_creates_copies(self) -> None:
+        """_save_untracked_base should copy untracked files to artifact_dir parent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            Path(repo, "untracked.py").write_text("original content\n")
+            untracked = _capture_untracked(repo)
+
+            _save_untracked_base(repo, data_dir, untracked)
+
+            ub_dir = _untracked_base_dir()
+            saved = ub_dir / "untracked.py"
+            assert saved.is_file()
+            assert saved.read_text() == "original content\n"
+
+    def test_save_untracked_base_clears_old_copies(self) -> None:
+        """Calling _save_untracked_base again should clear old copies."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            ub_dir = _untracked_base_dir()
+
+            # First save
+            Path(repo, "old.py").write_text("old\n")
+            _save_untracked_base(repo, data_dir, {"old.py"})
+            assert (ub_dir / "old.py").is_file()
+
+            # Second save with different file
+            Path(repo, "new.py").write_text("new\n")
+            _save_untracked_base(repo, data_dir, {"new.py"})
+            assert not (ub_dir / "old.py").exists()
+            assert (ub_dir / "new.py").is_file()
+
+    def test_save_untracked_base_skips_large_files(self) -> None:
+        """Files > 2MB should not be saved."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            Path(repo, "big.bin").write_bytes(b"x" * 3_000_000)
+            _save_untracked_base(repo, data_dir, {"big.bin"})
+            assert not (_untracked_base_dir() / "big.bin").exists()
+
+    def test_modified_untracked_with_tracked_changes(self) -> None:
+        """Both tracked and untracked modifications should appear together."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # Create untracked file
+            Path(repo, "untracked.py").write_text("ut line 1\n")
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(
+                repo, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(repo, data_dir, pre_untracked)
+
+            # Agent modifies both tracked and untracked files
+            Path(repo, "example.md").write_text("line 1\nCHANGED\nline 3\n")
+            Path(repo, "untracked.py").write_text("ut MODIFIED\n")
+
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result.get("status") == "opened"
+            assert result.get("count") == 2
 
 
 class TestBackwardCompatibility:

@@ -76,30 +76,34 @@ _history_cache: list[dict[str, str]] | None = None
 _history_lock = threading.Lock()
 
 
+def _load_history_unlocked() -> list[dict[str, str]]:
+    """Load task history from cache or disk. Must be called with _history_lock held."""
+    global _history_cache
+    if _history_cache is not None:
+        return _history_cache
+    if HISTORY_FILE.exists():
+        try:
+            data = json.loads(HISTORY_FILE.read_text())
+            if isinstance(data, list) and data:
+                seen: set[str] = set()
+                result: list[dict[str, str]] = []
+                for t in data[:MAX_HISTORY]:
+                    task_str = t["task"]
+                    if task_str not in seen:
+                        seen.add(task_str)
+                        result.append(t)
+                _history_cache = result
+                return result
+        except (json.JSONDecodeError, OSError):
+            logger.debug("Exception caught", exc_info=True)
+    _save_history_unlocked(list(SAMPLE_TASKS))
+    return _history_cache  # type: ignore[return-value]
+
+
 def _load_history() -> list[dict[str, str]]:
     """Load task history from cache or disk. Thread-safe."""
-    global _history_cache
     with _history_lock:
-        if _history_cache is not None:
-            return _history_cache
-        if HISTORY_FILE.exists():
-            try:
-                data = json.loads(HISTORY_FILE.read_text())
-                if isinstance(data, list) and data:
-                    seen: set[str] = set()
-                    result: list[dict[str, str]] = []
-                    for t in data[:MAX_HISTORY]:
-                        task_str = t["task"]
-                        if task_str not in seen:
-                            seen.add(task_str)
-                            result.append(t)
-                    _history_cache = result
-                    return result
-            except (json.JSONDecodeError, OSError):
-                logger.debug("Exception caught", exc_info=True)
-                pass
-        _save_history_unlocked(list(SAMPLE_TASKS))
-        return _history_cache  # type: ignore[return-value]
+        return _load_history_unlocked()
 
 
 def _save_history_unlocked(entries: list[dict[str, str]]) -> None:
@@ -111,7 +115,6 @@ def _save_history_unlocked(entries: list[dict[str, str]]) -> None:
         HISTORY_FILE.write_text(json.dumps(_history_cache, indent=2))
     except OSError:
         logger.debug("Exception caught", exc_info=True)
-        pass
 
 
 def _save_history(entries: list[dict[str, str]]) -> None:
@@ -123,8 +126,6 @@ def _save_history(entries: list[dict[str, str]]) -> None:
 def _set_latest_result(result: str) -> None:
     """Set the result of the most recent task. Thread-safe."""
     with _history_lock:
-        if _history_cache is None:
-            return
         if _history_cache:
             _history_cache[0]["result"] = result
             _save_history_unlocked(_history_cache)
@@ -138,7 +139,6 @@ def _load_proposals() -> list[str]:
                 return [str(t) for t in data if isinstance(t, str) and t.strip()][:5]
         except (json.JSONDecodeError, OSError):
             logger.debug("Exception caught", exc_info=True)
-            pass
     return []
 
 
@@ -148,7 +148,6 @@ def _save_proposals(proposals: list[str]) -> None:
         PROPOSALS_FILE.write_text(json.dumps(proposals))
     except OSError:
         logger.debug("Exception caught", exc_info=True)
-        pass
 
 
 def _load_json_dict(path: Path) -> dict:
@@ -159,7 +158,6 @@ def _load_json_dict(path: Path) -> dict:
                 return data
         except (json.JSONDecodeError, OSError):
             logger.debug("Exception caught", exc_info=True)
-            pass
     return {}
 
 
@@ -189,7 +187,6 @@ def _record_model_usage(model: str) -> None:
         MODEL_USAGE_FILE.write_text(json.dumps(usage))
     except OSError:
         logger.debug("Exception caught", exc_info=True)
-        pass
 
 
 FILE_USAGE_FILE = _KISS_DIR / "file_usage.json"
@@ -201,39 +198,20 @@ def _load_file_usage() -> dict[str, int]:
 
 def _record_file_usage(path: str) -> None:
     """Increment the access count for a file path."""
-    usage = _load_file_usage()
-    usage[path] = usage.get(path, 0) + 1
+    usage = _load_json_dict(FILE_USAGE_FILE)
+    usage[path] = int(usage.get(path, 0)) + 1
     try:
         _ensure_kiss_dir()
         FILE_USAGE_FILE.write_text(json.dumps(usage))
     except OSError:
         logger.debug("Exception caught", exc_info=True)
-        pass
 
 
 def _add_task(task: str) -> None:
     """Add a task to history, deduplicating. Thread-safe."""
     with _history_lock:
-        # Force load if not cached yet (without re-acquiring lock)
-        global _history_cache
-        if _history_cache is None:
-            if HISTORY_FILE.exists():
-                try:
-                    data = json.loads(HISTORY_FILE.read_text())
-                    if isinstance(data, list) and data:
-                        seen: set[str] = set()
-                        result: list[dict[str, str]] = []
-                        for t in data[:MAX_HISTORY]:
-                            task_str = t["task"]
-                            if task_str not in seen:
-                                seen.add(task_str)
-                                result.append(t)
-                        _history_cache = result
-                except (json.JSONDecodeError, OSError):
-                    logger.debug("Exception caught", exc_info=True)
-                    pass
-            if _history_cache is None:
-                _history_cache = list(SAMPLE_TASKS)
+        _load_history_unlocked()
+        assert _history_cache is not None
         history = [e for e in _history_cache if e["task"] != task]
         history.insert(0, {"task": task, "result": ""})
         _save_history_unlocked(history[:MAX_HISTORY])
@@ -248,7 +226,8 @@ def _get_task_history_md_path() -> Path:
 def _init_task_history_md() -> Path:
     path = _get_task_history_md_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# Task History\n\n")
+    if not path.exists():
+        path.write_text("# Task History\n\n")
     return path
 
 

@@ -38,7 +38,7 @@ def test_model_picker_shrinks_on_zoom():
     idx = CHATBOT_CSS.index("#model-picker{")
     block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
     assert "min-width:0" in block
-    assert "overflow:hidden" in block
+    assert "overflow:visible" in block
 
 
 def test_input_actions_no_shrink():

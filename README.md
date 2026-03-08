@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.8-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.9-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -68,7 +68,7 @@ python -m kiss.agents.sorcar.sorcar
 
 # Introduction to KISS Sorcar
 
-**KISS Sorcar** (named after the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity. It runs **locally** as a VSCode IDE. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. 
+**KISS Sorcar** (named after the [Famous Bengali Magician](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity. It runs **locally** as a VSCode IDE. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support.
 
 #whatispossible #KISSSorcar
 
@@ -112,11 +112,11 @@ print(result)  # 127.05
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
 Well, you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well-established agent frameworks?**" Here is my response:
 
-- **KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.**
-- **It has the GEPA prompt optimizer built-in with a simple API.**
-- **It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.**
-- **No bloat and simple codebase.**
-- **New techniques will be incorporated to the framework as we research them.**
+- KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.
+- It has the GEPA prompt optimizer built-in with a simple API.
+- It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.
+- No bloat and simple codebase.
+- New techniques will be incorporated to the framework as we research them.
 
 ## 🤝 Multi-Agent Orchestration is Function Composition
 
@@ -258,7 +258,6 @@ The visualizer provides:
 ![Trajectory Visualizer](assets/KISSTrajectory.png)
 
 📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
-
 
 ## 📦 Developer Installation
 

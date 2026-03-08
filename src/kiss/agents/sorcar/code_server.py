@@ -14,6 +14,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from kiss.core import config as config_module
+
 logger = logging.getLogger(__name__)
 
 _CS_SETTINGS = {
@@ -33,6 +35,7 @@ _CS_SETTINGS = {
     "git.repositoryScanMaxDepth": 1,
     "git.autoRepositoryDetection": True,
     "git.openRepositoryInParentFolders": "always",
+    "files.saveConflictResolution": "overwriteFileOnDisk",
     "github.copilot.enable": {"*": True},
     "github.copilot.editor.enableAutoCompletions": True,
 }
@@ -222,6 +225,7 @@ function activate(ctx){
     }
     ms={};curHunk=null;
     await vscode.workspace.saveAll(false);
+    try{await vscode.workspace.saveAll(false);}catch(e){}
     vscode.window.showInformationMessage('All changes accepted.');
     firePost('/merge-action',{action:'all-done'});
   }));
@@ -240,6 +244,7 @@ function activate(ctx){
     }
     ms={};curHunk=null;
     await vscode.workspace.saveAll(false);
+    try{await vscode.workspace.saveAll(false);}catch(e){}
     vscode.window.showInformationMessage('All changes rejected.');
     firePost('/merge-action',{action:'all-done'});
   }));
@@ -311,6 +316,9 @@ function activate(ctx){
     vscode.workspace.saveAll(false).then(function(){
       vscode.window.showInformationMessage('All changes reviewed.');
       firePost('/merge-action',{action:'all-done'});
+    },function(){
+      vscode.window.showInformationMessage('All changes reviewed.');
+      firePost('/merge-action',{action:'all-done'});
     });
   }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
@@ -380,6 +388,7 @@ function activate(ctx){
   },800);
   ctx.subscriptions.push({dispose:function(){clearInterval(iv)}});
   async function openMerge(data){
+    try{await vscode.workspace.saveAll(false);}catch(e){}
     for(var fp in ms){
       vscode.window.visibleTextEditors.forEach(function(ed){
         if(ed.document.uri.fsPath===fp){
@@ -393,6 +402,8 @@ function activate(ctx){
       var currentUri=vscode.Uri.file(f.current);
       var doc=await vscode.workspace.openTextDocument(currentUri);
       var ed=await vscode.window.showTextDocument(doc,{preview:false});
+      if(doc.isDirty){try{await vscode.commands.executeCommand(
+        'workbench.action.files.revert');}catch(e){}}
       var baseLines=fs.readFileSync(f.base,'utf8').split('\\n');
       var hunks=(f.hunks||[]).map(function(h){
         return{cs:h.cs,cc:h.cc,bs:h.bs,bc:h.bc};
@@ -632,7 +643,7 @@ def _scan_files(work_dir: str) -> list[str]:
                     return paths
             for d in dirs:
                 paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
-    except OSError:
+    except OSError:  # pragma: no cover — os.walk swallows all OSErrors internally
         logger.debug("Exception caught", exc_info=True)
         pass
     return paths
@@ -696,6 +707,64 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
     return result
 
 
+def _untracked_base_dir() -> Path:
+    """Return the directory for storing untracked file base copies.
+
+    Uses ``{artifact_dir.parent}/data_dir/untracked-base/`` so copies
+    live alongside other artifacts rather than inside the code-server
+    data directory.
+
+    Returns:
+        Path to the untracked-base directory.
+    """
+    artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
+    return artifact_dir.parent / "data_dir" / "untracked-base"
+
+
+def _save_untracked_base(
+    work_dir: str, data_dir: str, untracked: set[str]
+) -> None:
+    """Save copies of untracked files before a task runs.
+
+    These copies serve as the "base" for merge-view diffs when an agent
+    modifies a pre-existing untracked file.
+
+    Args:
+        work_dir: Repository root.
+        data_dir: Code-server data directory (unused, kept for API compat).
+        untracked: Set of untracked file paths (relative to work_dir).
+    """
+    base_dir = _untracked_base_dir()
+    if base_dir.exists():
+        shutil.rmtree(base_dir)
+    for fname in untracked:
+        fpath = Path(work_dir) / fname
+        try:
+            if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
+                continue
+            dest = base_dir / fname
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(fpath, dest)
+        except OSError:
+            logger.debug("Exception caught", exc_info=True)
+
+
+def _cleanup_merge_data(data_dir: str) -> None:
+    """Remove temporary merge and untracked-base directories after merge completes.
+
+    Should be called when the user finishes reviewing all merge changes.
+
+    Args:
+        data_dir: Code-server data directory (merge-temp lives here).
+    """
+    merge_dir = Path(data_dir) / "merge-temp"
+    if merge_dir.exists():
+        shutil.rmtree(merge_dir, ignore_errors=True)
+    base_dir = _untracked_base_dir()
+    if base_dir.exists():
+        shutil.rmtree(base_dir, ignore_errors=True)
+
+
 def _prepare_merge_view(
     work_dir: str,
     data_dir: str,
@@ -743,23 +812,55 @@ def _prepare_merge_view(
         except (OSError, UnicodeDecodeError):
             logger.debug("Exception caught", exc_info=True)
             pass
+    # Detect modified pre-existing untracked files
+    if pre_file_hashes:
+        for fname in pre_untracked:
+            if fname in file_hunks:
+                continue
+            if fname not in pre_file_hashes:
+                continue
+            fpath = Path(work_dir) / fname
+            try:
+                current_hash = hashlib.md5(fpath.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            if current_hash == pre_file_hashes[fname]:
+                continue
+            try:
+                if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
+                    continue
+                line_count = len(fpath.read_text().splitlines())
+                if line_count:
+                    file_hunks[fname] = [
+                        {"bs": 0, "bc": 0, "cs": 0, "cc": line_count}
+                    ]
+            except (OSError, UnicodeDecodeError):
+                logger.debug("Exception caught", exc_info=True)
     if not file_hunks:
         return {"error": "No changes"}
     merge_dir = Path(data_dir) / "merge-temp"
     if merge_dir.exists():
         shutil.rmtree(merge_dir)
+    ub_dir = _untracked_base_dir()
     manifest_files = []
     for fname, fh in file_hunks.items():
         current_path = Path(work_dir) / fname
         base_path = merge_dir / fname
         base_path.parent.mkdir(parents=True, exist_ok=True)
-        base_result = subprocess.run(
-            ["git", "show", f"HEAD:{fname}"],
-            capture_output=True,
-            text=True,
-            cwd=work_dir,
-        )
-        base_path.write_text(base_result.stdout if base_result.returncode == 0 else "")
+        # For untracked files, use saved pre-task copy as base if available
+        saved_base = ub_dir / fname
+        if saved_base.is_file():
+            shutil.copy2(saved_base, base_path)
+        else:
+            base_result = subprocess.run(
+                ["git", "show", f"HEAD:{fname}"],
+                capture_output=True,
+                text=True,
+                cwd=work_dir,
+            )
+            base_path.write_text(
+                base_result.stdout if base_result.returncode == 0 else ""
+            )
         manifest_files.append(
             {
                 "name": fname,

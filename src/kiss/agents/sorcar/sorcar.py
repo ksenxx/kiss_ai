@@ -23,8 +23,10 @@ from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter, find_free_port
 from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
+    _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
+    _save_untracked_base,
     _scan_files,
     _setup_code_server,
     _snapshot_files,
@@ -58,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 _FAST_MODEL = "gemini-2.0-flash"
 _COMMIT_MODEL = "gemini-2.0-flash"
+_INTERNAL_MODELS = frozenset({_FAST_MODEL, _COMMIT_MODEL})
 
 
 class _StopRequested(BaseException):
@@ -73,7 +76,6 @@ def _read_active_file(cs_data_dir: str) -> str:
             return path
     except (OSError, json.JSONDecodeError):
         logger.debug("Exception caught", exc_info=True)
-        pass
     return ""
 
 
@@ -155,6 +157,8 @@ def run_chatbot(
     proposed_tasks: list[str] = _load_proposals()
     proposed_lock = threading.Lock()
     selected_model = _load_last_model() or default_model
+    last = _load_last_model()
+    selected_model = last if last and last not in _INTERNAL_MODELS else default_model
 
     _init_task_history_md()
 
@@ -172,7 +176,6 @@ def run_chatbot(
                 port_in_use = True
         except (ConnectionRefusedError, OSError):
             logger.debug("Exception caught", exc_info=True)
-            pass
 
         workdir_file = Path(cs_data_dir) / "workdir"
         prev_workdir = ""
@@ -180,7 +183,6 @@ def run_chatbot(
             prev_workdir = workdir_file.read_text().strip() if workdir_file.exists() else ""
         except OSError:
             logger.debug("Exception caught", exc_info=True)
-            pass
         workdir_changed = prev_workdir != actual_work_dir
 
         need_restart = port_in_use and (ext_changed or workdir_changed)
@@ -199,7 +201,6 @@ def run_chatbot(
                 time.sleep(1.5)
             except Exception:
                 logger.debug("Exception caught", exc_info=True)
-                pass
             port_in_use = False
         if port_in_use:
             code_server_url = cs_url
@@ -247,7 +248,6 @@ def run_chatbot(
                 workdir_file.write_text(actual_work_dir)
             except OSError:
                 logger.debug("Exception caught", exc_info=True)
-                pass
 
     html_page = _build_html(title, code_server_url, actual_work_dir)
     shutdown_timer: threading.Timer | None = None
@@ -322,7 +322,6 @@ def run_chatbot(
                 )
         except Exception:
             logger.debug("Exception caught", exc_info=True)
-            pass
 
     def _watch_theme_file() -> None:
         theme_file = _KISS_DIR / "vscode-theme.json"
@@ -332,7 +331,6 @@ def run_chatbot(
                 last_mtime = theme_file.stat().st_mtime
         except OSError:
             logger.debug("Exception caught", exc_info=True)
-            pass
         while not shutting_down.is_set():
             try:
                 if theme_file.exists():
@@ -345,7 +343,6 @@ def run_chatbot(
                         printer.broadcast({"type": "theme_changed", **colors})
             except (OSError, json.JSONDecodeError):
                 logger.debug("Exception caught", exc_info=True)
-                pass
             shutting_down.wait(1.0)
 
     threading.Thread(target=_watch_theme_file, daemon=True).start()
@@ -378,6 +375,10 @@ def run_chatbot(
             pre_hunks = _parse_diff_hunks(actual_work_dir)
             pre_untracked = _capture_untracked(actual_work_dir)
             pre_file_hashes = _snapshot_files(actual_work_dir, set(pre_hunks.keys()))
+            pre_file_hashes = _snapshot_files(
+                actual_work_dir, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(actual_work_dir, cs_data_dir, pre_untracked)
             active_file = _read_active_file(cs_data_dir)
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
@@ -414,12 +415,12 @@ def run_chatbot(
             # immediately submit a new task without getting a 409.
             if done_event:
                 printer.broadcast(done_event)
-            if done_event and done_event.get("type") == "task_done":
-                threading.Thread(
-                    target=generate_followup,
-                    args=(task, result_text),
-                    daemon=True,
-                ).start()
+                if done_event.get("type") == "task_done":
+                    threading.Thread(
+                        target=generate_followup,
+                        args=(task, result_text),
+                        daemon=True,
+                    ).start()
             try:
                 merge_result = _prepare_merge_view(
                     actual_work_dir,
@@ -432,13 +433,11 @@ def run_chatbot(
                     printer.broadcast({"type": "merge_started"})
             except Exception:
                 logger.debug("Exception caught", exc_info=True)
-                pass
             refresh_file_cache()
             try:
                 refresh_proposed_tasks()
             except Exception:
                 logger.debug("Exception caught", exc_info=True)
-                pass
 
     def stop_agent() -> bool:
         """Kill the current agent thread and reset state for a new task.
@@ -507,13 +506,11 @@ def run_chatbot(
                     try:
                         event = cq.get_nowait()
                     except queue.Empty:
-                        logger.debug("Exception caught", exc_info=True)
                         await asyncio.sleep(0.05)
                         continue
                     yield f"data: {json.dumps(event)}\n\n"
             except asyncio.CancelledError:
                 logger.debug("Exception caught", exc_info=True)
-                pass
             finally:
                 printer.remove_client(cq)
                 _schedule_shutdown()
@@ -534,6 +531,8 @@ def run_chatbot(
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
+        if model not in _INTERNAL_MODELS:
+            _record_model_usage(model)
         t = threading.Thread(
             target=run_agent_thread,
             args=(task, model, attachments),
@@ -709,7 +708,6 @@ def run_chatbot(
                 kind = data.get("kind", "dark")
             except (json.JSONDecodeError, OSError):
                 logger.debug("Exception caught", exc_info=True)
-                pass
         return JSONResponse(_THEME_PRESETS.get(kind, _THEME_PRESETS["dark"]))
 
     async def open_file(request: Request) -> JSONResponse:
@@ -730,6 +728,7 @@ def run_chatbot(
         action = body.get("action", "")
         if action == "all-done":
             printer.broadcast({"type": "merge_ended"})
+            _cleanup_merge_data(cs_data_dir)
             return JSONResponse({"status": "ok"})
         if action not in ("prev", "next", "accept-all", "reject-all", "accept", "reject"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
@@ -746,7 +745,6 @@ def run_chatbot(
         if "error" in result:
             return JSONResponse(result, status_code=error_status)
         return JSONResponse(result)
-
     async def commit(request: Request) -> JSONResponse:
         def _do_commit() -> dict[str, str]:
             try:
@@ -804,6 +802,7 @@ def run_chatbot(
                 return {"error": str(e)}
 
         return await _thread_json_response(_do_push)
+
 
     async def record_file_usage_endpoint(
         request: Request,
@@ -936,9 +935,9 @@ def run_chatbot(
             Route("/open-file", open_file, methods=["POST"]),
             Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
             Route("/focus-editor", focus_editor, methods=["POST"]),
-            Route("/merge-action", merge_action, methods=["POST"]),
             Route("/commit", commit, methods=["POST"]),
             Route("/push", push, methods=["POST"]),
+            Route("/merge-action", merge_action, methods=["POST"]),
             Route("/record-file-usage", record_file_usage_endpoint, methods=["POST"]),
             Route("/generate-commit-message", generate_commit_message, methods=["POST"]),
             Route("/generate-config-message", generate_config_message, methods=["POST"]),
@@ -964,7 +963,6 @@ def run_chatbot(
         (_KISS_DIR / "assistant-port").write_text(str(port))
     except OSError:
         logger.debug("Exception caught", exc_info=True)
-        pass
     url = f"http://127.0.0.1:{port}"
     printer.print(f"{title} running at {url}")
     printer.print(f"Work directory: {actual_work_dir}")
@@ -974,8 +972,6 @@ def run_chatbot(
         webbrowser.open(url)
 
     threading.Thread(target=_open_browser, daemon=True).start()
-    import logging
-
     logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)
     config = uvicorn.Config(
         app,
@@ -996,7 +992,6 @@ def run_chatbot(
         server.run()
     except KeyboardInterrupt:
         logger.debug("Exception caught", exc_info=True)
-        pass
     _cleanup()
     os._exit(0)
 

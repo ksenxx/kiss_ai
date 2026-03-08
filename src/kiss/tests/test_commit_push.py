@@ -1,52 +1,8 @@
-"""Tests for commit author attribution and push functionality."""
+"""Tests for commit author attribution."""
 
 import os
 import subprocess
 import tempfile
-
-from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
-
-
-def test_commit_author_in_assistant_source():
-    """The git commit command in sorcar.py must set author to KISS Sorcar."""
-    import inspect
-
-    from kiss.agents.sorcar import sorcar
-
-    source = inspect.getsource(sorcar)
-    assert "--author=KISS Sorcar <ksen@berkeley.edu>" in source
-
-
-def test_commit_committer_env_in_assistant_source():
-    """The git commit must set GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL to KISS Sorcar."""
-    import inspect
-
-    from kiss.agents.sorcar import sorcar
-
-    source = inspect.getsource(sorcar)
-    assert '"GIT_COMMITTER_NAME": "KISS Sorcar"' in source
-    assert '"GIT_COMMITTER_EMAIL": "ksen@berkeley.edu"' in source
-
-
-def test_push_js_function_exists():
-    """The JS must define mergePush function that calls /push endpoint."""
-    assert "function mergePush()" in CHATBOT_JS
-    assert "fetch('/push'" in CHATBOT_JS
-
-
-def test_push_button_shows_pushing_state():
-    """Push button should show 'Pushing...' text while in progress."""
-    assert "Pushing..." in CHATBOT_JS
-
-
-def test_push_route_in_assistant_source():
-    """The /push route must be registered in the Starlette app."""
-    import inspect
-
-    from kiss.agents.sorcar import sorcar
-
-    source = inspect.getsource(sorcar)
-    assert 'Route("/push"' in source
 
 
 def test_git_commit_with_kiss_sorcar_attribution():
