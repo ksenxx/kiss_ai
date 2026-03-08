@@ -631,6 +631,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.3-codex": _mi(400000, 1.75, 14.00),  # NEW
     "openrouter/aion-labs/aion-2.0": _mi(131072, 0.80, 1.60),  # NEW
     "gemini-3.1-flash-lite-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
+    "qwen3-coder:30b": _mi(32768, 0.0, 0.0), # Real ollama model
 }
 
 # Populate cache pricing for known providers.
@@ -779,6 +780,14 @@ def model(
             model_config,
             token_callback,
         )
+    if model_name == "qwen3-coder:30b":
+        return _openai_compatible(
+            model_name=model_name,
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+            model_config=model_config,
+            token_callback=token_callback,
+        )
     raise KISSError(f"Unknown model name: {model_name}")
 
 
@@ -812,6 +821,8 @@ def get_available_models() -> list[str]:
                 api_key = keys.OPENAI_API_KEY
             elif name.startswith(_TOGETHER_PREFIXES):
                 api_key = keys.TOGETHER_API_KEY
+            elif name == "qwen3-coder:30b":
+                api_key = "ollama"
         if api_key:
             result.append(name)
     return sorted(result)
