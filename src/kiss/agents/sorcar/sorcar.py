@@ -128,7 +128,7 @@ def _model_vendor_order(name: str) -> int:
 
 def run_chatbot(
     agent_factory: Callable[[str], RelentlessAgent],
-    title: str = "KISS Assistant",
+    title: str = "KISS Sorcar",
     work_dir: str | None = None,
     default_model: str = "claude-opus-4-6",
     agent_kwargs: dict[str, Any] | None = None,
@@ -168,7 +168,74 @@ def run_chatbot(
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
     cs_data_dir = str(_KISS_DIR / "code-server-data")
+    cs_port = 13338
+    cs_url = f"http://127.0.0.1:{cs_port}"
     cs_binary = shutil.which("code-server")
+
+    def _code_server_launch_args() -> list[str]:
+        assert cs_binary is not None
+        return [
+            cs_binary,
+            "--port",
+            str(cs_port),
+            "--auth",
+            "none",
+            "--bind-addr",
+            f"127.0.0.1:{cs_port}",
+            "--disable-telemetry",
+            "--user-data-dir",
+            cs_data_dir,
+            "--extensions-dir",
+            str(Path(cs_data_dir) / "extensions"),
+            "--disable-getting-started-override",
+            "--disable-workspace-trust",
+            actual_work_dir,
+        ]
+
+    def _watch_code_server() -> None:
+        """Monitor code-server subprocess and restart it if it crashes."""
+        nonlocal cs_proc, code_server_url
+        while not shutting_down.is_set():
+            shutting_down.wait(5.0)
+            if shutting_down.is_set():
+                break
+            if cs_proc is None:
+                continue
+            ret = cs_proc.poll()
+            if ret is None:
+                continue
+            logger.warning(
+                "code-server exited with code %d, restarting...", ret
+            )
+            try:
+                from kiss.agents.sorcar.code_server import _MS_GALLERY
+
+                cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
+                cs_proc = subprocess.Popen(
+                    _code_server_launch_args(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=cs_env,
+                )
+                restarted = False
+                for _ in range(30):
+                    try:
+                        with socket.create_connection(
+                            ("127.0.0.1", cs_port), timeout=0.5
+                        ):
+                            code_server_url = cs_url
+                            restarted = True
+                            break
+                    except (ConnectionRefusedError, OSError):
+                        logger.debug("Exception caught", exc_info=True)
+                        time.sleep(0.5)
+                if restarted:
+                    logger.info("code-server restarted at %s", code_server_url)
+                    printer.broadcast({"type": "code_server_restarted"})
+                else:
+                    logger.warning("code-server failed to restart")
+            except Exception:
+                logger.debug("Exception caught", exc_info=True)
     if cs_binary:
         ext_changed = _setup_code_server(cs_data_dir)
         cs_port = 13338
@@ -230,6 +297,7 @@ def run_chatbot(
                     "--disable-workspace-trust",
                     actual_work_dir,
                 ],
+                _code_server_launch_args(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=cs_env,
@@ -251,6 +319,9 @@ def run_chatbot(
                 workdir_file.write_text(actual_work_dir)
             except OSError:
                 logger.debug("Exception caught", exc_info=True)
+
+    if cs_binary and code_server_url:
+        threading.Thread(target=_watch_code_server, daemon=True).start()
 
     html_page = _build_html(title, code_server_url, actual_work_dir)
     shutdown_timer: threading.Timer | None = None
