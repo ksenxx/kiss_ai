@@ -1825,6 +1825,7 @@ function loadTheme(){
 }
 loadTheme();
 connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
+window.addEventListener('beforeunload',function(){navigator.sendBeacon('/closing','')});
 var runPromptBtn=document.getElementById('run-prompt-btn');
 var _promptPath='';
 function checkActiveFile(){

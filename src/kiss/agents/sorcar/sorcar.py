@@ -27,6 +27,7 @@ from kiss.agents.sorcar.code_server import (
     _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
+    _restore_merge_files,
     _save_untracked_base,
     _scan_files,
     _setup_code_server,
@@ -168,6 +169,10 @@ def run_chatbot(
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
     cs_data_dir = str(_KISS_DIR / "code-server-data")
+
+    # Restore files from any stale merge state (e.g., previous crash during merge)
+    _restore_merge_files(cs_data_dir, actual_work_dir)
+
     cs_port = 13338
     cs_url = f"http://127.0.0.1:{cs_port}"
     cs_binary = shutil.which("code-server")
@@ -420,6 +425,23 @@ def run_chatbot(
 
     threading.Thread(target=_watch_theme_file, daemon=True).start()
 
+    def _watch_no_clients() -> None:
+        """Periodically check if all clients have disconnected and schedule shutdown."""
+        no_client_since: float | None = None
+        while not shutting_down.is_set():
+            shutting_down.wait(5.0)
+            if shutting_down.is_set():
+                break
+            if not printer.has_clients():
+                if no_client_since is None:
+                    no_client_since = time.monotonic()
+                elif time.monotonic() - no_client_since >= 10.0:
+                    _schedule_shutdown()
+            else:
+                no_client_since = None
+
+    threading.Thread(target=_watch_no_clients, daemon=True).start()
+
     def run_agent_thread(
         task: str,
         model_name: str,
@@ -558,6 +580,12 @@ def run_chatbot(
         return True
 
     def _cleanup() -> None:
+        nonlocal merging
+        with running_lock:
+            was_merging = merging
+            merging = False
+        if was_merging:
+            _restore_merge_files(cs_data_dir, actual_work_dir)
         stop_agent()
         if cs_proc:
             cs_proc.terminate()
@@ -592,7 +620,7 @@ def run_chatbot(
         with shutdown_lock:
             if shutdown_timer is not None:
                 shutdown_timer.cancel()
-            shutdown_timer = threading.Timer(120.0, _do_shutdown)
+            shutdown_timer = threading.Timer(10.0, _do_shutdown)
             shutdown_timer.daemon = True
             shutdown_timer.start()
 
@@ -868,6 +896,11 @@ def run_chatbot(
         )
         return JSONResponse({"models": models_list, "selected": selected_model})
 
+    async def closing(request: Request) -> JSONResponse:
+        """Handle browser tab/window closing. Schedule a quick shutdown."""
+        _schedule_shutdown()
+        return JSONResponse({"status": "ok"})
+
     async def focus_chatbox(request: Request) -> JSONResponse:
         printer.broadcast({"type": "focus_chatbox"})
         return JSONResponse({"status": "ok"})
@@ -1116,6 +1149,7 @@ def run_chatbot(
             Route("/run-selection", run_selection, methods=["POST"]),
             Route("/stop", stop_task, methods=["POST"]),
             Route("/open-file", open_file, methods=["POST"]),
+            Route("/closing", closing, methods=["POST"]),
             Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
             Route("/focus-editor", focus_editor, methods=["POST"]),
             Route("/commit", commit, methods=["POST"]),
