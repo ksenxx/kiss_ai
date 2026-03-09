@@ -1150,7 +1150,8 @@ function handleEvent(ev){
     document.getElementById('merge-toolbar').style.display='none';
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
-    inp.placeholder='Ask anything\u2026 (@ for files, cmd/ctrl-k to toggle between editor and chat, cmd/ctrl-L to run selected text in the editor as task)';
+    inp.placeholder='Ask anything\u2026 (@ for files, '
+    +'cmd/ctrl-k to toggle editor, cmd/ctrl-L to run selection)';
     inp.focus();break;
   case'clear':
     O.innerHTML='';state=mkS();
@@ -1976,7 +1977,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ for files, cmd/ctrl-k to toggle between editor and chat, cmd/ctrl-L to run selected text in the editor as task)"
+              placeholder="Ask anything\u2026 (@ files, \u2318/ctrl-k editor, \u2318/ctrl-L run)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple

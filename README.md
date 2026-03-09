@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.17-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.18-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -176,7 +176,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 ### Key Features
 
 - **KISSAgent with ReAct Loop**: The core agent runs a generate-execute-observe loop with native function calling, automatic tool schema generation from Python function signatures and docstrings, trajectory saving, and per-step budget tracking.
-- **RelentlessAgent for Long-Running Tasks**: Extends `KISSAgent` with auto-continuation across multiple sub-sessions (up to 2000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new session with the logged context, enabling agents to run for hours to days.
+- **RelentlessAgent for Long-Running Tasks**: Extends `KISSAgent` with auto-continuation across multiple sub-sessions (up to 10000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
 - **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, plus full browser automation via Playwright with accessibility-tree-based element selection.
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
 - **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (400+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
@@ -481,6 +481,10 @@ kiss/
 │   │   │   ├── multi_agent.py
 │   │   │   ├── config.py
 │   │   │   └── README.md
+│   │   ├── autoresearch/           # Autoresearch agent for autonomous ML experiments
+│   │   │   ├── autoresearch_agent.py
+│   │   │   ├── config.py
+│   │   │   └── README.md
 │   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   ├── core/            # Core framework components
 │   │   ├── base.py            # Base class with common functionality
@@ -513,6 +517,7 @@ kiss/
 │   │   ├── test_a_model.py
 │   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
+│   │   ├── test_autoresearch.py
 │   │   ├── test_chat_history_events.py
 │   │   ├── test_chatbot_tasks.py
 │   │   ├── test_chatbot_ui_spinner.py
@@ -536,6 +541,7 @@ kiss/
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_coverage.py
 │   │   ├── test_kiss_agent_non_agentic.py
+│   │   ├── test_merge_view_deletion_hunk.py
 │   │   ├── test_merge_view_second_change.py
 │   │   ├── test_model_base_class.py
 │   │   ├── test_model_implementations.py
@@ -543,15 +549,18 @@ kiss/
 │   │   ├── test_print_to_browser.py
 │   │   ├── test_print_to_console.py
 │   │   ├── test_race_conditions.py
+│   │   ├── test_relentless_agent.py
 │   │   ├── test_run_prompt_button.py
 │   │   ├── test_scm_commit_message.py
 │   │   ├── test_sorcar_bash_streaming.py
 │   │   ├── test_sorcar_coverage.py
 │   │   ├── test_sorcar_file_task.py
 │   │   ├── test_sorcar_integration.py
+│   │   ├── test_sorcar_race_conditions.py
 │   │   ├── test_sorcar_race_fixes.py
 │   │   ├── test_sorcar_run_selection.py
 │   │   ├── test_sorcar_text_wrap.py
+│   │   ├── test_sse_reconnection.py
 │   │   ├── test_stop_agent_thread.py
 │   │   ├── test_system_prompt.py
 │   │   ├── test_token_callback.py
@@ -618,9 +627,9 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
 - **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
   - `model_name`: Model for task execution (default: "claude-opus-4-6")
-  - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 2000)
-  - `max_steps`: Maximum steps per sub-session (default: 25)
+  - `max_steps`: Maximum steps per sub-session (default: 100)
   - `max_budget`: Maximum budget in USD (default: 200.0)
+  - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 10000)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
   - `max_generations`: Maximum number of evolutionary generations (default: 10)

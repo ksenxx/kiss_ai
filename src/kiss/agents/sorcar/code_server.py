@@ -395,7 +395,10 @@ function activate(ctx){
       if(!fs.existsSync(mp))return;
       var data=JSON.parse(fs.readFileSync(mp,'utf8'));
       fs.unlinkSync(mp);
-      openMerge(data);
+      openMerge(data).catch(function(e){
+        console.error('openMerge failed:',e);
+        vscode.window.showErrorMessage('Merge view setup failed: '+e.message);
+      });
     }catch(e){}
   },800);
   ctx.subscriptions.push({dispose:function(){clearInterval(iv)}});
@@ -838,13 +841,13 @@ def _prepare_merge_view(
             # Diff the saved pre-task copy against current to get only agent's changes
             agent_hunks = _diff_files(str(saved_base), str(Path(work_dir) / fname))
             filtered = [
-                {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
+                {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
                 for bs, bc, cs, cc in agent_hunks
             ]
         else:
             pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
             filtered = [
-                {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
+                {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
                 for bs, bc, cs, cc in hunks
                 if (bs, bc) not in pre
             ]
@@ -880,7 +883,7 @@ def _prepare_merge_view(
             if saved_base.is_file():
                 agent_hunks = _diff_files(str(saved_base), str(fpath))
                 filtered = [
-                    {"bs": bs - 1, "bc": bc, "cs": cs - 1, "cc": cc}
+                    {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
                     for bs, bc, cs, cc in agent_hunks
                 ]
                 if filtered:
