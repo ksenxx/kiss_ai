@@ -1165,14 +1165,12 @@ class TestCodeServerUncoveredBranches:
         data_dir = tempfile.mkdtemp()
         try:
             _init_git_repo(tmpdir)
-            # Need tracked change so pre_hashes is non-empty
-            Path(tmpdir, "file.txt").write_text("line1\nmodified\nline3\n")
             Path(tmpdir, "growing.py").write_text("small\n")
             pre_hunks = _parse_diff_hunks(tmpdir)
             pre_untracked = _capture_untracked(tmpdir)
             pre_hashes = _snapshot_files(tmpdir, set(pre_hunks.keys()) | pre_untracked)
             # Agent makes tracked change and makes untracked file huge
-            Path(tmpdir, "file.txt").write_text("line1\nmodified again\nline3\n")
+            Path(tmpdir, "file.txt").write_text("line1\nmodified\nline3\n")
             Path(tmpdir, "growing.py").write_bytes(b"x" * 2_100_000)
             result = _prepare_merge_view(
                 tmpdir, data_dir, pre_hunks, pre_untracked, pre_hashes
@@ -1192,14 +1190,12 @@ class TestCodeServerUncoveredBranches:
         data_dir = tempfile.mkdtemp()
         try:
             _init_git_repo(tmpdir)
-            # Need tracked change so pre_hashes is non-empty
-            Path(tmpdir, "file.txt").write_text("line1\nmodified\nline3\n")
             Path(tmpdir, "will_empty.py").write_text("content\n")
             pre_hunks = _parse_diff_hunks(tmpdir)
             pre_untracked = _capture_untracked(tmpdir)
             pre_hashes = _snapshot_files(tmpdir, set(pre_hunks.keys()) | pre_untracked)
             # Agent modifies tracked and empties untracked
-            Path(tmpdir, "file.txt").write_text("line1\nmodified again\nline3\n")
+            Path(tmpdir, "file.txt").write_text("line1\nmodified\nline3\n")
             Path(tmpdir, "will_empty.py").write_text("")
             result = _prepare_merge_view(
                 tmpdir, data_dir, pre_hunks, pre_untracked, pre_hashes
@@ -1218,13 +1214,12 @@ class TestCodeServerUncoveredBranches:
         data_dir = tempfile.mkdtemp()
         try:
             _init_git_repo(tmpdir)
-            Path(tmpdir, "file.txt").write_text("line1\nmodified\nline3\n")
             Path(tmpdir, "will_binary.py").write_text("text content\n")
             pre_hunks = _parse_diff_hunks(tmpdir)
             pre_untracked = _capture_untracked(tmpdir)
             pre_hashes = _snapshot_files(tmpdir, set(pre_hunks.keys()) | pre_untracked)
             # Agent modifies tracked and replaces untracked with binary
-            Path(tmpdir, "file.txt").write_text("line1\nmodified again\nline3\n")
+            Path(tmpdir, "file.txt").write_text("line1\nmodified\nline3\n")
             Path(tmpdir, "will_binary.py").write_bytes(b"\x80\x81\x82\xff\xfe")
             result = _prepare_merge_view(
                 tmpdir, data_dir, pre_hunks, pre_untracked, pre_hashes
