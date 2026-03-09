@@ -297,7 +297,6 @@ def run_chatbot(
                     "--disable-workspace-trust",
                     actual_work_dir,
                 ],
-                _code_server_launch_args(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=cs_env,
