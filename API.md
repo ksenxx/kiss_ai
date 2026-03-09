@@ -746,7 +746,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.sorcar.sorcar` — *Browser-based chatbot for RelentlessAgent-based agents.*
 
-**`run_chatbot`** — Run a browser-based chatbot UI for any RelentlessAgent-based agent.<br/>`def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Assistant', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None`
+**`run_chatbot`** — Run a browser-based chatbot UI for any RelentlessAgent-based agent.<br/>`def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Sorcar', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None`
 
 - `agent_factory`: Callable that takes a name string and returns a RelentlessAgent instance.
 - `title`: Title displayed in the browser tab.

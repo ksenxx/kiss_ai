@@ -1153,6 +1153,12 @@ function handleEvent(ev){
     inp.placeholder='Ask anything\u2026 (@ for files, '
     +'cmd/ctrl-k to toggle editor, cmd/ctrl-L to run selection)';
     inp.focus();break;
+  case'code_server_restarted':{
+    var csFrame=document.getElementById('code-server-frame');
+    if(csFrame){
+      setTimeout(function(){csFrame.src=csFrame.src},1500);
+    }
+    break};
   case'clear':
     O.innerHTML='';state=mkS();
     _scrollLock=false;
@@ -1863,6 +1869,25 @@ document.addEventListener('keydown',function(e){
     }
   }
 },true);
+var _csHealthOk=true,_csBaseUrl='';
+(function(){
+  var f=document.getElementById('code-server-frame');
+  if(f)_csBaseUrl=f.getAttribute('data-base-url')||'';
+})();
+function _checkCodeServerHealth(){
+  if(!_csBaseUrl)return;
+  var img=new Image();
+  img.onload=function(){
+    if(!_csHealthOk){
+      _csHealthOk=true;
+      var f=document.getElementById('code-server-frame');
+      if(f)f.src=f.src;
+    }
+  };
+  img.onerror=function(){_csHealthOk=false};
+  img.src=_csBaseUrl+'/favicon.ico?_t='+Date.now();
+}
+setInterval(_checkCodeServerHealth,15000);
 """
 
 
