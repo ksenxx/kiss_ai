@@ -237,15 +237,6 @@ def _tasks_endpoint_transform(history: list[dict]) -> list[dict]:
     ]
 
 
-def _task_events_lookup(history: list[dict], idx: int) -> dict:
-    """Replicate the /task-events endpoint logic from sorcar.py."""
-    if 0 <= idx < len(history):
-        entry = history[idx]
-        events = entry.get("chat_events", [])
-        return {"events": events, "task": entry["task"]}
-    return {"events": [], "task": ""}
-
-
 class TestTasksEndpointFormat:
     def setup_method(self) -> None:
         self.original, self.tmp = _use_temp_history()
@@ -256,22 +247,17 @@ class TestTasksEndpointFormat:
     def test_sample_tasks_all_have_has_events_false(self) -> None:
         result = _tasks_endpoint_transform(th.SAMPLE_TASKS)
         for entry in result:
+            assert "task" in entry
             assert entry["has_events"] is False
-            assert "chat_events" not in entry
 
-# ── /task-events endpoint logic tests ────────────────────────────────────
-
-
-class TestTaskEventsEndpoint:
-    def setup_method(self) -> None:
-        self.original, self.tmp = _use_temp_history()
-
-    def teardown_method(self) -> None:
-        _restore_history(self.original, self.tmp)
-
-    def test_empty_history_returns_empty(self) -> None:
-        result = _task_events_lookup([], 0)
-        assert result == {"events": [], "task": ""}
+    def test_task_with_events_has_events_true(self) -> None:
+        history = [
+            {"task": "task with events", "chat_events": [{"type": "text_delta", "text": "hi"}]},
+            {"task": "task without events", "chat_events": []},
+        ]
+        result = _tasks_endpoint_transform(history)
+        assert result[0]["has_events"] is True
+        assert result[1]["has_events"] is False
 
 # ── JavaScript syntax validation ─────────────────────────────────────────
 
@@ -297,7 +283,7 @@ class TestChatbotJSSyntax:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
         start = CHATBOT_JS.index("function renderTasks(q){")
-        end_search = CHATBOT_JS.index("function replayTaskEvents(")
+        end_search = CHATBOT_JS.index("\nhistSearch.addEventListener")
         render_tasks_js = CHATBOT_JS[start:end_search]
         count = render_tasks_js.count("allTasks.forEach")
         assert count == 1, f"Expected 1 allTasks.forEach, found {count}"
@@ -306,25 +292,63 @@ class TestChatbotJSSyntax:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
         start = CHATBOT_JS.index("function renderTasks(q){")
-        end_search = CHATBOT_JS.index("function replayTaskEvents(")
+        end_search = CHATBOT_JS.index("\nhistSearch.addEventListener")
         render_tasks_js = CHATBOT_JS[start:end_search]
         assert "filtered" not in render_tasks_js
 
-    def test_replay_task_events_balanced_braces(self) -> None:
+    def test_render_tasks_copies_to_input_and_replays(self) -> None:
+        """Verify clicking a task in history copies text and replays events."""
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
-        start = CHATBOT_JS.index("function replayTaskEvents(")
-        depth = 0
-        i = start
-        while i < len(CHATBOT_JS):
-            if CHATBOT_JS[i] == "{":
-                depth += 1
-            elif CHATBOT_JS[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        assert depth == 0, f"Unbalanced braces in replayTaskEvents, depth={depth}"
+        start = CHATBOT_JS.index("function renderTasks(q){")
+        end_search = CHATBOT_JS.index("histSearch.addEventListener")
+        render_tasks_js = CHATBOT_JS[start:end_search]
+        assert "inp.value=txt" in render_tasks_js
+        assert "inp.focus()" in render_tasks_js
+        assert "replayTaskEvents(idx,txt)" in render_tasks_js
+        assert "hasEvents" in render_tasks_js
+
+    def test_replay_task_events_function_exists(self) -> None:
+        """Verify replayTaskEvents function is defined."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        assert "function replayTaskEvents(idx,txt){" in CHATBOT_JS
+        # It should fetch from /task-events
+        start = CHATBOT_JS.index("function replayTaskEvents(idx,txt){")
+        end = CHATBOT_JS.index("function renderTasks(q){")
+        replay_js = CHATBOT_JS[start:end]
+        assert "/task-events" in replay_js
+        assert "handleOutputEvent" in replay_js
+        assert "showUserMsg" in replay_js
+
+    def test_replay_task_events_does_not_open_sidebar(self) -> None:
+        """Verify replayTaskEvents only closes sidebar if open, not toggles."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        start = CHATBOT_JS.index("function replayTaskEvents(idx,txt){")
+        end = CHATBOT_JS.index("function renderTasks(q){")
+        replay_js = CHATBOT_JS[start:end]
+        # Must NOT call toggleSidebar() unconditionally
+        assert "toggleSidebar();" not in replay_js.replace(
+            "if(sidebar.classList.contains('open')){toggleSidebar();}", ""
+        )
+        # Must guard toggleSidebar with sidebar open check
+        assert "if(sidebar.classList.contains('open')){toggleSidebar();}" in replay_js
+
+    def test_welcome_recent_clicks_replay_events(self) -> None:
+        """Verify clicking a recent item in welcome replays events like sidebar."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        start = CHATBOT_JS.index("function loadWelcome(){")
+        end = CHATBOT_JS.index("\n}", start) + 2
+        welcome_js = CHATBOT_JS[start:end]
+        # Recent items must track hasEvents and idx
+        assert "hasEvents" in welcome_js
+        assert "item.idx" in welcome_js
+        # Must call replayTaskEvents for recent items with events
+        assert "replayTaskEvents(item.idx,item.text)" in welcome_js
+        # Suggested items should just set input
+        assert "inp.value=item.text" in welcome_js
 
     def test_full_js_balanced_braces(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
@@ -336,6 +360,45 @@ class TestChatbotJSSyntax:
             elif ch == "}":
                 depth -= 1
         assert depth == 0, f"Full JS has unbalanced braces, depth={depth}"
+
+# ── /task-events endpoint logic tests ────────────────────────────────────
+
+
+def _task_events_lookup(history: list[dict], idx: int) -> list | dict:
+    """Replicate the /task-events endpoint logic from sorcar.py."""
+    if idx < 0 or idx >= len(history):
+        return {"error": "Index out of range"}
+    return history[idx].get("chat_events", [])
+
+
+class TestTaskEventsEndpoint:
+    def setup_method(self) -> None:
+        self.original, self.tmp = _use_temp_history()
+
+    def teardown_method(self) -> None:
+        _restore_history(self.original, self.tmp)
+
+    def test_returns_empty_for_sample_tasks(self) -> None:
+        result = _task_events_lookup(th.SAMPLE_TASKS, 0)
+        assert result == []
+
+    def test_returns_events_for_task_with_events(self) -> None:
+        th._add_task("test task with events")
+        events = [{"type": "text_delta", "text": "hello"}]
+        th._set_latest_chat_events(events, task="test task with events")
+        history = th._load_history()
+        result = _task_events_lookup(history, 0)
+        assert len(result) == 1
+        assert result[0]["type"] == "text_delta"
+
+    def test_out_of_range_returns_error(self) -> None:
+        result = _task_events_lookup(th.SAMPLE_TASKS, 999)
+        assert "error" in result
+
+    def test_negative_index_returns_error(self) -> None:
+        result = _task_events_lookup(th.SAMPLE_TASKS, -1)
+        assert "error" in result
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

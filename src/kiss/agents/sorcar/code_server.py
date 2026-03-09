@@ -75,6 +75,7 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
+  var dataDir=path.resolve(ctx.globalStorageUri.fsPath,'..','..','..');
   function writeTheme(){
     var k=vscode.window.activeColorTheme.kind;
     var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
@@ -249,7 +250,7 @@ function activate(ctx){
     firePost('/merge-action',{action:'all-done'});
   }));
   function readPort(){
-    try{return fs.readFileSync(path.join(home,'.kiss','assistant-port'),'utf8').trim();}
+    try{return fs.readFileSync(path.join(dataDir,'assistant-port'),'utf8').trim();}
     catch(e){return '';}
   }
   function postAssistant(p,body){
@@ -340,20 +341,19 @@ function activate(ctx){
     var ed=vscode.window.activeTextEditor;
     var fp=ed&&ed.document?ed.document.uri.fsPath:'';
     try{
-      var d=path.join(home,'.kiss','code-server-data');
-      if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});
-      fs.writeFileSync(path.join(d,'active-file.json'),JSON.stringify({path:fp}));
+      if(!fs.existsSync(dataDir))fs.mkdirSync(dataDir,{recursive:true});
+      fs.writeFileSync(path.join(dataDir,'active-file.json'),JSON.stringify({path:fp}));
     }catch(e){}
   }
   writeActiveFile();
   ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile()}));
-  var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
-  var op=path.join(home,'.kiss','code-server-data','pending-open.json');
-  var ap=path.join(home,'.kiss','code-server-data','pending-action.json');
-  var sp=path.join(home,'.kiss','code-server-data','pending-scm-message.json');
+  var mp=path.join(dataDir,'pending-merge.json');
+  var op=path.join(dataDir,'pending-open.json');
+  var ap=path.join(dataDir,'pending-action.json');
+  var sp=path.join(dataDir,'pending-scm-message.json');
   var iv=setInterval(function(){
     try{
-      var fep=path.join(home,'.kiss','code-server-data','pending-focus-editor.json');
+      var fep=path.join(dataDir,'pending-focus-editor.json');
       if(fs.existsSync(fep)){
         fs.unlinkSync(fep);
         vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');

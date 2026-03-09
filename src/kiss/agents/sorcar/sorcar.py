@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -168,12 +169,48 @@ def run_chatbot(
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
-    cs_data_dir = str(_KISS_DIR / "code-server-data")
+    wd_hash = hashlib.md5(actual_work_dir.encode()).hexdigest()[:8]
+    cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
+
+    # If another sorcar instance is already running with this data dir,
+    # use a unique data dir for this instance to avoid collisions
+    # (e.g., assistant-port overwrite, shared IPC files).
+    _existing_port_file = Path(cs_data_dir) / "assistant-port"
+    if _existing_port_file.exists():
+        try:
+            _existing_port = int(_existing_port_file.read_text().strip())
+            with socket.create_connection(
+                ("127.0.0.1", _existing_port), timeout=0.5
+            ):
+                # Another instance is reachable; isolate this instance.
+                cs_data_dir = str(
+                    _KISS_DIR / f"cs-{wd_hash}-{os.getpid()}"
+                )
+        except (ConnectionRefusedError, OSError, ValueError):
+            pass  # Port not reachable; safe to reuse this data dir.
 
     # Restore files from any stale merge state (e.g., previous crash during merge)
     _restore_merge_files(cs_data_dir, actual_work_dir)
 
-    cs_port = 13338
+    # Read or assign a code-server port for this work directory.
+    # Use socket.bind directly (not find_free_port) so test patches
+    # that override find_free_port for the Starlette port don't collide.
+    cs_port_file = Path(cs_data_dir) / "cs-port"
+    cs_port_file.parent.mkdir(parents=True, exist_ok=True)
+    cs_port = 0
+    if cs_port_file.exists():
+        try:
+            cs_port = int(cs_port_file.read_text().strip())
+        except (ValueError, OSError):
+            logger.debug("Exception caught", exc_info=True)
+    if not cs_port:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+            _s.bind(("", 0))
+            cs_port = int(_s.getsockname()[1])
+        try:
+            cs_port_file.write_text(str(cs_port))
+        except OSError:
+            logger.debug("Exception caught", exc_info=True)
     cs_url = f"http://127.0.0.1:{cs_port}"
     cs_binary = shutil.which("code-server")
 
@@ -243,14 +280,25 @@ def run_chatbot(
                 logger.debug("Exception caught", exc_info=True)
     if cs_binary:
         ext_changed = _setup_code_server(cs_data_dir)
-        cs_port = 13338
-        cs_url = f"http://127.0.0.1:{cs_port}"
         port_in_use = False
         try:
             with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
                 port_in_use = True
         except (ConnectionRefusedError, OSError):
             logger.debug("Exception caught", exc_info=True)
+        # If our stored port is not in use, verify it's still bindable;
+        # if another process grabbed it, pick a fresh port.
+        if not port_in_use:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+                    _s.bind(("127.0.0.1", cs_port))
+            except OSError:
+                cs_port = find_free_port()
+                cs_url = f"http://127.0.0.1:{cs_port}"
+                try:
+                    cs_port_file.write_text(str(cs_port))
+                except OSError:
+                    logger.debug("Exception caught", exc_info=True)
 
         workdir_file = Path(cs_data_dir) / "workdir"
         prev_workdir = ""
@@ -579,6 +627,9 @@ def run_chatbot(
         printer.broadcast({"type": "task_stopped"})
         return True
 
+    # True when this instance created a PID-specific data dir for isolation.
+    _is_isolated = cs_data_dir.endswith(f"-{os.getpid()}")
+
     def _cleanup() -> None:
         nonlocal merging
         with running_lock:
@@ -594,6 +645,12 @@ def run_chatbot(
             except Exception:
                 logger.debug("Exception caught", exc_info=True)
                 cs_proc.kill()
+        # Remove PID-specific data dir created for instance isolation.
+        if _is_isolated:
+            try:
+                shutil.rmtree(cs_data_dir, ignore_errors=True)
+            except Exception:
+                logger.debug("Exception caught", exc_info=True)
 
     def _do_shutdown() -> None:
         with running_lock:
@@ -793,23 +850,24 @@ def run_chatbot(
 
     async def tasks(request: Request) -> JSONResponse:
         history = _load_history()
-        return JSONResponse([
-            {"task": e["task"], "has_events": bool(e.get("chat_events"))}
-            for e in history
-        ])
+        return JSONResponse(
+            [
+                {"task": e["task"], "has_events": bool(e.get("chat_events"))}
+                for e in history
+            ]
+        )
 
     async def task_events(request: Request) -> JSONResponse:
-        """Return recorded chat events for a task by index."""
+        """Return chat events for a specific task by index."""
         try:
-            idx = int(request.query_params.get("index", "0"))
+            idx = int(request.query_params.get("idx", "0"))
         except (ValueError, TypeError):
-            return JSONResponse({"events": [], "task": ""})
+            return JSONResponse({"error": "Invalid index"}, status_code=400)
         history = _load_history()
-        if 0 <= idx < len(history):
-            entry = history[idx]
-            events = entry.get("chat_events", [])
-            return JSONResponse({"events": events, "task": entry["task"]})
-        return JSONResponse({"events": [], "task": ""})
+        if idx < 0 or idx >= len(history):
+            return JSONResponse({"error": "Index out of range"}, status_code=404)
+        events: list[dict[str, object]] = history[idx].get("chat_events", [])  # type: ignore[assignment]
+        return JSONResponse(events)
 
     async def proposed_tasks_endpoint(request: Request) -> JSONResponse:
         with proposed_lock:
@@ -1178,7 +1236,8 @@ def run_chatbot(
 
     port = find_free_port()
     try:
-        (_KISS_DIR / "assistant-port").write_text(str(port))
+        Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
+        (Path(cs_data_dir) / "assistant-port").write_text(str(port))
     except OSError:
         logger.debug("Exception caught", exc_info=True)
     url = f"http://127.0.0.1:{port}"
