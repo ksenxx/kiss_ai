@@ -7,6 +7,7 @@ in task_history.json, and retrieving them for replay. No mocks or patches.
 import queue
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -229,7 +230,7 @@ class TestJsonRoundtrip:
 # ── /tasks endpoint format tests ─────────────────────────────────────────
 
 
-def _tasks_endpoint_transform(history: list[dict]) -> list[dict]:
+def _tasks_endpoint_transform(history: list[Any]) -> list[dict[str, Any]]:
     """Replicate the /tasks endpoint list comprehension from sorcar.py."""
     return [
         {"task": e["task"], "has_events": bool(e.get("chat_events"))}
@@ -364,7 +365,7 @@ class TestChatbotJSSyntax:
 # ── /task-events endpoint logic tests ────────────────────────────────────
 
 
-def _task_events_lookup(history: list[dict], idx: int) -> list | dict:
+def _task_events_lookup(history: list[Any], idx: int) -> Any:
     """Replicate the /task-events endpoint logic from sorcar.py."""
     if idx < 0 or idx >= len(history):
         return {"error": "Index out of range"}
@@ -384,7 +385,7 @@ class TestTaskEventsEndpoint:
 
     def test_returns_events_for_task_with_events(self) -> None:
         th._add_task("test task with events")
-        events = [{"type": "text_delta", "text": "hello"}]
+        events: list[dict[str, Any]] = [{"type": "text_delta", "text": "hello"}]
         th._set_latest_chat_events(events, task="test task with events")
         history = th._load_history()
         result = _task_events_lookup(history, 0)

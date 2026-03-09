@@ -258,6 +258,7 @@ def run_chatbot(
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     env=cs_env,
+                    start_new_session=True,
                 )
                 restarted = False
                 for _ in range(30):
@@ -353,6 +354,7 @@ def run_chatbot(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=cs_env,
+                start_new_session=True,
             )
             for _ in range(30):
                 try:
@@ -638,13 +640,19 @@ def run_chatbot(
         if was_merging:
             _restore_merge_files(cs_data_dir, actual_work_dir)
         stop_agent()
-        if cs_proc:
-            cs_proc.terminate()
+        if cs_proc and cs_proc.poll() is None:
             try:
-                cs_proc.wait()
+                os.killpg(cs_proc.pid, 15)  # SIGTERM to process group
+            except OSError:
+                cs_proc.terminate()
+            try:
+                cs_proc.wait(timeout=5)
             except Exception:
                 logger.debug("Exception caught", exc_info=True)
-                cs_proc.kill()
+                try:
+                    os.killpg(cs_proc.pid, 9)  # SIGKILL to process group
+                except OSError:
+                    cs_proc.kill()
         # Remove PID-specific data dir created for instance isolation.
         if _is_isolated:
             try:

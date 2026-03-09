@@ -4,7 +4,6 @@ import hashlib
 import os
 import socket
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -161,9 +160,9 @@ class TestInstanceIsolationEndToEnd:
 
     def test_child_does_not_overwrite_parent_port(self) -> None:
         """A child sorcar must not overwrite the parent's assistant-port file."""
+        import select
         import subprocess
         import sys
-        import select
 
         work_dir = str(Path(tempfile.mkdtemp()).resolve())
         wd_hash = hashlib.md5(work_dir.encode()).hexdigest()[:8]
@@ -178,6 +177,7 @@ class TestInstanceIsolationEndToEnd:
             cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         )
         parent_url = None
+        child: subprocess.Popen[bytes] | None = None
         try:
             start = time.time()
             while time.time() - start < 20:
@@ -277,6 +277,7 @@ class TestInstanceIsolationEndToEnd:
 
             shutil.rmtree(work_dir, ignore_errors=True)
             # Clean up child data dir if it exists
-            child_data_dir = kiss_dir / f"cs-{wd_hash}-{child.pid}" if 'child' in dir() else None
-            if child_data_dir and child_data_dir.exists():
-                shutil.rmtree(child_data_dir, ignore_errors=True)
+            if child is not None:
+                cleanup_dir = kiss_dir / f"cs-{wd_hash}-{child.pid}"
+                if cleanup_dir.exists():
+                    shutil.rmtree(cleanup_dir, ignore_errors=True)

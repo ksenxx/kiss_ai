@@ -26,7 +26,6 @@ can you please work hard and carefully to precisly detect all actual race condit
 
 can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.
 
-
 # Pending
 
 When I click a recent item in the welcome window of the chat window in sorcar, it should behave similarly as clicking an item in the task history button in the chatbox of sorcar.
@@ -35,8 +34,6 @@ To validate that the code server creates a data directory for an instance of sor
 
 When I click a recent item in the welcome window of the sorcar (run with 'uv run sorcar'), you MSUT not open the list of task history in the UI.
 
-When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorcar, then whatever is printed in the chat window of the sorcar gets copied to the chat window of the newly launched sorcar.  Can you validate this bugs by launching sorcar and fix it without breaking any other functionality or feature.
+When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorcar, then whatever is printed in the chat window of the sorcar gets copied to the chat window of the newly launched sorcar. Can you validate this bugs by launching sorcar and fix it without breaking any other functionality or feature.
 
-You have implemented a restart logic for code-server in case the code-server shuts down, but I want you to investigate the root cause of why the code-server is shutting down intermittently in the first place.  See if you can fix the intermittent shutdown of the code server without changing any functionality in the project except for the fix.
-
-
+You have implemented a restart logic for code-server in case the code-server shuts down, but I want you to investigate the root cause of why the code-server is shutting down intermittently in the first place. See if you can fix the intermittent shutdown of the code server without changing any functionality in the project except for the fix.
