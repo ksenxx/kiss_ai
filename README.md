@@ -177,6 +177,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 
 - **KISSAgent with ReAct Loop**: The core agent runs a generate-execute-observe loop with native function calling, automatic tool schema generation from Python function signatures and docstrings, trajectory saving, and per-step budget tracking.
 - **RelentlessAgent for Long-Running Tasks**: Extends `KISSAgent` with auto-continuation across multiple sub-sessions (up to 2000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new session with the logged context, enabling agents to run for hours to days.
+- **RelentlessAgent for Long-Running Tasks**: Extends `KISSAgent` with auto-continuation across multiple sub-sessions (up to 10000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
 - **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, plus full browser automation via Playwright with accessibility-tree-based element selection.
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
 - **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (400+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
@@ -620,6 +621,8 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `model_name`: Model for task execution (default: "claude-opus-4-6")
   - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 2000)
   - `max_steps`: Maximum steps per sub-session (default: 25)
+  - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 10000)
+  - `max_steps`: Maximum steps per sub-session (default: 100)
   - `max_budget`: Maximum budget in USD (default: 200.0)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")

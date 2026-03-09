@@ -25,3 +25,7 @@ can you please work hard and carefully to precisly detect all actual race condit
 ## test compaction
 
 can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.
+
+# documentation updare
+
+Can you read all \*.md files, except API.md, in the project carefully and check and precisely fix any inconsistencies with the code in the project?
