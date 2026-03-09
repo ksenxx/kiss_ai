@@ -12,7 +12,7 @@ find redundancy, duplication, AI slop, lack of abstractions, and inconsistencies
 
 ## check
 
-un 'uv run check --full' and fix
+run 'uv run check --full' and fix
 
 ## test
 
@@ -26,6 +26,13 @@ can you please work hard and carefully to precisly detect all actual race condit
 
 can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.
 
-# documentation updare
+# documentation update
 
 Can you read all \*.md files, except API.md, in the project carefully and check and precisely fix any inconsistencies with the code in the project?
+
+
+# porting 'autresearch' to src/kiss/agents/autoresearch/
+
+can you implement the 'autoresearch' agent at https://github.com/karpathy/autoresearch in the folder src/kiss/agents/autoresearch/ using src/kiss/agents/sorcar/sorcar_agent.py and src/kiss/agents/sorcar/sorcar.py ? Please write integration tests with no mocks or test doubles to achieve 100% branch coverage.  Please do it precisely and do the the most intuitive design for the ambiguous parts.  Simplify code.  Use the browser tool if necessary.
+
+can you write documentation on 'autoresearch' and how to use it, how it works, and what are the advantages of KISS based 'autresesearch' over original 'autoresearch' in src/kiss/agents/autoresearch/README.md?

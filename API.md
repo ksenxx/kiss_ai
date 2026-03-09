@@ -33,7 +33,10 @@
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
-    - [`kiss.agents.sorcar.prompt_detector`](#kissagentssorcarprompt_detector)
+    - [`kiss.agents.autoresearch`](#kissagentsautoresearch)
+      - [`kiss.agents.autoresearch.autoresearch_agent`](#kissagentsautoresearchautoresearch_agent)
+      - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
+      - [`kiss.agents.sorcar.prompt_detector`](#kissagentssorcarprompt_detector)
 
 </details>
 
@@ -984,6 +987,40 @@ from kiss.docker import DockerManager
   - **Returns:** The host port mapped to the container port, or None if not mapped.
 
 - **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.autoresearch` — *Autoresearch agent for autonomous ML experiment iteration.*
+
+______________________________________________________________________
+
+#### `kiss.agents.autoresearch.autoresearch_agent` — *Autoresearch agent for autonomous ML experiment iteration.*
+
+##### `class AutoresearchAgent(RelentlessAgent)` — Agent that autonomously runs ML experiments following a program file.
+
+**Constructor:** `AutoresearchAgent(name: str) -> None`
+
+- **run** — Run the autoresearch agent. The agent reads the program file for instructions, then autonomously iterates: modify train.py, run experiments, evaluate, keep/discard.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, program_file: str | None = None) -> str`
+  - `model_name`: LLM model to use. Defaults to config value.
+  - `prompt_template`: Task prompt. If empty, reads from program_file.
+  - `arguments`: Dictionary of values to fill prompt_template placeholders.
+  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
+  - `max_budget`: Maximum budget in USD. Defaults to config value.
+  - `work_dir`: Working directory containing the autoresearch repo.
+  - `printer`: Printer instance for output display.
+  - `max_sub_sessions`: Maximum continuation sub-sessions.
+  - `docker_image`: Docker image name to run tools inside a container.
+  - `verbose`: Whether to print output to console.
+  - `program_file`: Path to program.md file. Defaults to program.md in work_dir.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
+
+______________________________________________________________________
+
+#### `kiss.agents.autoresearch.config` — *Configuration for the Autoresearch Agent.*
+
+##### `class AutoresearchAgentConfig(BaseModel)`
+
+##### `class AutoresearchConfig(BaseModel)`
 
 ______________________________________________________________________
 
