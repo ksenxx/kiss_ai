@@ -4,17 +4,13 @@ No mocks, patches, or test doubles. Uses real subprocesses and real
 threading primitives.
 """
 
+from __future__ import annotations
+
 import json
-import os
-import queue
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-from pathlib import Path
-
-import pytest
 
 
 class TestCodeServerWatchdogLogic:
@@ -50,7 +46,6 @@ class TestCodeServerWatchdogLogic:
 
         printer = BaseBrowserPrinter()
         cq = printer.add_client()
-        shutting_down = threading.Event()
 
         # Start a process that exits immediately
         proc = subprocess.Popen(
@@ -104,7 +99,6 @@ class TestCodeServerWatchdogLogic:
 
         printer = BaseBrowserPrinter()
         cq = printer.add_client()
-        shutting_down = threading.Event()
         restart_count = 0
 
         proc = subprocess.Popen(
@@ -138,8 +132,8 @@ class TestCodeServerWatchdogIntegration:
         printer = BaseBrowserPrinter()
         cq = printer.add_client()
         shutting_down = threading.Event()
-        cs_proc_holder = [None]  # Use list for mutability in closure
-        restart_events = []
+        cs_proc_holder: list[subprocess.Popen[bytes] | None] = [None]
+        restart_events: list[int] = []
 
         # Start a long-running process to simulate code-server
         cs_proc_holder[0] = subprocess.Popen(
@@ -174,8 +168,10 @@ class TestCodeServerWatchdogIntegration:
 
         try:
             # Kill the process
-            cs_proc_holder[0].terminate()
-            cs_proc_holder[0].wait()
+            initial_proc = cs_proc_holder[0]
+            assert initial_proc is not None
+            initial_proc.terminate()
+            initial_proc.wait()
 
             # Wait for watchdog to detect and restart
             deadline = time.monotonic() + 5
@@ -183,7 +179,9 @@ class TestCodeServerWatchdogIntegration:
                 time.sleep(0.2)
 
             assert len(restart_events) == 1
-            assert cs_proc_holder[0].poll() is None  # New process is running
+            new_proc = cs_proc_holder[0]
+            assert new_proc is not None
+            assert new_proc.poll() is None  # New process is running
 
             # Verify event was broadcast
             event = cq.get(timeout=2)
@@ -197,7 +195,7 @@ class TestCodeServerWatchdogIntegration:
             printer.remove_client(cq)
 
 
-class TestCodeServerRestarted_Event:
+class TestCodeServerRestartedEvent:
     """Test that the code_server_restarted event is properly handled by the frontend JS."""
 
     def test_event_in_build_html(self) -> None:
