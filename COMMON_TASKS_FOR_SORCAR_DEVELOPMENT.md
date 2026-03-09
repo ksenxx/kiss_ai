@@ -30,7 +30,6 @@ can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test
 
 Can you read all \*.md files, except API.md, in the project carefully and check and precisely fix any inconsistencies with the code in the project?
 
-
 # porting 'autresearch' to src/kiss/agents/autoresearch/
 
 can you implement the 'autoresearch' agent at https://github.com/karpathy/autoresearch in the folder src/kiss/agents/autoresearch/ using src/kiss/agents/sorcar/sorcar_agent.py and src/kiss/agents/sorcar/sorcar.py ? Please write integration tests with no mocks or test doubles to achieve 100% branch coverage.  Please do it precisely and do the the most intuitive design for the ambiguous parts.  Simplify code.  Use the browser tool if necessary.
