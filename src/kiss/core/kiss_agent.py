@@ -74,6 +74,7 @@ class KISSAgent(Base):
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
         verbose: bool | None = None,
+        session_info: str = "",
     ) -> None:
         cfg = config_module.DEFAULT_CONFIG.agent
         self.model_name = model_name if model_name is not None else cfg.model_name
@@ -96,6 +97,7 @@ class KISSAgent(Base):
         self.step_count = 0
         self.total_tokens_used = 0
         self.budget_used = 0.0
+        self.session_info = session_info
         self.run_start_timestamp = int(time.time())
 
     def _set_prompt(
@@ -137,6 +139,7 @@ class KISSAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
         attachments: list[Attachment] | None = None,
+        session_info: str = "",
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -163,6 +166,8 @@ class KISSAgent(Base):
                 Default is None (uses config verbose setting).
             attachments (list[Attachment] | None): Optional file attachments (images, PDFs)
                 to include in the initial prompt. Default is None.
+            session_info (str): Sub-session label string (e.g. "Session: 1/5") to
+                include in usage info output. Default is empty string.
 
         Returns:
             str: The result of the agent's task.
@@ -179,6 +184,7 @@ class KISSAgent(Base):
                 model_config,
                 printer,
                 verbose,
+                session_info=session_info,
             )
 
             if not self.is_agentic and tools is not None:
@@ -431,10 +437,15 @@ class KISSAgent(Base):
         """Returns a compact single-line usage information string."""
         try:
             max_tokens = get_max_context_length(self.model.model_name)
+            capped_tokens = min(self.total_tokens_used, max_tokens)
             global_max = config_module.DEFAULT_CONFIG.agent.global_max_budget
+            session_part = (
+                f"{self.session_info}, " if self.session_info else ""
+            )
             return (
+                f"{session_part}"
                 f"Steps: {self.step_count}/{self.max_steps}, "
-                f"Tokens: {self.total_tokens_used}/{max_tokens}, "
+                f"Tokens: {capped_tokens}/{max_tokens}, "
                 f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}, "
                 f"Global Budget: ${Base.global_budget_used:.4f}/${global_max:.2f}"
             )
