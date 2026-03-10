@@ -666,7 +666,7 @@ def run_chatbot(
                 return
             shutting_down.set()
         _cleanup()
-        os._exit(0)
+        server.should_exit = True
 
     def _cancel_shutdown() -> None:
         nonlocal shutdown_timer
@@ -1293,7 +1293,6 @@ def run_chatbot(
     except KeyboardInterrupt:
         logger.debug("Exception caught", exc_info=True)
     _cleanup()
-    os._exit(0)
 
 
 def main() -> None:

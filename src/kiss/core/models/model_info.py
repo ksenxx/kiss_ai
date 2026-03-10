@@ -277,7 +277,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-opus-4.1": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.5": _mi(200000, 5.00, 25.00),
     "openrouter/anthropic/claude-opus-4.6": _mi(1000000, 5.00, 25.00),  # 1M context
-    "openrouter/anthropic/claude-sonnet-4": _mi(1000000, 3.00, 15.00),
+    "openrouter/anthropic/claude-sonnet-4": _mi(200000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.5": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.6": _mi(1000000, 3.00, 15.00),
     "openrouter/arcee-ai/coder-large": _mi(32768, 0.50, 0.80, fc=False),
@@ -339,7 +339,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemma-2-27b-it": _mi(8192, 0.65, 0.65, fc=False),
     "openrouter/google/gemma-2-9b-it": _mi(8192, 0.03, 0.09, fc=False),
     "openrouter/google/gemma-3-12b-it": _mi(131072, 0.04, 0.13, fc=False),
-    "openrouter/google/gemma-3-27b-it": _mi(128000, 0.04, 0.15, fc=False),
+    "openrouter/google/gemma-3-27b-it": _mi(128000, 0.03, 0.11, fc=False),
     "openrouter/google/gemma-3-4b-it": _mi(131072, 0.04, 0.08, fc=False),
     "openrouter/google/gemma-3n-e4b-it": _mi(32768, 0.02, 0.04, fc=False),
     "openrouter/gryphe/mythomax-l2-13b": _mi(4096, 0.06, 0.06, fc=False),
@@ -515,7 +515,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-14b": _mi(40960, 0.06, 0.24, fc=False),
     "openrouter/qwen/qwen3-235b-a22b": _mi(131072, 0.455, 1.82, fc=False, gen=False),
     "openrouter/qwen/qwen3-235b-a22b-2507": _mi(262144, 0.07, 0.10, fc=False),
-    "openrouter/qwen/qwen3-235b-a22b-thinking-2507": _mi(131072, 0.00, 0.00),  # SLOW: thinking
+    "openrouter/qwen/qwen3-235b-a22b-thinking-2507": _mi(262144, 0.11, 0.60),  # SLOW: thinking
     "openrouter/qwen/qwen3-30b-a3b": _mi(40960, 0.08, 0.28, fc=False),
     "openrouter/qwen/qwen3-30b-a3b-instruct-2507": _mi(262144, 0.09, 0.30),
     "openrouter/qwen/qwen3-30b-a3b-thinking-2507": _mi(32768, 0.05, 0.34),  # SLOW: thinking
@@ -528,7 +528,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-coder-plus": _mi(1000000, 0.65, 3.25, fc=False),
     "openrouter/qwen/qwen3-max": _mi(262144, 1.20, 6.00),
     "openrouter/qwen/qwen3-max-thinking": _mi(262144, 0.78, 3.90, fc=False),  # SLOW: thinking
-    "openrouter/qwen/qwen3-next-80b-a3b-instruct": _mi(262144, 0.09, 1.10),
+    "openrouter/qwen/qwen3-next-80b-a3b-instruct": _mi(131072, 0.09, 1.10),
     "openrouter/qwen/qwen3-next-80b-a3b-thinking": _mi(128000, 0.15, 1.20),  # SLOW: thinking
     "openrouter/qwen/qwen3-vl-235b-a22b-instruct": _mi(262144, 0.20, 0.88),  # Vision model
     "openrouter/qwen/qwen3-vl-235b-a22b-thinking": _mi(131072, 0.00, 0.00, fc=False),
@@ -573,12 +573,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/x-ai/grok-code-fast-1": _mi(256000, 0.20, 1.50),
     "openrouter/xiaomi/mimo-v2-flash": _mi(262144, 0.09, 0.29, fc=False),
     "openrouter/z-ai/glm-4-32b": _mi(128000, 0.10, 0.10),
-    "openrouter/z-ai/glm-4.5": _mi(131000, 0.55, 2.00),
+    "openrouter/z-ai/glm-4.5": _mi(131072, 0.60, 2.20),
     "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.13, 0.85),
     "openrouter/z-ai/glm-4.5v": _mi(65536, 0.60, 1.80, fc=False),
-    "openrouter/z-ai/glm-4.6": _mi(202752, 0.35, 1.71, fc=False),  # Unreliable FC
+    "openrouter/z-ai/glm-4.6": _mi(204800, 0.39, 1.90, fc=False),  # Unreliable FC
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
-    "openrouter/z-ai/glm-4.7": _mi(202752, 0.30, 1.40),
+    "openrouter/z-ai/glm-4.7": _mi(202752, 0.38, 1.98),
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
     "openrouter/z-ai/glm-5": _mi(202752, 0.80, 2.56),  # 744B MoE - FC verified
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
@@ -631,6 +631,13 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.3-codex": _mi(400000, 1.75, 14.00),  # NEW
     "openrouter/aion-labs/aion-2.0": _mi(131072, 0.80, 1.60),  # NEW
     "gemini-3.1-flash-lite-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
+    # ==========================================================================
+    # Auto-discovered models (verify pricing and capabilities)
+    # ==========================================================================
+    "openrouter/openai/gpt-5.4-pro": _mi(1050000, 30.00, 180.00),  # NEW
+    "openrouter/openai/gpt-5.4": _mi(1050000, 2.50, 15.00),  # NEW
+    "openrouter/inception/mercury-2": _mi(128000, 0.25, 0.75),  # NEW
+    "Qwen/Qwen3.5-9B": _mi(262144, 0.10, 0.15),  # NEW
 }
 
 # Populate cache pricing for known providers.
