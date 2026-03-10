@@ -37,16 +37,16 @@ SAMPLE_TASKS: list[_HistoryEntry] = [
     {"task": "run 'uv run check' and fix"},
     {
         "task": (
-            "plan a trip to Yosemite over the weekend based on warnings and hotel availability"
+            "plan a trip to Yosemite over the weekend based on"
+            " warnings and hotel availability, create an html"
+            " report, and show it to me."
         ),
     },
     {
-        "task": ("find the cheapest afternoon non-stop flight from SFO to NYC around March 15"),
-    },
-    {
         "task": (
-            "run <<command>> in the background, monitor output,"
-            " fix errors, and optimize the code iteratively. "
+            "find the cheapest afternoon non-stop flight from"
+            " SFO to NYC around April 15, create an html"
+            " report, and show it to me."
         ),
     },
     {
@@ -57,21 +57,46 @@ SAMPLE_TASKS: list[_HistoryEntry] = [
     },
     {
         "task": (
-            "develop an automated evaluation framework for agent performance against benchmarks"
+            "can you use src/kiss/scripts/redundancy_analyzer.py"
+            " to get rid of redundant test methods?  Make sure"
+            " that you don't decrease the overall branch coverage"
+            " after removing the redundant test methods."
         ),
     },
     {
         "task": (
-            "launch a browser, research technical innovations, and compile a document incrementally"
+            "can you write integration tests (possibly"
+            " running 'uv run sorcar') with no mocks or test"
+            " doubles to achieve 100% branch coverage of the"
+            " project files? Please check the branch coverage"
+            " first for the existing tests with the coverage"
+            " tool.  Then try to reach uncovered branches by"
+            " crafting integration tests without any mocks, test"
+            " doubles. You MUST repeat the task until you get"
+            " 100% branch coverage or you cannot increase branch"
+            " coverage after 10 tries."
         ),
     },
     {
         "task": (
-            "read all *.md files, check consistency with the code, and fix any inconsistencies"
+            "find redundancy, duplication, AI slop, lack of"
+            " elegant abstractions, and inconsistencies in the"
+            " code of the project, and fix them. Make sure that"
+            " you test every change by writing and running"
+            " integration tests with no mocks or test doubles to"
+            " achieve 100% branch coverage. Do not change any"
+            " functionality or UI. Make that existing tests pass."
         ),
     },
     {
-        "task": ("remove duplicate or redundant tests while ensuring coverage doesn't decrease"),
+        "task": (
+            "can you please work hard and carefully to precisly"
+            " detect all actual race conditions in"
+            " the project? You can add"
+            " random delays within 0.1 seconds before racing"
+            " events to reliably trigger a race condition to"
+            " confirm a race condition."
+        ),
     },
 ]
 
