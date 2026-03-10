@@ -41,3 +41,6 @@ You have implemented a restart logic for code-server in case the code-server shu
 can you check if print_to_console.py and chatbot_ui.py print exactly the same contents when an agent is executed on a task? Write a regression test for this.
 
 Can you read sorcar.py and carefully find all threads, timers, processes, and other forms of concurrency introduced by sorcar.py?
+
+When I run sorcar on a task for very long time, the mac os x runs out of resources. Can you investigate the code for resource and memory hogs. For example, task_history.json could be very large. You may want to convert it into jsonl
+format and read tasks on demand by sorcar. Find other memory and resource hogging issues in the prject.

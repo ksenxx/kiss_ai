@@ -39,12 +39,14 @@ from kiss.agents.sorcar.task_history import (
     SAMPLE_TASKS,
     _add_task,
     _append_task_to_md,
+    _cleanup_stale_cs_dirs,
     _init_task_history_md,
     _load_file_usage,
     _load_history,
     _load_last_model,
     _load_model_usage,
     _load_proposals,
+    _load_task_chat_events,
     _record_file_usage,
     _record_model_usage,
     _save_proposals,
@@ -166,6 +168,9 @@ def run_chatbot(
     selected_model = last if last and last not in _INTERNAL_MODELS else default_model
 
     _init_task_history_md()
+
+    # Clean up stale code-server data directories in a background thread
+    threading.Thread(target=_cleanup_stale_cs_dirs, daemon=True).start()
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
@@ -859,7 +864,7 @@ def run_chatbot(
         history = _load_history()
         return JSONResponse(
             [
-                {"task": e["task"], "has_events": bool(e.get("chat_events"))}
+                {"task": e["task"], "has_events": bool(e.get("has_events"))}
                 for e in history
             ]
         )
@@ -873,7 +878,7 @@ def run_chatbot(
         history = _load_history()
         if idx < 0 or idx >= len(history):
             return JSONResponse({"error": "Index out of range"}, status_code=404)
-        events: list[dict[str, object]] = history[idx].get("chat_events", [])  # type: ignore[assignment]
+        events = _load_task_chat_events(str(history[idx]["task"]))
         return JSONResponse(events)
 
     async def proposed_tasks_endpoint(request: Request) -> JSONResponse:

@@ -20,11 +20,12 @@ import kiss.agents.sorcar.task_history as th
 
 def _redirect_history(tmpdir: str):
     old = (th.HISTORY_FILE, th.PROPOSALS_FILE, th.MODEL_USAGE_FILE,
-           th.FILE_USAGE_FILE, th._history_cache, th._KISS_DIR)
+           th.FILE_USAGE_FILE, th._history_cache, th._KISS_DIR, th._CHAT_EVENTS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th.HISTORY_FILE = kiss_dir / "task_history.json"
+    th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
+    th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
     th.PROPOSALS_FILE = kiss_dir / "proposals.json"
     th.MODEL_USAGE_FILE = kiss_dir / "model_usage.json"
     th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
@@ -34,7 +35,7 @@ def _redirect_history(tmpdir: str):
 
 def _restore_history(saved):
     (th.HISTORY_FILE, th.PROPOSALS_FILE, th.MODEL_USAGE_FILE,
-     th.FILE_USAGE_FILE, th._history_cache, th._KISS_DIR) = saved
+     th.FILE_USAGE_FILE, th._history_cache, th._KISS_DIR, th._CHAT_EVENTS_DIR) = saved
 
 
 # ---------------------------------------------------------------------------

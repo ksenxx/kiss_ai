@@ -24,6 +24,13 @@ import requests
 from kiss.agents.sorcar.sorcar import run_chatbot
 from kiss.core.relentless_agent import RelentlessAgent
 
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:websockets.legacy is deprecated:DeprecationWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning"
+    ),
+]
+
 
 class _CSDummyAgent(RelentlessAgent):
     """Minimal agent for code-server integration tests."""

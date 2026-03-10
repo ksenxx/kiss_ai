@@ -123,7 +123,7 @@ class TestHistoryLock:
 
         try:
             task_history._history_cache = None
-            _save_history([{"task": "initial_task", "chat_events": []}])
+            _save_history([{"task": "initial_task", "has_events": False}])
             task_history._history_cache = None  # Force reload
 
             errors: list[Exception] = []

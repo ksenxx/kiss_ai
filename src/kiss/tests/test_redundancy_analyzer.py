@@ -223,15 +223,20 @@ def _verify_coverage_preserved(cov_file: str, redundant: list[str]):
 
 def test_empty_coverage():
     """Handle coverage file with no test contexts gracefully."""
+    import warnings
+
     tmpdir = tempfile.mkdtemp()
     cov_file = os.path.join(tmpdir, ".coverage")
 
     import coverage
+    from coverage.exceptions import CoverageWarning
 
     cov = coverage.Coverage(data_file=cov_file, branch=True)
     cov.start()
-    cov.stop()
-    cov.save()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", CoverageWarning)
+        cov.stop()
+        cov.save()
 
     redundant = analyze_redundancy(cov_file)
     assert redundant == []
