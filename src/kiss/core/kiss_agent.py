@@ -437,7 +437,7 @@ class KISSAgent(Base):
         """Returns a compact single-line usage information string."""
         try:
             max_tokens = get_max_context_length(self.model.model_name)
-            capped_tokens = min(self.total_tokens_used, max_tokens)
+            capped_tokens = self.total_tokens_used % max_tokens
             global_max = config_module.DEFAULT_CONFIG.agent.global_max_budget
             session_part = (
                 f"{self.session_info}, " if self.session_info else ""
