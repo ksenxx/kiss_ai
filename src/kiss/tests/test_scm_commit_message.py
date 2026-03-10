@@ -25,7 +25,7 @@ class TestScmMessageExtensionJS(unittest.TestCase):
         assert "fs.unlinkSync(sp)" in _CS_EXTENSION_JS
 
     def test_sp_variable_declared_with_correct_path(self) -> None:
-        expected = "var sp=path.join(home,'.kiss','code-server-data','pending-scm-message.json')"
+        expected = "var sp=path.join(dataDir,'pending-scm-message.json')"
         assert expected in _CS_EXTENSION_JS
 
 

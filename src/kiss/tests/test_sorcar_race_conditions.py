@@ -302,11 +302,13 @@ class TestSorcarServerSubprocess:
         # Tasks
         r = requests.get(f"{base}/tasks")
         assert r.status_code == 200
+        tasks_data = r.json()
+        assert isinstance(tasks_data, list)
+        if tasks_data:
+            assert "has_events" in tasks_data[0]
 
         # Task events
-        r = requests.get(f"{base}/task-events?index=0")
-        assert r.status_code == 200
-        r = requests.get(f"{base}/task-events?index=abc")
+        r = requests.get(f"{base}/task-events?idx=0")
         assert r.status_code == 200
 
         # Proposed tasks
@@ -630,24 +632,20 @@ class TestSorcarServer:
 
         async def tasks_ep(request: Request) -> JSONResponse:
             history = th._load_history()
-            return JSONResponse([
-                {"task": e["task"], "has_events": bool(e.get("chat_events"))}
-                for e in history
-            ])
+            return JSONResponse(
+                [{"task": e["task"], "has_events": bool(e.get("chat_events"))} for e in history]
+            )
 
-        async def task_events(request: Request) -> JSONResponse:
+        async def task_events_ep(request: Request) -> JSONResponse:
             try:
-                idx = int(request.query_params.get("index", "0"))
+                idx = int(request.query_params.get("idx", "0"))
             except (ValueError, TypeError):
-                return JSONResponse({"events": [], "task": ""})
+                return JSONResponse({"error": "Invalid index"}, status_code=400)
             history = th._load_history()
-            if 0 <= idx < len(history):
-                entry = history[idx]
-                return JSONResponse({
-                    "events": entry.get("chat_events", []),
-                    "task": entry["task"],
-                })
-            return JSONResponse({"events": [], "task": ""})
+            if idx < 0 or idx >= len(history):
+                return JSONResponse({"error": "Index out of range"}, status_code=404)
+            events = history[idx].get("chat_events", [])
+            return JSONResponse(events)
 
         async def proposed_tasks_ep(request: Request) -> JSONResponse:
             with proposed_lock:
@@ -800,7 +798,7 @@ class TestSorcarServer:
                 Route("/suggestions", suggestions),
                 Route("/complete", complete),
                 Route("/tasks", tasks_ep),
-                Route("/task-events", task_events),
+                Route("/task-events", task_events_ep),
                 Route("/proposed_tasks", proposed_tasks_ep),
                 Route("/models", models_ep),
                 Route("/theme", theme),
@@ -859,18 +857,24 @@ class TestSorcarServer:
     def test_tasks(self) -> None:
         r = self.client.get("/tasks")
         assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        if data:
+            assert "task" in data[0]
+            assert "has_events" in data[0]
 
-    def test_task_events_valid(self) -> None:
-        r = self.client.get("/task-events?index=0")
+    def test_task_events_valid_index(self) -> None:
+        r = self.client.get("/task-events?idx=0")
         assert r.status_code == 200
+        assert isinstance(r.json(), list)
 
-    def test_task_events_invalid(self) -> None:
-        r = self.client.get("/task-events?index=abc")
-        assert r.json()["events"] == []
+    def test_task_events_invalid_index(self) -> None:
+        r = self.client.get("/task-events?idx=99999")
+        assert r.status_code == 404
 
-    def test_task_events_out_of_range(self) -> None:
-        r = self.client.get("/task-events?index=99999")
-        assert r.json()["events"] == []
+    def test_task_events_bad_param(self) -> None:
+        r = self.client.get("/task-events?idx=abc")
+        assert r.status_code == 400
 
     def test_proposed_tasks(self) -> None:
         r = self.client.get("/proposed_tasks")

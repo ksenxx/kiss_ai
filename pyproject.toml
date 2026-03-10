@@ -48,6 +48,7 @@ dependencies = [
     "playwright>=1.40.0",
     "uvicorn>=0.30.0",
     "starlette>=0.38.0",
+    "slack_sdk>=3.30.0",
 ]
 
 [build-system]
@@ -172,6 +173,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "playwright.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "slack_sdk.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
