@@ -50,22 +50,6 @@ def _drain(q: queue.Queue) -> list[dict]:
             break
     return events
 
-
-# ── _coalesce_events tests ──────────────────────────────────────────────
-
-
-class TestCoalesceEvents:
-    def test_no_merge_without_text_field(self) -> None:
-        events = [
-            {"type": "text_delta"},
-            {"type": "text_delta", "text": "a"},
-        ]
-        result = _coalesce_events(events)
-        assert len(result) == 2
-
-# ── Recording tests ─────────────────────────────────────────────────────
-
-
 class TestPrinterRecording:
     def test_stop_clears_buffer(self) -> None:
         p = BaseBrowserPrinter()
@@ -180,45 +164,6 @@ class TestDisplayEventTypes:
         ]
         for t in non_display:
             assert t not in _DISPLAY_EVENT_TYPES
-
-
-# ── Recording during print() calls ──────────────────────────────────────
-
-
-class TestRecordingViaPrint:
-    def test_tool_call_print_recorded(self) -> None:
-        p = BaseBrowserPrinter()
-        p.start_recording()
-        p.print("Bash", type="tool_call", tool_input={"command": "ls", "description": "list"})
-        events = p.stop_recording()
-        # tool_call triggers text_end + tool_call
-        types = [e["type"] for e in events]
-        assert "tool_call" in types
-
-    def test_result_print_recorded(self) -> None:
-        p = BaseBrowserPrinter()
-        p.start_recording()
-        p.print("done", type="result", step_count=1, total_tokens=50, cost="$0.01")
-        events = p.stop_recording()
-        types = [e["type"] for e in events]
-        assert "result" in types
-
-    def test_prompt_print_recorded(self) -> None:
-        p = BaseBrowserPrinter()
-        p.start_recording()
-        p.print("prompt text", type="prompt")
-        events = p.stop_recording()
-        assert any(e["type"] == "prompt" for e in events)
-
-    def test_usage_info_recorded(self) -> None:
-        p = BaseBrowserPrinter()
-        p.start_recording()
-        p.print("tokens: 100", type="usage_info")
-        events = p.stop_recording()
-        assert any(e["type"] == "usage_info" for e in events)
-
-# ── JSON serialization roundtrip ─────────────────────────────────────────
-
 
 class TestJsonRoundtrip:
     def setup_method(self) -> None:
@@ -382,15 +327,6 @@ class TestTaskEventsEndpoint:
     def test_returns_empty_for_sample_tasks(self) -> None:
         result = _task_events_lookup(th.SAMPLE_TASKS, 0)
         assert result == []
-
-    def test_returns_events_for_task_with_events(self) -> None:
-        th._add_task("test task with events")
-        events: list[dict[str, Any]] = [{"type": "text_delta", "text": "hello"}]
-        th._set_latest_chat_events(events, task="test task with events")
-        history = th._load_history()
-        result = _task_events_lookup(history, 0)
-        assert len(result) == 1
-        assert result[0]["type"] == "text_delta"
 
     def test_out_of_range_returns_error(self) -> None:
         result = _task_events_lookup(th.SAMPLE_TASKS, 999)

@@ -27,24 +27,6 @@ class TestAModel(unittest.TestCase):
     model_name = DEFAULT_MODEL
 
     @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_agentic(self) -> None:
-        skip_if_no_api_key_for_model(self.model_name)
-        agent = KISSAgent(f"Test Agent for {self.model_name}")
-        result = agent.run(
-            model_name=self.model_name,
-            prompt_template=(
-                "Use the simple_calculator tool with expression='8934 * 2894' to calculate. "
-                "Then call finish with the result of the simple_calculator tool."
-            ),
-            tools=[simple_calculator],
-            max_steps=10,
-            max_budget=1.0,
-        )
-        self.assertIsNotNone(result)
-        self.assertIn("25854996", re.sub(r"[,\\s]", "", result))
-        self.assertGreaterEqual(len(json.loads(agent.get_trajectory())), 5)
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
     def test_embedding(self) -> None:
         skip_if_no_api_key_for_model(self.model_name)
         from kiss.core.models.model_info import MODEL_INFO

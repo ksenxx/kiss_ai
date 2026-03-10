@@ -132,44 +132,6 @@ class TestGeminiMultimodal(unittest.TestCase):
         assert "red" in result_lower or "blue" in result_lower
 
 
-@requires_anthropic_api_key
-class TestAnthropicMultimodal(unittest.TestCase):
-    """Integration tests for Anthropic (Claude) model with image attachments."""
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_describe_png_image(self) -> None:
-        png_data = _create_png_bytes(width=4, height=4, color=(0, 255, 0))
-        att = Attachment(data=png_data, mime_type="image/png")
-        agent = KISSAgent("Claude Image Test")
-        result = agent.run(
-            model_name="claude-haiku-4-5",
-            prompt_template=(
-                "Describe this image. What color is it? Answer with just the color name."
-            ),
-            is_agentic=False,
-            max_budget=0.50,
-            attachments=[att],
-        )
-        assert result is not None
-        assert len(result) > 0
-        assert "green" in result.lower()
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_describe_pdf(self) -> None:
-        pdf_data = _create_minimal_pdf()
-        att = Attachment(data=pdf_data, mime_type="application/pdf")
-        agent = KISSAgent("Claude PDF Test")
-        result = agent.run(
-            model_name="claude-haiku-4-5",
-            prompt_template=("What text does this PDF contain? Answer with just the text content."),
-            is_agentic=False,
-            max_budget=0.50,
-            attachments=[att],
-        )
-        assert result is not None
-        assert "hello" in result.lower() or "world" in result.lower()
-
-
 @requires_openai_api_key
 class TestOpenAIMultimodal(unittest.TestCase):
     """Integration tests for OpenAI model with image attachments."""

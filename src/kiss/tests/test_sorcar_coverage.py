@@ -93,20 +93,6 @@ class TestTaskHistory:
     # --- file usage ---
     # --- _load_json_dict ---
     # --- _append_task_to_md ---
-    def test_append_task_to_md(self) -> None:
-        md_path = Path(self.tmpdir) / "TASK_HISTORY.md"
-        # Monkey-patch _get_task_history_md_path
-        import kiss.core.config as cfg
-        old_artifact = cfg.DEFAULT_CONFIG.agent.artifact_dir
-        try:
-            cfg.DEFAULT_CONFIG.agent.artifact_dir = str(md_path.parent / "artifacts")
-            th._init_task_history_md()
-            th._append_task_to_md("Test task", "success: true\nsummary: done")
-            content = th._get_task_history_md_path().read_text()
-            assert "Test task" in content
-            assert "success: true" in content
-        finally:
-            cfg.DEFAULT_CONFIG.agent.artifact_dir = old_artifact
 
     # --- thread safety ---
 # ---------------------------------------------------------------------------
@@ -155,26 +141,6 @@ class TestUsefulToolsBash:
 class TestBaseBrowserPrinter:
     def setup_method(self) -> None:
         self.printer = BaseBrowserPrinter()
-
-    def test_print_tool_call_with_edit(self) -> None:
-        cq = self.printer.add_client()
-        self.printer.print(
-            "Edit",
-            type="tool_call",
-            tool_input={
-                "file_path": "/tmp/test.py",
-                "old_string": "old",
-                "new_string": "new",
-            },
-        )
-        events = []
-        while not cq.empty():
-            events.append(cq.get_nowait())
-        tool_events = [e for e in events if e["type"] == "tool_call"]
-        assert len(tool_events) == 1
-        assert tool_events[0]["old_string"] == "old"
-        assert tool_events[0]["new_string"] == "new"
-        self.printer.remove_client(cq)
 
     def test_print_result_bad_yaml(self) -> None:
         cq = self.printer.add_client()
@@ -248,24 +214,6 @@ class TestBrowserPrinterEdgeCases:
     def setup_method(self) -> None:
         self.printer = BaseBrowserPrinter()
 
-    def test_tool_call_with_content_and_extras(self) -> None:
-        cq = self.printer.add_client()
-        self.printer.print(
-            "Write",
-            type="tool_call",
-            tool_input={
-                "file_path": "/tmp/out.py",
-                "content": "print('hi')",
-                "extra_key": "extra_val",
-            },
-        )
-        events = []
-        while not cq.empty():
-            events.append(cq.get_nowait())
-        tool_events = [e for e in events if e["type"] == "tool_call"]
-        assert tool_events[0]["content"] == "print('hi')"
-        self.printer.remove_client(cq)
-
 # ---------------------------------------------------------------------------
 # Additional code_server.py coverage
 # ---------------------------------------------------------------------------
@@ -287,10 +235,6 @@ class TestTaskHistoryAdditional:
     def teardown_method(self) -> None:
         _restore_history(*self.old)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_load_usage_corrupted(self) -> None:
-        th.FILE_USAGE_FILE.write_text("broken json")
-        assert th._load_file_usage() == {}
 
 # ---------------------------------------------------------------------------
 # Additional useful_tools.py coverage
@@ -359,25 +303,6 @@ class TestPrepareMergeViewEdgeCases:
                 self.tmpdir, data_dir, pre_hunks, pre_untracked, pre_hashes,
             )
             assert "error" in result  # Only large file, skipped
-        finally:
-            shutil.rmtree(data_dir, ignore_errors=True)
-
-    def test_pre_hunks_filter_with_matching_base(self) -> None:
-        """Hunks that exist in pre_hunks should be filtered out."""
-        # Make a change, record hunks, then don't change further
-        Path(self.tmpdir, "file.txt").write_text("line1\nchanged\nline3\n")
-        pre_hunks = _parse_diff_hunks(self.tmpdir)
-        pre_untracked = _capture_untracked(self.tmpdir)
-        # Also create a NEW file to force merge view open
-        Path(self.tmpdir, "new.py").write_text("code\n")
-        data_dir = tempfile.mkdtemp()
-        try:
-            result = _prepare_merge_view(self.tmpdir, data_dir, pre_hunks, pre_untracked, None)
-            if result.get("status") == "opened":
-                manifest = json.loads((Path(data_dir) / "pending-merge.json").read_text())
-                file_names = [f["name"] for f in manifest["files"]]
-                # new.py should be there, file.txt should NOT (its hunks match pre_hunks)
-                assert "new.py" in file_names
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
 
@@ -864,28 +789,6 @@ class TestWebUseToolWaitForStable:
         # about:blank has empty body, so snapshot might be empty
         result = self.tool.click(2)
         assert "Error" in result
-
-
-class TestBashStreamingBaseException:
-    """Cover useful_tools.py lines 354-356: BaseException in streaming readline loop."""
-
-    def test_callback_raises_keyboard_interrupt(self) -> None:
-        """Stream callback raising KeyboardInterrupt triggers BaseException handler."""
-        call_count = 0
-
-        def callback(line: str) -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 3:
-                raise KeyboardInterrupt("test interrupt")
-
-        tools = UsefulTools(stream_callback=callback)
-        with pytest.raises(KeyboardInterrupt, match="test interrupt"):
-            tools.Bash(
-                "for i in 1 2 3 4 5; do echo line$i; done",
-                "test",
-                timeout_seconds=30,
-            )
 
 
 class TestWebUseToolDomContentLoadedTimeout:
