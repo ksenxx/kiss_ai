@@ -1035,7 +1035,6 @@ def run_chatbot(
         if was_merging:  # pragma: no cover – cleanup during active merge
             _restore_merge_files(cs_data_dir, actual_work_dir)
         stop_agent()
-        if cs_proc and cs_proc.poll() is None:  # pragma: no cover – cleanup timing
         _shutdown_oauth_callback_server()
         if cs_proc and cs_proc.poll() is None:  # pragma: no cover – cleanup timing
             try:
