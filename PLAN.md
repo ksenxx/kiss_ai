@@ -13,47 +13,47 @@ tests pass. Run `uv run check --full` to ensure lint and type checks pass.
 
 ### Daemon Threads (8 total)
 
-| # | Target function         | Purpose                                                | Line  |
+| # | Target function | Purpose | Line |
 |---|-------------------------|--------------------------------------------------------|-------|
-| 1 | `_cleanup_stale_cs_dirs`| One-shot: removes stale code-server data dirs at start | ~173  |
-| 2 | `_watch_code_server`    | Polling loop (5s): restart code-server if it crashes   | ~383  |
-| 3 | `_watch_theme_file`     | Polling loop (1s): detect VS Code theme changes        | ~481  |
-| 4 | `_watch_no_clients`     | Polling loop (5s): schedule shutdown when no clients    | ~498  |
-| 5 | `run_agent_thread`      | Per-task: runs the agent (created in `run_task`/`run_selection`) | ~753/~789 |
-| 6 | `generate_followup`     | One-shot per task: calls LLM for a followup suggestion | ~579  |
-| 7 | `refresh_proposed_tasks`| One-shot at startup: calls LLM for proposed tasks      | ~1243 |
-| 8 | `_open_browser`         | One-shot: sleeps 2s then opens browser                 | ~1278 |
+| 1 | `_cleanup_stale_cs_dirs`| One-shot: removes stale code-server data dirs at start | ~173 |
+| 2 | `_watch_code_server` | Polling loop (5s): restart code-server if it crashes | ~383 |
+| 3 | `_watch_theme_file` | Polling loop (1s): detect VS Code theme changes | ~481 |
+| 4 | `_watch_no_clients` | Polling loop (5s): schedule shutdown when no clients | ~498 |
+| 5 | `run_agent_thread` | Per-task: runs the agent (created in `run_task`/`run_selection`) | ~753/~789 |
+| 6 | `generate_followup` | One-shot per task: calls LLM for a followup suggestion | ~579 |
+| 7 | `refresh_proposed_tasks`| One-shot at startup: calls LLM for proposed tasks | ~1243 |
+| 8 | `_open_browser` | One-shot: sleeps 2s then opens browser | ~1278 |
 
 ### Timer
 
-| # | Function            | Purpose                                          | Line  |
+| # | Function | Purpose | Line |
 |---|---------------------|--------------------------------------------------|-------|
 | 1 | `_schedule_shutdown`| `threading.Timer(10s)` → `_do_shutdown` after no clients | ~692 |
 
 ### Locks and Events (5)
 
-| # | Name                | Type              | Protects                           |
+| # | Name | Type | Protects |
 |---|---------------------|-------------------|------------------------------------|
-| 1 | `running_lock`      | `threading.Lock`  | `running`, `agent_thread`, `merging` |
-| 2 | `proposed_lock`     | `threading.Lock`  | `proposed_tasks`                    |
-| 3 | `shutdown_lock`     | `threading.Lock`  | `shutdown_timer`                    |
-| 4 | `shutting_down`     | `threading.Event` | Signals all watcher threads to exit |
-| 5 | `current_stop_event`| `threading.Event` | Per-task stop signal                |
+| 1 | `running_lock` | `threading.Lock` | `running`, `agent_thread`, `merging` |
+| 2 | `proposed_lock` | `threading.Lock` | `proposed_tasks` |
+| 3 | `shutdown_lock` | `threading.Lock` | `shutdown_timer` |
+| 4 | `shutting_down` | `threading.Event` | Signals all watcher threads to exit |
+| 5 | `current_stop_event`| `threading.Event` | Per-task stop signal |
 
 ### asyncio.to_thread (3 call sites)
 
-| # | Endpoint                   | Purpose                     | Line  |
+| # | Endpoint | Purpose | Line |
 |---|----------------------------|-----------------------------|-------|
-| 1 | `/complete`                | LLM autocomplete generation | ~944  |
-| 2 | `_thread_json_response`    | Used by commit, push, generate-commit-message, generate-config-message | ~1029 |
+| 1 | `/complete` | LLM autocomplete generation | ~944 |
+| 2 | `_thread_json_response` | Used by commit, push, generate-commit-message, generate-config-message | ~1029 |
 
 ### Subprocesses
 
-| # | Type             | Purpose                       |
+| # | Type | Purpose |
 |---|------------------|-------------------------------|
 | 1 | `subprocess.Popen` (long-lived) | code-server process |
-| 2 | `subprocess.Popen` (one-shot)   | macOS `open` fallback for browser |
-| 3 | Various `subprocess.run`        | git operations (add, diff, commit, push) |
+| 2 | `subprocess.Popen` (one-shot) | macOS `open` fallback for browser |
+| 3 | Various `subprocess.run` | git operations (add, diff, commit, push) |
 
 ## Changes to Make (in order)
 
@@ -74,6 +74,7 @@ two daemon threads for this is unnecessary. They can share a single thread that
 wakes up every 1 second (the faster of the two intervals) and performs both checks.
 
 **How**:
+
 - Create a single `_watch_periodic()` function that combines the logic of
   `_watch_theme_file` (check theme file mtime every 1s) and `_watch_no_clients`
   (check client count every 5s, using a counter to skip 4 out of 5 iterations).
@@ -105,7 +106,7 @@ few seconds and happens before the user typically interacts).
 with a synchronous call `refresh_proposed_tasks()`, moved to just before
 `server.run()`. Alternatively, if startup latency is a concern, make the
 `/proposed_tasks` endpoint trigger the refresh on first call (lazy init with a
-flag variable).  The simpler approach is synchronous because the browser is opened
+flag variable). The simpler approach is synchronous because the browser is opened
 in a background thread with a 2-second delay, so the user won't notice.
 
 ### Change 5: Replace `_open_browser` thread with `asyncio` startup event
@@ -132,17 +133,17 @@ and store the handle for cancellation. Replace `_cancel_shutdown` to call
 ## After Each Change
 
 1. Run `uv run pytest -v` (timeout 900s) to verify no test breakage.
-2. Run `uv run check --full` to verify lint/type checks.
-3. Verify the overall thread/timer/lock count decreased by the expected amount.
+1. Run `uv run check --full` to verify lint/type checks.
+1. Verify the overall thread/timer/lock count decreased by the expected amount.
 
 ## Expected Result
 
-| Metric                | Before | After |
+| Metric | Before | After |
 |-----------------------|--------|-------|
-| Daemon threads        | 8      | 5 (agent thread + code-server watcher + combined periodic watcher + code-server process watcher remains as-is, _open_browser moved to asyncio) |
-| `threading.Timer`     | 1      | 0     |
-| `threading.Lock`      | 3      | 2 (remove `shutdown_lock`)  |
-| Total thread launches | ~10    | ~6    |
+| Daemon threads | 8 | 5 (agent thread + code-server watcher + combined periodic watcher + code-server process watcher remains as-is, \_open_browser moved to asyncio) |
+| `threading.Timer` | 1 | 0 |
+| `threading.Lock` | 3 | 2 (remove `shutdown_lock`) |
+| Total thread launches | ~10 | ~6 |
 
 The `run_agent_thread` (per-task), `_watch_code_server`, and `asyncio.to_thread`
 calls are genuinely needed and should NOT be removed. The code-server `Popen`

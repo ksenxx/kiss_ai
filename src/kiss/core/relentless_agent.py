@@ -139,6 +139,7 @@ class RelentlessAgent(Base):
         current_pid = str(os.getpid())
         for session in range(self.max_sub_sessions):
             executor = KISSAgent(f"{self.name} Session-{session}")
+            session_info = f"Session: {session + 1}/{self.max_sub_sessions}"
             try:
                 result = executor.run(
                     model_name=self.model_name,
@@ -156,6 +157,7 @@ class RelentlessAgent(Base):
                     max_budget=self.max_budget,
                     printer=self.printer,
                     attachments=attachments if session == 0 else None,
+                    session_info=session_info,
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
