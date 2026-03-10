@@ -169,8 +169,8 @@ def run_chatbot(
 
     _init_task_history_md()
 
-    # Clean up stale code-server data directories in a background thread
-    threading.Thread(target=_cleanup_stale_cs_dirs, daemon=True).start()
+    # Clean up stale code-server data directories synchronously at startup
+    _cleanup_stale_cs_dirs()
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
@@ -383,8 +383,7 @@ def run_chatbot(
         threading.Thread(target=_watch_code_server, daemon=True).start()
 
     html_page = _build_html(title, code_server_url, actual_work_dir)
-    shutdown_timer: threading.Timer | None = None
-    shutdown_lock = threading.Lock()
+    shutdown_handle: asyncio.TimerHandle | None = None
 
     def refresh_file_cache() -> None:
         nonlocal file_cache
@@ -456,7 +455,8 @@ def run_chatbot(
         except Exception:  # pragma: no cover – LLM API failure
             logger.debug("Exception caught", exc_info=True)
 
-    def _watch_theme_file() -> None:
+    def _watch_periodic() -> None:
+        """Combined watcher: check theme file every 1s and client count every 5s."""
         theme_file = _KISS_DIR / "vscode-theme.json"
         last_mtime = 0.0
         try:
@@ -464,7 +464,10 @@ def run_chatbot(
                 last_mtime = theme_file.stat().st_mtime
         except OSError:  # pragma: no cover – filesystem error
             logger.debug("Exception caught", exc_info=True)
+        no_client_since: float | None = None
+        tick = 0
         while not shutting_down.is_set():  # pragma: no branch – daemon thread exit
+            # Theme check every 1s
             try:
                 if theme_file.exists():
                     mtime = theme_file.stat().st_mtime
@@ -476,26 +479,20 @@ def run_chatbot(
                         printer.broadcast({"type": "theme_changed", **colors})
             except (OSError, json.JSONDecodeError):  # pragma: no cover – filesystem/JSON error
                 logger.debug("Exception caught", exc_info=True)
+            # Client check every 5s (every 5th tick)
+            tick += 1
+            if tick >= 5:
+                tick = 0
+                if not printer.has_clients():
+                    if no_client_since is None:
+                        no_client_since = time.monotonic()
+                    elif time.monotonic() - no_client_since >= 10.0:
+                        _schedule_shutdown()
+                else:
+                    no_client_since = None
             shutting_down.wait(1.0)
 
-    threading.Thread(target=_watch_theme_file, daemon=True).start()
-
-    def _watch_no_clients() -> None:
-        """Periodically check if all clients have disconnected and schedule shutdown."""
-        no_client_since: float | None = None
-        while not shutting_down.is_set():  # pragma: no branch – daemon thread exit
-            shutting_down.wait(5.0)
-            if shutting_down.is_set():
-                break
-            if not printer.has_clients():
-                if no_client_since is None:
-                    no_client_since = time.monotonic()
-                elif time.monotonic() - no_client_since >= 10.0:
-                    _schedule_shutdown()
-            else:
-                no_client_since = None
-
-    threading.Thread(target=_watch_no_clients, daemon=True).start()
+    threading.Thread(target=_watch_periodic, daemon=True).start()
 
     def run_agent_thread(
         task: str,
@@ -576,11 +573,10 @@ def run_chatbot(
             chat_events.append(done_event)
             printer.broadcast(done_event)
             if done_event.get("type") == "task_done":
-                threading.Thread(
-                    target=generate_followup,
-                    args=(task, result_text),
-                    daemon=True,
-                ).start()
+                try:
+                    generate_followup(task, result_text)
+                except Exception:  # pragma: no cover – LLM API failure
+                    logger.debug("Exception caught", exc_info=True)
             _set_latest_chat_events(chat_events, task=task)
             try:
                 merge_result = _prepare_merge_view(
@@ -673,25 +669,41 @@ def run_chatbot(
         server.should_exit = True
 
     def _cancel_shutdown() -> None:
-        nonlocal shutdown_timer
-        with shutdown_lock:
-            if shutdown_timer is not None:  # pragma: no cover – timer race
-                shutdown_timer.cancel()
-                shutdown_timer = None
+        nonlocal shutdown_handle
+        if shutdown_handle is not None:  # pragma: no cover – timer race
+            shutdown_handle.cancel()
+            shutdown_handle = None
 
-    def _schedule_shutdown() -> None:  # pragma: no cover – timer-triggered shutdown
-        nonlocal shutdown_timer
+    def _schedule_shutdown_on_loop() -> None:  # pragma: no cover – timer-triggered shutdown
+        """Schedule shutdown from the asyncio event loop thread."""
+        nonlocal shutdown_handle
         if printer.has_clients():
             return
         with running_lock:
             if running:
                 return
-        with shutdown_lock:
-            if shutdown_timer is not None:
-                shutdown_timer.cancel()
-            shutdown_timer = threading.Timer(10.0, _do_shutdown)
-            shutdown_timer.daemon = True
-            shutdown_timer.start()
+        if shutdown_handle is not None:
+            shutdown_handle.cancel()
+        loop = asyncio.get_event_loop()
+        shutdown_handle = loop.call_later(10.0, _do_shutdown)
+
+    def _schedule_shutdown() -> None:  # pragma: no cover – timer-triggered shutdown
+        if printer.has_clients():
+            return
+        with running_lock:
+            if running:
+                return
+        try:
+            loop = asyncio.get_running_loop()
+            # Already on the event loop thread (called from async context)
+            _schedule_shutdown_on_loop()
+        except RuntimeError:
+            # Called from a non-async thread; dispatch to the event loop
+            try:
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(_schedule_shutdown_on_loop)
+            except RuntimeError:  # pragma: no cover – no event loop available
+                pass
 
     async def index(request: Request) -> HTMLResponse:
         return HTMLResponse(html_page)
@@ -1240,7 +1252,10 @@ def run_chatbot(
         ]
     )
 
-    threading.Thread(target=refresh_proposed_tasks, daemon=True).start()
+    try:
+        refresh_proposed_tasks()
+    except Exception:  # pragma: no cover – LLM API failure
+        logger.debug("Exception caught", exc_info=True)
 
     import atexit
 
@@ -1258,8 +1273,8 @@ def run_chatbot(
     printer.print(f"{title} running at {url}")
     printer.print(f"Work directory: {actual_work_dir}")
 
-    def _open_browser() -> None:  # pragma: no cover – browser launch
-        time.sleep(2)
+    async def _open_browser_async() -> None:  # pragma: no cover – browser launch
+        await asyncio.sleep(2)
         try:
             if not webbrowser.open(url):
                 logger.warning("webbrowser.open() returned False for %s", url)
@@ -1275,7 +1290,10 @@ def run_chatbot(
                 except Exception:
                     logger.warning("Fallback 'open' command also failed", exc_info=True)
 
-    threading.Thread(target=_open_browser, daemon=True).start()
+    async def _on_startup() -> None:  # pragma: no cover – browser launch
+        asyncio.create_task(_open_browser_async())
+
+    app.add_event_handler("startup", _on_startup)
     logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)
     config = uvicorn.Config(
         app,

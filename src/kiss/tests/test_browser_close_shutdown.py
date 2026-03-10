@@ -21,5 +21,5 @@ class TestShutdownTimerDuration:
 
         source = inspect.getsource(sorcar.run_chatbot)
         # The timer should be 10 seconds, not 120
-        assert "Timer(10.0," in source
+        assert "call_later(10.0," in source
         assert "Timer(120.0," not in source
