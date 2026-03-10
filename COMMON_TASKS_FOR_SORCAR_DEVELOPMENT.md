@@ -40,3 +40,6 @@ You have implemented a restart logic for code-server in case the code-server shu
 
 can you check if print_to_console.py and chatbot_ui.py print exactly the same contents when an agent is executed on a task?
 
+Can you read sorcar.py and carefully find all threads, timers, processes, and other forms of concurrency introduced by sorcar.py?
+
+

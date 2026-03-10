@@ -1151,7 +1151,7 @@ function handleEvent(ev){
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
     inp.placeholder='Ask anything\u2026 (@ for files, '
-    +'cmd/ctrl-k to toggle editor, cmd/ctrl-L to run selection)';
+    +'cmd/ctrl-k to toggle editor, cmd/ctrl-L to run selected text)';
     inp.focus();break;
   case'code_server_restarted':{
     var csFrame=document.getElementById('code-server-frame');
@@ -1995,7 +1995,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files, \u2318/ctrl-k editor, \u2318/ctrl-L run)"
+              placeholder="Ask anything\u2026 (@ files, \u2318/ctrl-k editor, \u2318/ctrl-L to run selected text)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple

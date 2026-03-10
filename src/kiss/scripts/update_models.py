@@ -161,8 +161,7 @@ def fetch_gemini(verbose: bool = False) -> dict[str, dict]:
         print("  Fetching Gemini models...")
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     data = api_get(url)
-    skip_suffixes = (
-        "-exp",
+    skip_fragments = (
         "-latest",
         "-preview-tts",
         "-image-generation",
@@ -178,9 +177,7 @@ def fetch_gemini(verbose: bool = False) -> dict[str, dict]:
         model_id = raw_name.replace("models/", "")
         if not model_id.startswith("gemini-"):
             continue
-        if any(s in model_id for s in skip_suffixes):
-            continue
-        if model_id.endswith("-latest"):
+        if any(s in model_id for s in skip_fragments):
             continue
         ctx = m.get("inputTokenLimit", 0)
         methods = m.get("supportedGenerationMethods", [])
@@ -215,6 +212,49 @@ def fetch_anthropic(verbose: bool = False) -> dict[str, dict]:
         if not model_id.startswith("claude-"):
             continue
         models[model_id] = {"source": "anthropic"}
+    if verbose:
+        print(f"    Found {len(models)} models")
+    return models
+
+
+def fetch_openai(verbose: bool = False) -> dict[str, dict]:
+    """Fetch model list from OpenAI API (IDs and context, no pricing).
+
+    Filters to models matching _OPENAI_PREFIXES so we only pick up chat /
+    embedding models, not internal fine-tune artefacts.
+    """
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        print("  WARNING: OPENAI_API_KEY not set, skipping OpenAI")
+        return {}
+    if verbose:
+        print("  Fetching OpenAI models...")
+    data = api_get(
+        "https://api.openai.com/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    from kiss.core.models.model_info import _OPENAI_PREFIXES
+
+    skip_fragments = (
+        "realtime",
+        "audio",
+        "transcribe",
+        "tts",
+        "whisper",
+        "dall-e",
+        "davinci",
+        "babbage",
+        "instruct",
+        "search-api",
+    )
+    models: dict[str, dict] = {}
+    for m in data.get("data", []):
+        model_id = m.get("id", "")
+        if not model_id or not model_id.startswith(_OPENAI_PREFIXES):
+            continue
+        if any(f in model_id for f in skip_fragments):
+            continue
+        models[model_id] = {"source": "openai"}
     if verbose:
         print(f"    Found {len(models)} models")
     return models
@@ -333,6 +373,7 @@ def find_deprecated_models(
     openrouter: dict[str, dict],
     anthropic: dict[str, dict],
     gemini: dict[str, dict],
+    openai: dict[str, dict],
 ) -> list[dict]:
     """Identify models in current MODEL_INFO that are deprecated upstream.
 
@@ -342,7 +383,11 @@ def find_deprecated_models(
     - It's a claude- model not returned by the Anthropic models API and not an
       alias (aliases don't have date suffixes and resolve to snapshot versions).
     - It's a gemini- model not returned by the Gemini models API.
+    - It's an OpenAI model (gpt-/o1-/o3-/o4-/codex-) with a date suffix not
+      returned by the OpenAI models API.
     """
+    from kiss.core.models.model_info import _OPENAI_PREFIXES
+
     deprecated: list[dict] = []
 
     for name in current:
@@ -360,8 +405,53 @@ def find_deprecated_models(
         elif name.startswith("gemini-") and not name.startswith("gemini-embedding"):
             if gemini and name not in gemini:
                 deprecated.append({"name": name, "reason": "not in Gemini API"})
+        elif name.startswith(_OPENAI_PREFIXES):
+            if openai and name not in openai:
+                has_date = bool(re.search(r"\d{4}-\d{2}-\d{2}$|\d{8}$", name))
+                if has_date:
+                    deprecated.append({"name": name, "reason": "not in OpenAI API"})
 
     return deprecated
+
+
+def _strip_date_suffix(name: str) -> str:
+    """Remove trailing date suffixes (YYYYMMDD or YYYY-MM-DD) for fuzzy lookup."""
+    stripped = re.sub(r"-\d{8}$", "", name)
+    if stripped != name:
+        return stripped
+    return re.sub(r"-\d{4}-\d{2}-\d{2}$", "", name)
+
+
+_VENDOR_OR_PREFIX: dict[str, str] = {
+    "openai": "openrouter/openai/",
+    "anthropic": "openrouter/anthropic/",
+    "gemini": "openrouter/google/",
+}
+
+
+def _lookup_openrouter_pricing(
+    model_name: str,
+    source: str,
+    openrouter: dict[str, dict],
+) -> dict | None:
+    """Cross-reference a vendor model name against OpenRouter for pricing/context.
+
+    Tries an exact match first (e.g. ``gpt-5.4`` → ``openrouter/openai/gpt-5.4``),
+    then falls back to the base name with date suffixes stripped (e.g.
+    ``gpt-5.4-2026-03-05`` → ``openrouter/openai/gpt-5.4``).
+    """
+    prefix = _VENDOR_OR_PREFIX.get(source)
+    if not prefix:
+        return None
+    or_key = f"{prefix}{model_name}"
+    if or_key in openrouter:
+        return openrouter[or_key]
+    base = _strip_date_suffix(model_name)
+    if base != model_name:
+        or_key = f"{prefix}{base}"
+        if or_key in openrouter:
+            return openrouter[or_key]
+    return None
 
 
 def compute_changes(
@@ -370,6 +460,7 @@ def compute_changes(
     together: dict[str, dict],
     gemini: dict[str, dict],
     anthropic: dict[str, dict],
+    openai: dict[str, dict],
 ) -> tuple[list[dict], list[dict]]:
     """Compare fetched data with current MODEL_INFO.
 
@@ -444,7 +535,7 @@ def compute_changes(
                     }
                 )
 
-    # --- Gemini models (context length updates only, no pricing in API) ---
+    # --- Gemini models (context from API, pricing from OpenRouter cross-ref) ---
     for name, fetched in gemini.items():
         if name in current:
             cur = current[name]
@@ -457,30 +548,91 @@ def compute_changes(
                     }
                 )
         else:
+            or_info = _lookup_openrouter_pricing(name, "gemini", openrouter)
+            inp = or_info["input_price_per_1M"] if or_info else 0.0
+            out = or_info["output_price_per_1M"] if or_info else 0.0
             new_models.append(
                 {
                     "name": name,
                     "context_length": fetched["context_length"],
-                    "input_price_per_1M": 0.0,
-                    "output_price_per_1M": 0.0,
+                    "input_price_per_1M": inp,
+                    "output_price_per_1M": out,
                     "source": "gemini",
-                    "needs_pricing": True,
+                    "needs_pricing": inp == 0,
                 }
             )
 
-    # --- Anthropic models (new model detection only) ---
+    # --- Anthropic models (pricing/context from OpenRouter cross-ref) ---
     for name in anthropic:
         if name not in current:
+            or_info = _lookup_openrouter_pricing(name, "anthropic", openrouter)
+            ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 200000
+            inp = or_info["input_price_per_1M"] if or_info else 0.0
+            out = or_info["output_price_per_1M"] if or_info else 0.0
             new_models.append(
                 {
                     "name": name,
-                    "context_length": 200000,
-                    "input_price_per_1M": 0.0,
-                    "output_price_per_1M": 0.0,
+                    "context_length": ctx,
+                    "input_price_per_1M": inp,
+                    "output_price_per_1M": out,
                     "source": "anthropic",
-                    "needs_pricing": True,
+                    "needs_pricing": inp == 0,
                 }
             )
+
+    # --- OpenAI models (pricing/context from OpenRouter cross-ref) ---
+    for name in openai:
+        if name not in current:
+            or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
+            ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 0
+            inp = or_info["input_price_per_1M"] if or_info else 0.0
+            out = or_info["output_price_per_1M"] if or_info else 0.0
+            new_models.append(
+                {
+                    "name": name,
+                    "context_length": ctx,
+                    "input_price_per_1M": inp,
+                    "output_price_per_1M": out,
+                    "source": "openai",
+                    "needs_pricing": inp == 0,
+                }
+            )
+
+    # --- Backfill pricing/context for existing zero-priced models via OpenRouter ---
+    from kiss.core.models.model_info import _OPENAI_PREFIXES
+
+    update_by_name = {upd["name"]: upd for upd in updates}
+    for name, cur in current.items():
+        if name.startswith("openrouter/"):
+            continue
+        has_pricing = cur["input_price_per_1M"] > 0
+        has_context = cur["context_length"] > 0
+        if has_pricing and has_context:
+            continue
+        source = None
+        if name.startswith(_OPENAI_PREFIXES):
+            source = "openai"
+        elif name.startswith("claude"):
+            source = "anthropic"
+        elif name.startswith("gemini-"):
+            source = "gemini"
+        if not source:
+            continue
+        or_info = _lookup_openrouter_pricing(name, source, openrouter)
+        if not or_info:
+            continue
+        changed: dict[str, Any] = {}
+        if not has_pricing and or_info.get("input_price_per_1M", 0) > 0:
+            changed["input_price_per_1M"] = or_info["input_price_per_1M"]
+            changed["output_price_per_1M"] = or_info["output_price_per_1M"]
+        if not has_context and or_info.get("context_length", 0) > 0:
+            changed["context_length"] = or_info["context_length"]
+        if not changed:
+            continue
+        if name in update_by_name:
+            update_by_name[name]["changes"].update(changed)
+        else:
+            updates.append({"name": name, "changes": changed, "source": "openrouter-xref"})
 
     return updates, new_models
 
@@ -522,12 +674,45 @@ def _make_entry_line(
 def apply_updates_to_file(
     updates: list[dict],
     new_models: list[dict],
+    deprecated: list[dict],
     current: dict[str, dict],
     dry_run: bool = False,
 ) -> None:
     content = MODEL_INFO_PATH.read_text()
     lines = content.split("\n")
 
+    # --- Helpers for multi-line entries ---
+    _key_pat = re.compile(r'^\s+"[^"]+"\s*:')
+
+    def _find_entry_span(lines: list[str], name: str) -> tuple[int, int]:
+        """Return (start, end) indices of a model entry, handling multi-line spans."""
+        pat = re.compile(rf'^\s+"{re.escape(name)}"\s*:')
+        for i, line in enumerate(lines):
+            if pat.match(line):
+                if line.rstrip().endswith(","):
+                    return i, i + 1
+                for j in range(i + 1, len(lines)):
+                    if lines[j].rstrip().endswith(",") or _key_pat.match(lines[j]):
+                        if _key_pat.match(lines[j]):
+                            return i, j
+                        return i, j + 1
+                return i, i + 1
+        return -1, -1
+
+    # --- Remove deprecated models ---
+    deprecated_names = {d["name"] for d in deprecated}
+    removed = 0
+    if deprecated_names:
+        spans: list[tuple[int, int]] = []
+        for name in deprecated_names:
+            start, end = _find_entry_span(lines, name)
+            if start >= 0:
+                spans.append((start, end))
+        for start, end in sorted(spans, reverse=True):
+            del lines[start:end]
+            removed += 1
+
+    # --- Apply pricing/context updates ---
     applied_updates = 0
     for upd in updates:
         name = upd["name"]
@@ -544,17 +729,16 @@ def apply_updates_to_file(
             emb=cur["emb"],
             gen=cur["gen"],
         )
-        pattern = re.compile(rf'^\s+"{re.escape(name)}"\s*:')
-        for i, line in enumerate(lines):
-            if pattern.match(line):
-                old_comment = ""
-                if "#" in line:
-                    old_comment = line[line.index("#") + 1 :].strip()
-                if old_comment and len(new_line) + len(old_comment) + 4 <= 100:
-                    new_line += f"  # {old_comment}"
-                lines[i] = new_line
-                applied_updates += 1
-                break
+        start, end = _find_entry_span(lines, name)
+        if start >= 0:
+            old_first = lines[start]
+            old_comment = ""
+            if "#" in old_first:
+                old_comment = old_first[old_first.index("#") + 1 :].strip()
+            if old_comment and len(new_line) + len(old_comment) + 4 <= 100:
+                new_line += f"  # {old_comment}"
+            lines[start:end] = [new_line]
+            applied_updates += 1
 
     # --- Add new models ---
     # Find the closing "}" of MODEL_INFO dict (first "}" on its own line
@@ -590,15 +774,60 @@ def apply_updates_to_file(
         added += 1
 
     if new_lines_to_add and insert_before_closing >= 0:
-        header = [
-            "    # ==========================================================================",
-            "    # Auto-discovered models (verify pricing and capabilities)",
-            "    # ==========================================================================",
-        ]
-        for line in reversed(header + new_lines_to_add):
+        for line in reversed(new_lines_to_add):
             lines.insert(insert_before_closing, line)
 
-    print(f"\n  Applied {applied_updates} updates, added {added} new models")
+    # --- Sort all MODEL_INFO entries alphabetically ---
+    # Find the MODEL_INFO dict boundaries, extract entries, sort, replace.
+    # Entries may span multiple lines (e.g. long _mi() calls), so we group
+    # continuation lines with the preceding key line before sorting.
+    dict_start = -1
+    dict_end = -1
+    in_mi = False
+    for i, line in enumerate(lines):
+        if "MODEL_INFO" in line and "{" in line:
+            dict_start = i + 1
+            in_mi = True
+        if in_mi and line.strip() == "}":
+            dict_end = i
+            break
+
+    if dict_start >= 0 and dict_end > dict_start:
+        standalone_comments: list[str] = []
+        entry_blocks: list[list[str]] = []
+        current_block: list[str] = []
+
+        for line in lines[dict_start:dict_end]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                if current_block:
+                    current_block.append(line)
+                elif not stripped.startswith("# ==="):
+                    standalone_comments.append(line)
+                continue
+            if re.match(r'\s+"[^"]+"\s*:', line):
+                if current_block:
+                    entry_blocks.append(current_block)
+                current_block = [line]
+            else:
+                current_block.append(line)
+
+        if current_block:
+            entry_blocks.append(current_block)
+
+        def _sort_key(block: list[str]) -> str:
+            m = re.search(r'"([^"]+)"', block[0])
+            return m.group(1).lower() if m else block[0]
+
+        entry_blocks.sort(key=_sort_key)
+        sorted_lines: list[str] = standalone_comments[:]
+        for block in entry_blocks:
+            sorted_lines.extend(block)
+        lines[dict_start:dict_end] = sorted_lines
+
+    print(f"\n  Removed {removed} deprecated, applied {applied_updates} updates, added {added} new")
     if not dry_run:
         MODEL_INFO_PATH.write_text("\n".join(lines))
         print(f"  Written to {MODEL_INFO_PATH}")
@@ -638,6 +867,7 @@ def main() -> None:
     together_models = fetch_together(verbose=args.verbose)
     gemini_models = fetch_gemini(verbose=args.verbose)
     anthropic_models = fetch_anthropic(verbose=args.verbose)
+    openai_models = fetch_openai(verbose=args.verbose)
 
     # 3. Detect deprecated models
     print("\n[3/6] Detecting deprecated models...")
@@ -646,6 +876,7 @@ def main() -> None:
         openrouter_models,
         anthropic_models,
         gemini_models,
+        openai_models,
     )
     if deprecated:
         print(f"\n  Deprecated models in MODEL_INFO ({len(deprecated)}):")
@@ -662,6 +893,7 @@ def main() -> None:
         together_models,
         gemini_models,
         anthropic_models,
+        openai_models,
     )
 
     # Print summary
@@ -687,7 +919,11 @@ def main() -> None:
     else:
         print("\n  No new models discovered")
 
-    if not updates and not new_models:
+    # Filter out models that are deprecated in any vendor from the new list
+    deprecated_names = {d["name"] for d in deprecated}
+    new_models = [nm for nm in new_models if nm["name"] not in deprecated_names]
+
+    if not updates and not new_models and not deprecated:
         print("\nEverything is up to date!")
         return
 
@@ -725,7 +961,7 @@ def main() -> None:
 
     # 6. Apply changes
     print("\n[6/6] Applying changes...")
-    apply_updates_to_file(updates, new_models, current, dry_run=args.dry_run)
+    apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
 
     print("\nDone!")
 
