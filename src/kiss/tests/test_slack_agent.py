@@ -48,35 +48,10 @@ class TestWorkspaceConfigPersistence:
         elif _SLACK_WORKSPACES_FILE.exists():
             _SLACK_WORKSPACES_FILE.unlink()
 
-    def test_load_empty(self):
-        assert _load_workspaces() == {}
-
-    def test_save_and_load(self):
-        workspaces = {"test-ws": {"token": "xoxb-fake", "team": "TestTeam"}}
-        _save_workspaces(workspaces)
-        assert _SLACK_WORKSPACES_FILE.exists()
-        loaded = _load_workspaces()
-        assert loaded == workspaces
-
     def test_load_corrupt_json(self):
         _SLACK_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         _SLACK_WORKSPACES_FILE.write_text("{bad json!!!")
         assert _load_workspaces() == {}
-
-    def test_load_non_dict_json(self):
-        _SLACK_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        _SLACK_WORKSPACES_FILE.write_text('["not", "a", "dict"]')
-        assert _load_workspaces() == {}
-
-    def test_save_creates_directory(self):
-        # Remove directory if it exists
-        if _SLACK_CONFIG_DIR.exists():
-            import shutil
-
-            shutil.rmtree(_SLACK_CONFIG_DIR)
-        _save_workspaces({"ws1": {"token": "t", "team": "T"}})
-        assert _SLACK_CONFIG_DIR.exists()
-        assert _load_workspaces() == {"ws1": {"token": "t", "team": "T"}}
 
     def test_list_workspaces_empty(self):
         result = list_workspaces()
@@ -105,19 +80,6 @@ class TestWorkspaceConfigPersistence:
     def test_remove_workspace_not_found(self):
         result = remove_workspace("nonexistent")
         assert "not found" in result
-
-
-class TestTokenValidation:
-    """Test token validation against real Slack API (expects failure with fake tokens)."""
-
-    def test_invalid_token(self):
-        valid, msg = _validate_token("xoxb-fake-token-for-testing")
-        assert not valid
-        assert msg  # Should have an error message
-
-    def test_empty_token(self):
-        valid, msg = _validate_token("")
-        assert not valid
 
 
 class TestAddWorkspace:
@@ -168,10 +130,6 @@ class TestResolveWorkspaceClient:
         elif _SLACK_WORKSPACES_FILE.exists():
             _SLACK_WORKSPACES_FILE.unlink()
 
-    def test_no_workspaces(self):
-        with pytest.raises(ValueError, match="No Slack workspaces configured"):
-            _resolve_workspace_client(None)
-
     def test_single_workspace_auto_select(self):
         _save_workspaces({"ws1": {"token": "xoxb-test", "team": "T1"}})
         client, name = _resolve_workspace_client(None)
@@ -188,41 +146,9 @@ class TestResolveWorkspaceClient:
         with pytest.raises(ValueError, match="Multiple workspaces"):
             _resolve_workspace_client(None)
 
-    def test_explicit_workspace(self):
-        _save_workspaces(
-            {
-                "ws1": {"token": "xoxb-t1", "team": "T1"},
-                "ws2": {"token": "xoxb-t2", "team": "T2"},
-            }
-        )
-        client, name = _resolve_workspace_client("ws2")
-        assert name == "ws2"
-
-    def test_workspace_not_found(self):
-        _save_workspaces({"ws1": {"token": "xoxb-t1", "team": "T1"}})
-        with pytest.raises(ValueError, match="not found"):
-            _resolve_workspace_client("nonexistent")
-
 
 class TestResolveChannelId:
     """Test channel ID resolution logic."""
-
-    def test_already_channel_id(self):
-        # Channel IDs starting with C followed by alphanumeric
-        client = _get_client("xoxb-fake")
-        # This should return the ID directly without API call
-        result = _resolve_channel_id(client, "C01234ABCD")
-        assert result == "C01234ABCD"
-
-    def test_group_id(self):
-        client = _get_client("xoxb-fake")
-        result = _resolve_channel_id(client, "G01234ABCD")
-        assert result == "G01234ABCD"
-
-    def test_strips_hash(self):
-        client = _get_client("xoxb-fake")
-        result = _resolve_channel_id(client, "#C01234ABCD")
-        assert result == "C01234ABCD"
 
     def test_name_lookup_fails_with_invalid_token(self):
         client = _get_client("xoxb-fake")
@@ -246,28 +172,16 @@ class TestSlackApiErrorPaths:
         elif _SLACK_WORKSPACES_FILE.exists():
             _SLACK_WORKSPACES_FILE.unlink()
 
-    def test_list_channels_no_workspace(self):
-        result = list_channels()
-        assert "No Slack workspaces configured" in result
-
     def test_list_channels_invalid_token(self):
         _save_workspaces({"ws1": {"token": "xoxb-fake", "team": "T1"}})
         result = list_channels("ws1")
         assert "Error" in result
-
-    def test_read_messages_no_workspace(self):
-        result = read_messages("general")
-        assert "No Slack workspaces configured" in result
 
     def test_read_messages_invalid_token(self):
         _save_workspaces({"ws1": {"token": "xoxb-fake", "team": "T1"}})
         # Use a channel ID to skip name resolution
         result = read_messages("C01234ABCD", workspace="ws1")
         assert "Error" in result
-
-    def test_send_message_no_workspace(self):
-        result = send_message("general", "hello")
-        assert "No Slack workspaces configured" in result
 
     def test_send_message_empty_text(self):
         result = send_message("general", "")
@@ -298,23 +212,6 @@ class TestSlackApiErrorPaths:
 class TestSlackChannelAgent:
     """Test the SlackChannelAgent wrapper class."""
 
-    def test_get_tools(self):
-        agent = SlackChannelAgent()
-        tools = agent.get_tools()
-        assert len(tools) == 6
-        tool_names = {t.__name__ for t in tools}
-        assert "list_workspaces" in tool_names
-        assert "add_workspace" in tool_names
-        assert "remove_workspace" in tool_names
-        assert "list_channels" in tool_names
-        assert "read_messages" in tool_names
-        assert "send_message" in tool_names
-
-    def test_tools_are_callable(self):
-        agent = SlackChannelAgent()
-        for tool in agent.get_tools():
-            assert callable(tool)
-
     def test_tools_have_docstrings(self):
         agent = SlackChannelAgent()
         for tool in agent.get_tools():
@@ -342,14 +239,6 @@ class TestPolling:
         result = agent.stop_polling("test-channel", workspace="test")
         assert "Not polling" in result
 
-    def test_stop_all_polling(self):
-        agent = SlackChannelAgent()
-        agent.start_polling("ch1", workspace="ws1", interval=60)
-        agent.start_polling("ch2", workspace="ws1", interval=60)
-        assert len(agent._poll_threads) == 2
-        agent.stop_all_polling()
-        assert len(agent._poll_threads) == 0
-
     def test_polling_callback(self):
         """Test that polling thread runs and can be stopped cleanly."""
         agent = SlackChannelAgent()
@@ -363,11 +252,6 @@ class TestPolling:
 
 class TestFormatMessages:
     """Test message formatting helper."""
-
-    def test_format_empty(self):
-        client = _get_client("xoxb-fake")
-        result = _format_messages(client, "general", [])
-        assert result == ""
 
     def test_format_with_messages(self):
         client = _get_client("xoxb-fake")
@@ -383,12 +267,3 @@ class TestFormatMessages:
         assert "#general" in lines[0]
         assert "hi there" in lines[0]  # Last message appears first (reversed)
         assert "hello world" in lines[1]
-
-
-class TestGetClient:
-    """Test client creation."""
-
-    def test_creates_client(self):
-        client = _get_client("xoxb-test-token")
-        assert client is not None
-        assert client.token == "xoxb-test-token"

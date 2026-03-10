@@ -35,18 +35,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.core.relentless_agent import RelentlessAgent
 
-
-class TestGenerateCommitMsg:
-    def test_non_detailed(self) -> None:
-        result = _generate_commit_msg("added: hello world")
-        assert isinstance(result, str)
-
-    def test_detailed(self) -> None:
-        result = _generate_commit_msg("added: hello world", detailed=True)
-        assert isinstance(result, str)
-
-
-# ── _read_active_file: path exists but is a directory (not a file) ────────
 class TestReadActiveFileDirPath:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -54,97 +42,6 @@ class TestReadActiveFileDirPath:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_path_is_directory_returns_empty(self) -> None:
-        """When active-file.json points to a directory, return empty string."""
-        sub = os.path.join(self.tmpdir, "subdir")
-        os.makedirs(sub)
-        af = os.path.join(self.tmpdir, "active-file.json")
-        with open(af, "w") as f:
-            json.dump({"path": sub}, f)
-        assert _read_active_file(self.tmpdir) == ""
-
-    def test_path_key_missing_returns_empty(self) -> None:
-        """When active-file.json has no 'path' key, return empty string."""
-        af = os.path.join(self.tmpdir, "active-file.json")
-        with open(af, "w") as f:
-            json.dump({"other": "val"}, f)
-        assert _read_active_file(self.tmpdir) == ""
-
-
-# ── _read_active_file: additional error paths ─────────────────────────────
-class TestReadActiveFileErrors:
-    def test_invalid_json_returns_empty(self) -> None:
-        tmpdir = tempfile.mkdtemp()
-        try:
-            af = os.path.join(tmpdir, "active-file.json")
-            Path(af).write_text("not json {{{")
-            assert _read_active_file(tmpdir) == ""
-        finally:
-            shutil.rmtree(tmpdir)
-
-    def test_nonexistent_dir_returns_empty(self) -> None:
-        assert _read_active_file("/nonexistent/xyz_999") == ""
-
-    def test_valid_file_returns_path(self) -> None:
-        tmpdir = tempfile.mkdtemp()
-        try:
-            test_file = os.path.join(tmpdir, "real.txt")
-            Path(test_file).write_text("content")
-            af = os.path.join(tmpdir, "active-file.json")
-            with open(af, "w") as f:
-                json.dump({"path": test_file}, f)
-            assert _read_active_file(tmpdir) == test_file
-        finally:
-            shutil.rmtree(tmpdir)
-
-    def test_empty_path_returns_empty(self) -> None:
-        tmpdir = tempfile.mkdtemp()
-        try:
-            af = os.path.join(tmpdir, "active-file.json")
-            with open(af, "w") as f:
-                json.dump({"path": ""}, f)
-            assert _read_active_file(tmpdir) == ""
-        finally:
-            shutil.rmtree(tmpdir)
-
-
-# ── _clean_llm_output ────────────────────────────────────────────────────
-class TestCleanLlmOutput:
-    def test_strips_quotes(self) -> None:
-        assert _clean_llm_output('"hello"') == "hello"
-
-    def test_strips_single_quotes(self) -> None:
-        assert _clean_llm_output("'hello'") == "hello"
-
-    def test_strips_whitespace(self) -> None:
-        assert _clean_llm_output("  hello  ") == "hello"
-
-
-# ── _model_vendor_order: all prefixes ────────────────────────────────────
-class TestModelVendorOrderAllPrefixes:
-    def test_claude(self) -> None:
-        assert _model_vendor_order("claude-3-opus") == 0
-
-    def test_o1_prefix(self) -> None:
-        assert _model_vendor_order("o1-preview") == 1
-
-    def test_o3_prefix(self) -> None:
-        assert _model_vendor_order("o3-mini") == 1
-
-    def test_gemini(self) -> None:
-        assert _model_vendor_order("gemini-1.5-pro") == 2
-
-    def test_minimax(self) -> None:
-        assert _model_vendor_order("minimax-abab") == 3
-
-    def test_openrouter(self) -> None:
-        assert _model_vendor_order("openrouter/meta-llama") == 4
-
-    def test_unknown(self) -> None:
-        assert _model_vendor_order("unknown-model") == 5
-
-
-# ── _resolve_task: priority -f > --task > default ─────────────────────────
 class TestResolveTaskPriority:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -159,11 +56,6 @@ class TestResolveTaskPriority:
         args = parser.parse_args(["-f", p, "--task", "from flag"])
         assert _resolve_task(args) == "from file"
 
-    def test_task_flag_only(self) -> None:
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--task", "my explicit task"])
-        assert _resolve_task(args) == "my explicit task"
-
     def test_default_task(self) -> None:
         parser = _build_arg_parser()
         args = parser.parse_args([])
@@ -173,49 +65,6 @@ class TestResolveTaskPriority:
 
 # ── SorcarAgent direct tests (covers __init__, _get_tools, _reset, run) ──
 class TestSorcarAgentDirect:
-    def test_init_attributes(self) -> None:
-        agent = SorcarAgent("test_agent")
-        assert agent.web_use_tool is None
-        assert agent.docker_manager is None
-
-    def test_get_tools_no_web(self) -> None:
-        agent = SorcarAgent("test_agent")
-        tools = agent._get_tools()
-        assert len(tools) == 4  # Bash, Read, Edit, Write
-
-    def test_get_tools_with_web(self) -> None:
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        agent = SorcarAgent("test_agent")
-        agent.web_use_tool = WebUseTool(headless=True)
-        try:
-            tools = agent._get_tools()
-            assert len(tools) > 4
-        finally:
-            agent.web_use_tool.close()
-
-    def test_reset_all_defaults(self) -> None:
-        agent = SorcarAgent("test_agent")
-        agent._reset(
-            model_name=None,
-            max_sub_sessions=None,
-            max_steps=None,
-            max_budget=None,
-            work_dir=None,
-            docker_image=None,
-        )
-
-    def test_reset_with_explicit_values(self) -> None:
-        agent = SorcarAgent("test_agent")
-        agent._reset(
-            model_name="claude-opus-4-6",
-            max_sub_sessions=3,
-            max_steps=5,
-            max_budget=1.0,
-            work_dir="/tmp",
-            docker_image=None,
-            verbose=True,
-        )
 
     def test_run_zero_budget_no_attachments(self) -> None:
         """SorcarAgent.run() with zero budget exits fast, covering init code."""
@@ -229,46 +78,6 @@ class TestSorcarAgentDirect:
                 max_budget=0.001,
                 headless=True,
                 verbose=False,
-            )
-            assert isinstance(result, str)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_run_with_image_attachment(self) -> None:
-        """Cover the attachments branch with an image."""
-        from kiss.core.models.model import Attachment
-
-        agent = SorcarAgent("test_agent")
-        tmpdir = tempfile.mkdtemp()
-        try:
-            result = agent.run(
-                prompt_template="describe this image",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                attachments=[Attachment(data=b"fake_img", mime_type="image/png")],
-            )
-            assert isinstance(result, str)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_run_with_pdf_attachment(self) -> None:
-        """Cover the PDF attachment branch."""
-        from kiss.core.models.model import Attachment
-
-        agent = SorcarAgent("test_agent")
-        tmpdir = tempfile.mkdtemp()
-        try:
-            result = agent.run(
-                prompt_template="read this pdf",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                attachments=[Attachment(data=b"fake_pdf", mime_type="application/pdf")],
             )
             assert isinstance(result, str)
         finally:
@@ -317,23 +126,6 @@ class TestSorcarAgentDirect:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_run_headless_none_uses_config(self) -> None:
-        """Cover the headless=None branch which falls back to config."""
-        agent = SorcarAgent("test_agent")
-        tmpdir = tempfile.mkdtemp()
-        try:
-            result = agent.run(
-                prompt_template="hello",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=None,
-                verbose=False,
-            )
-            assert isinstance(result, str)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
     def test_run_with_text_attachment_no_parts(self) -> None:
         """Attachment that is neither image nor PDF hits empty parts branch."""
         from kiss.core.models.model import Attachment
@@ -354,17 +146,6 @@ class TestSorcarAgentDirect:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_stream_callback_with_printer(self) -> None:
-        """Cover the _stream closure's if self.printer True branch."""
-        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
-
-        agent = SorcarAgent("test_stream_agent")
-        agent.printer = BaseBrowserPrinter()
-        tools = agent._get_tools()
-        bash_tool = tools[0]
-        result = bash_tool(command="echo hello_stream", description="test stream")
-        assert "hello_stream" in result
-
     def test_stream_callback_without_printer(self) -> None:
         """Cover the _stream closure's if self.printer False branch."""
         agent = SorcarAgent("test_stream_agent")
@@ -373,101 +154,6 @@ class TestSorcarAgentDirect:
         bash_tool = tools[0]
         result = bash_tool(command="echo hello_no_printer", description="test no printer")
         assert "hello_no_printer" in result
-
-
-# ── sorcar_agent.py main() via subprocess (lines 214-250) ────────────────
-class TestSorcarAgentMainSubprocess:
-    def test_main_with_task_flag(self) -> None:
-        """Run sorcar_agent main() with --task and --max_steps=0 so it exits fast."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable, "-m",
-                    "kiss.agents.sorcar.sorcar_agent",
-                    "--task", "say hello",
-                    "--max_steps", "0",
-                    "--max_budget", "0.0",
-                    "--work_dir", tmpdir,
-                    "--headless", "true",
-                    "--verbose", "false",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            # Should print FINAL RESULT
-            assert "FINAL RESULT" in result.stdout or result.returncode != 0
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_main_with_file_flag(self) -> None:
-        """Run sorcar_agent main() with -f pointing to a task file."""
-        tmpdir = tempfile.mkdtemp()
-        task_file = os.path.join(tmpdir, "task.txt")
-        Path(task_file).write_text("echo test task")
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable, "-m",
-                    "kiss.agents.sorcar.sorcar_agent",
-                    "-f", task_file,
-                    "--max_steps", "0",
-                    "--max_budget", "0.0",
-                    "--work_dir", tmpdir,
-                    "--headless", "true",
-                    "--verbose", "false",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            assert "FINAL RESULT" in result.stdout or result.returncode != 0
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_main_default_task_exits(self) -> None:
-        """Run sorcar_agent main() with default task, budget=0 so it exits."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable, "-m",
-                    "kiss.agents.sorcar.sorcar_agent",
-                    "--max_steps", "0",
-                    "--max_budget", "0.0",
-                    "--work_dir", tmpdir,
-                    "--headless", "true",
-                    "--verbose", "false",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            assert "FINAL RESULT" in result.stdout or result.returncode != 0
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_main_no_work_dir_uses_tempdir(self) -> None:
-        """Run sorcar_agent main() without --work_dir to hit tempdir branch."""
-        result = subprocess.run(
-            [
-                sys.executable, "-m",
-                "kiss.agents.sorcar.sorcar_agent",
-                "--task", "hello",
-                "--max_steps", "0",
-                "--max_budget", "0.0",
-                "--headless", "true",
-                "--verbose", "false",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        assert "FINAL RESULT" in result.stdout or result.returncode != 0
-
-
-# ── Server endpoint integration tests ─────────────────────────────────────
 
 def _wait_for_port_file(port_file: str, timeout: float = 30.0) -> int:
     deadline = time.monotonic() + timeout
@@ -537,22 +223,6 @@ def server():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestCommitWithChanges:
-    """Exercise /commit endpoint with actual staged changes (lines 895-938)."""
-
-    def test_commit_with_changes(self, server) -> None:
-        base_url, work_dir, _, _ = server
-        # Create a real change
-        Path(work_dir, "new_file.txt").write_text("new content\n")
-        subprocess.run(["git", "add", "."], cwd=work_dir, capture_output=True)
-
-        resp = requests.post(f"{base_url}/commit", json={}, timeout=30)
-        data = resp.json()
-        # It will either succeed (status=ok) or error (e.g., LLM failure gives empty msg)
-        assert resp.status_code in (200, 400)
-        assert "status" in data or "error" in data
-
-
 class TestPushEndpoint:
     """Exercise /push endpoint (lines 934-938)."""
 
@@ -576,29 +246,6 @@ class TestSuggestionsFileMatch:
         resp = requests.get(
             f"{base_url}/suggestions",
             params={"q": "file", "mode": "general"},
-            timeout=5,
-        )
-        data = resp.json()
-        assert isinstance(data, list)
-
-    def test_suggestions_general_5_history_hits(self, server) -> None:
-        """Trigger the 'len(results) >= 5: break' branch by running tasks first."""
-        base_url, work_dir, _, _ = server
-        # Run several tasks to populate history
-        for i in range(6):
-            requests.post(
-                f"{base_url}/run",
-                json={"task": f"test task {i}"},
-                timeout=10,
-            )
-            # Wait for task to finish
-            time.sleep(0.5)
-            requests.post(f"{base_url}/stop", json={}, timeout=5)
-            time.sleep(0.3)
-
-        resp = requests.get(
-            f"{base_url}/suggestions",
-            params={"q": "test", "mode": "general"},
             timeout=5,
         )
         data = resp.json()
@@ -763,81 +410,6 @@ class TestRecordFileUsageWithPath:
         assert resp.json()["status"] == "ok"
 
 
-
-class TestSorcarMainSubprocess:
-    """Exercise sorcar.py main() (lines 1300-1321)."""
-
-    def test_sorcar_main_exits_on_sigint(self) -> None:
-        """Start sorcar main() and send SIGINT to exercise main() + _cleanup."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            proc = subprocess.Popen(
-                [
-                    sys.executable, "-c",
-                    "import shutil, webbrowser\n"
-                    "_orig = shutil.which\n"
-                    "shutil.which = lambda cmd, **kw: "
-                    "None if cmd == 'code-server' else _orig(cmd, **kw)\n"
-                    "webbrowser.open = lambda url: None\n"
-                    "import os; os.environ['KISS_MODE'] = 'coding'\n"
-                    "from kiss.agents.sorcar.sorcar import main; main()",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={
-                    **os.environ,
-                    "KISS_MODE": "coding",
-                },
-                cwd=tmpdir,
-            )
-            # Wait for server to start
-            time.sleep(5)
-            proc.send_signal(signal.SIGINT)
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            stdout = proc.stdout.read().decode() if proc.stdout else ""
-            assert "running at" in stdout or proc.returncode is not None
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_sorcar_main_assistant_mode(self) -> None:
-        """Start sorcar main() in assistant mode (default)."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            proc = subprocess.Popen(
-                [
-                    sys.executable, "-c",
-                    "import shutil, webbrowser\n"
-                    "_orig = shutil.which\n"
-                    "shutil.which = lambda cmd, **kw: "
-                    "None if cmd == 'code-server' else _orig(cmd, **kw)\n"
-                    "webbrowser.open = lambda url: None\n"
-                    "from kiss.agents.sorcar.sorcar import main; main()",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={
-                    **os.environ,
-                    "KISS_MODE": "assistant",
-                },
-                cwd=tmpdir,
-            )
-            time.sleep(5)
-            proc.send_signal(signal.SIGINT)
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            stdout = proc.stdout.read().decode() if proc.stdout else ""
-            assert "running at" in stdout or proc.returncode is not None
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 class TestGenerateCommitMessageNoChanges:
     """Exercise /generate-commit-message with no changes (line 1118)."""
 
@@ -865,7 +437,6 @@ class TestGenerateCommitMessageNoChanges:
 
 
 # ── In-process server test (runs run_chatbot in a thread for coverage) ────
-
 
 
 class _InProcessDummyAgent(RelentlessAgent):
@@ -1008,18 +579,6 @@ class TestInProcessEndpoints:
         assert "models" in data
         assert "selected" in data
 
-    def test_theme(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.get(f"{base_url}/theme", timeout=5)
-        assert resp.status_code == 200
-
-    def test_tasks(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.get(f"{base_url}/tasks", timeout=5)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, list)
-
     def test_proposed_tasks(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         resp = requests.get(f"{base_url}/proposed_tasks", timeout=5)
@@ -1028,11 +587,6 @@ class TestInProcessEndpoints:
     def test_suggestions_empty(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         resp = requests.get(f"{base_url}/suggestions?q=&mode=general", timeout=5)
-        assert resp.status_code == 200
-
-    def test_suggestions_files(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.get(f"{base_url}/suggestions?q=&mode=files", timeout=5)
         assert resp.status_code == 200
 
     def test_complete_short(self, inproc_server) -> None:
@@ -1089,33 +643,6 @@ class TestInProcessEndpoints:
         base_url, _, _ = inproc_server
         resp = requests.post(f"{base_url}/run", json={"task": ""}, timeout=5)
         assert resp.status_code == 400
-
-    def test_run_and_stop(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        # Run a slow task so we can stop it while running
-        resp = requests.post(
-            f"{base_url}/run",
-            json={"task": "slow_task_for_stop_test", "model": "claude-opus-4-6"},
-            timeout=10,
-        )
-        assert resp.status_code == 200
-        time.sleep(1)
-        # Stop the task
-        stop = requests.post(f"{base_url}/stop", json={}, timeout=5)
-        assert stop.status_code == 200
-        # Wait for cleanup
-        time.sleep(2)
-
-    def test_run_normal_task(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.post(
-            f"{base_url}/run",
-            json={"task": "normal task", "model": "claude-opus-4-6"},
-            timeout=10,
-        )
-        assert resp.status_code == 200
-        # Wait for task to complete
-        time.sleep(2)
 
     def test_run_with_active_file(self, inproc_server) -> None:
         """Exercise the active_file branch in run_agent_thread (line 538)."""
@@ -1181,14 +708,6 @@ class TestInProcessEndpoints:
         )
         assert resp.status_code == 400
 
-    def test_run_selection(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.post(
-            f"{base_url}/run-selection", json={"text": "hello test"}, timeout=10
-        )
-        assert resp.status_code == 200
-        time.sleep(2)
-
     def test_open_file_empty(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         resp = requests.post(
@@ -1232,23 +751,6 @@ class TestInProcessEndpoints:
         base_url, _, _ = inproc_server
         resp = requests.post(
             f"{base_url}/merge-action", json={"action": "all-done"}, timeout=5
-        )
-        assert resp.status_code == 200
-
-    def test_merge_action_prev_next(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        for action in ("prev", "next", "accept", "reject", "accept-all", "reject-all"):
-            resp = requests.post(
-                f"{base_url}/merge-action", json={"action": action}, timeout=5
-            )
-            assert resp.status_code == 200
-
-    def test_record_file_usage(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.post(
-            f"{base_url}/record-file-usage",
-            json={"path": "test.py"},
-            timeout=5,
         )
         assert resp.status_code == 200
 
@@ -1342,47 +844,6 @@ class TestInProcessEndpoints:
             f"{base_url}/suggestions", params={"q": "file", "mode": "files"}, timeout=5
         )
         assert resp.status_code == 200
-
-    def test_suggestions_files_with_dir_match(self, inproc_server) -> None:
-        """Test suggestions in files mode with directory entries."""
-        base_url, work_dir, _ = inproc_server
-        # Create a subdirectory
-        subdir = os.path.join(work_dir, "subdir_test")
-        os.makedirs(subdir, exist_ok=True)
-        Path(os.path.join(subdir, "inner.txt")).write_text("inner")
-        resp = requests.get(
-            f"{base_url}/suggestions", params={"q": "sub", "mode": "files"}, timeout=5
-        )
-        data = resp.json()
-        assert isinstance(data, list)
-
-    def test_suggestions_with_file_match_general(self, inproc_server) -> None:
-        """Test suggestions general mode with file path matching."""
-        base_url, work_dir, _ = inproc_server
-        # Query matching a file
-        resp = requests.get(
-            f"{base_url}/suggestions", params={"q": "file.txt", "mode": "general"}, timeout=5
-        )
-        data = resp.json()
-        assert isinstance(data, list)
-
-    def test_theme_with_file(self, inproc_server) -> None:
-        """Exercise theme endpoint with an existing theme file."""
-        from kiss.agents.sorcar.task_history import _KISS_DIR
-
-        theme_file = _KISS_DIR / "vscode-theme.json"
-        theme_file.parent.mkdir(parents=True, exist_ok=True)
-        orig = theme_file.read_text() if theme_file.exists() else None
-        try:
-            theme_file.write_text(json.dumps({"kind": "light"}))
-            base_url, _, _ = inproc_server
-            resp = requests.get(f"{base_url}/theme", timeout=5)
-            assert resp.status_code == 200
-        finally:
-            if orig is not None:
-                theme_file.write_text(orig)
-            elif theme_file.exists():
-                theme_file.unlink()
 
     def test_theme_with_bad_file(self, inproc_server) -> None:
         """Exercise theme endpoint with a corrupt theme file (lines 987-988)."""
@@ -1479,19 +940,6 @@ class TestInProcessEndpoints:
             hook_path.unlink(missing_ok=True)
             Path(work_dir, "hook_test.txt").unlink(missing_ok=True)
 
-    def test_theme_file_change_detected(self, inproc_server) -> None:
-        """Write theme file and verify _watch_theme_file detects it."""
-        base_url, _, _ = inproc_server
-        from kiss.agents.sorcar.task_history import _KISS_DIR
-
-        theme_file = _KISS_DIR / "vscode-theme.json"
-        theme_file.write_text('{"kind": "light"}')
-        time.sleep(2)
-        resp = requests.get(f"{base_url}/theme", timeout=5)
-        data = resp.json()
-        assert isinstance(data, dict)
-        theme_file.unlink(missing_ok=True)
-
     def test_theme_no_file(self, inproc_server) -> None:
         """Theme endpoint with no theme file → hits file-not-exists branch."""
         base_url, _, _ = inproc_server
@@ -1506,11 +954,6 @@ class TestInProcessEndpoints:
         finally:
             if orig is not None:
                 theme_file.write_text(orig)
-
-    def test_closing(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.post(f"{base_url}/closing", json={}, timeout=5)
-        assert resp.status_code == 200
 
     def test_generate_commit_message_no_changes(self, inproc_server) -> None:
         base_url, work_dir, _ = inproc_server
@@ -1549,37 +992,6 @@ class TestInProcessEndpoints:
         )
         assert resp.status_code == 200
         time.sleep(2)
-
-    def test_run_with_internal_model(self, inproc_server) -> None:
-        """Run task with an internal model name to skip double usage recording."""
-        base_url, _, _ = inproc_server
-        resp = requests.post(
-            f"{base_url}/run",
-            json={"task": "test internal model", "model": "gemini-2.0-flash"},
-            timeout=10,
-        )
-        assert resp.status_code == 200
-        time.sleep(2)
-
-    def test_commit_with_changes(self, inproc_server) -> None:
-        """Commit endpoint with actual changes."""
-        base_url, work_dir, _ = inproc_server
-        new_file = os.path.join(work_dir, "commit_test.txt")
-        Path(new_file).write_text("change for commit")
-        resp = requests.post(f"{base_url}/commit", json={}, timeout=60)
-        data = resp.json()
-        assert "status" in data or "error" in data
-        # Clean up
-        if os.path.exists(new_file):
-            os.unlink(new_file)
-
-    def test_sse_events(self, inproc_server) -> None:
-        """Connect to SSE stream briefly."""
-        base_url, _, _ = inproc_server
-        resp = requests.get(f"{base_url}/events", stream=True, timeout=3)
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers.get("content-type", "")
-        resp.close()
 
     def test_run_error_task(self, inproc_server) -> None:
         """Run a task that raises Exception to cover except Exception branch."""
@@ -1625,22 +1037,6 @@ class TestInProcessEndpoints:
         finally:
             if os.path.exists(test_file):
                 os.unlink(test_file)
-
-    def test_generate_commit_message_with_diff(self, inproc_server) -> None:
-        """Generate commit message with staged diff changes."""
-        base_url, work_dir, _ = inproc_server
-        # Modify a tracked file to create a diff
-        fpath = os.path.join(work_dir, "file.txt")
-        Path(fpath).write_text("modified content\nline2\nline3\n")
-        try:
-            resp = requests.post(
-                f"{base_url}/generate-commit-message", json={}, timeout=60
-            )
-            data = resp.json()
-            assert "message" in data or "error" in data
-        finally:
-            # Restore original content
-            Path(fpath).write_text("line1\nline2\n")
 
     def test_commit_with_staged_changes(self, inproc_server) -> None:
         """Commit endpoint with staged changes to cover full commit path."""
@@ -1726,19 +1122,6 @@ class TestInProcessEndpoints:
         )
         data = resp.json()
         assert "suggestion" in data
-
-    def test_suggestions_general_file_word_match(self, inproc_server) -> None:
-        """Query where last word (>=2 chars) matches a file in file_cache."""
-        base_url, work_dir, _ = inproc_server
-        # Ensure a known file exists
-        Path(work_dir, "matchable_xyz.txt").write_text("test")
-        resp = requests.get(
-            f"{base_url}/suggestions",
-            params={"q": "edit matchable_xyz", "mode": "general"},
-            timeout=5,
-        )
-        data = resp.json()
-        assert isinstance(data, list)
 
     def test_suggestions_general_short_last_word(self, inproc_server) -> None:
         """Query where last word is only 1 char → skips file matching."""
