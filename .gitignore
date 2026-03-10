@@ -30,4 +30,5 @@ artifacts/
 .claude
 .ipynb_checkpoints
 screenshots/    
+.kiss.artifacts
 
