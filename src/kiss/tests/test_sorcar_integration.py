@@ -228,8 +228,10 @@ class TestTaskHistory:
         self._orig_kiss_dir = task_history._KISS_DIR
 
         self.tmpdir = tempfile.mkdtemp()
+        self._orig_events_dir = task_history._CHAT_EVENTS_DIR
         task_history._KISS_DIR = Path(self.tmpdir)
-        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.json"
+        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
+        task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
         task_history.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
@@ -241,6 +243,7 @@ class TestTaskHistory:
         from kiss.agents.sorcar import task_history
 
         task_history.HISTORY_FILE = self._orig_history_file
+        task_history._CHAT_EVENTS_DIR = self._orig_events_dir
         task_history.PROPOSALS_FILE = self._orig_proposals_file
         task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
         task_history.FILE_USAGE_FILE = self._orig_file_usage_file
@@ -337,9 +340,11 @@ class TestTaskHistoryEdgeCases:
         self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
         self._orig_file_usage_file = task_history.FILE_USAGE_FILE
         self._orig_kiss_dir = task_history._KISS_DIR
+        self._orig_events_dir = task_history._CHAT_EVENTS_DIR
         self.tmpdir = tempfile.mkdtemp()
         task_history._KISS_DIR = Path(self.tmpdir)
-        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.json"
+        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
+        task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
         task_history.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
@@ -349,6 +354,7 @@ class TestTaskHistoryEdgeCases:
         from kiss.agents.sorcar import task_history
 
         task_history.HISTORY_FILE = self._orig_history_file
+        task_history._CHAT_EVENTS_DIR = self._orig_events_dir
         task_history.PROPOSALS_FILE = self._orig_proposals_file
         task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
         task_history.FILE_USAGE_FILE = self._orig_file_usage_file
@@ -621,10 +627,12 @@ class TestTaskHistoryUncoveredBranches:
         self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
         self._orig_file_usage_file = task_history.FILE_USAGE_FILE
         self._orig_kiss_dir = task_history._KISS_DIR
+        self._orig_events_dir = task_history._CHAT_EVENTS_DIR
 
         self.tmpdir = tempfile.mkdtemp()
         task_history._KISS_DIR = Path(self.tmpdir)
-        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.json"
+        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
+        task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
         task_history.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
@@ -634,6 +642,7 @@ class TestTaskHistoryUncoveredBranches:
         from kiss.agents.sorcar import task_history
 
         task_history.HISTORY_FILE = self._orig_history_file
+        task_history._CHAT_EVENTS_DIR = self._orig_events_dir
         task_history.PROPOSALS_FILE = self._orig_proposals_file
         task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
         task_history.FILE_USAGE_FILE = self._orig_file_usage_file

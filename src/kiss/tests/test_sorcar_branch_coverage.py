@@ -94,9 +94,11 @@ class TestTaskHistory:
         self._orig_model_usage_file = th.MODEL_USAGE_FILE
         self._orig_file_usage_file = th.FILE_USAGE_FILE
         self._orig_kiss_dir = th._KISS_DIR
+        self._orig_events_dir = th._CHAT_EVENTS_DIR
         # Redirect to temp
         th._KISS_DIR = Path(self.tmpdir)
-        th.HISTORY_FILE = Path(self.tmpdir) / "task_history.json"
+        th.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
+        th._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
         th.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         th.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         th.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
@@ -105,6 +107,7 @@ class TestTaskHistory:
 
     def teardown_method(self) -> None:
         th.HISTORY_FILE = self._orig_history_file
+        th._CHAT_EVENTS_DIR = self._orig_events_dir
         th.PROPOSALS_FILE = self._orig_proposals_file
         th.MODEL_USAGE_FILE = self._orig_model_usage_file
         th.FILE_USAGE_FILE = self._orig_file_usage_file
@@ -444,8 +447,10 @@ class TestTaskHistoryEdgeCases:
         self._orig_model_usage_file = th.MODEL_USAGE_FILE
         self._orig_file_usage_file = th.FILE_USAGE_FILE
         self._orig_kiss_dir = th._KISS_DIR
+        self._orig_events_dir = th._CHAT_EVENTS_DIR
         th._KISS_DIR = Path(self.tmpdir)
-        th.HISTORY_FILE = Path(self.tmpdir) / "task_history.json"
+        th.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
+        th._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
         th.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         th.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         th.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
@@ -453,6 +458,7 @@ class TestTaskHistoryEdgeCases:
 
     def teardown_method(self) -> None:
         th.HISTORY_FILE = self._orig_history_file
+        th._CHAT_EVENTS_DIR = self._orig_events_dir
         th.PROPOSALS_FILE = self._orig_proposals_file
         th.MODEL_USAGE_FILE = self._orig_model_usage_file
         th.FILE_USAGE_FILE = self._orig_file_usage_file

@@ -57,16 +57,18 @@ def _redirect_history(tmpdir: str):
     old_file = th.FILE_USAGE_FILE
     old_cache = th._history_cache
     old_kiss = th._KISS_DIR
+    old_events = th._CHAT_EVENTS_DIR
 
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th.HISTORY_FILE = kiss_dir / "task_history.json"
+    th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
+    th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
     th.PROPOSALS_FILE = kiss_dir / "proposals.json"
     th.MODEL_USAGE_FILE = kiss_dir / "model_usage.json"
     th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
     th._history_cache = None
-    return old_hist, old_prop, old_model, old_file, old_cache, old_kiss
+    return old_hist, old_prop, old_model, old_file, old_cache, old_kiss, old_events
 
 
 def _restore_history(saved):
@@ -76,6 +78,7 @@ def _restore_history(saved):
     th.FILE_USAGE_FILE = saved[3]
     th._history_cache = saved[4]
     th._KISS_DIR = saved[5]
+    th._CHAT_EVENTS_DIR = saved[6]
 
 
 def _make_git_repo(tmpdir: str) -> str:
@@ -159,7 +162,8 @@ class TestSorcarServerSubprocess:
             f"from pathlib import Path\n"
             f"kiss_dir = Path({str(kiss_dir)!r})\n"
             f"th._KISS_DIR = kiss_dir\n"
-            f"th.HISTORY_FILE = kiss_dir / 'task_history.json'\n"
+            f"th.HISTORY_FILE = kiss_dir / 'task_history.jsonl'\n"
+            f"th._CHAT_EVENTS_DIR = kiss_dir / 'chat_events'\n"
             f"th.PROPOSALS_FILE = kiss_dir / 'proposals.json'\n"
             f"th.MODEL_USAGE_FILE = kiss_dir / 'model_usage.json'\n"
             f"th.FILE_USAGE_FILE = kiss_dir / 'file_usage.json'\n"
@@ -427,7 +431,7 @@ class TestSorcarServer:
         async def tasks_ep(request: Request) -> JSONResponse:
             history = th._load_history()
             return JSONResponse(
-                [{"task": e["task"], "has_events": bool(e.get("chat_events"))} for e in history]
+                [{"task": e["task"], "has_events": bool(e.get("has_events"))} for e in history]
             )
 
         async def task_events_ep(request: Request) -> JSONResponse:
@@ -438,7 +442,7 @@ class TestSorcarServer:
             history = th._load_history()
             if idx < 0 or idx >= len(history):
                 return JSONResponse({"error": "Index out of range"}, status_code=404)
-            events = history[idx].get("chat_events", [])
+            events = th._load_task_chat_events(str(history[idx]["task"]))
             return JSONResponse(events)
 
         async def proposed_tasks_ep(request: Request) -> JSONResponse:
@@ -710,20 +714,20 @@ class TestTaskHistory:
         th._add_task("exists")
         th._set_latest_chat_events([{"type": "z"}], task="missing")
         history = th._load_history()
-        assert history[0]["chat_events"] == []  # unchanged
+        assert history[0]["has_events"] is False  # unchanged
 
     def test_proposals_corrupt(self) -> None:
         th.PROPOSALS_FILE.write_text("not json")
         assert th._load_proposals() == []
 
     def test_load_history_with_duplicates(self) -> None:
-        """History file with duplicate tasks gets deduplicated on load."""
-        data = [
-            {"task": "dup", "chat_events": []},
-            {"task": "dup", "chat_events": []},
-            {"task": "other", "chat_events": []},
+        """JSONL history with duplicate tasks gets deduplicated on load."""
+        lines = [
+            json.dumps({"task": "dup", "has_events": False}),
+            json.dumps({"task": "dup", "has_events": False}),
+            json.dumps({"task": "other", "has_events": False}),
         ]
-        th.HISTORY_FILE.write_text(json.dumps(data))
+        th.HISTORY_FILE.write_text("\n".join(lines) + "\n")
         th._history_cache = None
         history = th._load_history()
         tasks = [e["task"] for e in history]
@@ -949,9 +953,9 @@ class TestTaskHistoryRemaining:
         _restore_history(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_load_history_empty_list(self) -> None:
-        """Empty list in history file falls back to SAMPLE_TASKS."""
-        th.HISTORY_FILE.write_text("[]")
+    def test_load_history_empty_file(self) -> None:
+        """Empty JSONL file falls back to SAMPLE_TASKS."""
+        th.HISTORY_FILE.write_text("")
         th._history_cache = None
         history = th._load_history()
         assert len(history) > 0  # SAMPLE_TASKS
@@ -963,7 +967,7 @@ class TestTaskHistoryRemaining:
         th.HISTORY_FILE.parent.chmod(0o444)
         try:
             # Should not raise
-            th._save_history([{"task": "test", "chat_events": []}])
+            th._save_history([{"task": "test", "has_events": False}])
         finally:
             th.HISTORY_FILE.parent.chmod(0o755)
 
