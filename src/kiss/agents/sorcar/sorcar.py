@@ -699,11 +699,11 @@ def run_chatbot(
             last_heartbeat = time.monotonic()
             disconnect_check_counter = 0
             try:
-                while not shutting_down.is_set():  # pragma: no branch – SSE loop exits via break/cancel
+                while not shutting_down.is_set():  # pragma: no branch  # noqa: E501
                     disconnect_check_counter += 1
                     if disconnect_check_counter >= 20:
                         disconnect_check_counter = 0
-                        if await request.is_disconnected():  # pragma: no cover – timing-dependent disconnect
+                        if await request.is_disconnected():  # pragma: no cover  # noqa: E501
                             break
                     try:
                         event = cq.get_nowait()
@@ -929,14 +929,14 @@ def run_chatbot(
                     is_agentic=False,
                 )
                 s = _clean_llm_output(result)
-                if s.lower().startswith(query.lower()):  # pragma: no branch – LLM output dependent
-                    s = s[len(query) :]  # pragma: no cover – coverage.py asyncio.to_thread tracking bug
+                if s.lower().startswith(query.lower()):  # pragma: no branch
+                    s = s[len(query) :]  # pragma: no cover
                 return s
             except Exception:  # pragma: no cover – LLM API failure
                 logger.debug("Exception caught", exc_info=True)
                 return ""
 
-        suggestion = await asyncio.to_thread(_generate)  # pragma: no branch – coverage.py thread tracking bug
+        suggestion = await asyncio.to_thread(_generate)  # pragma: no branch
         return JSONResponse({"suggestion": suggestion})
 
     async def models_endpoint(request: Request) -> JSONResponse:
@@ -1021,7 +1021,7 @@ def run_chatbot(
         fn: Callable[[], dict[str, str]],
         error_status: int = 400,
     ) -> JSONResponse:
-        result = await asyncio.to_thread(fn)  # pragma: no branch – coverage.py thread tracking bug
+        result = await asyncio.to_thread(fn)  # pragma: no branch
         if "error" in result:
             return JSONResponse(result, status_code=error_status)
         return JSONResponse(result)
@@ -1117,7 +1117,7 @@ def run_chatbot(
                 context_parts = []
                 if diff_text:  # pragma: no branch – coverage.py asyncio.to_thread tracking bug
                     context_parts.append(f"Diff:\n{diff_text[:4000]}")
-                if untracked_files:  # pragma: no branch – coverage.py asyncio.to_thread tracking bug
+                if untracked_files:  # pragma: no branch
                     context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
                 msg = _generate_commit_msg("\n\n".join(context_parts), detailed=True)
                 scm_pending = os.path.join(cs_data_dir, "pending-scm-message.json")
@@ -1282,7 +1282,7 @@ def run_chatbot(
     server = uvicorn.Server(config)
     _orig_handle_exit = server.handle_exit
 
-    def _on_exit(sig: int, frame: types.FrameType | None) -> None:  # pragma: no cover – signal handler
+    def _on_exit(sig: int, frame: types.FrameType | None) -> None:  # pragma: no cover
         shutting_down.set()
         _orig_handle_exit(sig, frame)
 

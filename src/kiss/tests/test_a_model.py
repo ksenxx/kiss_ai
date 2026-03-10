@@ -4,15 +4,12 @@ Usage:
     pytest src/kiss/tests/test_a_model.py --model=gpt-5.2
 """
 
-import json
-import re
 import unittest
 
 import pytest
 
 from kiss.agents.kiss_evolve.simple_rag import SimpleRAG
-from kiss.core.kiss_agent import KISSAgent
-from kiss.tests.conftest import DEFAULT_MODEL, simple_calculator, skip_if_no_api_key_for_model
+from kiss.tests.conftest import DEFAULT_MODEL, skip_if_no_api_key_for_model
 
 TEST_TIMEOUT = 60
 

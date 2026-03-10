@@ -7,7 +7,6 @@ from pathlib import Path
 
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
-    _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
     _restore_merge_files,

@@ -1,13 +1,11 @@
 """Tests for web_use_tool.py module."""
 
-import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import (
-    KISS_PROFILE_DIR,
     WebUseTool,
 )
 

@@ -22,10 +22,6 @@ import pytest
 import requests
 
 from kiss.agents.sorcar.sorcar import (
-    _clean_llm_output,
-    _generate_commit_msg,
-    _model_vendor_order,
-    _read_active_file,
     run_chatbot,
 )
 from kiss.agents.sorcar.sorcar_agent import (
@@ -34,6 +30,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _resolve_task,
 )
 from kiss.core.relentless_agent import RelentlessAgent
+
 
 class TestReadActiveFileDirPath:
     def setup_method(self) -> None:

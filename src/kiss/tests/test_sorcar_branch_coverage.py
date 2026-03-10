@@ -9,19 +9,43 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
 import pytest
+import requests
 
-# ---------------------------------------------------------------------------
-# prompt_detector.py
-# ---------------------------------------------------------------------------
+import kiss.agents.sorcar.task_history as th
+from kiss.agents.sorcar.browser_ui import (
+    BaseBrowserPrinter,
+    _coalesce_events,
+)
+from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS
+from kiss.agents.sorcar.code_server import (
+    _capture_untracked,
+    _cleanup_merge_data,
+    _prepare_merge_view,
+    _save_untracked_base,
+    _setup_code_server,
+    _snapshot_files,
+)
+from kiss.agents.sorcar.config import AgentConfig, SorcarConfig
 from kiss.agents.sorcar.prompt_detector import PromptDetector
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+)
+from kiss.agents.sorcar.useful_tools import (
+    UsefulTools,
+    _extract_command_names,
+)
+from kiss.agents.sorcar.web_use_tool import (
+    INTERACTIVE_ROLES,
+    WebUseTool,
+)
 
 
 class TestPromptDetector:
@@ -37,14 +61,7 @@ class TestPromptDetector:
 # ---------------------------------------------------------------------------
 # useful_tools.py
 # ---------------------------------------------------------------------------
-from kiss.agents.sorcar.useful_tools import (
-    UsefulTools,
-    _extract_command_names,
-    _format_bash_result,
-    _kill_process_group,
-    _strip_heredocs,
-    _truncate_output,
-)
+
 
 class TestExtractCommandNames:
 
@@ -66,7 +83,6 @@ class TestUsefulTools:
 # ---------------------------------------------------------------------------
 # task_history.py
 # ---------------------------------------------------------------------------
-import kiss.agents.sorcar.task_history as th
 
 
 class TestTaskHistory:
@@ -100,16 +116,6 @@ class TestTaskHistory:
 # ---------------------------------------------------------------------------
 # web_use_tool.py: _number_interactive_elements
 # ---------------------------------------------------------------------------
-from kiss.agents.sorcar.web_use_tool import (
-    INTERACTIVE_ROLES,
-    _number_interactive_elements,
-)
-
-from kiss.agents.sorcar.browser_ui import (
-    BaseBrowserPrinter,
-    _coalesce_events,
-    find_free_port,
-)
 
 
 class TestCoalesceEvents:
@@ -121,21 +127,6 @@ class TestCoalesceEvents:
         ]
         result = _coalesce_events(events)
         assert len(result) == 2
-
-from kiss.agents.sorcar.code_server import (
-    _capture_untracked,
-    _cleanup_merge_data,
-    _diff_files,
-    _disable_copilot_scm_button,
-    _parse_diff_hunks,
-    _prepare_merge_view,
-    _restore_merge_files,
-    _save_untracked_base,
-    _scan_files,
-    _setup_code_server,
-    _snapshot_files,
-)
-
 
 class TestScanFiles:
     def setup_method(self) -> None:
@@ -247,7 +238,7 @@ class TestDisableCopilotScmButton:
 # ---------------------------------------------------------------------------
 # chatbot_ui.py
 # ---------------------------------------------------------------------------
-from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
+
 
 class TestThemePresets:
     def test_all_presets_exist(self) -> None:
@@ -266,7 +257,6 @@ class TestThemePresets:
 # ---------------------------------------------------------------------------
 # config.py
 # ---------------------------------------------------------------------------
-from kiss.agents.sorcar.config import AgentConfig, SorcarConfig
 
 
 class TestSorcarConfig:
@@ -285,16 +275,6 @@ class TestSorcarConfig:
 # ---------------------------------------------------------------------------
 # sorcar.py utility functions
 # ---------------------------------------------------------------------------
-from kiss.agents.sorcar.sorcar import (
-    _clean_llm_output,
-    _model_vendor_order,
-    _read_active_file,
-)
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-    _build_arg_parser,
-    _resolve_task,
-)
 
 
 class TestReadActiveFile:
@@ -337,13 +317,13 @@ class TestSorcarAgentRunAttachments:
 # ---------------------------------------------------------------------------
 # web_use_tool.py: WebUseTool construction and close
 # ---------------------------------------------------------------------------
-from kiss.agents.sorcar.web_use_tool import WebUseTool
+
 
 class TestSorcarAgentMain:
     def test_main_subprocess(self) -> None:
         tmpdir = tempfile.mkdtemp()
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -364,7 +344,7 @@ class TestSorcarAgentMain:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_main_no_work_dir(self) -> None:
-        result = subprocess.run(
+        subprocess.run(
             [
                 sys.executable,
                 "-m",
@@ -385,7 +365,7 @@ class TestSorcarAgentMain:
         task_file = os.path.join(tmpdir, "task.txt")
         Path(task_file).write_text("echo hello")
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -588,9 +568,6 @@ class TestWebUseToolBrowser:
 # ---------------------------------------------------------------------------
 # sorcar.py: Server integration test via subprocess
 # ---------------------------------------------------------------------------
-import signal
-
-import requests
 
 
 def _wait_for_port_file(port_file: str, timeout: float = 30.0) -> int:
@@ -1018,7 +995,10 @@ class TestCodeServerFinalEdgeCases:
         work_dir = os.path.join(self.tmpdir, "work")
         os.makedirs(work_dir)
         subprocess.run(["git", "init"], cwd=work_dir, capture_output=True, check=True)
-        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=work_dir, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@t.com"],
+            cwd=work_dir, capture_output=True,
+        )
         subprocess.run(["git", "config", "user.name", "T"], cwd=work_dir, capture_output=True)
         Path(work_dir, "f.txt").write_text("a\nb\n")
         subprocess.run(["git", "add", "."], cwd=work_dir, capture_output=True)

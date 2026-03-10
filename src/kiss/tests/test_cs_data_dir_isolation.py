@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _setup_code_server
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 
 
 class TestDataDirIsolation:

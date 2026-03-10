@@ -7,10 +7,7 @@ via three mechanisms:
 3. The SSE disconnect detection scheduling shutdown
 """
 
-import threading
-import time
 
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 
 
 class TestShutdownTimerDuration:

@@ -15,7 +15,6 @@ import kiss.agents.sorcar.task_history as th
 from kiss.agents.sorcar.browser_ui import (
     _DISPLAY_EVENT_TYPES,
     BaseBrowserPrinter,
-    _coalesce_events,
 )
 
 # ── Helpers ──────────────────────────────────────────────────────────────

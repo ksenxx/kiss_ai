@@ -11,7 +11,6 @@ import pytest
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import SUPPORTED_MIME_TYPES, Attachment
 from kiss.tests.conftest import (
-    requires_anthropic_api_key,
     requires_gemini_api_key,
     requires_openai_api_key,
 )

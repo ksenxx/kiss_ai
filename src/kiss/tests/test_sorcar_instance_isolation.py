@@ -4,10 +4,7 @@ import hashlib
 import os
 import socket
 import tempfile
-import time
 from pathlib import Path
-
-import pytest
 
 
 def _find_free_port() -> int:

@@ -38,8 +38,6 @@ When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorc
 
 You have implemented a restart logic for code-server in case the code-server shuts down, but I want you to investigate the root cause of why the code-server is shutting down intermittently in the first place. See if you can fix the intermittent shutdown of the code server without changing any functionality in the project except for the fix.
 
-can you check if print_to_console.py and chatbot_ui.py print exactly the same contents when an agent is executed on a task?  Write a regression test for this.
+can you check if print_to_console.py and chatbot_ui.py print exactly the same contents when an agent is executed on a task? Write a regression test for this.
 
 Can you read sorcar.py and carefully find all threads, timers, processes, and other forms of concurrency introduced by sorcar.py?
-
-

@@ -11,7 +11,6 @@ from kiss.agents.sorcar.code_server import (
     _prepare_merge_view,
     _save_untracked_base,
     _snapshot_files,
-    _untracked_base_dir,
 )
 
 

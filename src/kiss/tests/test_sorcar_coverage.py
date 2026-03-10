@@ -16,8 +16,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 import kiss.agents.sorcar.task_history as th
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.code_server import (

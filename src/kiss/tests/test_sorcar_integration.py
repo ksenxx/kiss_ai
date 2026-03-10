@@ -9,19 +9,16 @@ import os
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
 from pathlib import Path
 
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
-    _cleanup_merge_data,
     _disable_copilot_scm_button,
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
     _scan_files,
-    _setup_code_server,
     _snapshot_files,
     _untracked_base_dir,
 )

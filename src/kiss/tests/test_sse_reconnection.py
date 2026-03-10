@@ -10,18 +10,12 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-import json
-import queue
 import shutil
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 import kiss.agents.sorcar.task_history as th
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
-from kiss.agents.sorcar.chatbot_ui import _build_html
 
 
 def _redirect_history(tmpdir: str):

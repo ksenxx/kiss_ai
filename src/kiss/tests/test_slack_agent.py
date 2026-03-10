@@ -20,7 +20,6 @@ from kiss.channels.slack_agent import (
     _resolve_channel_id,
     _resolve_workspace_client,
     _save_workspaces,
-    _validate_token,
     add_workspace,
     list_channels,
     list_workspaces,

@@ -10,7 +10,6 @@ import unittest
 from types import SimpleNamespace
 
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
-from kiss.core.printer import MAX_RESULT_LEN as _MAX_RESULT_LEN
 
 
 def _subscribe(printer: BaseBrowserPrinter) -> queue.Queue:

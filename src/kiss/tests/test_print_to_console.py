@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from kiss.core.print_to_console import ConsolePrinter
 
+
 class TestFormatToolCall(unittest.TestCase):
     def _make_printer(self):
         buf = io.StringIO()
