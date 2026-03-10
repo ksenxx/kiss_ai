@@ -298,15 +298,27 @@ def _load_last_model() -> str:
     return last if isinstance(last, str) else ""
 
 
-def _record_model_usage(model: str) -> None:
-    usage = _load_json_dict(MODEL_USAGE_FILE)
-    usage[model] = int(usage.get(model, 0)) + 1
-    usage["_last"] = model
+def _increment_usage(file_path: Path, key: str, extra: dict[str, object] | None = None) -> None:
+    """Increment a usage counter in a JSON file and optionally set extra keys.
+
+    Args:
+        file_path: Path to the JSON usage file.
+        key: The key whose integer count to increment.
+        extra: Optional extra key-value pairs to merge into the file.
+    """
+    usage = _load_json_dict(file_path)
+    usage[key] = int(usage.get(key, 0)) + 1
+    if extra:
+        usage.update(extra)
     try:
         _ensure_kiss_dir()
-        MODEL_USAGE_FILE.write_text(json.dumps(usage))
+        file_path.write_text(json.dumps(usage))
     except OSError:
         logger.debug("Exception caught", exc_info=True)
+
+
+def _record_model_usage(model: str) -> None:
+    _increment_usage(MODEL_USAGE_FILE, model, extra={"_last": model})
 
 
 FILE_USAGE_FILE = _KISS_DIR / "file_usage.json"
@@ -318,13 +330,7 @@ def _load_file_usage() -> dict[str, int]:
 
 def _record_file_usage(path: str) -> None:
     """Increment the access count for a file path."""
-    usage = _load_json_dict(FILE_USAGE_FILE)
-    usage[path] = int(usage.get(path, 0)) + 1
-    try:
-        _ensure_kiss_dir()
-        FILE_USAGE_FILE.write_text(json.dumps(usage))
-    except OSError:
-        logger.debug("Exception caught", exc_info=True)
+    _increment_usage(FILE_USAGE_FILE, path)
 
 
 def _add_task(task: str) -> None:
