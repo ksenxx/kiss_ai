@@ -1389,7 +1389,7 @@ def run_chatbot(
 
 
 def main() -> None:  # pragma: no cover – CLI entry point
-    """Launch the KISS chatbot UI in assistant or coding mode based on KISS_MODE env var."""
+    """Launch the KISS Sorcar chatbot UI."""
     import argparse
 
     from kiss._version import __version__
@@ -1410,13 +1410,12 @@ def main() -> None:  # pragma: no cover – CLI entry point
     args = parser.parse_args()
     work_dir = str(Path(args.work_dir).resolve())
 
-    is_assistant = os.environ.get("KISS_MODE", "assistant").lower() == "assistant"
     run_chatbot(
         agent_factory=SorcarAgent,
-        title=f"KISS {'Assistant' if is_assistant else 'Coding Assistant'}: {__version__}",
+        title=f"KISS Sorcar: {__version__}",
         work_dir=work_dir,
         default_model=args.model_name,
-        agent_kwargs={"headless": not is_assistant},
+        agent_kwargs={"headless": False},
     )
 
 
