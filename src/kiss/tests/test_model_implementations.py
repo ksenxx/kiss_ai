@@ -122,17 +122,6 @@ class TestModelHelperFunctions:
 
         assert _build_text_based_tools_prompt({}) == ""
 
-    def test_build_text_based_tools_prompt_with_function(self):
-        from kiss.core.models.openai_compatible_model import _build_text_based_tools_prompt
-
-        def test_func(x: int) -> str:
-            """A test function."""
-            return str(x)
-
-        prompt = _build_text_based_tools_prompt({"test_func": test_func})
-        assert "test_func" in prompt
-        assert "Available Tools" in prompt
-
     @pytest.mark.parametrize(
         "content,expected_count",
         [

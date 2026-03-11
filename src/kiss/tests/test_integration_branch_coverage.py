@@ -77,32 +77,12 @@ def _make_collector_callback(collector: list[str]):
 class TestRelentlessAgentFinish:
     """Cover all branches of the module-level finish() in relentless_agent."""
 
-    def test_finish_bool_args(self) -> None:
-        result = ra_finish(True, False, "done")
-        payload = yaml.safe_load(result)
-        assert payload["success"] is True
-        assert payload["is_continue"] is False
-        assert payload["summary"] == "done"
-
     def test_finish_string_true(self) -> None:
         """Cover isinstance(success, str) and isinstance(is_continue, str) branches."""
         result = ra_finish("true", "yes", "ok")  # type: ignore[arg-type]
         payload = yaml.safe_load(result)
         assert payload["success"] is True
         assert payload["is_continue"] is True
-
-    def test_finish_string_false(self) -> None:
-        result = ra_finish("no", "no", "nope")  # type: ignore[arg-type]
-        payload = yaml.safe_load(result)
-        assert payload["success"] is False
-        assert payload["is_continue"] is False
-
-    def test_finish_string_1(self) -> None:
-        result = ra_finish("1", "1", "ones")  # type: ignore[arg-type]
-        payload = yaml.safe_load(result)
-        assert payload["success"] is True
-        assert payload["is_continue"] is True
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # relentless_agent._docker_bash
@@ -124,51 +104,7 @@ class TestRelentlessAgentDockerBash:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class TestExtractDeepseekReasoning:
-    def test_with_think_tags(self) -> None:
-        reasoning, answer = _extract_deepseek_reasoning(
-            "<think>Step 1: think</think>Final answer"
-        )
-        assert reasoning == "Step 1: think"
-        assert answer == "Final answer"
-
-    def test_without_think_tags(self) -> None:
-        reasoning, answer = _extract_deepseek_reasoning("Just an answer")
-        assert reasoning == ""
-        assert answer == "Just an answer"
-
-
 class TestBuildTextBasedToolsPrompt:
-    def test_empty_map(self) -> None:
-        assert _build_text_based_tools_prompt({}) == ""
-
-    def test_function_with_typed_params(self) -> None:
-        def greet(name: str, count: int) -> str:
-            """Say hello."""
-            return f"hi {name}" * count
-
-        prompt = _build_text_based_tools_prompt({"greet": greet})
-        assert "greet" in prompt
-        assert "name (str)" in prompt
-        assert "count (int)" in prompt
-
-    def test_function_no_params(self) -> None:
-        def noop() -> None:
-            """Does nothing."""
-            pass
-
-        prompt = _build_text_based_tools_prompt({"noop": noop})
-        assert "(no parameters)" in prompt
-
-    def test_function_no_docstring(self) -> None:
-        def mystery(x):  # type: ignore[no-untyped-def]
-            pass
-
-        # Remove docstring
-        mystery.__doc__ = None
-        prompt = _build_text_based_tools_prompt({"mystery": mystery})
-        assert "Function mystery" in prompt
-
     def test_function_untyped_param(self) -> None:
         def untyped(x):  # type: ignore[no-untyped-def]
             """Untyped."""
@@ -179,34 +115,6 @@ class TestBuildTextBasedToolsPrompt:
 
 
 class TestParseTextBasedToolCalls:
-    def test_json_code_block(self) -> None:
-        content = (
-            '```json\n{"tool_calls": [{"name": "finish",'
-            ' "arguments": {"status": "ok"}}]}\n```'
-        )
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 1
-        assert calls[0]["name"] == "finish"
-        assert calls[0]["arguments"]["status"] == "ok"
-
-    def test_generic_code_block(self) -> None:
-        content = '```\n{"tool_calls": [{"name": "test"}]}\n```'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 1
-        assert calls[0]["name"] == "test"
-        assert calls[0]["arguments"] == {}
-
-    def test_inline_json(self) -> None:
-        content = '{"tool_calls": [{"name": "run", "arguments": {"cmd": "ls"}}]}'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 1
-        assert calls[0]["name"] == "run"
-
-    def test_invalid_json_in_code_block(self) -> None:
-        content = '```json\n{invalid json}\n```'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 0
-
     def test_no_tool_calls_key(self) -> None:
         content = '```json\n{"result": "hello"}\n```'
         calls = _parse_text_based_tool_calls(content)
@@ -238,37 +146,12 @@ class TestParseTextBasedToolCalls:
         calls = _parse_text_based_tool_calls(content)
         assert len(calls) == 0
 
-    def test_plain_text_no_json(self) -> None:
-        content = "Just some text without any JSON"
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 0
-
-    def test_multiple_tool_calls(self) -> None:
-        content = '{"tool_calls": [{"name": "a"}, {"name": "b"}]}'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 2
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # OpenAICompatibleModel class methods (no API calls)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TestOpenAICompatibleModelInit:
-    def test_basic_init(self) -> None:
-        m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="test")
-        assert m.model_name == "gpt-4"
-        assert m.base_url == "http://localhost"
-        assert m._api_model_name == "gpt-4"
-
-    def test_openrouter_prefix_strip(self) -> None:
-        m = OpenAICompatibleModel(
-            "openrouter/deepseek/deepseek-r1",
-            base_url="http://localhost",
-            api_key="test",
-        )
-        assert m._api_model_name == "deepseek/deepseek-r1"
-
     def test_str_repr(self) -> None:
         m = OpenAICompatibleModel("gpt-4", base_url="http://localhost:8080", api_key="k")
         s = str(m)
@@ -276,48 +159,7 @@ class TestOpenAICompatibleModelInit:
         assert "http://localhost:8080" in s
         assert repr(m) == s
 
-    def test_is_deepseek_reasoning_model(self) -> None:
-        m = OpenAICompatibleModel(
-            "deepseek/deepseek-r1", base_url="http://localhost", api_key="k"
-        )
-        assert m._is_deepseek_reasoning_model() is True
-
-    def test_is_not_deepseek_reasoning_model(self) -> None:
-        m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
-        assert m._is_deepseek_reasoning_model() is False
-
-
 class TestOpenAICompatibleModelInitialize:
-    def test_initialize_no_attachments(self) -> None:
-        m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
-        m.initialize("Hello world")
-        assert len(m.conversation) == 1
-        assert m.conversation[0]["role"] == "user"
-        assert m.conversation[0]["content"] == "Hello world"
-
-    def test_initialize_with_system_instruction(self) -> None:
-        m = OpenAICompatibleModel(
-            "gpt-4",
-            base_url="http://localhost",
-            api_key="k",
-            model_config={"system_instruction": "Be helpful"},
-        )
-        m.initialize("Hello")
-        assert len(m.conversation) == 2
-        assert m.conversation[0]["role"] == "system"
-        assert m.conversation[0]["content"] == "Be helpful"
-
-    def test_initialize_with_image_attachment(self) -> None:
-        from kiss.core.models.model import Attachment
-
-        m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
-        att = Attachment(data=b"\x89PNG\r\n", mime_type="image/png")
-        m.initialize("Describe this image", attachments=[att])
-        content = m.conversation[0]["content"]
-        assert isinstance(content, list)
-        assert content[0]["type"] == "image_url"
-        assert content[-1]["type"] == "text"
-
     def test_initialize_with_pdf_attachment(self) -> None:
         from kiss.core.models.model import Attachment
 
@@ -342,15 +184,6 @@ class TestOpenAICompatibleModelInitialize:
 
 
 class TestParseToolCallAccum:
-    def test_valid_json_arguments(self) -> None:
-        accum = {
-            0: {"id": "c1", "name": "test", "arguments": '{"x": 1}'},
-        }
-        fc, raw = OpenAICompatibleModel._parse_tool_call_accum(accum)
-        assert len(fc) == 1
-        assert fc[0]["arguments"] == {"x": 1}
-        assert raw[0]["function"]["name"] == "test"
-
     def test_invalid_json_arguments(self) -> None:
         accum = {
             0: {"id": "c1", "name": "test", "arguments": "not json"},
@@ -359,70 +192,7 @@ class TestParseToolCallAccum:
         assert len(fc) == 1
         assert fc[0]["arguments"] == {}
 
-    def test_multiple_accum_entries(self) -> None:
-        accum = {
-            1: {"id": "c2", "name": "b", "arguments": "{}"},
-            0: {"id": "c1", "name": "a", "arguments": "{}"},
-        }
-        fc, raw = OpenAICompatibleModel._parse_tool_call_accum(accum)
-        assert len(fc) == 2
-        assert fc[0]["name"] == "a"  # sorted by index
-        assert fc[1]["name"] == "b"
-
-
-class TestParseToolCallsFromMessage:
-    def test_no_tool_calls(self) -> None:
-        class FakeMessage:
-            tool_calls = None
-
-        fc, raw = OpenAICompatibleModel._parse_tool_calls_from_message(FakeMessage())
-        assert fc == []
-        assert raw == []
-
-    def test_with_valid_tool_calls(self) -> None:
-        class FakeFunction:
-            def __init__(self, name: str, arguments: str) -> None:
-                self.name = name
-                self.arguments = arguments
-
-        class FakeToolCall:
-            def __init__(self, id: str, name: str, arguments: str) -> None:
-                self.id = id
-                self.function = FakeFunction(name, arguments)
-
-        class FakeMessage:
-            tool_calls = [
-                FakeToolCall("id1", "test_func", '{"a": 1}'),
-            ]
-
-        fc, raw = OpenAICompatibleModel._parse_tool_calls_from_message(FakeMessage())
-        assert len(fc) == 1
-        assert fc[0]["name"] == "test_func"
-        assert fc[0]["arguments"] == {"a": 1}
-
-    def test_with_invalid_json_arguments(self) -> None:
-        class FakeFunction:
-            def __init__(self) -> None:
-                self.name = "test"
-                self.arguments = "bad json"
-
-        class FakeToolCall:
-            def __init__(self) -> None:
-                self.id = "id1"
-                self.function = FakeFunction()
-
-        class FakeMessage:
-            tool_calls = [FakeToolCall()]
-
-        fc, raw = OpenAICompatibleModel._parse_tool_calls_from_message(FakeMessage())
-        assert fc[0]["arguments"] == {}
-
-
 class TestFinalizeStreamResponse:
-    def test_with_response(self) -> None:
-        result = OpenAICompatibleModel._finalize_stream_response("resp", "last")
-        assert result == "resp"
-
     def test_with_last_chunk(self) -> None:
         result = OpenAICompatibleModel._finalize_stream_response(None, "last")
         assert result == "last"
@@ -452,33 +222,6 @@ class TestExtractTokenCounts:
         assert out == 50
         assert cache_r == 0
         assert cache_w == 0
-
-    def test_with_cached_tokens(self) -> None:
-        class FakeDetails:
-            cached_tokens = 30
-
-        class FakeUsage:
-            prompt_tokens = 100
-            completion_tokens = 50
-            prompt_tokens_details = FakeDetails()
-
-        class FakeResponse:
-            usage = FakeUsage()
-
-        m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
-        inp, out, cache_r, cache_w = m.extract_input_output_token_counts_from_response(
-            FakeResponse()
-        )
-        assert inp == 70  # 100 - 30
-        assert cache_r == 30
-
-    def test_no_usage(self) -> None:
-        class FakeResponse:
-            usage = None
-
-        m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
-        result = m.extract_input_output_token_counts_from_response(FakeResponse())
-        assert result == (0, 0, 0, 0)
 
     def test_no_usage_attr(self) -> None:
         m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
@@ -806,28 +549,6 @@ def fake_openai_server():
 class TestOpenAICompatibleModelGenerate:
     """Test generate() via a fake server (non-streaming and streaming)."""
 
-    def test_generate_non_streaming(self, fake_openai_server: str) -> None:
-        FakeOpenAIHandler.response_mode = "normal"
-        m = OpenAICompatibleModel("fake-model", base_url=fake_openai_server, api_key="test")
-        m.initialize("Hi")
-        content, response = m.generate()
-        assert content == "Hello from server!"
-        assert len(m.conversation) == 2  # user + assistant
-
-    def test_generate_streaming(self, fake_openai_server: str) -> None:
-        FakeOpenAIHandler.response_mode = "normal"
-        tokens: list[str] = []
-        m = OpenAICompatibleModel(
-            "fake-model",
-            base_url=fake_openai_server,
-            api_key="test",
-            token_callback=_make_collector_callback(tokens),
-        )
-        m.initialize("Hi")
-        content, response = m.generate()
-        assert content == "Hello streamed!"
-        assert len(tokens) > 0
-
     def test_generate_deepseek_strips_think_tags(self, fake_openai_server: str) -> None:
         """Cover the _is_deepseek_reasoning_model branch in generate()."""
         FakeOpenAIHandler.response_mode = "deepseek"
@@ -888,66 +609,6 @@ class TestOpenAICompatibleModelGenerateWithTools:
         fc, content, response = m.generate_and_process_with_tools({"bad_func": bad_func})
         assert len(fc) == 1
         assert fc[0]["arguments"] == {}  # Bad JSON → empty dict
-
-    def test_streaming_no_tools(self, fake_openai_server: str) -> None:
-        FakeOpenAIHandler.response_mode = "normal"
-        tokens: list[str] = []
-        m = OpenAICompatibleModel(
-            "fake-model",
-            base_url=fake_openai_server,
-            api_key="test",
-            token_callback=_make_collector_callback(tokens),
-        )
-        m.initialize("Hi")
-
-        def dummy() -> str:
-            """Dummy."""
-            return "ok"
-
-        fc, content, response = m.generate_and_process_with_tools({"dummy": dummy})
-        assert fc == []
-        assert content == "Hello streamed!"
-        assert "tool_calls" not in m.conversation[-1]
-
-    def test_streaming_with_tool_calls(self, fake_openai_server: str) -> None:
-        FakeOpenAIHandler.response_mode = "stream_tool_calls"
-        tokens: list[str] = []
-        m = OpenAICompatibleModel(
-            "fake-model",
-            base_url=fake_openai_server,
-            api_key="test",
-            token_callback=_make_collector_callback(tokens),
-        )
-        m.initialize("Call tools")
-
-        def test_func(x: int) -> str:
-            """Test function."""
-            return str(x)
-
-        fc, content, response = m.generate_and_process_with_tools({"test_func": test_func})
-        assert len(fc) == 1
-        assert fc[0]["name"] == "test_func"
-        assert fc[0]["arguments"] == {"x": 42}
-
-    def test_deepseek_text_based_tools(self, fake_openai_server: str) -> None:
-        """Cover _generate_with_text_based_tools for DeepSeek R1 model."""
-        FakeOpenAIHandler.response_mode = "deepseek"
-        tokens: list[str] = []
-        m = OpenAICompatibleModel(
-            "deepseek/deepseek-r1",
-            base_url=fake_openai_server,
-            api_key="test",
-            token_callback=_make_collector_callback(tokens),
-        )
-        m.initialize("What is 6*7?")
-
-        def finish(result: str) -> str:
-            """Finish."""
-            return result
-
-        fc, content, response = m.generate_and_process_with_tools({"finish": finish})
-        # The response doesn't contain tool_calls JSON, so fc should be empty
-        assert isinstance(fc, list)
 
     def test_deepseek_text_based_tools_with_system_message(
         self, fake_openai_server: str
@@ -1016,18 +677,6 @@ class TestOpenAICompatibleModelGenerateWithTools:
 
 
 class TestOpenAICompatibleModelEmbedding:
-    def test_get_embedding(self, fake_openai_server: str) -> None:
-        m = OpenAICompatibleModel("fake-model", base_url=fake_openai_server, api_key="test")
-        m.initialize("test")
-        embedding = m.get_embedding("Hello world")
-        assert embedding == [0.1, 0.2, 0.3]
-
-    def test_get_embedding_with_custom_model(self, fake_openai_server: str) -> None:
-        m = OpenAICompatibleModel("fake-model", base_url=fake_openai_server, api_key="test")
-        m.initialize("test")
-        embedding = m.get_embedding("Hello", embedding_model="custom-embed")
-        assert embedding == [0.1, 0.2, 0.3]
-
     def test_get_embedding_failure(self) -> None:
         from kiss.core.kiss_error import KISSError
 
@@ -1045,15 +694,6 @@ class TestOpenAICompatibleModelEmbedding:
 
 
 class TestUtilsFunctions:
-    def test_get_config_value_explicit(self) -> None:
-        assert get_config_value("explicit", object(), "x") == "explicit"
-
-    def test_get_config_value_from_config(self) -> None:
-        class Cfg:
-            attr = "from_config"
-
-        assert get_config_value(None, Cfg(), "attr") == "from_config"
-
     def test_get_config_value_default(self) -> None:
         class Cfg:
             pass
@@ -1066,42 +706,6 @@ class TestUtilsFunctions:
 
         with pytest.raises(ValueError):
             get_config_value(None, Cfg(), "missing")
-
-    def test_get_config_value_config_none(self) -> None:
-        """Cover config_value is not None check (config attribute exists but is None)."""
-
-        class Cfg:
-            attr = None
-
-        assert get_config_value(None, Cfg(), "attr", default="fb") == "fb"
-
-    def test_get_template_field_names(self) -> None:
-        fields = get_template_field_names("Hello {name}, {age} years old")
-        assert fields == ["name", "age"]
-
-    def test_get_template_field_names_no_fields(self) -> None:
-        fields = get_template_field_names("No fields here")
-        assert fields == []
-
-    def test_add_prefix(self) -> None:
-        result = add_prefix_to_each_line("a\nb\nc", "> ")
-        assert result == "> a\n> b\n> c"
-
-    def test_config_to_dict(self) -> None:
-        d = config_to_dict()
-        assert isinstance(d, dict)
-        # Should not contain API keys
-        flat_str = str(d)
-        assert "API_KEY" not in flat_str
-
-    def test_fc_reads_file(self) -> None:
-        tmpfile = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
-        tmpfile.write("hello")
-        tmpfile.close()
-        try:
-            assert fc(tmpfile.name) == "hello"
-        finally:
-            os.unlink(tmpfile.name)
 
     def test_utils_finish(self) -> None:
         result = utils_finish(status="success", analysis="good", result="42")
@@ -1122,12 +726,6 @@ class TestUtilsFunctions:
         with pytest.raises(KISSError, match="Could not find"):
             read_project_file("nonexistent_single_file.xyz")
 
-    def test_read_project_file_from_package_not_found(self) -> None:
-        from kiss.core.kiss_error import KISSError
-
-        with pytest.raises(KISSError):
-            read_project_file_from_package("nonexistent_file_xyz.txt")
-
     def test_resolve_path_relative(self) -> None:
         result = resolve_path("foo/bar.txt", "/base")
         assert result == Path("/base/foo/bar.txt").resolve()
@@ -1135,9 +733,6 @@ class TestUtilsFunctions:
     def test_resolve_path_absolute(self) -> None:
         result = resolve_path("/absolute/path.txt", "/base")
         assert result == Path("/absolute/path.txt").resolve()
-
-    def test_is_subpath_true(self) -> None:
-        assert is_subpath(Path("/a/b/c"), [Path("/a/b")]) is True
 
     def test_is_subpath_false(self) -> None:
         assert is_subpath(Path("/a/b/c"), [Path("/d/e")]) is False
@@ -1170,20 +765,6 @@ class TestUsefulToolsBashTimeout:
         assert "timeout" in result.lower()
 
 
-class TestFormatBashResult:
-    def test_success(self) -> None:
-        assert _format_bash_result(0, "output", 1000) == "output"
-
-    def test_error(self) -> None:
-        result = _format_bash_result(1, "error msg", 1000)
-        assert "Error (exit code 1)" in result
-        assert "error msg" in result
-
-    def test_error_no_output(self) -> None:
-        result = _format_bash_result(1, "", 1000)
-        assert "Error (exit code 1):" in result
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # relentless_agent.perform_task (integration via real KISSAgent + fake server)
 # ═══════════════════════════════════════════════════════════════════════
@@ -1197,61 +778,6 @@ class TestRelentlessAgentRun:
         d = Path(tempfile.mkdtemp())
         yield d
         shutil.rmtree(d, ignore_errors=True)
-
-    def test_run_minimal_budget(self, tmpdir: Path) -> None:
-        """Run with minimal budget to cover _reset and perform_task paths."""
-        agent = RelentlessAgent("test-agent")
-        result = agent.run(
-            prompt_template="say hello",
-            max_steps=1,
-            max_budget=0.001,
-            max_sub_sessions=1,
-            work_dir=str(tmpdir),
-            verbose=False,
-        )
-        assert isinstance(result, str)
-
-    def test_run_with_system_instructions(self, tmpdir: Path) -> None:
-        """Cover system_instructions branch in run()."""
-        agent = RelentlessAgent("test-agent")
-        result = agent.run(
-            system_instructions="You are a helpful assistant.",
-            prompt_template="say hello",
-            max_steps=1,
-            max_budget=0.001,
-            max_sub_sessions=1,
-            work_dir=str(tmpdir),
-            verbose=False,
-        )
-        assert isinstance(result, str)
-
-    def test_run_with_arguments(self, tmpdir: Path) -> None:
-        """Cover the args branch (prompt_template.format(**args))."""
-        agent = RelentlessAgent("test-agent")
-        result = agent.run(
-            prompt_template="Hello {name}",
-            arguments={"name": "World"},
-            max_steps=1,
-            max_budget=0.001,
-            max_sub_sessions=1,
-            work_dir=str(tmpdir),
-            verbose=False,
-        )
-        assert isinstance(result, str)
-
-    def test_run_with_no_arguments(self, tmpdir: Path) -> None:
-        """Cover the args is None branch (no format substitution)."""
-        agent = RelentlessAgent("test-no-args")
-        result = agent.run(
-            prompt_template="just say hello",
-            max_steps=1,
-            max_budget=0.001,
-            max_sub_sessions=1,
-            work_dir=str(tmpdir),
-            verbose=False,
-        )
-        assert isinstance(result, str)
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

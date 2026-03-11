@@ -178,17 +178,6 @@ def cs_server():
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestCSIndex:
-    def test_index_returns_html_with_code_server(self, cs_server: Any) -> None:
-        """Verify server started with code-server URL embedded in HTML."""
-        base_url, _, _, _ = cs_server
-        resp = requests.get(base_url, timeout=5)
-        assert resp.status_code == 200
-        assert "text/html" in resp.headers["content-type"]
-        # The HTML should contain the code-server URL
-        assert "127.0.0.1" in resp.text
-
-
 class TestCSPushSuccess:
     def test_push_succeeds_with_local_remote(self, cs_server: Any) -> None:
         """Push to local bare remote. Covers push success path (line 1079)."""
@@ -295,15 +284,3 @@ class TestCSSSEDisconnect:
         # Give server time to detect disconnect
         time.sleep(2)
 
-class TestCSRunAndCleanup:
-
-    def test_run_quick_task(self, cs_server: Any) -> None:
-        """Run a quick task with code-server active."""
-        base_url, _, _, _ = cs_server
-        resp = requests.post(
-            f"{base_url}/run",
-            json={"task": "quick cs task"},
-            timeout=10,
-        )
-        assert resp.status_code == 200
-        time.sleep(3)

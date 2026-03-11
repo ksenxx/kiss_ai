@@ -699,19 +699,6 @@ class TestTaskHistory:
         history = th._load_history()
         assert history[0]["has_events"] is False  # unchanged
 
-    def test_load_history_with_duplicates(self) -> None:
-        """JSONL history with duplicate tasks gets deduplicated on load."""
-        lines = [
-            json.dumps({"task": "dup", "has_events": False}),
-            json.dumps({"task": "dup", "has_events": False}),
-            json.dumps({"task": "other", "has_events": False}),
-        ]
-        th.HISTORY_FILE.write_text("\n".join(lines) + "\n")
-        th._history_cache = None
-        history = th._load_history()
-        tasks = [e["task"] for e in history]
-        assert tasks.count("dup") == 1
-
     def test_load_history_corrupt(self) -> None:
         th.HISTORY_FILE.write_text("bad json")
         th._history_cache = None

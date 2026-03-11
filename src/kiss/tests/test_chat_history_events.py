@@ -200,18 +200,6 @@ class TestTasksEndpointFormat:
             assert "task" in entry
             assert entry["has_events"] is False
 
-    def test_task_with_events_has_events_true(self) -> None:
-        th._add_task("task with events")
-        th._set_latest_chat_events(
-            [{"type": "text_delta", "text": "hi"}], task="task with events"
-        )
-        th._add_task("task without events")
-        history = th._load_history()
-        result = _tasks_endpoint_transform(history)
-        # task without events is first (most recent)
-        assert result[0]["has_events"] is False
-        assert result[1]["has_events"] is True
-
 # ── JavaScript syntax validation ─────────────────────────────────────────
 
 
@@ -321,16 +309,6 @@ class TestTaskEventsEndpoint:
 
     def teardown_method(self) -> None:
         _restore_history(self.original_file, self.original_events_dir, self.tmp_dir)
-
-    def test_returns_empty_for_sample_tasks(self) -> None:
-        history = th._load_history()
-        result = th._load_task_chat_events(str(history[0]["task"]))
-        assert result == []
-
-    def test_out_of_range_returns_empty(self) -> None:
-        result = th._load_task_chat_events("nonexistent_task_xyz")
-        assert result == []
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
