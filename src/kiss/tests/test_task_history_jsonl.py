@@ -38,23 +38,19 @@ class TestJSONLFormat:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_new_history_creates_jsonl(self):
+    def test_new_history_loads_sample_tasks_only(self):
         history = th._load_history()
-        assert len(history) > 0
-        # File should exist and be JSONL
-        assert th.HISTORY_FILE.exists()
-        lines = th.HISTORY_FILE.read_text().strip().splitlines()
-        for line in lines:
-            obj = json.loads(line)
-            assert "task" in obj
-            assert "has_events" in obj
+        assert len(history) == len(th.SAMPLE_TASKS)
+        # SAMPLE_TASKS are only in memory, file is not created
+        assert not th.HISTORY_FILE.exists()
 
     def test_add_task_writes_jsonl(self):
         th._add_task("test jsonl task")
         lines = th.HISTORY_FILE.read_text().strip().splitlines()
-        first = json.loads(lines[0])
-        assert first["task"] == "test jsonl task"
-        assert first["has_events"] is False
+        # New task is appended (last line in chronological file)
+        last = json.loads(lines[-1])
+        assert last["task"] == "test jsonl task"
+        assert last["has_events"] is False
 
     def test_set_chat_events_writes_separate_file(self):
         th._add_task("my task")

@@ -11,15 +11,26 @@ via three mechanisms:
 
 
 class TestShutdownTimerDuration:
-    """The shutdown timer should use a short delay (not the old 120s)."""
+    """The shutdown timer should use a short delay for quick exit."""
 
     def test_timer_is_short(self) -> None:
-        """Verify the source code uses a short timer, not 120 seconds."""
+        """Verify the source code uses a 1-second timer for fast shutdown."""
         import inspect
 
         from kiss.agents.sorcar import sorcar
 
         source = inspect.getsource(sorcar.run_chatbot)
-        # The timer should be 10 seconds, not 120
-        assert "call_later(10.0," in source
+        # The timer should be 1 second for fast shutdown on browser close
+        assert "call_later(1.0," in source
+        assert "call_later(10.0," not in source
         assert "Timer(120.0," not in source
+
+    def test_no_client_safety_net_is_short(self) -> None:
+        """Verify the no-client safety net uses a 2-second threshold."""
+        import inspect
+
+        from kiss.agents.sorcar import sorcar
+
+        source = inspect.getsource(sorcar.run_chatbot)
+        assert "no_client_since >= 2.0" in source
+        assert "no_client_since >= 10.0" not in source

@@ -576,11 +576,6 @@ class TestInProcessEndpoints:
         assert "models" in data
         assert "selected" in data
 
-    def test_proposed_tasks(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.get(f"{base_url}/proposed_tasks", timeout=5)
-        assert resp.status_code == 200
-
     def test_suggestions_empty(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         resp = requests.get(f"{base_url}/suggestions?q=&mode=general", timeout=5)

@@ -1,4 +1,5 @@
-\#whatispossible
+#whatispossible
+
 # RelentlessAgent: The Elegant Engine Behind Multi-Hour Agentic Tasks in KISS Sorcar IDE
 
 *How 280 lines of Python solve the hardest problem in agentic coding — and why it deliberately ignores the patterns everyone else uses.*

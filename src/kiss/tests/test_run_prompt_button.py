@@ -182,6 +182,16 @@ class TestPlayButtonDisableDuringRun:
         idx_focus = CHATBOT_JS.index("inp.focus();", idx_check)
         assert idx_running_false < idx_check < idx_focus
 
+    def test_js_set_ready_clears_chatbox(self) -> None:
+        """setReady() should clear the chatbox input after task completion."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        idx_set_ready = CHATBOT_JS.index("function setReady(label){")
+        # Find the next function definition to bound the search
+        next_fn = CHATBOT_JS.index("\nfunction ", idx_set_ready + 1)
+        body = CHATBOT_JS[idx_set_ready:next_fn]
+        assert "inp.value=''" in body
+
 
 class TestEndToEndPromptDetection:
     """End-to-end test: write active-file.json, check prompt detection."""

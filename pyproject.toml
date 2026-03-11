@@ -124,11 +124,15 @@ markers = [
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
+addopts = "--cov=src/kiss --cov-branch"
 
 [tool.coverage.run]
+branch = true
+parallel = true
 source = ["src/kiss"]
 omit = ["src/kiss/tests/*"]
 concurrency = ["greenlet", "thread"]
+data_file = ".coverage"
 
 [tool.coverage.report]
 exclude_lines = [

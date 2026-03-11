@@ -253,6 +253,7 @@ class KISSAgent(Base):
         consecutive_errors = 0
         for _ in range(self.max_steps):
             self.step_count += 1
+            self._check_limits()
             try:
                 result = self._execute_step()
                 consecutive_errors = 0
@@ -283,8 +284,6 @@ class KISSAgent(Base):
                 content = f"Failed to get response from Model: {e}.\nPlease try again.\n"
                 self.model.add_message_to_conversation("user", content)
                 self._add_message("user", content)
-
-            self._check_limits()
 
         raise KISSError(  # pragma: no cover
             f"Agent {self.name} completed {self.max_steps} steps without finishing."

@@ -647,7 +647,7 @@ class GEPA:
         except ValueError:
             logger.debug("Exception caught", exc_info=True)
             return fallback
-        if placeholders != self.valid_placeholders:
+        if not placeholders.issubset(self.valid_placeholders):
             return fallback
         return normalized
 
