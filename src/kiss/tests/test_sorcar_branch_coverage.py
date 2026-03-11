@@ -637,8 +637,14 @@ class TestSorcarServerIntegration:
             else:
                 raise TimeoutError("Server not responsive")
 
+            # Keep an SSE client connected to prevent auto-shutdown
+            keepalive = requests.get(
+                f"{base_url}/events", stream=True, timeout=300,
+            )
+
             yield base_url, work_dir, proc, str(tmpdir)
         finally:
+            keepalive.close()
             proc.send_signal(signal.SIGINT)
             try:
                 proc.wait(timeout=10)
@@ -849,11 +855,6 @@ class TestSorcarServerIntegration:
         )
         assert r.status_code == 200
 
-    def test_closing(self, server) -> None:
-        base_url, _, _, _ = server
-        r = requests.post(f"{base_url}/closing", timeout=5)
-        assert r.status_code == 200
-
     def test_commit_no_changes(self, server) -> None:
         base_url, _, _, _ = server
         r = requests.post(f"{base_url}/commit", timeout=30)
@@ -912,6 +913,11 @@ class TestSorcarServerIntegration:
         r = requests.get(f"{base_url}/active-file-info", timeout=5)
         assert r.status_code == 200
         assert "is_prompt" in r.json()
+
+    def test_closing(self, server) -> None:
+        base_url, _, _, _ = server
+        r = requests.post(f"{base_url}/closing", timeout=5)
+        assert r.status_code == 200
 
 
 class TestWebUseToolBrowserExtra:

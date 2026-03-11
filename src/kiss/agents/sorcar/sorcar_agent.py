@@ -12,6 +12,7 @@ import yaml
 from kiss.agents.sorcar.task_history import HISTORY_FILE
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.channels.slack_agent import SlackChannelAgent
 from kiss.core import config as config_module
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
@@ -27,6 +28,7 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: DockerManager | None = None
+        self.slack_agent = SlackChannelAgent()
 
     def _get_tools(self) -> list:
         def _stream(text: str) -> None:
@@ -38,6 +40,7 @@ class SorcarAgent(RelentlessAgent):
         tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
+        tools.extend(self.slack_agent.get_tools())
         return tools
 
     def _reset(
