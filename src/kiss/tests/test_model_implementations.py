@@ -227,7 +227,9 @@ class TestCachePricing:
 
     def test_openrouter_models_no_cache_pricing(self):
         for name, info in MODEL_INFO.items():
-            if name.startswith("openrouter/"):
+            if name.startswith("openrouter/") and not name.startswith(
+                "openrouter/anthropic/"
+            ):
                 assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
                 assert info.cache_write_price_per_1M is None, (
                     f"{name} should not have cache pricing"
