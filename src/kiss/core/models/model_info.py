@@ -637,11 +637,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
 
 # Populate cache pricing for known providers.
 # Anthropic: cache_read = 10% of input, cache_write = 125% of input.
+# OpenRouter Anthropic: same as Anthropic (routes to Anthropic, supports prompt caching).
 # OpenAI: cache_read = 50% of input (automatic caching, no write premium).
 for _name, _info in MODEL_INFO.items():
     if _info.cache_read_price_per_1M is not None:
         continue
-    if _name.startswith("claude-"):
+    if _name.startswith("claude-") or _name.startswith("openrouter/anthropic/"):
         _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.1
         _info.cache_write_price_per_1M = _info.input_price_per_1M * 1.25
     elif (
