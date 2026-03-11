@@ -445,7 +445,7 @@ def run_chatbot(
                 if not printer.has_clients():
                     if no_client_since is None:
                         no_client_since = time.monotonic()
-                    elif time.monotonic() - no_client_since >= 10.0:
+                    elif time.monotonic() - no_client_since >= 2.0:
                         _schedule_shutdown()
                 else:
                     no_client_since = None
@@ -639,7 +639,7 @@ def run_chatbot(
         if shutdown_handle is not None:
             shutdown_handle.cancel()
         loop = asyncio.get_event_loop()
-        shutdown_handle = loop.call_later(10.0, _do_shutdown)
+        shutdown_handle = loop.call_later(1.0, _do_shutdown)
 
     def _schedule_shutdown() -> None:  # pragma: no cover – timer-triggered shutdown
         if printer.has_clients():
