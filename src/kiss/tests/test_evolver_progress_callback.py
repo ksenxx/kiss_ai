@@ -5,14 +5,17 @@
 
 import os
 import unittest
+import warnings
 
-from kiss.agents.create_and_optimize_agent.agent_evolver import (
-    AgentEvolver,
-    AgentVariant,
-)
-from kiss.agents.create_and_optimize_agent.improver_agent import (
-    ImprovementReport,
-)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    from kiss.agents.create_and_optimize_agent.agent_evolver import (
+        AgentEvolver,
+        AgentVariant,
+    )
+    from kiss.agents.create_and_optimize_agent.improver_agent import (
+        ImprovementReport,
+    )
 
 VARIANT_AGENT_TEMPLATE = """
 def agent_run(task: str) -> dict:
@@ -54,7 +57,7 @@ def _create_agent_dir(
     return folder, report_path
 
 
-class TestableAgentEvolver(AgentEvolver):
+class _TestableAgentEvolver(AgentEvolver):
     def __init__(self, agent_metrics: list[dict[str, float]] | None = None):
         super().__init__()
         self._test_metrics_iter = iter(agent_metrics or [])
@@ -155,7 +158,7 @@ class TestReportProgressDirectly(unittest.TestCase):
         os.chdir(self.original_cwd)
 
     def test_update_best_score_noop_on_empty_frontier(self):
-        evolver = TestableAgentEvolver()
+        evolver = _TestableAgentEvolver()
         evolver._reset(
             task_description="test",
             max_generations=1,

@@ -72,7 +72,7 @@ ______________________________________________________________________
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, session_info: str = '') -> str`
 
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -86,6 +86,7 @@ ______________________________________________________________________
   - `printer`: Optional printer for streaming output. Default is None.
   - `verbose`: Whether to print output to console. Default is None (uses config verbose setting).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
+  - `session_info`: Sub-session label string (e.g. "Session: 1/5") to include in usage info output. Default is empty string.
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
@@ -355,6 +356,15 @@ ______________________________________________________________________
 
 #### `kiss.core.printer` — *Abstract base class and shared utilities for KISS agent printers.*
 
+##### `class StreamEventParser` — Shared parser for LLM stream events used by both console and browser printers.
+
+**Constructor:** `StreamEventParser() -> None`
+
+- **reset_stream_state** — Reset block type and tool buffer state.<br/>`reset_stream_state() -> None`
+- **parse_stream_event** — Parse a stream event, dispatch to on\_\* callbacks, return extracted text.<br/>`parse_stream_event(event: Any) -> str`
+  - `event`: An event object with an `event` dict attribute.
+  - **Returns:** str: Any text content extracted from text or thinking deltas.
+
 ##### `class Printer(ABC)`
 
 - **print** — Render content to the output destination.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
@@ -411,7 +421,7 @@ ______________________________________________________________________
 
 #### `kiss.core.print_to_console` — *Console output formatting for KISS agents.*
 
-##### `class ConsolePrinter(Printer)`
+##### `class ConsolePrinter(StreamEventParser, Printer)`
 
 **Constructor:** `ConsolePrinter(file: Any = None) -> None`
 
@@ -432,7 +442,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.sorcar.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
-##### `class BaseBrowserPrinter(Printer)`
+##### `class BaseBrowserPrinter(StreamEventParser, Printer)`
 
 **Constructor:** `BaseBrowserPrinter() -> None`
 

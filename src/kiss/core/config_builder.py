@@ -110,9 +110,9 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
     if current_config is not None:
         # Get all fields that are not part of the base Config class
         base_fields = set(Config.model_fields.keys())
-        for field_name in current_config.model_fields.keys():
+        for field_name in type(current_config).model_fields.keys():
             if field_name not in base_fields:
-                field_info = current_config.model_fields[field_name]
+                field_info = type(current_config).model_fields[field_name]
                 field_type = field_info.annotation
                 # Get the current value as default
                 current_value = getattr(current_config, field_name, None)

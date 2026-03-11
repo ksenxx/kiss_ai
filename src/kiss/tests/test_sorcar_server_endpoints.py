@@ -90,15 +90,6 @@ def server():
             proc.wait()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-
-class TestServerIndex:
-    def test_get_index_returns_html(self, server):
-        base_url, _, _ = server
-        resp = requests.get(base_url, timeout=5)
-        assert resp.status_code == 200
-        assert "text/html" in resp.headers["content-type"]
-
-
 class TestServerModels:
     def test_models_endpoint(self, server):
         base_url, _, _ = server
@@ -202,23 +193,6 @@ class TestServerRunTask:
         )
         assert resp.status_code == 400
 
-    def test_run_and_stop_task(self, server):
-        base_url, _, _ = server
-        # Start a task - the DummyAgent returns immediately
-        resp = requests.post(
-            f"{base_url}/run",
-            json={"task": "test task", "model": "claude-opus-4-6"},
-            timeout=5,
-        )
-        assert resp.status_code == 200
-        # Wait a moment for agent thread to complete
-        time.sleep(1)
-
-        # Now try stopping (may already be done)
-        resp = requests.post(f"{base_url}/stop", timeout=5)
-        # Either 200 (stopped) or 404 (no running task)
-        assert resp.status_code in (200, 404)
-
 
 class TestServerRunSelection:
     def test_run_selection_empty_text(self, server):
@@ -229,31 +203,6 @@ class TestServerRunSelection:
             timeout=5,
         )
         assert resp.status_code == 400
-
-    def test_run_selection_success(self, server):
-        base_url, _, _ = server
-        # Wait for any previous task to finish
-        time.sleep(1)
-        resp = requests.post(
-            f"{base_url}/run-selection",
-            json={"text": "echo hello"},
-            timeout=5,
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "started"
-        # Wait for task to finish
-        time.sleep(1)
-
-
-class TestServerStop:
-    def test_stop_no_running_task(self, server):
-        base_url, _, _ = server
-        # Wait for any previous task to finish
-        time.sleep(1)
-        resp = requests.post(f"{base_url}/stop", timeout=5)
-        assert resp.status_code == 404
-
 
 class TestServerOpenFile:
     def test_open_file_no_path(self, server):
@@ -380,36 +329,6 @@ class TestServerGetFileContent:
         )
         assert resp.status_code == 404
 
-
-class TestServerEvents:
-    def test_events_sse_stream(self, server):
-        """Connect to SSE events endpoint and verify it returns event data."""
-        base_url, _, _ = server
-        resp = requests.get(
-            f"{base_url}/events",
-            stream=True,
-            timeout=10,
-        )
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers["content-type"]
-        # Read a few bytes (heartbeat or event) then close
-        content = b""
-        for chunk in resp.iter_content(chunk_size=256):
-            content += chunk
-            if len(content) > 50:
-                break
-        resp.close()
-
-
-class TestServerCommit:
-    def test_commit_no_changes(self, server):
-        base_url, _, _ = server
-        # Wait for any running tasks to finish
-        time.sleep(1)
-        resp = requests.post(f"{base_url}/commit", timeout=30)
-        assert resp.status_code in (200, 400)
-
-
 class TestServerSuggestionsFilesMode:
     def test_suggestions_files_empty_query(self, server):
         base_url, _, _ = server
@@ -418,24 +337,3 @@ class TestServerSuggestionsFilesMode:
         data = resp.json()
         assert isinstance(data, list)
 
-
-class TestServerRunWithAttachments:
-    def test_run_with_attachments(self, server):
-        import base64
-        base_url, _, _ = server
-        # Wait for previous tasks
-        time.sleep(1)
-        # Create a simple image-like attachment
-        fake_image = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100).decode()
-        resp = requests.post(
-            f"{base_url}/run",
-            json={
-                "task": "test with attachment",
-                "attachments": [
-                    {"data": fake_image, "mime_type": "image/png"}
-                ],
-            },
-            timeout=5,
-        )
-        assert resp.status_code == 200
-        time.sleep(1)

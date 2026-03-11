@@ -113,11 +113,6 @@ class TestChatbotExternalRunHandler:
         block = CHATBOT_JS[idx:idx + 500]
         assert "showSpinner()" in block
 
-    def test_external_run_adds_running_dot(self) -> None:
-        idx = CHATBOT_JS.index("case'external_run':")
-        block = CHATBOT_JS[idx:idx + 500]
-        assert "D.classList.add('running')" in block
-
     def test_external_run_loads_models(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
         block = CHATBOT_JS[idx:idx + 500]

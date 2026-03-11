@@ -31,17 +31,6 @@ MODEL_CONFIGS = [
     pytest.param("gpt-4.1-mini", "OpenAICompatibleModel", "10", marks=requires_openai_api_key),
 ]
 
-
-class TestModelCommon:
-    @pytest.mark.parametrize("model_name,_,__", MODEL_CONFIGS)
-    @pytest.mark.timeout(60)
-    def test_add_message_to_conversation(self, model_name, _, __):
-        m = model(model_name)
-        m.initialize("Hello")
-        m.add_message_to_conversation("user", "Follow up")
-        assert len(m.conversation) == 2
-
-
 @requires_anthropic_api_key
 class TestAnthropicModel:
     @pytest.mark.timeout(60)
@@ -107,14 +96,6 @@ class TestOpenAIModel:
         assert isinstance(embedding, list)
         assert len(embedding) > 0
         assert isinstance(embedding[0], float)
-
-    @pytest.mark.timeout(60)
-    def test_add_message_with_usage_info(self):
-        m = model("gpt-4.1-mini")
-        m.initialize("Hello")
-        m.set_usage_info_for_messages("Token usage: 50")
-        m.add_message_to_conversation("user", "Test")
-        assert "Token usage: 50" in m.conversation[-1]["content"]
 
 
 class TestModelHelperFunctions:

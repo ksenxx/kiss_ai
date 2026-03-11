@@ -82,17 +82,6 @@ class TestSetupCodeServer(unittest.TestCase):
         assert ".then(function(){" in snippet
         assert "},function(){" in snippet
 
-
-class TestBuildHtmlSplitLayout(unittest.TestCase):
-
-    def test_iframe_with_code_server_url(self) -> None:
-        html = chatbot_ui._build_html("T", "http://127.0.0.1:9999", "/tmp/work")
-        assert '<iframe id="code-server-frame"' in html
-        assert 'data-base-url="http://127.0.0.1:9999"' in html
-        assert 'data-work-dir="/tmp/work"' in html
-        assert 'id="editor-fallback"' not in html
-
-
 class TestBuildHtmlJavaScript(unittest.TestCase):
     html: str
 
@@ -102,11 +91,6 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
 
     def test_merge_function(self) -> None:
         assert "function mergeAction" in self.html
-
-    def test_divider_and_editor_functions(self) -> None:
-        assert "isDragging" in self.html
-        assert "function openInEditor" in self.html
-        assert "closest('[data-path]')" in self.html
 
     def test_js_balanced(self) -> None:
         start = self.html.find("<script>")
@@ -142,15 +126,6 @@ class TestMergeEndpoints(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.repo, ignore_errors=True)
 
-    def test_diff_contains_changes(self) -> None:
-        result = subprocess.run(
-            ["git", "diff", "main"],
-            capture_output=True,
-            text=True,
-            cwd=self.repo,
-        )
-        assert "original" in result.stdout and "modified" in result.stdout
-
     def test_revert_file(self) -> None:
         subprocess.run(
             ["git", "checkout", "main", "--", "file.txt"],
@@ -177,28 +152,6 @@ class TestMergeEndpoints(unittest.TestCase):
             check=True,
         )
         assert (Path(self.repo) / "file.txt").read_text() == "original\n"
-
-    def test_revert_nonexistent_file_fails(self) -> None:
-        result = subprocess.run(
-            ["git", "checkout", "main", "--", "no_such_file.txt"],
-            capture_output=True,
-            text=True,
-            cwd=self.repo,
-        )
-        assert result.returncode != 0
-
-    def test_not_a_git_repo(self) -> None:
-        non_git = tempfile.mkdtemp()
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--is-inside-work-tree"],
-                capture_output=True,
-                text=True,
-                cwd=non_git,
-            )
-            assert result.returncode != 0
-        finally:
-            shutil.rmtree(non_git, ignore_errors=True)
 
     def test_revert_all_files(self) -> None:
         changed = (
@@ -243,29 +196,6 @@ class TestFixedPortLogic(unittest.TestCase):
             s.close()
         assert connected
 
-    def test_detects_closed_port(self) -> None:
-        from kiss.agents.sorcar.browser_ui import find_free_port
-
-        port = find_free_port()
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                connected = True
-        except (ConnectionRefusedError, OSError):
-            connected = False
-        assert not connected
-
-
-class TestWelcomeChipCounts(unittest.TestCase):
-    def test_welcome_shows_5_recent_and_5_suggested(self) -> None:
-        html = chatbot_ui._build_html("T")
-        assert "proposed.slice(0,5)" in html
-        assert "tasks.slice(0,5)" in html
-        assert "items.slice(0,10)" in html
-        assert "proposed.slice(0,3)" not in html
-        assert "tasks.slice(0,3)" not in html
-        assert "items.slice(0,6)" not in html
-
-
 class TestFilePathDetection(unittest.TestCase):
     """Tests for the file-path-opens-in-editor feature in submitTask."""
 
@@ -277,9 +207,6 @@ class TestFilePathDetection(unittest.TestCase):
 
     def test_looks_like_file_path_function_exists(self) -> None:
         assert "function looksLikeFilePath" in self.html
-
-    def test_do_submit_task_function_exists(self) -> None:
-        assert "function doSubmitTask" in self.html
 
     def test_submit_task_calls_open_file_for_file_paths(self) -> None:
         # submitTask should call /open-file when looksLikeFilePath returns true

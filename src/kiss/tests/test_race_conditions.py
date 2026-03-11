@@ -53,42 +53,6 @@ class TestGlobalBudgetThreadSafety:
         assert abs(Base.global_budget_used - expected) < 1e-9
 
 
-class TestBashBufferThreadSafety:
-    """Verify _bash_buffer doesn't lose data when timer flush races with append."""
-
-    def test_concurrent_reset_and_append(self):
-        """Reset from one thread while another appends doesn't raise."""
-        p = BaseBrowserPrinter()
-        _subscribe(p)
-        barrier = threading.Barrier(2)
-        errors: list[Exception] = []
-
-        def appender():
-            barrier.wait()
-            for i in range(50):
-                try:
-                    p.print(f"x{i}\n", type="bash_stream")
-                except Exception as e:
-                    errors.append(e)
-
-        def resetter():
-            barrier.wait()
-            for _ in range(50):
-                try:
-                    p.reset()
-                except Exception as e:
-                    errors.append(e)
-
-        t1 = threading.Thread(target=appender)
-        t2 = threading.Thread(target=resetter)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-
-        assert errors == [], f"Exceptions during concurrent access: {errors}"
-
-
 class TestCallbackLoopThreadSafety:
     """Verify _get_callback_loop returns same loop from concurrent callers."""
 

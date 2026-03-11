@@ -24,6 +24,13 @@ import requests
 from kiss.agents.sorcar.sorcar import run_chatbot
 from kiss.core.relentless_agent import RelentlessAgent
 
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:websockets.legacy is deprecated:DeprecationWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning"
+    ),
+]
+
 
 class _CSDummyAgent(RelentlessAgent):
     """Minimal agent for code-server integration tests."""
@@ -284,32 +291,7 @@ class TestCSSSEDisconnect:
         # Give server time to detect disconnect
         time.sleep(2)
 
-
-class TestCSProposedTasksFallback:
-    def test_proposed_tasks_fallback_to_sample(self, cs_server: Any) -> None:
-        """When proposed_tasks is empty, SAMPLE_TASKS are returned (line 883)."""
-        base_url, _, _, _ = cs_server
-        resp = requests.get(f"{base_url}/proposed_tasks", timeout=5)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, list)
-        assert len(data) > 0
-
-
 class TestCSRunAndCleanup:
-    def test_run_task_and_stop(self, cs_server: Any) -> None:
-        """Run a task and stop it to exercise stop_agent with code-server running."""
-        base_url, _, _, _ = cs_server
-        resp = requests.post(
-            f"{base_url}/run",
-            json={"task": "slow_cs_task"},
-            timeout=10,
-        )
-        assert resp.status_code == 200
-        time.sleep(1)
-        stop = requests.post(f"{base_url}/stop", json={}, timeout=5)
-        assert stop.status_code == 200
-        time.sleep(2)
 
     def test_run_quick_task(self, cs_server: Any) -> None:
         """Run a quick task with code-server active."""

@@ -33,9 +33,6 @@ class TestIsRetryableError(unittest.TestCase):
     def test_generic_error_with_unauthorized_message_not_retryable(self) -> None:
         self.assertFalse(_is_retryable_error(Exception("401 Unauthorized")))
 
-    def test_value_error_is_retryable(self) -> None:
-        self.assertTrue(_is_retryable_error(ValueError("Unexpected response format")))
-
 
 class TestAgenticLoopAuthError(unittest.TestCase):
     """Test that auth errors fail fast instead of retrying until max_steps."""

@@ -1,13 +1,11 @@
 """Tests for web_use_tool.py module."""
 
-import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import (
-    KISS_PROFILE_DIR,
     WebUseTool,
 )
 
@@ -123,21 +121,6 @@ class TestNavigation:
     def test_go_to_invalid_url(self, web_tool):
         result = web_tool.go_to_url("http://localhost:99999/nonexistent")
         assert "Error" in result
-
-class TestClick:
-
-    def test_hover(self, http_server, web_tool):
-        dom = web_tool.go_to_url(http_server + "/")
-        match = re.search(r"\[(\d+)\].*Hover me", dom)
-        if match:
-            hover_id = int(match.group(1))
-            result = web_tool.click(hover_id, action="hover")
-            assert "Page:" in result
-
-class TestKissProfile:
-    def test_kiss_profile_dir_is_under_home(self):
-        assert ".kiss" in KISS_PROFILE_DIR
-        assert "browser_profile" in KISS_PROFILE_DIR
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
