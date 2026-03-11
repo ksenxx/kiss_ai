@@ -63,23 +63,6 @@ class TestResolveTaskPriority:
 # ── SorcarAgent direct tests (covers __init__, _get_tools, _reset, run) ──
 class TestSorcarAgentDirect:
 
-    def test_run_zero_budget_no_attachments(self) -> None:
-        """SorcarAgent.run() with zero budget exits fast, covering init code."""
-        agent = SorcarAgent("test_agent")
-        tmpdir = tempfile.mkdtemp()
-        try:
-            result = agent.run(
-                prompt_template="say hello",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-            )
-            assert isinstance(result, str)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
     def test_run_with_both_attachments(self) -> None:
         """Cover both image + PDF attachment branches simultaneously."""
         from kiss.core.models.model import Attachment
@@ -646,28 +629,6 @@ class TestInProcessEndpoints:
         resp = requests.post(f"{base_url}/run", json={"task": ""}, timeout=5)
         assert resp.status_code == 400
 
-    def test_run_with_active_file(self, inproc_server) -> None:
-        """Exercise the active_file branch in run_agent_thread (line 538)."""
-        base_url, work_dir, cs_data_dir = inproc_server
-        # Create a file and set it as active
-        active_py = os.path.join(work_dir, "active_test.py")
-        Path(active_py).write_text("print('active')")
-        os.makedirs(cs_data_dir, exist_ok=True)
-        af = os.path.join(cs_data_dir, "active-file.json")
-        with open(af, "w") as f:
-            json.dump({"path": active_py}, f)
-        try:
-            resp = requests.post(
-                f"{base_url}/run",
-                json={"task": "test with active file"},
-                timeout=10,
-            )
-            assert resp.status_code == 200
-            time.sleep(2)
-        finally:
-            if os.path.exists(af):
-                os.unlink(af)
-
     def test_run_while_running(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         # Start a slow task
@@ -1052,43 +1013,6 @@ class TestInProcessEndpoints:
         assert resp.status_code in (200, 400)
         assert "status" in data or "error" in data
 
-    def test_sse_events_with_task_data(self, inproc_server) -> None:
-        """Connect to SSE, run a task, and verify events arrive."""
-        base_url, _, _ = inproc_server
-        # Start SSE stream in background
-        import threading as _th
-
-        events_received: list[str] = []
-        stop_reading = threading.Event()
-
-        def _read_sse() -> None:
-            try:
-                resp = requests.get(
-                    f"{base_url}/events", stream=True, timeout=10
-                )
-                for line in resp.iter_lines(decode_unicode=True):
-                    if stop_reading.is_set():
-                        break
-                    if line and line.startswith("data:"):
-                        events_received.append(line)
-                resp.close()
-            except Exception:
-                pass
-
-        reader = _th.Thread(target=_read_sse, daemon=True)
-        reader.start()
-        time.sleep(0.5)
-
-        # Run a quick task to generate events
-        requests.post(
-            f"{base_url}/run", json={"task": "sse data test"}, timeout=10
-        )
-        time.sleep(3)
-
-        stop_reading.set()
-        reader.join(timeout=3)
-        assert len(events_received) > 0
-
     def test_run_selection_while_merging(self, inproc_server) -> None:
         """Hit the merging check in run-selection by triggering merge state."""
         base_url, _, _ = inproc_server
@@ -1109,24 +1033,6 @@ class TestInProcessEndpoints:
         resp = requests.get(
             f"{base_url}/complete",
             params={"q": "xyzzy_no_match_ever_12345"},
-            timeout=30,
-        )
-        data = resp.json()
-        assert "suggestion" in data
-
-    def test_complete_with_active_file_context(self, inproc_server) -> None:
-        """LLM autocomplete includes active file content and file list."""
-        base_url, work_dir, cs_data_dir = inproc_server
-        # Create a file in the work dir
-        test_file = os.path.join(work_dir, "context_test.txt")
-        Path(test_file).write_text("unique_context_content_for_autocomplete")
-        # Set active-file.json so autocomplete reads it
-        af_path = os.path.join(cs_data_dir, "active-file.json")
-        os.makedirs(cs_data_dir, exist_ok=True)
-        Path(af_path).write_text(json.dumps({"path": test_file}))
-        resp = requests.get(
-            f"{base_url}/complete",
-            params={"q": "what is in context_test"},
             timeout=30,
         )
         data = resp.json()

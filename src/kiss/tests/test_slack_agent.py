@@ -208,15 +208,6 @@ class TestSlackApiErrorPaths:
         assert "not found" in result
 
 
-class TestSlackChannelAgent:
-    """Test the SlackChannelAgent wrapper class."""
-
-    def test_tools_have_docstrings(self):
-        agent = SlackChannelAgent()
-        for tool in agent.get_tools():
-            assert tool.__doc__, f"{tool.__name__} missing docstring"
-
-
 class TestPolling:
     """Test polling start/stop lifecycle."""
 

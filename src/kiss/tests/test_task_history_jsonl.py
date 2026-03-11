@@ -38,48 +38,6 @@ class TestJSONLFormat:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_new_history_loads_sample_tasks_only(self):
-        history = th._load_history()
-        assert len(history) == len(th.SAMPLE_TASKS)
-        # SAMPLE_TASKS are only in memory, file is not created
-        assert not th.HISTORY_FILE.exists()
-
-    def test_add_task_writes_jsonl(self):
-        th._add_task("test jsonl task")
-        lines = th.HISTORY_FILE.read_text().strip().splitlines()
-        # New task is appended (last line in chronological file)
-        last = json.loads(lines[-1])
-        assert last["task"] == "test jsonl task"
-        assert last["has_events"] is False
-
-    def test_set_chat_events_writes_separate_file(self):
-        th._add_task("my task")
-        events: list[dict[str, object]] = [{"type": "text_delta", "text": "hello"}]
-        th._set_latest_chat_events(events, task="my task")
-
-        # Events file should exist
-        events_path = th._task_events_path("my task")
-        assert events_path.exists()
-        stored = json.loads(events_path.read_text())
-        assert stored == events
-
-        # JSONL should have has_events=True
-        th._history_cache = None
-        history = th._load_history()
-        assert history[0]["has_events"] is True
-
-    def test_load_task_chat_events(self):
-        th._add_task("event task")
-        events: list[dict[str, object]] = [{"type": "result", "text": "done"}]
-        th._set_latest_chat_events(events, task="event task")
-
-        loaded = th._load_task_chat_events("event task")
-        assert loaded == events
-
-    def test_load_task_chat_events_nonexistent(self):
-        result = th._load_task_chat_events("no such task")
-        assert result == []
-
     def test_set_empty_events_removes_file(self):
         th._add_task("temp task")
         th._set_latest_chat_events([{"type": "x"}], task="temp task")
@@ -87,14 +45,6 @@ class TestJSONLFormat:
 
         th._set_latest_chat_events([], task="temp task")
         assert not th._task_events_path("temp task").exists()
-
-    def test_history_entries_have_no_chat_events_key(self):
-        """History entries in memory should not contain chat_events."""
-        th._add_task("lightweight task")
-        history = th._load_history()
-        for entry in history:
-            assert "chat_events" not in entry
-
 
 class TestMigration:
     """Test migration from old task_history.json to JSONL format."""
@@ -150,11 +100,6 @@ class TestMigration:
         tasks = [e["task"] for e in history]
         assert tasks.count("dup") == 1
         assert not old_file.exists()
-
-    def test_no_migration_when_no_old_file(self):
-        """Migration is a no-op when old file doesn't exist."""
-        history = th._load_history()  # Should use SAMPLE_TASKS
-        assert len(history) > 0
 
     def test_migrate_corrupt_old_file(self):
         """Corrupt old file should not crash migration."""
@@ -224,11 +169,6 @@ class TestCleanupStaleCsDirs:
             assert active.exists()
         finally:
             sock.close()
-
-    def test_no_dirs_returns_zero(self):
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert removed == 0
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

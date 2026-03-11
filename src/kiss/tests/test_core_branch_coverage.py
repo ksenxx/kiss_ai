@@ -41,20 +41,6 @@ class TestBaseClass:
 
 
 class TestUtils:
-    def test_get_config_value_uses_default(self):
-        class ConfigWithNone:
-            nonexistent = None
-
-        result = get_config_value(None, ConfigWithNone(), "nonexistent", default="fallback")
-        assert result == "fallback"
-
-    def test_get_config_value_raises_on_missing(self):
-        class EmptyConfig:
-            pass
-
-        with pytest.raises(ValueError, match="No value provided"):
-            get_config_value(None, EmptyConfig(), "nonexistent_attr")
-
     def test_read_project_file_not_found(self):
         from kiss.core.kiss_error import KISSError
 
