@@ -1068,6 +1068,7 @@ function setReady(label){
   if(!merging){inp.disabled=false;btn.disabled=false;uploadBtn.disabled=false;}
   btn.style.display='';
   stopBtn.style.display='none';
+  inp.value='';
   checkActiveFile();
   if(!merging)inp.focus();
 }
