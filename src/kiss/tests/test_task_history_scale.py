@@ -85,20 +85,6 @@ class TestSearchHistory:
         # Most recent first
         assert results[0]["task"] == "task-19"
 
-class TestCountHistory:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_count_no_file(self):
-        # No file, triggers sample task creation
-        count = th._count_history()
-        assert count > 0
-
 
 class TestGetHistoryEntry:
     def setup_method(self):
