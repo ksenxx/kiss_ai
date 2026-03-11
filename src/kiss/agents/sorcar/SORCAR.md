@@ -38,6 +38,45 @@ There are no subagent hierarchies. No shadow file systems. No planner/worker/jud
 
 ---
 
+
+## The IDE: A Unified Browser Experience
+
+The Sorcar IDE is a single HTML page served by a Starlette application. The left panel embeds code-server (VS Code in the browser); the right panel is the chat interface. A draggable divider lets the user control the split. The two panels are integrated through:
+
+- **Merge view.** After the agent completes a task, Sorcar computes a diff of all changes, opens a merge view in the editor, and presents accept/reject controls in a floating toolbar. The user reviews changes file-by-file before they land.
+- **Keyboard shortcuts.** `Cmd/Ctrl-K` toggles focus between editor and chat. `Cmd/Ctrl-L` runs selected editor text as an agent task.
+
+This is a meaningfully different experience from both Cursor and Claude Code:
+
+- **Cursor** tightly couples the AI agent to a proprietary VS Code fork. The agent runs server-side, and the editor is the only interface. There is no standalone chatbot; everything happens through inline suggestions, the command palette, or the sidebar chat.
+- **Claude Code** is a CLI tool. There is no integrated editor. The user switches between their terminal and their editor, with the agent operating on files directly.
+- **Sorcar** gives you both in one browser tab, with no IDE installation required beyond `pip install kiss-framework` and optionally `code-server`. It works on any machine with a browser, including remote servers accessed via SSH tunneling.
+
+---
+
+## Model Freedom
+
+I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
+
+This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.3 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
+
+---
+
+## What Sorcar Gets Right
+
+**Simplicity as a feature, not a limitation.** The entire agent stack (`KISSAgent` + `RelentlessAgent` + `SorcarAgent`) is under 1,000 lines of Python. The server is another ~1,300 lines. The UI is a single HTML page with embedded CSS and JavaScript. A developer who wants to understand how their AI coding assistant works can read the entire system in a few hours. This is not true of Cursor (proprietary, closed-source, multi-service architecture) or Claude Code (open-source but complex, with Bun compilation, React Ink rendering, and elaborate permission systems).
+
+**Transparent execution.** Every step of the agent's reasoning is streamed to the UI in real time: thinking blocks, tool calls with full arguments, tool results, usage stats (tokens, cost, session count). There is no hidden planning phase. The user is always in the loop.
+
+**Structured continuation over lossy compaction.** The `RelentlessAgent` continuation mechanism is the single most important architectural advantage. It lets Sorcar handle tasks that take 50+ tool calls across multiple context windows without the "context rot" that plagues single-session approaches. The summary checkpoint between sessions is an auditable artifact, not a black-box heuristic.
+
+**Self-improvement loop.** The system prompt instructs the agent to maintain a `LESSONS.md` file with learned behaviors and mistakes, and to review it at the start of each task. Combined with a `TASK_HISTORY.md` file that logs completed work, this gives Sorcar a form of persistent memory across sessions that is fully transparent and user-editable.
+
+**No vendor lock-in.** Sorcar works with any LLM that supports function calling. It does not depend on Anthropic's context caching, OpenAI's assistants API, or any provider-specific feature. The continuation mechanism is pure prompt engineering.
+
+**Docker isolation.** For untrusted tasks, Sorcar can run tools inside a Docker container by passing a `docker_image` parameter. The `DockerManager` provides a sandboxed `Bash` tool that executes commands inside the container while the agent runs outside it. This is a simpler security model than Claude Code's shell trust boundaries and permission callbacks.
+
+---
 ## The RelentlessAgent: Elegance Through Continuation
 
 The core innovation of Sorcar lives in [`relentless_agent.py`](../../core/relentless_agent.py). The problem it solves is fundamental: LLMs have finite context windows, and real-world coding tasks routinely exceed them. Cursor addresses this with compaction heuristics and manual `/compact` commands. Claude Code uses server-side context editing and thinking-block clearing. Both approaches are heuristic and lossy -- the agent forgets work it has already done, leading to repeated effort and subtle regressions.
@@ -120,45 +159,6 @@ That's it. There is no separate "search" tool, no "grep" tool, no "find" tool, n
 Cursor provides 10+ specialized tools (semantic search, file navigation, web search, image generation, linter integration, etc.). Claude Code provides a similarly rich but different tool set. In both cases, the tool surface is large enough that tool selection itself becomes a source of errors -- the agent might use semantic search when grep would be faster, or use the built-in file reader when `cat` would give it more control.
 
 Sorcar avoids this by trusting the LLM to compose the right Unix commands from a single `Bash` tool. This works remarkably well in practice because modern LLMs have deep knowledge of command-line tooling.
-
----
-
-## The IDE: A Unified Browser Experience
-
-The Sorcar IDE is a single HTML page served by a Starlette application. The left panel embeds code-server (VS Code in the browser); the right panel is the chat interface. A draggable divider lets the user control the split. The two panels are integrated through:
-
-- **Merge view.** After the agent completes a task, Sorcar computes a diff of all changes, opens a merge view in the editor, and presents accept/reject controls in a floating toolbar. The user reviews changes file-by-file before they land.
-- **Keyboard shortcuts.** `Cmd/Ctrl-K` toggles focus between editor and chat. `Cmd/Ctrl-L` runs selected editor text as an agent task.
-
-This is a meaningfully different experience from both Cursor and Claude Code:
-
-- **Cursor** tightly couples the AI agent to a proprietary VS Code fork. The agent runs server-side, and the editor is the only interface. There is no standalone chatbot; everything happens through inline suggestions, the command palette, or the sidebar chat.
-- **Claude Code** is a CLI tool. There is no integrated editor. The user switches between their terminal and their editor, with the agent operating on files directly.
-- **Sorcar** gives you both in one browser tab, with no IDE installation required beyond `pip install kiss-framework` and optionally `code-server`. It works on any machine with a browser, including remote servers accessed via SSH tunneling.
-
----
-
-## Model Freedom
-
-I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
-
-This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.3 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
-
----
-
-## What Sorcar Gets Right
-
-**Simplicity as a feature, not a limitation.** The entire agent stack (`KISSAgent` + `RelentlessAgent` + `SorcarAgent`) is under 1,000 lines of Python. The server is another ~1,300 lines. The UI is a single HTML page with embedded CSS and JavaScript. A developer who wants to understand how their AI coding assistant works can read the entire system in a few hours. This is not true of Cursor (proprietary, closed-source, multi-service architecture) or Claude Code (open-source but complex, with Bun compilation, React Ink rendering, and elaborate permission systems).
-
-**Transparent execution.** Every step of the agent's reasoning is streamed to the UI in real time: thinking blocks, tool calls with full arguments, tool results, usage stats (tokens, cost, session count). There is no hidden planning phase. The user is always in the loop.
-
-**Structured continuation over lossy compaction.** The `RelentlessAgent` continuation mechanism is the single most important architectural advantage. It lets Sorcar handle tasks that take 50+ tool calls across multiple context windows without the "context rot" that plagues single-session approaches. The summary checkpoint between sessions is an auditable artifact, not a black-box heuristic.
-
-**Self-improvement loop.** The system prompt instructs the agent to maintain a `LESSONS.md` file with learned behaviors and mistakes, and to review it at the start of each task. Combined with a `TASK_HISTORY.md` file that logs completed work, this gives Sorcar a form of persistent memory across sessions that is fully transparent and user-editable.
-
-**No vendor lock-in.** Sorcar works with any LLM that supports function calling. It does not depend on Anthropic's context caching, OpenAI's assistants API, or any provider-specific feature. The continuation mechanism is pure prompt engineering.
-
-**Docker isolation.** For untrusted tasks, Sorcar can run tools inside a Docker container by passing a `docker_image` parameter. The `DockerManager` provides a sandboxed `Bash` tool that executes commands inside the container while the agent runs outside it. This is a simpler security model than Claude Code's shell trust boundaries and permission callbacks.
 
 ---
 
