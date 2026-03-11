@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from io import StringIO
 from types import SimpleNamespace
 from typing import Any

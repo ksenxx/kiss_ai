@@ -190,30 +190,11 @@ class AnthropicModel(Model):
             kwargs["tools"] = tools
 
         if enable_cache:
-            # Strip stale cache_control from all conversation blocks first.
-            for msg in self.conversation:
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict):
-                            block.pop("cache_control", None)
-
-            if tools:
-                tools[-1]["cache_control"] = {"type": "ephemeral"}
-            for msg in reversed(self.conversation):
-                if msg.get("role") == "user":
-                    content = msg["content"]
-                    if isinstance(content, str):
-                        msg["content"] = [
-                            {
-                                "type": "text",
-                                "text": content,
-                                "cache_control": {"type": "ephemeral"},
-                            }
-                        ]
-                    elif isinstance(content, list) and content:
-                        content[-1]["cache_control"] = {"type": "ephemeral"}
-                    break
+            # Use Anthropic's recommended automatic caching: a single top-level
+            # cache_control. The system applies the breakpoint to the last cacheable
+            # block and moves it forward as the conversation grows. No per-message
+            # stripping or manipulation needed.
+            kwargs["cache_control"] = {"type": "ephemeral"}
 
         return kwargs
 

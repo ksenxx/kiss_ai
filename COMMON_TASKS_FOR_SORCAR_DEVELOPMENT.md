@@ -30,6 +30,20 @@ can you please work hard and carefully to precisly detect all actual race condit
 
 can you use [src/kiss/scripts/redundancy_analyzer.py](src/kiss/scripts/redundancy_analyzer.py) to get rid of redundant test methods in [src/kiss/tests/](src/kiss/tests/)?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.
 
+## slack setup and authentication
+
+Set up Slack API authentication for sorcar so it can read/write messages to Slack channels. Follow these steps:
+
+1. **Get the bot token**: Read the Slack bot token from the file [slack_token.txt](slack_token.txt) in the project root. If the file does not exist or is empty, launch the browser to `https://api.slack.com/apps` and ask the user to: (a) log in to Slack if needed, (b) select an existing Slack app or create a new one named "KISS Sorcar Bot", (c) go to "OAuth & Permissions", (d) ensure the bot has scopes: `channels:read`, `channels:history`, `chat:write`, `users:read`, (e) install the app to the workspace if not already installed, and (f) copy the "Bot User OAuth Token" (starts with `xoxb-`). Ask the user to paste the token, then save it to `slack_token.txt`.
+
+1. **Register the workspace**: Use the `add_workspace` tool to register the workspace with a friendly name (ask the user for the workspace name) and the bot token from step 1. This validates the token and saves the configuration to `~/.kiss/slack/workspaces.json`.
+
+1. **Verify the connection**: Use the `list_channels` tool to list all public channels in the workspace. Show the channel list to the user to confirm everything works.
+
+1. **Test reading and writing**: Use `read_messages` to read the last 5 messages from a channel the user specifies (e.g. `#general`). Then use `send_message` to send a test message like "Hello from Sorcar!" to a channel the user specifies. Ask the user to confirm the message appeared in Slack.
+
+If you need the user to do something on the browser that you cannot perform (like logging in or clicking OAuth allow), use `ask_user_browser_action` and wait for their response.
+
 # Pending
 
 When I click a recent item in the welcome window of the chat window in sorcar, it should behave similarly as clicking an item in the task history button in the chatbox of sorcar.

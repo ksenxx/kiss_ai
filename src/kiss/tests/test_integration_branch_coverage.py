@@ -13,7 +13,6 @@ No mocks, patches, or test doubles.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import tempfile
 import threading
@@ -27,12 +26,10 @@ import yaml
 
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
-    _format_bash_result,
 )
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
     _build_text_based_tools_prompt,
-    _extract_deepseek_reasoning,
     _parse_text_based_tool_calls,
 )
 from kiss.core.relentless_agent import (
@@ -42,18 +39,13 @@ from kiss.core.relentless_agent import (
     finish as ra_finish,
 )
 from kiss.core.utils import (
-    add_prefix_to_each_line,
-    config_to_dict,
-    fc,
-    get_config_value,
-    get_template_field_names,
-    is_subpath,
-    read_project_file,
-    read_project_file_from_package,
-    resolve_path,
+    finish as utils_finish,
 )
 from kiss.core.utils import (
-    finish as utils_finish,
+    get_config_value,
+    is_subpath,
+    read_project_file,
+    resolve_path,
 )
 
 

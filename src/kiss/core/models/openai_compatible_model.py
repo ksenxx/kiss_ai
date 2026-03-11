@@ -270,6 +270,23 @@ class OpenAICompatibleModel(Model):
         """
         return self.model_name in DEEPSEEK_REASONING_MODELS
 
+    def _is_openrouter_anthropic(self) -> bool:
+        """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
+        return self.model_name.startswith("openrouter/anthropic/")
+
+    def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
+        """Add top-level cache_control for OpenRouter Anthropic prompt caching.
+
+        Uses the same approach as AnthropicModel: a single top-level cache_control
+        that lets OpenRouter automatically place the breakpoint at the last cacheable
+        block and move it forward as the conversation grows.
+        """
+        if not self._is_openrouter_anthropic():
+            return
+        if not self.model_config.get("enable_cache", True):
+            return
+        kwargs.setdefault("extra_body", {})["cache_control"] = {"type": "ephemeral"}
+
     @staticmethod
     def _parse_tool_call_accum(
         accum: dict[int, dict[str, str]],
@@ -401,6 +418,7 @@ class OpenAICompatibleModel(Model):
                 "messages": self.conversation,
             }
         )
+        self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
         content, response = self._stream_text(kwargs)
 
@@ -439,6 +457,7 @@ class OpenAICompatibleModel(Model):
                 "tools": tools or None,
             }
         )
+        self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
         if self.token_callback is not None:
             # Streaming path: accumulate text and tool-call deltas.
@@ -535,6 +554,7 @@ class OpenAICompatibleModel(Model):
                 "messages": modified_conversation,
             }
         )
+        self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
         content, response = self._stream_text(kwargs)
 
@@ -577,15 +597,24 @@ class OpenAICompatibleModel(Model):
             (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
             For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens
             is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
+            OpenRouter returns cache_write_tokens in prompt_tokens_details.
         """
         if hasattr(response, "usage") and response.usage:
-            prompt_tokens = response.usage.prompt_tokens or 0
-            completion_tokens = response.usage.completion_tokens or 0
+            usage = response.usage
+            prompt_tokens = getattr(usage, "prompt_tokens", None) or 0
+            completion_tokens = getattr(usage, "completion_tokens", None) or 0
             cached_tokens = 0
-            details = getattr(response.usage, "prompt_tokens_details", None)
-            if details:
+            cache_write_tokens = 0
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is not None:
                 cached_tokens = getattr(details, "cached_tokens", 0) or 0
-            return prompt_tokens - cached_tokens, completion_tokens, cached_tokens, 0
+                cache_write_tokens = getattr(details, "cache_write_tokens", 0) or 0
+            return (
+                prompt_tokens - cached_tokens - cache_write_tokens,
+                completion_tokens,
+                cached_tokens,
+                cache_write_tokens,
+            )
         return 0, 0, 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:

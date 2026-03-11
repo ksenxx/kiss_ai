@@ -160,7 +160,9 @@ def run_chatbot(
     file_cache: list[str] = _scan_files(actual_work_dir)
     agent_thread: threading.Thread | None = None
     current_stop_event: threading.Event | None = None
-    selected_model = _load_last_model() or default_model
+    user_action_event: threading.Event | None = None
+    user_question_event: threading.Event | None = None
+    user_question_answer: str = ""
     last = _load_last_model()
     selected_model = last if last and last not in _INTERNAL_MODELS else default_model
 
@@ -453,6 +455,41 @@ def run_chatbot(
 
     threading.Thread(target=_watch_periodic, daemon=True).start()
 
+    def _wait_for_user_browser(instruction: str, url: str) -> None:
+        nonlocal user_action_event
+        event = threading.Event()
+        user_action_event = event
+        printer.broadcast({
+            "type": "user_browser_action",
+            "instruction": instruction,
+            "url": url,
+        })
+        while not event.wait(timeout=0.5):
+            stop_ev = current_stop_event
+            if stop_ev and stop_ev.is_set():
+                user_action_event = None
+                raise KeyboardInterrupt("Agent stopped while waiting for user")
+        user_action_event = None
+
+    def _ask_user_question(question: str) -> str:
+        nonlocal user_question_event, user_question_answer
+        event = threading.Event()
+        user_question_event = event
+        user_question_answer = ""
+        printer.broadcast({
+            "type": "user_question",
+            "question": question,
+        })
+        while not event.wait(timeout=0.5):
+            stop_ev = current_stop_event
+            if stop_ev and stop_ev.is_set():
+                user_question_event = None
+                raise KeyboardInterrupt("Agent stopped while waiting for user answer")
+        answer = user_question_answer
+        user_question_event = None
+        user_question_answer = ""
+        return answer
+
     def run_agent_thread(
         task: str,
         model_name: str,
@@ -494,6 +531,10 @@ def run_chatbot(
             printer.start_recording()
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
+            if hasattr(agent, '_wait_for_user_callback'):
+                agent._wait_for_user_callback = _wait_for_user_browser  # type: ignore[attr-defined]
+            if hasattr(agent, '_ask_user_question_callback'):
+                agent._ask_user_question_callback = _ask_user_question  # type: ignore[attr-defined]
             extra_kwargs = dict(agent_kwargs or {})
             if active_file:
                 extra_kwargs["current_editor_file"] = active_file
@@ -713,8 +754,6 @@ def run_chatbot(
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
-        if model not in _INTERNAL_MODELS:
-            _record_model_usage(model)
         stop_ev = threading.Event()
         t = threading.Thread(
             target=run_agent_thread,
@@ -749,8 +788,6 @@ def run_chatbot(
             return JSONResponse({"error": "No text selected"}, status_code=400)
         model = selected_model
         _record_model_usage(model)
-        if model not in _INTERNAL_MODELS:
-            _record_model_usage(model)
         stop_ev = threading.Event()
         t = threading.Thread(
             target=run_agent_thread,
@@ -778,6 +815,23 @@ def run_chatbot(
         if stop_agent():
             return JSONResponse({"status": "stopping"})
         return JSONResponse({"error": "No running task"}, status_code=404)
+
+    async def user_browser_done(request: Request) -> JSONResponse:
+        """Signal that the user has finished their browser interaction."""
+        if user_action_event is not None:
+            user_action_event.set()
+            return JSONResponse({"status": "ok"})
+        return JSONResponse({"error": "No pending action"}, status_code=404)
+
+    async def user_question_done(request: Request) -> JSONResponse:
+        """Signal that the user has answered the agent's question."""
+        nonlocal user_question_answer
+        if user_question_event is not None:
+            body = await request.json()
+            user_question_answer = body.get("answer", "")
+            user_question_event.set()
+            return JSONResponse({"status": "ok"})
+        return JSONResponse({"error": "No pending question"}, status_code=404)
 
     async def suggestions(request: Request) -> JSONResponse:
         query = request.query_params.get("q", "").strip()
@@ -960,6 +1014,16 @@ def run_chatbot(
             )
         )
         return JSONResponse({"models": models_list, "selected": selected_model})
+
+    async def select_model_endpoint(request: Request) -> JSONResponse:
+        """Update the selected model when user picks from the dropdown."""
+        nonlocal selected_model
+        body = await request.json()
+        name = body.get("model", "").strip()
+        if not name:
+            return JSONResponse({"error": "No model"}, status_code=400)
+        selected_model = name
+        return JSONResponse({"status": "ok"})
 
     async def get_ui_state(request: Request) -> JSONResponse:
         """Return saved UI state (divider position, etc.)."""
@@ -1237,6 +1301,8 @@ def run_chatbot(
             Route("/run", run_task, methods=["POST"]),
             Route("/run-selection", run_selection, methods=["POST"]),
             Route("/stop", stop_task, methods=["POST"]),
+            Route("/user-browser-done", user_browser_done, methods=["POST"]),
+            Route("/user-question-done", user_question_done, methods=["POST"]),
             Route("/open-file", open_file, methods=["POST"]),
             Route("/ui-state", get_ui_state),
             Route("/ui-state", save_ui_state, methods=["POST"]),
@@ -1257,6 +1323,7 @@ def run_chatbot(
             Route("/task-events", task_events),
 
             Route("/models", models_endpoint),
+            Route("/select-model", select_model_endpoint, methods=["POST"]),
             Route("/theme", theme),
         ]
     )
@@ -1322,7 +1389,7 @@ def run_chatbot(
 
 
 def main() -> None:  # pragma: no cover – CLI entry point
-    """Launch the KISS chatbot UI in assistant or coding mode based on KISS_MODE env var."""
+    """Launch the KISS Sorcar chatbot UI."""
     import argparse
 
     from kiss._version import __version__
@@ -1343,13 +1410,12 @@ def main() -> None:  # pragma: no cover – CLI entry point
     args = parser.parse_args()
     work_dir = str(Path(args.work_dir).resolve())
 
-    is_assistant = os.environ.get("KISS_MODE", "assistant").lower() == "assistant"
     run_chatbot(
         agent_factory=SorcarAgent,
-        title=f"KISS {'Assistant' if is_assistant else 'Coding Assistant'}: {__version__}",
+        title=f"KISS Sorcar: {__version__}",
         work_dir=work_dir,
         default_model=args.model_name,
-        agent_kwargs={"headless": not is_assistant},
+        agent_kwargs={"headless": False},
     )
 
 
