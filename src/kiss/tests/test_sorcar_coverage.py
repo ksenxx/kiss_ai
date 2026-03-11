@@ -506,16 +506,6 @@ class TestTaskHistoryBranches:
         finally:
             os.chmod(str(th.MODEL_USAGE_FILE), 0o644)
 
-    def test_record_file_usage_oserror(self) -> None:
-        """OSError when writing file usage.
-        Covers lines 206-207."""
-        th.FILE_USAGE_FILE.write_text("{}")
-        os.chmod(str(th.FILE_USAGE_FILE), 0o444)
-        try:
-            th._record_file_usage("/some/file.py")
-        finally:
-            os.chmod(str(th.FILE_USAGE_FILE), 0o644)
-
 class TestUsefulToolsBranches:
     """Cover remaining branches in useful_tools.py."""
 

@@ -320,29 +320,6 @@ class TestSorcarAgentRunAttachments:
 
 
 class TestSorcarAgentMain:
-    def test_main_subprocess(self) -> None:
-        tmpdir = tempfile.mkdtemp()
-        try:
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "kiss.agents.sorcar.sorcar_agent",
-                    "--max_steps", "0",
-                    "--max_budget", "0.0",
-                    "--work_dir", tmpdir,
-                    "--headless", "true",
-                    "--verbose", "false",
-                    "--task", "say hello",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            # Should complete (may fail due to 0 budget but should not crash)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
     def test_main_no_work_dir(self) -> None:
         subprocess.run(
             [

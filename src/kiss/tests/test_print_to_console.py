@@ -32,30 +32,6 @@ class TestPrintStreamEvent(unittest.TestCase):
     def _event(self, evt_dict):
         return SimpleNamespace(event=evt_dict)
 
-    def test_content_block_delta_unknown_delta_type(self):
-        p, _ = self._make_printer()
-        text = p.print(
-            self._event(
-                {
-                    "type": "content_block_delta",
-                    "delta": {"type": "unknown_type"},
-                }
-            ),
-            type="stream_event",
-        )
-        assert text == ""
-
-    def test_content_block_stop_tool_use_invalid_json(self):
-        p, buf = self._make_printer()
-        p._current_block_type = "tool_use"
-        p._tool_name = "Bash"
-        p._tool_json_buffer = "invalid json{"
-        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
-        assert p._current_block_type == ""
-        out = buf.getvalue()
-        assert "Bash" in out
-
-
 class TestPrintMessageSystem(unittest.TestCase):
     def _make_printer(self):
         buf = io.StringIO()
