@@ -947,6 +947,29 @@ def run_chatbot(
         )
         return JSONResponse({"models": models_list, "selected": selected_model})
 
+    async def get_ui_state(request: Request) -> JSONResponse:
+        """Return saved UI state (divider position, etc.)."""
+        ui_state_file = os.path.join(cs_data_dir, "ui-state.json")
+        try:
+            if os.path.exists(ui_state_file):
+                with open(ui_state_file) as f:
+                    return JSONResponse(json.load(f))
+        except (OSError, json.JSONDecodeError):
+            logger.debug("Exception caught", exc_info=True)
+        return JSONResponse({})
+
+    async def save_ui_state(request: Request) -> JSONResponse:
+        """Save UI state (divider position, etc.)."""
+        body = await request.json()
+        ui_state_file = os.path.join(cs_data_dir, "ui-state.json")
+        try:
+            Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
+            with open(ui_state_file, "w") as f:
+                json.dump(body, f)
+        except OSError:
+            logger.debug("Exception caught", exc_info=True)
+        return JSONResponse({"status": "ok"})
+
     async def closing(request: Request) -> JSONResponse:
         """Handle browser tab/window closing. Schedule a quick shutdown."""
         _schedule_shutdown()
@@ -1200,6 +1223,8 @@ def run_chatbot(
             Route("/run-selection", run_selection, methods=["POST"]),
             Route("/stop", stop_task, methods=["POST"]),
             Route("/open-file", open_file, methods=["POST"]),
+            Route("/ui-state", get_ui_state),
+            Route("/ui-state", save_ui_state, methods=["POST"]),
             Route("/closing", closing, methods=["POST"]),
             Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
             Route("/focus-editor", focus_editor, methods=["POST"]),

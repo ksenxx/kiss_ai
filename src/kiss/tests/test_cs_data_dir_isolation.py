@@ -82,6 +82,43 @@ class TestExtensionJSUsesDataDir:
         assert "path.join(home,'.kiss')" in _CS_EXTENSION_JS
 
 
+class TestExtensionJSEditorStatePersistence:
+    """Verify the extension JS saves/restores editor tab state."""
+
+    def test_extension_uses_editor_state_file(self) -> None:
+        assert "path.join(dataDir,'editor-state.json')" in _CS_EXTENSION_JS
+
+    def test_extension_has_save_editor_state(self) -> None:
+        assert "function saveEditorState()" in _CS_EXTENSION_JS
+
+    def test_extension_has_restore_editor_state(self) -> None:
+        assert "async function restoreEditorState()" in _CS_EXTENSION_JS
+
+    def test_extension_saves_tabs_array(self) -> None:
+        assert "tabs:tabs" in _CS_EXTENSION_JS
+
+    def test_extension_saves_active_file(self) -> None:
+        assert "activeFile:" in _CS_EXTENSION_JS
+
+    def test_extension_saves_cursors(self) -> None:
+        assert "cursors:cursors" in _CS_EXTENSION_JS
+        assert "ed.selection.active.line" in _CS_EXTENSION_JS
+        assert "ed.selection.active.character" in _CS_EXTENSION_JS
+
+    def test_extension_restores_cursor_position(self) -> None:
+        assert "new vscode.Position(c.line,c.character)" in _CS_EXTENSION_JS
+
+    def test_extension_debounced_save_on_tab_change(self) -> None:
+        assert "onDidChangeTabs" in _CS_EXTENSION_JS
+        assert "debouncedSaveState" in _CS_EXTENSION_JS
+
+    def test_extension_periodic_save(self) -> None:
+        assert "setInterval(saveEditorState,30000)" in _CS_EXTENSION_JS
+
+    def test_extension_delayed_restore_on_startup(self) -> None:
+        assert "setTimeout(function(){restoreEditorState();},3000)" in _CS_EXTENSION_JS
+
+
 class TestAssistantPortIsolation:
     """Verify assistant-port file is written per-instance, not globally."""
 

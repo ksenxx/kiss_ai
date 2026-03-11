@@ -76,6 +76,75 @@ function activate(ctx){
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
   var dataDir=path.resolve(ctx.globalStorageUri.fsPath,'..','..','..');
+  var editorStateFile=path.join(dataDir,'editor-state.json');
+  function saveEditorState(){
+    try{
+      var tabs=[];
+      for(var g of vscode.window.tabGroups.all){
+        for(var t of g.tabs){
+          if(t.input&&t.input.uri&&t.input.uri.scheme==='file'){
+            tabs.push({path:t.input.uri.fsPath,viewColumn:g.viewColumn,isActive:t.isActive});
+          }
+        }
+      }
+      var ae=vscode.window.activeTextEditor;
+      var cursors={};
+      for(var ed of vscode.window.visibleTextEditors){
+        if(ed.document.uri.scheme==='file'){
+          cursors[ed.document.uri.fsPath]={
+            line:ed.selection.active.line,
+            character:ed.selection.active.character
+          };
+        }
+      }
+      var st={tabs:tabs,activeFile:ae&&ae.document?ae.document.uri.fsPath:'',cursors:cursors};
+      if(!fs.existsSync(dataDir))fs.mkdirSync(dataDir,{recursive:true});
+      fs.writeFileSync(editorStateFile,JSON.stringify(st));
+    }catch(e){}
+  }
+  async function restoreEditorState(){
+    try{
+      if(!fs.existsSync(editorStateFile))return;
+      var st=JSON.parse(fs.readFileSync(editorStateFile,'utf8'));
+      if(!st.tabs||!st.tabs.length)return;
+      var currentPaths=new Set();
+      for(var g of vscode.window.tabGroups.all){
+        for(var t of g.tabs){
+          if(t.input&&t.input.uri)currentPaths.add(t.input.uri.fsPath);
+        }
+      }
+      for(var tab of st.tabs){
+        if(!currentPaths.has(tab.path)&&fs.existsSync(tab.path)){
+          try{
+            var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(tab.path));
+            var opts={preview:false,viewColumn:tab.viewColumn||1,preserveFocus:true};
+            await vscode.window.showTextDocument(doc,opts);
+          }catch(e){}
+        }
+      }
+      if(st.activeFile&&fs.existsSync(st.activeFile)){
+        try{
+          var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(st.activeFile));
+          var ed=await vscode.window.showTextDocument(doc,{preview:false});
+          var c=st.cursors&&st.cursors[st.activeFile];
+          if(c){
+            var pos=new vscode.Position(c.line,c.character);
+            ed.selection=new vscode.Selection(pos,pos);
+            ed.revealRange(new vscode.Range(pos,pos),vscode.TextEditorRevealType.InCenter);
+          }
+        }catch(e){}
+      }
+    }catch(e){}
+  }
+  setTimeout(function(){restoreEditorState();},3000);
+  var saveTimer=null;
+  function debouncedSaveState(){
+    if(saveTimer)clearTimeout(saveTimer);
+    saveTimer=setTimeout(saveEditorState,500);
+  }
+  ctx.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(function(){debouncedSaveState();}));
+  var saveStateInterval=setInterval(saveEditorState,30000);
+  ctx.subscriptions.push({dispose:function(){clearInterval(saveStateInterval);}});
   function writeTheme(){
     var k=vscode.window.activeColorTheme.kind;
     var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
@@ -346,7 +415,7 @@ function activate(ctx){
     }catch(e){}
   }
   writeActiveFile();
-  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile()}));
+  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile();debouncedSaveState();}));
   var mp=path.join(dataDir,'pending-merge.json');
   var op=path.join(dataDir,'pending-open.json');
   var ap=path.join(dataDir,'pending-action.json');

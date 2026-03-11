@@ -36,6 +36,8 @@ _KISS_DIR = Path().home() / ".kiss"
 _artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
 
 SYSTEM_PROMPT = f"""
+# FOCUS ON THE GIVEN TASK.  IT'S COMPLETION IS YOUR SOLE GOAL.  BE RELENTLESS.
+
 # Rules
 - Write() for new files. Edit() for small changes.
 - Use bounded poll loops with output sent to a temporary file for bash commands;

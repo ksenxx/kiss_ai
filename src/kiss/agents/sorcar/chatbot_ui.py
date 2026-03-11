@@ -1142,8 +1142,8 @@ function handleEvent(ev){
     document.getElementById('merge-toolbar').style.display='none';
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
-    inp.placeholder='Ask anything\u2026 (@ for files, '
-    +'cmd/ctrl-k to toggle editor, cmd/ctrl-l to run selected text)';
+    inp.placeholder='Ask anything\u2026 (@ files'
+ +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)';
     inp.focus();break;
   case'code_server_restarted':{
     var csFrame=document.getElementById('code-server-frame');
@@ -1740,7 +1740,17 @@ if(divider){
     document.body.style.userSelect='';
     var frame=document.getElementById('code-server-frame');
     if(frame)frame.style.pointerEvents='';
+    var ep=editorPanel.style.flex.split(' ')[0];
+    fetch('/ui-state',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({editorPct:parseFloat(ep)})}).catch(function(){});
   });
+  fetch('/ui-state').then(function(r){return r.json()}).then(function(d){
+    if(d.editorPct){
+      var pct=Math.max(15,Math.min(85,d.editorPct));
+      editorPanel.style.flex=pct+' 1 0%';
+      assistantPanel.style.flex=(100-pct)+' 1 0%';
+    }
+  }).catch(function(){});
 }
 function openInEditor(path){
   fetch('/open-file',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1964,7 +1974,8 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files, \u2318/ctrl-k editor, \u2318/ctrl-l to run selected text)"
+              placeholder="Ask anything\u2026 (@ files,
+ \u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple
