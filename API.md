@@ -261,7 +261,7 @@ ______________________________________________________________________
 
 - **extract_input_output_token_counts_from_response** — Extract token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
-  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly. OpenRouter returns cache_write_tokens in prompt_tokens_details.
 
 - **get_embedding** — Generate an embedding vector for the given text.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 

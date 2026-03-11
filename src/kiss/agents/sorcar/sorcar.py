@@ -163,7 +163,6 @@ def run_chatbot(
     user_action_event: threading.Event | None = None
     user_question_event: threading.Event | None = None
     user_question_answer: str = ""
-    selected_model = _load_last_model() or default_model
     last = _load_last_model()
     selected_model = last if last and last not in _INTERNAL_MODELS else default_model
 
@@ -755,8 +754,6 @@ def run_chatbot(
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
         _record_model_usage(model)
-        if model not in _INTERNAL_MODELS:
-            _record_model_usage(model)
         stop_ev = threading.Event()
         t = threading.Thread(
             target=run_agent_thread,
@@ -791,8 +788,6 @@ def run_chatbot(
             return JSONResponse({"error": "No text selected"}, status_code=400)
         model = selected_model
         _record_model_usage(model)
-        if model not in _INTERNAL_MODELS:
-            _record_model_usage(model)
         stop_ev = threading.Event()
         t = threading.Thread(
             target=run_agent_thread,
@@ -1019,6 +1014,16 @@ def run_chatbot(
             )
         )
         return JSONResponse({"models": models_list, "selected": selected_model})
+
+    async def select_model_endpoint(request: Request) -> JSONResponse:
+        """Update the selected model when user picks from the dropdown."""
+        nonlocal selected_model
+        body = await request.json()
+        name = body.get("model", "").strip()
+        if not name:
+            return JSONResponse({"error": "No model"}, status_code=400)
+        selected_model = name
+        return JSONResponse({"status": "ok"})
 
     async def get_ui_state(request: Request) -> JSONResponse:
         """Return saved UI state (divider position, etc.)."""
@@ -1318,6 +1323,7 @@ def run_chatbot(
             Route("/task-events", task_events),
 
             Route("/models", models_endpoint),
+            Route("/select-model", select_model_endpoint, methods=["POST"]),
             Route("/theme", theme),
         ]
     )

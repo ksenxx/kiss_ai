@@ -1305,6 +1305,9 @@ function selectModel(name){
   modelLabel.textContent=name;
   closeModelDD();
   renderModelList('');
+  fetch('/select-model',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:name})}).catch(function(){});
 }
 function toggleModelDD(){
   if(modelDD.classList.contains('open')){closeModelDD();return}
