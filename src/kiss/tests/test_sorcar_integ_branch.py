@@ -211,18 +211,6 @@ def server():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestPushEndpoint:
-    """Exercise /push endpoint (lines 934-938)."""
-
-    def test_push_no_remote(self, server) -> None:
-        base_url, _, _, _ = server
-        resp = requests.post(f"{base_url}/push", json={}, timeout=10)
-        data = resp.json()
-        # No remote configured, so push will fail
-        assert resp.status_code == 400
-        assert "error" in data
-
-
 class TestSuggestionsFileMatch:
     """Exercise suggestions with file query matching actual files (line 825, 831)."""
 
@@ -741,12 +729,6 @@ class TestInProcessEndpoints:
         data = resp.json()
         assert "error" in data  # "No changes to commit"
 
-    def test_push_no_remote(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.post(f"{base_url}/push", json={}, timeout=10)
-        data = resp.json()
-        assert "error" in data
-
     def test_active_file_info_no_file(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         resp = requests.get(f"{base_url}/active-file-info", timeout=5)
@@ -873,18 +855,6 @@ class TestInProcessEndpoints:
                 timeout=10,
             )
             time.sleep(1)
-
-    def test_generate_config_message(self, inproc_server) -> None:
-        """Hit the /generate-config-message endpoint."""
-        base_url, _, _ = inproc_server
-        resp = requests.post(
-            f"{base_url}/generate-config-message",
-            json={"model": "claude-opus-4-6"},
-            timeout=30,
-        )
-        assert resp.status_code in (200, 500)
-        data = resp.json()
-        assert "message" in data or "error" in data
 
     def test_commit_git_failure(self, inproc_server) -> None:
         """Make git commit fail via a pre-commit hook."""

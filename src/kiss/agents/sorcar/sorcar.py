@@ -39,7 +39,6 @@ from kiss.agents.sorcar.task_history import (
     _RECENT_CACHE_SIZE,
     _add_task,
     _cleanup_stale_cs_dirs,
-    _count_history,
     _get_history_entry,
     _load_file_usage,
     _load_history,
@@ -51,7 +50,6 @@ from kiss.agents.sorcar.task_history import (
     _search_history,
     _set_latest_chat_events,
 )
-from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import (
     _OPENAI_PREFIXES,
@@ -833,6 +831,11 @@ def run_chatbot(
             return JSONResponse({"status": "ok"})
         return JSONResponse({"error": "No pending question"}, status_code=404)
 
+    async def refresh_files(request: Request) -> JSONResponse:
+        """Refresh the file cache on demand (e.g. when user types @)."""
+        refresh_file_cache()
+        return JSONResponse({"status": "ok"})
+
     async def suggestions(request: Request) -> JSONResponse:
         query = request.query_params.get("q", "").strip()
         mode = request.query_params.get("mode", "general")
@@ -849,8 +852,28 @@ def run_chatbot(
                         frequent.append(item)
                     else:
                         rest.append(item)
-            frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
-            rest.sort(key=lambda m: m["type"] != "file")
+
+            def _end_dist(text: str) -> int:
+                """Distance from end of path to end of rightmost query match.
+
+                Lower = match is closer to end of path = higher priority.
+                Returns 0 when query is empty (all items equal).
+                """
+                if not q:
+                    return 0
+                pos = text.lower().rfind(q)
+                if pos < 0:
+                    return len(text)
+                return len(text) - (pos + len(q))
+
+            frequent.sort(
+                key=lambda m: (
+                    _end_dist(m["text"]),
+                    m["type"] != "file",
+                    -usage.get(m["text"], 0),
+                )
+            )
+            rest.sort(key=lambda m: (_end_dist(m["text"]), m["type"] != "file"))
             for f in frequent:
                 f["type"] = "frequent_" + f["type"]
             return JSONResponse((frequent + rest)[:20])
@@ -1152,25 +1175,6 @@ def run_chatbot(
 
         return await _thread_json_response(_do_commit)
 
-    async def push(request: Request) -> JSONResponse:
-        def _do_push() -> dict[str, str]:
-            try:
-                result = subprocess.run(
-                    ["git", "push"],
-                    capture_output=True,
-                    text=True,
-                    cwd=actual_work_dir,
-                )
-                if result.returncode != 0:
-                    return {"error": result.stderr.strip() or "Push failed"}
-                return {"status": "ok"}
-            except Exception as e:  # pragma: no cover – git error
-                logger.debug("Exception caught", exc_info=True)
-                return {"error": str(e)}
-
-        return await _thread_json_response(_do_push)
-
-
     async def record_file_usage_endpoint(
         request: Request,
     ) -> JSONResponse:
@@ -1247,53 +1251,6 @@ def run_chatbot(
             logger.debug("Exception caught", exc_info=True)
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    async def generate_config_message(request: Request) -> JSONResponse:
-        body = await request.json()
-        model = body.get("model", selected_model)
-
-        def _generate() -> dict[str, str]:
-            cfg = config_module.DEFAULT_CONFIG
-            total = _count_history()
-            recent_entries = _load_history(limit=5)
-            info_parts = [
-                f"Work directory: {actual_work_dir}",
-                f"Selected model: {model}",
-                f"Max steps: {cfg.sorcar.sorcar_agent.max_steps}",
-                f"Max budget: ${cfg.sorcar.sorcar_agent.max_budget:.2f}",
-                f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
-                f"Headless browser: {cfg.sorcar.sorcar_agent.headless}",
-                f"Code-server: {'running' if code_server_url else 'not available'}",
-                f"Tasks completed: {total}",
-            ]
-            recent = [str(e["task"]) for e in recent_entries]
-            if recent:  # pragma: no branch – history always has SAMPLE_TASKS fallback
-                info_parts.append("Recent tasks: " + "; ".join(recent))
-            config_info = "\n".join(info_parts)
-
-            agent = KISSAgent("Config Message Generator")
-            try:
-                result = agent.run(
-                    model_name=_FAST_MODEL,
-                    prompt_template=(
-                        "You are a helpful assistant. Given the following configuration "
-                        "information about a coding assistant environment, generate a "
-                        "short, nicely formatted, informative status message that a "
-                        "developer would find useful. Include key details like the "
-                        "model, work directory, budget, and recent activity. "
-                        "Keep it concise (3-5 lines) and use emoji for visual appeal. "
-                        "Return ONLY the message text, no quotes or markdown fences.\n\n"
-                        "Configuration:\n{config_info}"
-                    ),
-                    arguments={"config_info": config_info},
-                    is_agentic=False,
-                )
-                return {"message": result.strip()}
-            except Exception as e:  # pragma: no cover – LLM API failure
-                logger.debug("Exception caught", exc_info=True)
-                return {"error": str(e)}
-
-        return await _thread_json_response(_generate, error_status=500)
-
     app = Starlette(
         routes=[
             Route("/", index),
@@ -1310,13 +1267,12 @@ def run_chatbot(
             Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
             Route("/focus-editor", focus_editor, methods=["POST"]),
             Route("/commit", commit, methods=["POST"]),
-            Route("/push", push, methods=["POST"]),
             Route("/merge-action", merge_action, methods=["POST"]),
             Route("/record-file-usage", record_file_usage_endpoint, methods=["POST"]),
             Route("/generate-commit-message", generate_commit_message, methods=["POST"]),
-            Route("/generate-config-message", generate_config_message, methods=["POST"]),
             Route("/active-file-info", active_file_info),
             Route("/get-file-content", get_file_content),
+            Route("/refresh-files", refresh_files, methods=["POST"]),
             Route("/suggestions", suggestions),
             Route("/complete", complete),
             Route("/tasks", tasks),

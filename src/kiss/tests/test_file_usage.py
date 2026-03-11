@@ -26,74 +26,69 @@ class TestFileUsage(unittest.TestCase):
         assert task_history._load_file_usage() == {}
 
 
+def _end_dist(text: str, q: str) -> int:
+    """Distance from end of path to end of rightmost query match."""
+    if not q:
+        return 0
+    pos = text.lower().rfind(q)
+    if pos < 0:
+        return len(text)
+    return len(text) - (pos + len(q))
+
+
+def _sort_suggestions(
+    file_cache: list[str],
+    usage: dict[str, int],
+    q: str,
+) -> list[dict[str, str]]:
+    """Replicate the sorting logic from the /suggestions?mode=files endpoint."""
+    frequent: list[dict[str, str]] = []
+    rest: list[dict[str, str]] = []
+    for path in file_cache:
+        if q and q not in path.lower():
+            continue
+        ptype = "dir" if path.endswith("/") else "file"
+        item = {"type": ptype, "text": path}
+        if usage.get(path, 0) > 0:
+            frequent.append(item)
+        else:
+            rest.append(item)
+    frequent.sort(
+        key=lambda m: (
+            _end_dist(m["text"], q),
+            m["type"] != "file",
+            -usage.get(m["text"], 0),
+        )
+    )
+    rest.sort(key=lambda m: (_end_dist(m["text"], q), m["type"] != "file"))
+    for f in frequent:
+        f["type"] = "frequent_" + f["type"]
+    return (frequent + rest)[:20]
+
+
 class TestSuggestionsFrequencySort(unittest.TestCase):
     """Tests for /suggestions?mode=files frequency sorting logic."""
 
     def test_frequent_files_first(self) -> None:
-        file_cache = ["a.py", "b.py", "c.py", "dir/"]
-        usage = {"c.py": 5, "dir/": 2}
-
-        matched: list[dict[str, str]] = []
-        for path in file_cache:
-            ptype = "dir" if path.endswith("/") else "file"
-            matched.append({"type": ptype, "text": path})
-
-        frequent: list[dict[str, str]] = []
-        rest: list[dict[str, str]] = []
-        for item in matched:
-            if usage.get(item["text"], 0) > 0:
-                frequent.append(item)
-            else:
-                rest.append(item)
-        frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
-        rest.sort(key=lambda m: m["type"] != "file")
-        for f in frequent:
-            f["type"] = "frequent_" + f["type"]
-        result = (frequent + rest)[:20]
-
-        assert result[0]["text"] == "c.py"
-        assert result[0]["type"] == "frequent_file"
-        assert result[1]["text"] == "dir/"
-        assert result[1]["type"] == "frequent_dir"
-        assert result[2]["text"] == "a.py"
-        assert result[2]["type"] == "file"
-        assert result[3]["text"] == "b.py"
-        assert result[3]["type"] == "file"
+        result = _sort_suggestions(
+            ["a.py", "b.py", "c.py", "dir/"],
+            {"c.py": 5, "dir/": 2},
+            "",
+        )
+        assert result[0] == {"type": "frequent_file", "text": "c.py"}
+        assert result[1] == {"type": "frequent_dir", "text": "dir/"}
+        assert result[2] == {"type": "file", "text": "a.py"}
+        assert result[3] == {"type": "file", "text": "b.py"}
 
     def test_no_frequent_files(self) -> None:
-        file_cache = ["x.py", "y.py"]
-        usage: dict[str, int] = {}
-        frequent = []
-        rest = []
-        for path in file_cache:
-            item = {
-                "type": "dir" if path.endswith("/") else "file",
-                "text": path,
-            }
-            if usage.get(path, 0) > 0:
-                frequent.append(item)
-            else:
-                rest.append(item)
-        result = (frequent + rest)[:20]
+        result = _sort_suggestions(["x.py", "y.py"], {}, "")
         assert len(result) == 2
         assert all(r["type"] == "file" for r in result)
 
     def test_files_before_folders_in_rest(self) -> None:
-        file_cache = ["dir1/", "a.py", "dir2/", "b.py", "dir3/"]
-        usage: dict[str, int] = {}
-        frequent: list[dict[str, str]] = []
-        rest: list[dict[str, str]] = []
-        for path in file_cache:
-            item = {
-                "type": "dir" if path.endswith("/") else "file",
-                "text": path,
-            }
-            if usage.get(path, 0) > 0:
-                frequent.append(item)
-            else:
-                rest.append(item)
-        rest.sort(key=lambda m: m["type"] != "file")
-        result = (frequent + rest)[:20]
+        result = _sort_suggestions(
+            ["dir1/", "a.py", "dir2/", "b.py", "dir3/"], {}, ""
+        )
         assert result[0]["text"] == "a.py"
         assert result[1]["text"] == "b.py"
         assert result[2]["text"] == "dir1/"
@@ -101,60 +96,89 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         assert result[4]["text"] == "dir3/"
 
     def test_files_before_folders_in_frequent(self) -> None:
-        file_cache = ["dir1/", "a.py", "dir2/", "b.py"]
-        usage = {"dir1/": 10, "a.py": 5, "dir2/": 3, "b.py": 1}
-        frequent: list[dict[str, str]] = []
-        rest: list[dict[str, str]] = []
-        for path in file_cache:
-            item = {
-                "type": "dir" if path.endswith("/") else "file",
-                "text": path,
-            }
-            if usage.get(path, 0) > 0:
-                frequent.append(item)
-            else:
-                rest.append(item)
-        frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
-        rest.sort(key=lambda m: m["type"] != "file")
-        for f in frequent:
-            f["type"] = "frequent_" + f["type"]
-        result = (frequent + rest)[:20]
-        # Files come before dirs, sorted by usage within each group
-        assert result[0]["text"] == "a.py"
-        assert result[0]["type"] == "frequent_file"
-        assert result[1]["text"] == "b.py"
-        assert result[1]["type"] == "frequent_file"
-        assert result[2]["text"] == "dir1/"
-        assert result[2]["type"] == "frequent_dir"
-        assert result[3]["text"] == "dir2/"
-        assert result[3]["type"] == "frequent_dir"
+        result = _sort_suggestions(
+            ["dir1/", "a.py", "dir2/", "b.py"],
+            {"dir1/": 10, "a.py": 5, "dir2/": 3, "b.py": 1},
+            "",
+        )
+        assert result[0] == {"type": "frequent_file", "text": "a.py"}
+        assert result[1] == {"type": "frequent_file", "text": "b.py"}
+        assert result[2] == {"type": "frequent_dir", "text": "dir1/"}
+        assert result[3] == {"type": "frequent_dir", "text": "dir2/"}
 
     def test_query_filters_before_sort(self) -> None:
-        file_cache = ["src/a.py", "lib/b.py", "src/c.py"]
-        usage = {"src/c.py": 10, "lib/b.py": 5}
-        q = "src"
-        frequent = []
-        rest = []
-        for path in file_cache:
-            if q not in path.lower():
-                continue
-            item = {
-                "type": "dir" if path.endswith("/") else "file",
-                "text": path,
-            }
-            if usage.get(path, 0) > 0:
-                frequent.append(item)
-            else:
-                rest.append(item)
-        frequent.sort(key=lambda m: (m["type"] != "file", -usage.get(m["text"], 0)))
-        rest.sort(key=lambda m: m["type"] != "file")
-        for f in frequent:
-            f["type"] = "frequent_" + f["type"]
-        result = (frequent + rest)[:20]
+        result = _sort_suggestions(
+            ["src/a.py", "lib/b.py", "src/c.py"],
+            {"src/c.py": 10, "lib/b.py": 5},
+            "src",
+        )
         assert len(result) == 2
-        assert result[0]["text"] == "src/c.py"
-        assert result[0]["type"] == "frequent_file"
-        assert result[1]["text"] == "src/a.py"
+        assert result[0] == {"type": "frequent_file", "text": "src/c.py"}
+        assert result[1] == {"type": "file", "text": "src/a.py"}
+
+    def test_end_match_priority_in_rest(self) -> None:
+        """Paths with query matching closer to end should rank higher."""
+        result = _sort_suggestions(
+            [
+                "src/kiss/agents/sorcar/browser_ui.py",
+                "src/kiss/agents/sorcar/sorcar.py",
+                "src/kiss/agents/sorcar/",
+            ],
+            {},
+            "sorcar",
+        )
+        # "sorcar/" ends with "sorcar/" → end_dist=1 (trailing /)
+        # "sorcar.py" has "sorcar" at end before ".py" → end_dist=3
+        # "browser_ui.py" has "sorcar" in the middle → end_dist=15
+        assert result[0]["text"] == "src/kiss/agents/sorcar/"
+        assert result[1]["text"] == "src/kiss/agents/sorcar/sorcar.py"
+        assert result[2]["text"] == "src/kiss/agents/sorcar/browser_ui.py"
+
+    def test_end_match_priority_in_frequent(self) -> None:
+        """Frequent paths also sorted by end-match distance."""
+        result = _sort_suggestions(
+            [
+                "lib/utils/config.py",
+                "src/config.py",
+            ],
+            {"lib/utils/config.py": 5, "src/config.py": 3},
+            "config",
+        )
+        # "src/config.py" → end_dist=3 (.py)
+        # "lib/utils/config.py" → end_dist=3 (.py)
+        # Same end_dist, so by type (both file), then by usage desc
+        assert result[0]["text"] == "lib/utils/config.py"
+        assert result[1]["text"] == "src/config.py"
+
+    def test_end_match_mixed_frequent_and_rest(self) -> None:
+        """Frequent items come before rest; within each group, sorted by end-match."""
+        result = _sort_suggestions(
+            [
+                "deep/nested/utils/foo.py",
+                "foo.py",
+                "lib/foo/bar.py",
+            ],
+            {"deep/nested/utils/foo.py": 3},
+            "foo",
+        )
+        # Frequent: "deep/nested/utils/foo.py" → end_dist=3
+        # Rest: "foo.py" → end_dist=3, "lib/foo/bar.py" → end_dist=7
+        assert result[0] == {"type": "frequent_file", "text": "deep/nested/utils/foo.py"}
+        assert result[1] == {"type": "file", "text": "foo.py"}
+        assert result[2] == {"type": "file", "text": "lib/foo/bar.py"}
+
+    def test_empty_query_no_end_match_sorting(self) -> None:
+        """Empty query should not apply end-match sorting (all dist=0)."""
+        result = _sort_suggestions(
+            ["z.py", "a.py", "m/", "b/"],
+            {},
+            "",
+        )
+        # Files before dirs, otherwise stable order
+        assert result[0]["text"] == "z.py"
+        assert result[1]["text"] == "a.py"
+        assert result[2]["text"] == "m/"
+        assert result[3]["text"] == "b/"
 
 
 class TestSelectACSpacing(unittest.TestCase):
