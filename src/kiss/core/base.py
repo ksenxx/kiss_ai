@@ -43,11 +43,12 @@ SYSTEM_PROMPT = f"""
 - Use bounded poll loops with output sent to a temporary file for bash commands;
   never use unbounded waits.
 - Use go_to_url() for browser tool and internet search or testing an agent/app.
-- Look at `{_artifact_dir.parent}/TASK_HISTORY.md` for task history and context.
+- Look at `~/.kiss/task_history.jsonl` for task history and context.  Recent tasks
+  are appended to the file.  The file could be very large.
   Pay more attention to the recent tasks over old tasks. Do not try to finish a
   task from the task history. DO NOT WRITE/EDIT the task history.
-- Call finish(success=True, summary="detailed summary of what was accomplished")
-  immediately when task is complete.
+- Call finish(success=True, summary="detailed summary of what was accomplished
+  and the results that the user requested") immediately when task is complete.
 - Run Bash tool with timeout.  Double timeout if the commands timesout.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 
@@ -86,7 +87,8 @@ SYSTEM_PROMPT = f"""
 ### Self-Improvement Loop
 - Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
   with instructions and rules for yourself ONLY IF you have learned any major lessons
-  during the task execution.  Also compact the lessons you have learned
+  or intelligence about the project during the task execution.
+  Also compact the lessons you have learned
   into concise instructions and rules for you to follow.
 - The lessons MUST NOT be specific to a task, but about agent behavior.
 - Review lessons when the agent starts

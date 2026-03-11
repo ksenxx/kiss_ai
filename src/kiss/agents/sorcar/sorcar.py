@@ -36,10 +36,11 @@ from kiss.agents.sorcar.code_server import (
 )
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
+    _RECENT_CACHE_SIZE,
     _add_task,
-    _append_task_to_md,
     _cleanup_stale_cs_dirs,
-    _init_task_history_md,
+    _count_history,
+    _get_history_entry,
     _load_file_usage,
     _load_history,
     _load_last_model,
@@ -47,6 +48,7 @@ from kiss.agents.sorcar.task_history import (
     _load_task_chat_events,
     _record_file_usage,
     _record_model_usage,
+    _search_history,
     _set_latest_chat_events,
 )
 from kiss.core import config as config_module
@@ -161,8 +163,6 @@ def run_chatbot(
     selected_model = _load_last_model() or default_model
     last = _load_last_model()
     selected_model = last if last and last not in _INTERNAL_MODELS else default_model
-
-    _init_task_history_md()
 
     # Clean up stale code-server data directories synchronously at startup
     _cleanup_stale_cs_dirs()
@@ -518,7 +518,6 @@ def run_chatbot(
         finally:
             printer._thread_local.stop_event = None
             chat_events = printer.stop_recording()
-            _append_task_to_md(task, result_text)
             with running_lock:
                 if agent_thread is not current_thread:
                     # Stopped externally; stop_agent already broadcast
@@ -803,16 +802,11 @@ def run_chatbot(
             return JSONResponse((frequent + rest)[:20])
         if not query:
             return JSONResponse([])
-        q_lower = query.lower()
         results = []
-        for entry in _load_history():
-            task = str(entry["task"])
-            if q_lower in task.lower():
-                results.append({"type": "task", "text": task})
-                if len(results) >= 5:
-                    break
+        for entry in _search_history(query, limit=5):
+            results.append({"type": "task", "text": str(entry["task"])})
         words = query.split()
-        last_word = words[-1].lower() if words else q_lower
+        last_word = words[-1].lower() if words else query.lower()
         if last_word and len(last_word) >= 2:
             count = 0
             for path in file_cache:
@@ -824,11 +818,31 @@ def run_chatbot(
         return JSONResponse(results)
 
     async def tasks(request: Request) -> JSONResponse:
-        history = _load_history()
+        """Return task history with optional limit, offset, and search.
+
+        Query params:
+            limit: max entries (default 100, 0 = all)
+            offset: skip first N entries (default 0)
+            q: search substring (case-insensitive)
+        """
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+        except (ValueError, TypeError):
+            limit = 100
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+        except (ValueError, TypeError):
+            offset = 0
+        query = request.query_params.get("q", "")
+        if query:
+            history = _search_history(query, limit=limit + offset)
+        else:
+            history = _load_history(limit=limit + offset)
+        page = history[offset : offset + limit] if limit > 0 else history[offset:]
         return JSONResponse(
             [
                 {"task": e["task"], "has_events": bool(e.get("has_events"))}
-                for e in history
+                for e in page
             ]
         )
 
@@ -838,15 +852,15 @@ def run_chatbot(
             idx = int(request.query_params.get("idx", "0"))
         except (ValueError, TypeError):
             return JSONResponse({"error": "Invalid index"}, status_code=400)
-        history = _load_history()
-        if idx < 0 or idx >= len(history):
+        entry = _get_history_entry(idx)
+        if entry is None:
             return JSONResponse({"error": "Index out of range"}, status_code=404)
-        events = _load_task_chat_events(str(history[idx]["task"]))
+        events = _load_task_chat_events(str(entry["task"]))
         return JSONResponse(events)
 
     def _fast_complete(raw_query: str, query: str) -> str:
         query_lower = query.lower()
-        for entry in _load_history():
+        for entry in _load_history(limit=_RECENT_CACHE_SIZE):
             task = str(entry.get("task", ""))
             if task.lower().startswith(query_lower) and len(task) > len(query):
                 return task[len(query):]
@@ -870,8 +884,8 @@ def run_chatbot(
             return JSONResponse({"suggestion": fast})
 
         def _generate() -> str:
-            history = _load_history()
-            task_list = "\n".join(f"- {e['task']}" for e in history[:20])
+            history = _load_history(limit=20)
+            task_list = "\n".join(f"- {e['task']}" for e in history)
             files_list = "\n".join(file_cache[:200])
             active_path = _read_active_file(cs_data_dir)
             active_content = ""
@@ -1175,7 +1189,8 @@ def run_chatbot(
 
         def _generate() -> dict[str, str]:
             cfg = config_module.DEFAULT_CONFIG
-            history = _load_history()
+            total = _count_history()
+            recent_entries = _load_history(limit=5)
             info_parts = [
                 f"Work directory: {actual_work_dir}",
                 f"Selected model: {model}",
@@ -1184,9 +1199,9 @@ def run_chatbot(
                 f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
                 f"Headless browser: {cfg.sorcar.sorcar_agent.headless}",
                 f"Code-server: {'running' if code_server_url else 'not available'}",
-                f"Tasks completed: {len(history)}",
+                f"Tasks completed: {total}",
             ]
-            recent = [str(e["task"]) for e in history[:5]] if history else []
+            recent = [str(e["task"]) for e in recent_entries]
             if recent:  # pragma: no branch – history always has SAMPLE_TASKS fallback
                 info_parts.append("Recent tasks: " + "; ".join(recent))
             config_info = "\n".join(info_parts)

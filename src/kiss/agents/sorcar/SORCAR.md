@@ -25,7 +25,7 @@ sorcar.py  (Starlette server, ~1300 lines)
      |
      | agent_factory(name) -> RelentlessAgent
      v
-RelentlessAgent.perform_task()   (~282 lines total)
+RelentlessAgent.perform_task()   (~284 lines total)
      |
      | for session in range(max_sub_sessions):
      |     KISSAgent(tools).run()
@@ -64,7 +64,7 @@ ______________________________________________________________________
 
 **Structured continuation over lossy compaction.** The `RelentlessAgent` continuation mechanism is the single most important architectural advantage. It lets Sorcar handle tasks that take millions of tool calls across multiple context windows without the "context rot" that plagues single-session approaches. The summary checkpoint between sessions is an auditable artifact, not a black-box heuristic.
 
-**Self-improvement loop.** The system prompt instructs the agent to maintain a `LESSONS.md` file with learned behaviors and mistakes, and to review it at the start of each task. Combined with a `TASK_HISTORY.md` file that logs completed work, this gives Sorcar a form of persistent memory across sessions that is fully transparent and user-editable.
+**Self-improvement loop.** The system prompt instructs the agent to maintain a `LESSONS.md` file with learned behaviors and mistakes, and to review it at the start of each task. Combined with a `task_history.jsonl` file that logs completed work, this gives Sorcar a form of persistent memory across sessions that is fully transparent and user-editable.
 
 **No vendor lock-in.** Sorcar works with any LLM that supports function calling. It does not depend on Anthropic's context caching, OpenAI's assistants API, or any provider-specific feature. The continuation mechanism is pure prompt engineering.
 

@@ -1127,7 +1127,7 @@ function handleEvent(ev){
     stopBtn.style.display='inline-flex';
     D.classList.add('running');hideAC();startTimer();
     inp.style.height='auto';inp.style.overflowY='hidden';
-    inp.value='';
+    inp.value=ev.text||'';
     pendingUserMsg={text:ev.text,images:[]};
     pendingFiles=[];renderFileChips();
     showSpinner();loadModels();
@@ -1331,7 +1331,7 @@ function doSubmitTask(task){
     body:JSON.stringify(payload)
   }).then(function(r){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
-    inp.value='';pendingFiles=[];renderFileChips();loadModels();
+    pendingFiles=[];renderFileChips();loadModels();
   }).catch(function(){setReady('Error');alert('Network error')});
 }
 function submitTask(){
@@ -1614,7 +1614,7 @@ function fetchGhost(){
 }
 function cycleHistory(dir){
   if(!histCache.length){
-    fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
+    fetch('/tasks?limit=100').then(function(r){return r.json()}).then(function(tasks){
       histCache=tasks.map(function(t){return typeof t==='string'?t:(t.task||'')});
       doHistCycle(dir);
     });return;
@@ -1628,8 +1628,8 @@ function doHistCycle(dir){
   inp.value=histCache[histIdx];
 }
 function loadTasks(){
-  fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
-    allTasks=tasks;renderTasks('');histSearch.value='';
+  fetch('/tasks?limit=100').then(function(r){return r.json()}).then(function(tasks){
+    allTasks=tasks;renderSidebarTasks(tasks);histSearch.value='';
   }).catch(function(){});
 }
 function replayTaskEvents(idx,txt){
@@ -1670,14 +1670,15 @@ function replayTaskEvents(idx,txt){
     sb();
   }).catch(function(){});
 }
-function renderTasks(q){
+function renderSidebarTasks(tasks){
   rl.innerHTML='';
-  var ql=q.toLowerCase(),any=false;
-  allTasks.forEach(function(t,idx){
+  if(!tasks.length){
+    rl.innerHTML='<div class="sidebar-empty">No recent tasks</div>';
+    return;
+  }
+  tasks.forEach(function(t,idx){
     var txt=typeof t==='string'?t:(t.task||'');
     var hasEvents=typeof t==='object'&&t.has_events;
-    if(ql&&txt.toLowerCase().indexOf(ql)<0)return;
-    any=true;
     var d=mkEl('div','sidebar-item');
     d.textContent=txt;d.title=txt;
     d.addEventListener('click',function(){
@@ -1686,17 +1687,30 @@ function renderTasks(q){
     });
     rl.appendChild(d);
   });
-  if(!any){rl.innerHTML='<div class="sidebar-empty">'
-    +(ql?'No matches':'No recent tasks')+'</div>'}
 }
-histSearch.addEventListener('input',function(){renderTasks(this.value)});
+var _histSearchTimer=null;
+histSearch.addEventListener('input',function(){
+  var q=this.value.trim();
+  if(_histSearchTimer)clearTimeout(_histSearchTimer);
+  _histSearchTimer=setTimeout(function(){
+    var url='/tasks?limit=100';
+    if(q)url+='&q='+encodeURIComponent(q);
+    fetch(url).then(function(r){return r.json()}).then(function(tasks){
+      if(!tasks.length&&q){
+        rl.innerHTML='<div class="sidebar-empty">No matches</div>';
+      }else{
+        renderSidebarTasks(tasks);
+      }
+    }).catch(function(){});
+  },200);
+});
 
 function loadWelcome(){
   if(!suggestionsEl)return;
-  fetch('/tasks').then(function(r){return r.json()})
+  fetch('/tasks?limit=10').then(function(r){return r.json()})
   .catch(function(){return []}).then(function(tasks){
     suggestionsEl.innerHTML='';
-    tasks.slice(0,10).forEach(function(t,i){
+    tasks.forEach(function(t,i){
       var hasEvents=typeof t==='object'&&t.has_events;
       var text=typeof t==='string'?t:(t.task||'');
       var chip=mkEl('div','suggestion-chip');
