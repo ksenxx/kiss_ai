@@ -52,7 +52,7 @@ This is a meaningfully different experience from both Cursor and Claude Code:
 
 - **Cursor** tightly couples the AI agent to a proprietary VS Code fork. The agent runs server-side, and the editor is the only interface. There is no standalone chatbot; everything happens through inline suggestions, the command palette, or the sidebar chat.
 - **Claude Code** is a CLI tool. There is no integrated editor. The user switches between their terminal and their editor, with the agent operating on files directly.
-- **Sorcar** gives you both in one browser tab, with no IDE installation required beyond `pip install kiss-framework` and optionally `code-server`. It works on any machine with a browser, including remote servers accessed via SSH tunneling.
+- **Sorcar** gives you both in one browser tab, with no IDE installation required. It works on any machine with a browser, including remote servers accessed via SSH tunneling.
 
 ______________________________________________________________________
 

@@ -153,9 +153,13 @@ def cs_server():
     wd_hash = hashlib.md5(work_dir.encode()).hexdigest()[:8]
     cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
 
+    # Keep an SSE client connected to prevent auto-shutdown
+    keepalive = requests.get(f"{base_url}/events", stream=True, timeout=300)
+
     yield base_url, work_dir, cs_data_dir, tmpdir
 
-    # Cleanup
+    # Cleanup: close keepalive and trigger shutdown
+    keepalive.close()
     try:
         requests.post(f"{base_url}/closing", json={}, timeout=2)
     except Exception:
