@@ -1,5 +1,8 @@
-\#whatispossible
+#whatispossible
+
 # KISS Sorcar: A Radically Simple AI Coding IDE
+
+![KISS Sorcar Screenshot](../../../../assets/KISSSorcar.png)
 
 ## Overview
 
@@ -7,11 +10,11 @@ KISS Sorcar is an open-source, browser-based AI coding IDE built on a single, el
 
 The entire IDE ships as a Python package. Run `sorcar` on any directory, and a browser tab opens with a VS Code editor on the left and a chat panel on the right. Behind the scenes, the system is powered by [`RelentlessAgent`](../../core/RELENTLESS_AGENT.md) -- a ~284-line class that implements the only orchestration pattern you actually need for long-running agentic tasks.
 
----
+______________________________________________________________________
 
 ## Architecture at a Glance
 
-Sorcar's architecture can be described in one sentence: **a Starlette web server streams SSE events from a `RelentlessAgent` that runs in a background thread, using `KISSAgent` for each sub-session of tool-calling against any LLM**.  Claude Opus 4.6 is highly recommended.
+Sorcar's architecture can be described in one sentence: **a Starlette web server streams SSE events from a `RelentlessAgent` that runs in a background thread, using `KISSAgent` for each sub-session of tool-calling against any LLM**. Claude Opus 4.6 is highly recommended.
 
 ```
 Browser UI (HTML/JS)
@@ -36,8 +39,7 @@ Any LLM  (Claude, GPT, Gemini, OpenRouter, Together AI)
 
 There are no subagent hierarchies. No shadow file systems. No planner/worker/judge roles. No lock files. No MCP servers. The entire agent stack is three classes deep: `SorcarAgent` -> `RelentlessAgent` -> `KISSAgent`.
 
----
-
+______________________________________________________________________
 
 ## The IDE: A Unified Browser Experience
 
@@ -52,15 +54,7 @@ This is a meaningfully different experience from both Cursor and Claude Code:
 - **Claude Code** is a CLI tool. There is no integrated editor. The user switches between their terminal and their editor, with the agent operating on files directly.
 - **Sorcar** gives you both in one browser tab, with no IDE installation required beyond `pip install kiss-framework` and optionally `code-server`. It works on any machine with a browser, including remote servers accessed via SSH tunneling.
 
----
-
-## Model Freedom
-
-I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
-
-This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.3 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
-
----
+______________________________________________________________________
 
 ## What Sorcar Gets Right
 
@@ -76,7 +70,16 @@ This is architecturally simpler than Cursor's model management, which involves r
 
 **Docker isolation.** For untrusted tasks, Sorcar can run tools inside a Docker container by passing a `docker_image` parameter. The `DockerManager` provides a sandboxed `Bash` tool that executes commands inside the container while the agent runs outside it. This is a simpler security model than Claude Code's shell trust boundaries and permission callbacks.
 
----
+______________________________________________________________________
+
+## Model Freedom
+
+I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
+
+This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.3 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
+
+______________________________________________________________________
+
 ## The RelentlessAgent: Elegance Through Continuation
 
 The core innovation of Sorcar lives in [`relentless_agent.py`](../../core/relentless_agent.py). The problem it solves is fundamental: LLMs have finite context windows, and real-world coding tasks routinely exceed them. Cursor addresses this with compaction heuristics and manual `/compact` commands. Claude Code uses server-side context editing and thinking-block clearing. Both approaches are heuristic and lossy -- the agent forgets work it has already done, leading to repeated effort and subtle regressions.
@@ -84,9 +87,9 @@ The core innovation of Sorcar lives in [`relentless_agent.py`](../../core/relent
 `RelentlessAgent` takes a different approach. It uses **explicit, structured continuation**:
 
 1. A `KISSAgent` sub-session runs with a bounded step count and budget.
-2. At step `N-2` (two steps before the limit), the agent is instructed to call `finish(success=False, is_continue=True, summary="...")` with a precise, chronologically-ordered summary of every steps it has executed with reason and relevant code snippets.
-3. The next sub-session receives that summary as its `previous_progress` context, along with an explicit instruction: *"Complete the rest of the task. DON'T redo completed work."*
-4. This loop continues for up to `max_sub_sessions` iterations (configurable, typically 3-5).
+1. At step `N-2` (two steps before the limit), the agent is instructed to call `finish(success=False, is_continue=True, summary="...")` with a precise, chronologically-ordered summary of every steps it has executed with explanation and relevant code snippets.
+1. The next sub-session receives that summary as its `previous_progress` context, along with an explicit instruction: *"Complete the rest of the task. DON'T redo completed work."*
+1. This loop continues for up to `max_sub_sessions` iterations (configurable, typically 3-5).
 
 The key insight is that the continuation summary is *generated by the agent itself*, not by a separate summarizer or heuristic compactor. The agent knows what matters about its own work. If a sub-session crashes or exceeds its budget, a fallback `Summarizer` agent reads the trajectory and produces the summary instead.
 
@@ -124,15 +127,15 @@ for session in range(self.max_sub_sessions):
 
 Compare this to Cursor's approach of managing context through Shadow Virtual File Systems, democratic vs. hierarchical agent coordination, and lock-based contention resolution -- all of which Cursor's own scaling experiments revealed to be fragile. Or compare it to Claude Code's `/compact` workflow, where background task polling can consume the entire context window before compaction even runs. Sorcar sidesteps these problems entirely by treating each sub-session as a stateless function call with an explicit input (the summary) and an explicit output (the result or the next summary).
 
----
+______________________________________________________________________
 
 ## The KISSAgent: A Transparent ReAct Loop
 
 Beneath `RelentlessAgent` sits `KISSAgent`, the workhorse that actually calls LLMs and executes tools. Its design is deliberately minimal:
 
 1. **Setup:** Register tools as plain Python functions. The agent introspects their signatures and docstrings to build the function-calling schema automatically.
-2. **Loop:** Call `model.generate_and_process_with_tools()`. If the model returns function calls, execute them and feed results back. If the model returns a `finish()` call, return the result. If the model returns no function calls, prompt it to try again.
-3. **Limits:** Check budget and step count after every iteration. Raise `KISSError` if exceeded.
+1. **Loop:** Call `model.generate_and_process_with_tools()`. If the model returns function calls, execute them and feed results back. If the model returns a `finish()` call, return the result. If the model returns no function calls, prompt it to try again.
+1. **Limits:** Check budget and step count after every iteration. Raise `KISSError` if exceeded.
 
 There is no planning phase, no tool-selection heuristic, and no routing layer. The LLM decides which tools to call and in what order. This is not a limitation -- it is the design. Modern frontier models (Claude Opus 4.6, GPT-5.4, Gemini 3.1 Pro) are excellent at tool selection when given clear tool definitions and a well-structured prompt. Adding an orchestration layer on top introduces latency, complexity, and a new source of errors without meaningfully improving tool selection.
 
@@ -140,7 +143,7 @@ Cursor's architecture, by contrast, routes tasks through a planner that selects 
 
 In Sorcar, every tool call, every LLM response, and every token count is streamed directly to the chat panel. The user sees exactly what the agent sees. There is no hidden state.
 
----
+______________________________________________________________________
 
 ## The Tool Surface: Four Tools and a Browser
 
@@ -160,7 +163,7 @@ Cursor provides 10+ specialized tools (semantic search, file navigation, web sea
 
 Sorcar avoids this by trusting the LLM to compose the right Unix commands from a single `Bash` tool. This works remarkably well in practice because modern LLMs have deep knowledge of command-line tooling.
 
----
+______________________________________________________________________
 
 ## Summary
 

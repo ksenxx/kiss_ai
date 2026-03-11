@@ -161,7 +161,6 @@ class TestDisplayEventTypes:
     def test_non_display_events_filtered(self) -> None:
         non_display = [
             "tasks_updated",
-            "proposed_updated",
             "theme_changed",
             "focus_chatbox",
             "merge_started",
@@ -296,13 +295,11 @@ class TestChatbotJSSyntax:
         start = CHATBOT_JS.index("function loadWelcome(){")
         end = CHATBOT_JS.index("\n}", start) + 2
         welcome_js = CHATBOT_JS[start:end]
-        # Recent items must track hasEvents and idx
+        # Recent items must track hasEvents and call replayTaskEvents
         assert "hasEvents" in welcome_js
-        assert "item.idx" in welcome_js
-        # Must call replayTaskEvents for recent items with events
-        assert "replayTaskEvents(item.idx,item.text)" in welcome_js
-        # Suggested items should just set input
-        assert "inp.value=item.text" in welcome_js
+        assert "replayTaskEvents" in welcome_js
+        # Items without events should set input value
+        assert "inp.value=text" in welcome_js
 
     def test_full_js_balanced_braces(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS

@@ -52,7 +52,6 @@ from kiss.agents.sorcar.useful_tools import (
 
 def _redirect_history(tmpdir: str):
     old_hist = th.HISTORY_FILE
-    old_prop = th.PROPOSALS_FILE
     old_model = th.MODEL_USAGE_FILE
     old_file = th.FILE_USAGE_FILE
     old_cache = th._history_cache
@@ -64,21 +63,19 @@ def _redirect_history(tmpdir: str):
     th._KISS_DIR = kiss_dir
     th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
     th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
-    th.PROPOSALS_FILE = kiss_dir / "proposals.json"
     th.MODEL_USAGE_FILE = kiss_dir / "model_usage.json"
     th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
     th._history_cache = None
-    return old_hist, old_prop, old_model, old_file, old_cache, old_kiss, old_events
+    return old_hist, old_model, old_file, old_cache, old_kiss, old_events
 
 
 def _restore_history(saved):
     th.HISTORY_FILE = saved[0]
-    th.PROPOSALS_FILE = saved[1]
-    th.MODEL_USAGE_FILE = saved[2]
-    th.FILE_USAGE_FILE = saved[3]
-    th._history_cache = saved[4]
-    th._KISS_DIR = saved[5]
-    th._CHAT_EVENTS_DIR = saved[6]
+    th.MODEL_USAGE_FILE = saved[1]
+    th.FILE_USAGE_FILE = saved[2]
+    th._history_cache = saved[3]
+    th._KISS_DIR = saved[4]
+    th._CHAT_EVENTS_DIR = saved[5]
 
 
 def _make_git_repo(tmpdir: str) -> str:
@@ -164,7 +161,6 @@ class TestSorcarServerSubprocess:
             f"th._KISS_DIR = kiss_dir\n"
             f"th.HISTORY_FILE = kiss_dir / 'task_history.jsonl'\n"
             f"th._CHAT_EVENTS_DIR = kiss_dir / 'chat_events'\n"
-            f"th.PROPOSALS_FILE = kiss_dir / 'proposals.json'\n"
             f"th.MODEL_USAGE_FILE = kiss_dir / 'model_usage.json'\n"
             f"th.FILE_USAGE_FILE = kiss_dir / 'file_usage.json'\n"
             f"th._history_cache = None\n"
@@ -268,8 +264,6 @@ class TestSorcarServer:
         agent_thread = None
         current_stop_event = None
         selected_model = "claude-opus-4-6"
-        proposed_tasks: list[str] = []
-        proposed_lock = threading.Lock()
         cs_data_dir = self.cs_data_dir
 
         html_page = _build_html("Test", "", actual_work_dir)
@@ -412,10 +406,6 @@ class TestSorcarServer:
                     results.append({"type": "task", "text": task})
                     if len(results) >= 5:
                         break
-            with proposed_lock:
-                for t in proposed_tasks:
-                    if q_lower in t.lower():
-                        results.append({"type": "suggested", "text": t})
             words = qp.split()
             last_word = words[-1].lower() if words else q_lower
             if last_word and len(last_word) >= 2:
@@ -444,13 +434,6 @@ class TestSorcarServer:
                 return JSONResponse({"error": "Index out of range"}, status_code=404)
             events = th._load_task_chat_events(str(history[idx]["task"]))
             return JSONResponse(events)
-
-        async def proposed_tasks_ep(request: Request) -> JSONResponse:
-            with proposed_lock:
-                tl = list(proposed_tasks)
-            if not tl:
-                tl = [str(t["task"]) for t in th.SAMPLE_TASKS[:5]]
-            return JSONResponse(tl)
 
         async def models_ep(request: Request) -> JSONResponse:
             from kiss.core.models.model_info import MODEL_INFO, get_available_models
@@ -597,7 +580,7 @@ class TestSorcarServer:
                 Route("/complete", complete),
                 Route("/tasks", tasks_ep),
                 Route("/task-events", task_events_ep),
-                Route("/proposed_tasks", proposed_tasks_ep),
+
                 Route("/models", models_ep),
                 Route("/theme", theme),
             ]
@@ -715,10 +698,6 @@ class TestTaskHistory:
         th._set_latest_chat_events([{"type": "z"}], task="missing")
         history = th._load_history()
         assert history[0]["has_events"] is False  # unchanged
-
-    def test_proposals_corrupt(self) -> None:
-        th.PROPOSALS_FILE.write_text("not json")
-        assert th._load_proposals() == []
 
     def test_load_history_with_duplicates(self) -> None:
         """JSONL history with duplicate tasks gets deduplicated on load."""
@@ -970,14 +949,6 @@ class TestTaskHistoryRemaining:
             th._save_history([{"task": "test", "has_events": False}])
         finally:
             th.HISTORY_FILE.parent.chmod(0o755)
-
-    def test_save_proposals_oserror(self) -> None:
-        th.PROPOSALS_FILE.parent.chmod(0o444)
-        try:
-            th._save_proposals(["test"])
-        finally:
-            th.PROPOSALS_FILE.parent.chmod(0o755)
-
 
 class TestCodeServerOSErrors:
     """Cover OSError branches in code_server.py."""

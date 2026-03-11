@@ -12,19 +12,49 @@ No mocks, patches, or test doubles.
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import shutil
 import tempfile
 import threading
-import time
+from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+
+from kiss.agents.sorcar.useful_tools import (
+    UsefulTools,
+    _format_bash_result,
+)
+from kiss.core.models.openai_compatible_model import (
+    OpenAICompatibleModel,
+    _build_text_based_tools_prompt,
+    _extract_deepseek_reasoning,
+    _parse_text_based_tool_calls,
+)
+from kiss.core.relentless_agent import (
+    RelentlessAgent,
+)
+from kiss.core.relentless_agent import (
+    finish as ra_finish,
+)
+from kiss.core.utils import (
+    add_prefix_to_each_line,
+    config_to_dict,
+    fc,
+    get_config_value,
+    get_template_field_names,
+    is_subpath,
+    read_project_file,
+    read_project_file_from_package,
+    resolve_path,
+)
+from kiss.core.utils import (
+    finish as utils_finish,
+)
 
 
 async def _noop_callback(token: str) -> None:
@@ -37,44 +67,6 @@ def _make_collector_callback(collector: list[str]):
     async def _cb(token: str) -> None:
         collector.append(token)
     return _cb
-
-
-# ─── relentless_agent ───
-from kiss.core.relentless_agent import (
-    CONTINUATION_PROMPT,
-    RelentlessAgent,
-    finish as ra_finish,
-)
-
-# ─── openai_compatible_model ───
-from kiss.core.models.openai_compatible_model import (
-    OpenAICompatibleModel,
-    _build_text_based_tools_prompt,
-    _extract_deepseek_reasoning,
-    _parse_text_based_tool_calls,
-)
-
-# ─── utils ───
-from kiss.core.utils import (
-    add_prefix_to_each_line,
-    config_to_dict,
-    fc,
-    finish as utils_finish,
-    get_config_value,
-    get_template_field_names,
-    is_subpath,
-    read_project_file,
-    read_project_file_from_package,
-    resolve_path,
-)
-
-# ─── useful_tools ───
-from kiss.agents.sorcar.useful_tools import (
-    UsefulTools,
-    _extract_command_names,
-    _format_bash_result,
-    _truncate_output,
-)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -188,7 +180,10 @@ class TestBuildTextBasedToolsPrompt:
 
 class TestParseTextBasedToolCalls:
     def test_json_code_block(self) -> None:
-        content = '```json\n{"tool_calls": [{"name": "finish", "arguments": {"status": "ok"}}]}\n```'
+        content = (
+            '```json\n{"tool_calls": [{"name": "finish",'
+            ' "arguments": {"status": "ok"}}]}\n```'
+        )
         calls = _parse_text_based_tool_calls(content)
         assert len(calls) == 1
         assert calls[0]["name"] == "finish"
@@ -525,7 +520,11 @@ def _make_stream_chunks(
                 "object": "chat.completion.chunk",
                 "model": "fake-model",
                 "choices": [
-                    {"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None,
+                    }
                 ],
             }
         )
@@ -599,7 +598,9 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
     """Handler that simulates OpenAI API responses."""
 
     # Class-level response configuration
-    response_mode: str = "normal"  # "normal", "stream", "tool_calls", "stream_tool_calls", "deepseek", "error", "embedding"
+    # Modes: normal, stream, tool_calls, stream_tool_calls,
+    # deepseek, error, embedding
+    response_mode: str = "normal"
 
     def do_POST(self) -> None:  # noqa: N802
         content_length = int(self.headers.get("Content-Length", 0))
@@ -1151,7 +1152,7 @@ class TestUsefulToolsBashTimeout:
     """Cover the timeout branches in Bash (both streaming and non-streaming)."""
 
     @pytest.fixture
-    def tmpdir(self) -> Path:
+    def tmpdir(self) -> Generator[Path]:
         d = Path(tempfile.mkdtemp())
         yield d
         shutil.rmtree(d, ignore_errors=True)
@@ -1192,7 +1193,7 @@ class TestRelentlessAgentRun:
     """Integration tests for RelentlessAgent.run()."""
 
     @pytest.fixture
-    def tmpdir(self) -> Path:
+    def tmpdir(self) -> Generator[Path]:
         d = Path(tempfile.mkdtemp())
         yield d
         shutil.rmtree(d, ignore_errors=True)

@@ -54,7 +54,6 @@ class TestPromptDetector:
 def _redirect_history(tmpdir: str):
     """Redirect all task_history files to a temp dir."""
     old_hist = th.HISTORY_FILE
-    old_prop = th.PROPOSALS_FILE
     old_model = th.MODEL_USAGE_FILE
     old_file = th.FILE_USAGE_FILE
     old_cache = th._history_cache
@@ -62,18 +61,16 @@ def _redirect_history(tmpdir: str):
 
     th.HISTORY_FILE = Path(tmpdir) / "history.jsonl"
     th._CHAT_EVENTS_DIR = Path(tmpdir) / "chat_events"
-    th.PROPOSALS_FILE = Path(tmpdir) / "proposals.json"
     th.MODEL_USAGE_FILE = Path(tmpdir) / "model_usage.json"
     th.FILE_USAGE_FILE = Path(tmpdir) / "file_usage.json"
     th._history_cache = None
 
-    return old_hist, old_prop, old_model, old_file, old_cache, old_events
+    return old_hist, old_model, old_file, old_cache, old_events
 
 
-def _restore_history(old_hist, old_prop, old_model, old_file, old_cache, old_events):
+def _restore_history(old_hist, old_model, old_file, old_cache, old_events):
     th.HISTORY_FILE = old_hist
     th._CHAT_EVENTS_DIR = old_events
-    th.PROPOSALS_FILE = old_prop
     th.MODEL_USAGE_FILE = old_model
     th.FILE_USAGE_FILE = old_file
     th._history_cache = old_cache
@@ -478,7 +475,6 @@ class TestTaskHistoryBranches:
         self.orig_kiss_dir = th._KISS_DIR
         self.orig_history = th.HISTORY_FILE
         self.orig_events_dir = th._CHAT_EVENTS_DIR
-        self.orig_proposals = th.PROPOSALS_FILE
         self.orig_model_usage = th.MODEL_USAGE_FILE
         self.orig_file_usage = th.FILE_USAGE_FILE
         kiss_dir = Path(self.tmpdir) / ".kiss"
@@ -486,7 +482,6 @@ class TestTaskHistoryBranches:
         th._KISS_DIR = kiss_dir
         th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
         th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
-        th.PROPOSALS_FILE = kiss_dir / "proposals.json"
         th.MODEL_USAGE_FILE = kiss_dir / "model_usage.json"
         th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
         th._history_cache = None
@@ -495,7 +490,6 @@ class TestTaskHistoryBranches:
         th._KISS_DIR = self.orig_kiss_dir
         th.HISTORY_FILE = self.orig_history
         th._CHAT_EVENTS_DIR = self.orig_events_dir
-        th.PROPOSALS_FILE = self.orig_proposals
         th.MODEL_USAGE_FILE = self.orig_model_usage
         th.FILE_USAGE_FILE = self.orig_file_usage
         th._history_cache = None

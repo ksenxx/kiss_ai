@@ -222,7 +222,6 @@ class TestTaskHistory:
         from kiss.agents.sorcar import task_history
 
         self._orig_history_file = task_history.HISTORY_FILE
-        self._orig_proposals_file = task_history.PROPOSALS_FILE
         self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
         self._orig_file_usage_file = task_history.FILE_USAGE_FILE
         self._orig_kiss_dir = task_history._KISS_DIR
@@ -232,7 +231,6 @@ class TestTaskHistory:
         task_history._KISS_DIR = Path(self.tmpdir)
         task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
         task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        task_history.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
 
@@ -244,17 +242,12 @@ class TestTaskHistory:
 
         task_history.HISTORY_FILE = self._orig_history_file
         task_history._CHAT_EVENTS_DIR = self._orig_events_dir
-        task_history.PROPOSALS_FILE = self._orig_proposals_file
         task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
         task_history.FILE_USAGE_FILE = self._orig_file_usage_file
         task_history._KISS_DIR = self._orig_kiss_dir
         task_history._history_cache = None
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_load_proposals_empty(self) -> None:
-        from kiss.agents.sorcar.task_history import _load_proposals
-
-        assert _load_proposals() == []
 
 class TestScanFiles:
     def test_respects_depth_limit(self) -> None:
@@ -336,7 +329,6 @@ class TestTaskHistoryEdgeCases:
         from kiss.agents.sorcar import task_history
 
         self._orig_history_file = task_history.HISTORY_FILE
-        self._orig_proposals_file = task_history.PROPOSALS_FILE
         self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
         self._orig_file_usage_file = task_history.FILE_USAGE_FILE
         self._orig_kiss_dir = task_history._KISS_DIR
@@ -345,7 +337,6 @@ class TestTaskHistoryEdgeCases:
         task_history._KISS_DIR = Path(self.tmpdir)
         task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
         task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        task_history.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
         task_history._history_cache = None
@@ -355,20 +346,11 @@ class TestTaskHistoryEdgeCases:
 
         task_history.HISTORY_FILE = self._orig_history_file
         task_history._CHAT_EVENTS_DIR = self._orig_events_dir
-        task_history.PROPOSALS_FILE = self._orig_proposals_file
         task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
         task_history.FILE_USAGE_FILE = self._orig_file_usage_file
         task_history._KISS_DIR = self._orig_kiss_dir
         task_history._history_cache = None
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_load_proposals_non_list_json(self) -> None:
-        """Test _load_proposals when file contains non-list JSON."""
-        from kiss.agents.sorcar import task_history
-        from kiss.agents.sorcar.task_history import _load_proposals
-
-        task_history.PROPOSALS_FILE.write_text('{"key": "value"}')
-        assert _load_proposals() == []
 
     def test_append_task_to_md_creates_file(self) -> None:
         """Test _append_task_to_md when file doesn't exist."""
@@ -623,7 +605,6 @@ class TestTaskHistoryUncoveredBranches:
         from kiss.agents.sorcar import task_history
 
         self._orig_history_file = task_history.HISTORY_FILE
-        self._orig_proposals_file = task_history.PROPOSALS_FILE
         self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
         self._orig_file_usage_file = task_history.FILE_USAGE_FILE
         self._orig_kiss_dir = task_history._KISS_DIR
@@ -633,7 +614,6 @@ class TestTaskHistoryUncoveredBranches:
         task_history._KISS_DIR = Path(self.tmpdir)
         task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
         task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        task_history.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
         task_history._history_cache = None
@@ -643,7 +623,6 @@ class TestTaskHistoryUncoveredBranches:
 
         task_history.HISTORY_FILE = self._orig_history_file
         task_history._CHAT_EVENTS_DIR = self._orig_events_dir
-        task_history.PROPOSALS_FILE = self._orig_proposals_file
         task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
         task_history.FILE_USAGE_FILE = self._orig_file_usage_file
         task_history._KISS_DIR = self._orig_kiss_dir

@@ -12,7 +12,7 @@ find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsi
 
 ## documentation update
 
-Can you carefully read all *.md files, except API.md, in the project and check their consistency against the code in the project, grammar, and correctness? Fix them with precision.
+Can you carefully read all \*.md files, except API.md, in the project and check their consistency against the code in the project, grammar, and correctness? Fix them with precision.
 
 ## check
 

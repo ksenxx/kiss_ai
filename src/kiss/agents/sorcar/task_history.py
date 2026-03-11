@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.jsonl"
 _CHAT_EVENTS_DIR = _KISS_DIR / "chat_events"
-PROPOSALS_FILE = _KISS_DIR / "proposed_tasks.json"
+
 MODEL_USAGE_FILE = _KISS_DIR / "model_usage.json"
 MAX_HISTORY = 2000
 
@@ -275,24 +275,6 @@ def _set_latest_chat_events(
         except OSError:
             logger.debug("Exception caught", exc_info=True)
 
-
-def _load_proposals() -> list[str]:
-    if PROPOSALS_FILE.exists():
-        try:
-            data = json.loads(PROPOSALS_FILE.read_text())
-            if isinstance(data, list):
-                return [str(t) for t in data if isinstance(t, str) and t.strip()][:5]
-        except (json.JSONDecodeError, OSError):
-            logger.debug("Exception caught", exc_info=True)
-    return []
-
-
-def _save_proposals(proposals: list[str]) -> None:
-    try:
-        _ensure_kiss_dir()
-        PROPOSALS_FILE.write_text(json.dumps(proposals))
-    except OSError:
-        logger.debug("Exception caught", exc_info=True)
 
 
 def _load_json_dict(path: Path) -> dict:

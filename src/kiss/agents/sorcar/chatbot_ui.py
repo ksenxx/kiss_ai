@@ -412,7 +412,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   letter-spacing:0.04em;margin-bottom:5px;display:block;
 }
 .chip-label.recent{color:rgba(88,166,255,0.7)}
-.chip-label.suggested{color:rgba(188,140,255,0.7)}
+
 #sidebar{
   position:fixed;right:0;top:0;bottom:0;width:340px;
   background:rgba(12,12,14,0.95);backdrop-filter:blur(24px);
@@ -426,12 +426,12 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
-#history-btn,#proposals-btn,#run-prompt-btn{
+#history-btn,#run-prompt-btn{
   background:none;border:none;
   color:rgba(255,255,255,0.3);cursor:pointer;
   padding:4px;transition:color 0.15s,opacity 0.15s;display:flex;align-items:center;
 }
-#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.6)}
+#history-btn:hover{color:rgba(255,255,255,0.6)}
 #run-prompt-btn:not(:disabled):hover{color:rgba(34,197,94,0.9)}
 #run-prompt-btn:disabled{opacity:0.15;cursor:not-allowed}
 #run-prompt-btn:not(:disabled){color:rgba(34,197,94,0.7)}
@@ -560,7 +560,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel header{padding:8px 12px}
 #assistant-panel .logo{font-size:11px}
 #assistant-panel .status{font-size:11px}
-#assistant-panel #history-btn svg,#assistant-panel #proposals-btn svg{width:12px;height:12px}
+#assistant-panel #history-btn svg{width:12px;height:12px}
 #assistant-panel #welcome{padding:20px 14px}
 #assistant-panel #welcome h2{font-size:17px;margin-bottom:3px;letter-spacing:-0.3px}
 #assistant-panel #welcome p{font-size:11px;margin-bottom:14px}
@@ -858,15 +858,15 @@ body{background:var(--bg)}
   box-shadow:0 4px 20px rgba(0,0,0,0.25);
 }
 #assistant-panel .chip-label.recent{color:rgba(var(--accent-rgb),0.75)}
-#assistant-panel .chip-label.suggested{color:rgba(var(--purple-rgb),0.75)}
+
 #assistant-panel #sidebar{
   background:rgba(var(--bg2-rgb),0.97);border-left:1px solid var(--border);
 }
 #assistant-panel #sidebar-overlay{background:rgba(0,0,0,0.35)}
-#assistant-panel #history-btn,#assistant-panel #proposals-btn{
+#assistant-panel #history-btn{
   color:rgba(var(--fg-rgb),0.35);
 }
-#assistant-panel #history-btn:hover,#assistant-panel #proposals-btn:hover{
+#assistant-panel #history-btn:hover{
   color:rgba(var(--fg-rgb),0.6);
 }
 #assistant-panel #run-prompt-btn:not(:disabled){color:rgba(var(--green-rgb),0.7)}
@@ -941,7 +941,6 @@ var btn=document.getElementById('send-btn');
 var stopBtn=document.getElementById('stop-btn');
 var clearBtn=document.getElementById('clear-btn');
 var ac=document.getElementById('autocomplete');var rl=document.getElementById('recent-list');
-var pl=document.getElementById('proposed-list');
 var histSearch=document.getElementById('history-search');
 var allTasks=[];
 var modelLabel=document.getElementById('model-label');
@@ -1020,14 +1019,7 @@ inp.addEventListener('input',function(){
     ghostTimer2=setTimeout(fetchGhost,200);
   }
 });
-var sidebarHistSec=document.getElementById('sidebar-history-sec');
-var sidebarPropSec=document.getElementById('sidebar-proposals-sec');
-function toggleSidebar(mode){
-  if(mode){
-    sidebarHistSec.style.display=mode==='proposals'?'none':'';
-    sidebarPropSec.style.display=mode==='history'?'none':'';
-    if(sidebar.classList.contains('open'))return;
-  }
+function toggleSidebar(){
   sidebar.classList.toggle('open');
   sidebarOverlay.classList.toggle('open');
 }
@@ -1125,7 +1117,7 @@ function handleEvent(ev){
     ||t==='prompt')removeSpinner();
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
-  case'proposed_updated':loadProposed();loadWelcome();break;
+
   case'theme_changed':applyTheme(ev);break;
   case'focus_chatbox':window.focus();inp.focus();break;
   case'external_run':
@@ -1182,12 +1174,12 @@ function handleEvent(ev){
     var err=mkEl('div','ev tr err');
     err.innerHTML='<div class="rl fail">ERROR</div>'+esc(ev.text||'Unknown error');
     O.appendChild(err);
-    setReady('Error');loadTasks();loadProposed();break}
+    setReady('Error');loadTasks();break}
   case'task_stopped':{
     var stEl=mkEl('div','ev tr err');
     stEl.innerHTML='<div class="rl fail">STOPPED</div>Agent execution stopped by user';
     O.appendChild(stEl);
-    setReady('Stopped');loadTasks();loadProposed();break}
+    setReady('Stopped');loadTasks();break}
   default:{
     if(t==='tool_call'){
       lastToolName=ev.name||'';
@@ -1698,41 +1690,21 @@ function renderTasks(q){
     +(ql?'No matches':'No recent tasks')+'</div>'}
 }
 histSearch.addEventListener('input',function(){renderTasks(this.value)});
-function loadProposed(){
-  fetch('/proposed_tasks').then(function(r){return r.json()}).then(function(tasks){
-    pl.innerHTML='';
-    if(!tasks.length){pl.innerHTML='<div class="sidebar-empty">No suggestions yet</div>';return}
-    tasks.forEach(function(t){
-      var d=mkEl('div','sidebar-item');
-      d.textContent=t;d.title=t;
-      d.addEventListener('click',function(){inp.value=t;inp.focus();toggleSidebar()});
-      pl.appendChild(d);
-    });
-  }).catch(function(){});
-}
+
 function loadWelcome(){
   if(!suggestionsEl)return;
-  Promise.all([
-    fetch('/tasks').then(function(r){return r.json()}).catch(function(){return []}),
-    fetch('/proposed_tasks').then(function(r){return r.json()}).catch(function(){return []})
-  ]).then(function(res){
-    var tasks=res[0],proposed=res[1];
+  fetch('/tasks').then(function(r){return r.json()})
+  .catch(function(){return []}).then(function(tasks){
     suggestionsEl.innerHTML='';
-    var items=[];
-    proposed.slice(0,5).forEach(function(t){items.push({text:t,type:'suggested'})});
-    tasks.slice(0,5).forEach(function(t,i){
+    tasks.slice(0,10).forEach(function(t,i){
       var hasEvents=typeof t==='object'&&t.has_events;
-      items.push({text:typeof t==='string'?t:(t.task||''),type:'recent',idx:i,hasEvents:hasEvents});
-    });
-    items.slice(0,10).forEach(function(item){
+      var text=typeof t==='string'?t:(t.task||'');
       var chip=mkEl('div','suggestion-chip');
-      chip.title=item.text;
-      chip.innerHTML='<span class="chip-label '+item.type+'">'
-        +(item.type==='recent'?'Recent':'Suggested')+'</span>'
-        +esc(item.text);
+      chip.title=text;
+      chip.innerHTML='<span class="chip-label recent">Recent</span>'+esc(text);
       chip.addEventListener('click',function(){
-        if(item.type==='recent'&&item.hasEvents){replayTaskEvents(item.idx,item.text)}
-        else{inp.value=item.text;inp.focus()}
+        if(hasEvents){replayTaskEvents(i,text)}
+        else{inp.value=text;inp.focus()}
       });
       suggestionsEl.appendChild(chip);
     });
@@ -1816,7 +1788,7 @@ function loadTheme(){
   fetch('/theme').then(function(r){return r.json()}).then(applyTheme).catch(function(){});
 }
 loadTheme();
-connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
+connectSSE();loadModels();loadTasks();loadWelcome();inp.focus();
 window.addEventListener('beforeunload',function(){navigator.sendBeacon('/closing','')});
 var runPromptBtn=document.getElementById('run-prompt-btn');
 var _promptPath='';
@@ -1969,10 +1941,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           autocomplete="off"/>
         <div id="recent-list"></div>
       </div>
-      <div class="sidebar-section" id="sidebar-proposals-sec">
-        <div class="sidebar-hdr">Suggested Tasks</div>
-        <div id="proposed-list"></div>
-      </div>
+
     </div>
     <header>
       <div class="logo">KISS Sorcar</div>
@@ -2021,19 +1990,13 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
               -8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2
               2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
+            <button id="history-btn" onclick="toggleSidebar()" title="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
             </button>
-            <button id="proposals-btn" onclick="toggleSidebar('proposals')" title="Suggested tasks">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
-                <path d="M2 12l10 5 10-5"/>
-              </svg>
-            </button>
+
             <button id="run-prompt-btn" title="Run current file as prompt" disabled>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
                 stroke="none">

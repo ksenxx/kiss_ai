@@ -129,15 +129,6 @@ class TestServerTasks:
             assert resp.status_code == 200
 
 
-class TestServerProposedTasks:
-    def test_proposed_tasks(self, server):
-        base_url, _, _ = server
-        resp = requests.get(f"{base_url}/proposed_tasks", timeout=5)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, list)
-
-
 class TestServerSuggestions:
     def test_suggestions_empty_query(self, server):
         base_url, _, _ = server
