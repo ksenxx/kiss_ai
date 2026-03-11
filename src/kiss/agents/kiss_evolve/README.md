@@ -189,7 +189,7 @@ class CodeVariant:
 
 ## Configuration
 
-Default values for all parameters can be configured via `DEFAULT_CONFIG.kiss_evolve` in `src/kiss/agents/kiss_evolve/config.py`. See the API Reference above for parameter descriptions and defaults.
+Default values for all parameters can be configured via `DEFAULT_CONFIG.kiss_evolve` in [`src/kiss/agents/kiss_evolve/config.py`](config.py). See the API Reference above for parameter descriptions and defaults.
 
 ## Advanced Features
 

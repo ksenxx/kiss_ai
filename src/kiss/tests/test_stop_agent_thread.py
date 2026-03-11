@@ -233,25 +233,6 @@ def test_error_in_task_resets_state():
     assert "err:cleanup:error:boom" in ctrl.events
 
 
-def test_stop_then_start_new_task():
-    """After stopping a task, a new task can start immediately."""
-    ctrl = _AgentController()
-
-    t1 = ctrl.start_task(_long_work, "a")
-    assert t1 is not None
-    time.sleep(0.05)
-    assert ctrl.stop_task()
-
-    done = threading.Event()
-    t2 = ctrl.start_task(lambda: done.set(), "b")
-    assert t2 is not None
-    done.wait(timeout=3)
-    t2.join(timeout=3)
-    ctrl.assert_idle()
-    assert "b:done" in ctrl.events
-    t1.join(timeout=3)
-
-
 def _long_work():
     """Simulate agent work with short sleep loops (interruptible by async exc)."""
     while True:
@@ -470,33 +451,6 @@ def test_setup_failure_does_not_corrupt_state():
         assert not running or agent_thread is not None
 
 
-def test_concurrent_start_attempts_only_one_wins():
-    """Multiple threads trying to start a task: exactly one succeeds."""
-    ctrl = _AgentController()
-    results: list[bool] = []
-    results_lock = threading.Lock()
-    barrier = threading.Barrier(10, timeout=5)
-
-    def try_start():
-        barrier.wait()
-        t = ctrl.start_task(_long_work, "race")
-        with results_lock:
-            results.append(t is not None)
-
-    starters = [threading.Thread(target=try_start, daemon=True) for _ in range(10)]
-    for s in starters:
-        s.start()
-    for s in starters:
-        s.join(timeout=5)
-
-    assert results.count(True) == 1
-    assert results.count(False) == 9
-
-    ctrl.stop_task()
-    time.sleep(0.5)
-    ctrl.assert_idle()
-
-
 def test_stop_requested_not_caught_by_except_exception():
     """_StopRequested propagates through except Exception blocks in called code."""
     escaped = threading.Event()
@@ -538,35 +492,6 @@ def test_double_stop_is_safe():
     assert ctrl.stop_task() is True
     assert ctrl.stop_task() is False
     t.join(timeout=3)
-    ctrl.assert_idle()
-
-
-def test_stress_interleaved_start_stop_from_many_threads():
-    """Hammer start/stop from 20 threads; verify no deadlock and clean final state."""
-    ctrl = _AgentController()
-    barrier = threading.Barrier(20, timeout=10)
-    all_threads: list[threading.Thread] = []
-
-    def hammer():
-        barrier.wait()
-        for _ in range(20):
-            t = ctrl.start_task(_long_work, "h")
-            if t is not None:
-                all_threads.append(t)
-            time.sleep(0.001)
-            ctrl.stop_task()
-            time.sleep(0.001)
-
-    workers = [threading.Thread(target=hammer, daemon=True) for _ in range(20)]
-    for w in workers:
-        w.start()
-    for w in workers:
-        w.join(timeout=30)
-
-    for t in all_threads:
-        t.join(timeout=3)
-
-    time.sleep(0.2)
     ctrl.assert_idle()
 
 

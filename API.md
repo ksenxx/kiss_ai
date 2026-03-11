@@ -37,6 +37,8 @@
       - [`kiss.agents.autoresearch.autoresearch_agent`](#kissagentsautoresearchautoresearch_agent)
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
       - [`kiss.agents.sorcar.prompt_detector`](#kissagentssorcarprompt_detector)
+  - [`kiss.channels`](#kisschannels)
+    - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
 
 </details>
 
@@ -70,7 +72,7 @@ ______________________________________________________________________
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, session_info: str = '') -> str`
 
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -84,6 +86,7 @@ ______________________________________________________________________
   - `printer`: Optional printer for streaming output. Default is None.
   - `verbose`: Whether to print output to console. Default is None (uses config verbose setting).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
+  - `session_info`: Sub-session label string (e.g. "Session: 1/5") to include in usage info output. Default is empty string.
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
@@ -353,6 +356,15 @@ ______________________________________________________________________
 
 #### `kiss.core.printer` — *Abstract base class and shared utilities for KISS agent printers.*
 
+##### `class StreamEventParser` — Shared parser for LLM stream events used by both console and browser printers.
+
+**Constructor:** `StreamEventParser() -> None`
+
+- **reset_stream_state** — Reset block type and tool buffer state.<br/>`reset_stream_state() -> None`
+- **parse_stream_event** — Parse a stream event, dispatch to on\_\* callbacks, return extracted text.<br/>`parse_stream_event(event: Any) -> str`
+  - `event`: An event object with an `event` dict attribute.
+  - **Returns:** str: Any text content extracted from text or thinking deltas.
+
 ##### `class Printer(ABC)`
 
 - **print** — Render content to the output destination.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
@@ -409,7 +421,7 @@ ______________________________________________________________________
 
 #### `kiss.core.print_to_console` — *Console output formatting for KISS agents.*
 
-##### `class ConsolePrinter(Printer)`
+##### `class ConsolePrinter(StreamEventParser, Printer)`
 
 **Constructor:** `ConsolePrinter(file: Any = None) -> None`
 
@@ -430,7 +442,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.sorcar.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
-##### `class BaseBrowserPrinter(Printer)`
+##### `class BaseBrowserPrinter(StreamEventParser, Printer)`
 
 **Constructor:** `BaseBrowserPrinter() -> None`
 
@@ -1030,5 +1042,72 @@ ______________________________________________________________________
 
 - **analyze** — Analyzes a file to check if it is a prompt.<br/>`analyze(file_path: str) -> tuple[bool, float, list[str]]`
   - **Returns:** (Is Prompt?, Confidence Score, Reasons)
+
+______________________________________________________________________
+
+### `kiss.channels` — *Channel integrations for KISS agents.*
+
+______________________________________________________________________
+
+#### `kiss.channels.slack_agent` — *Slack channel agent for reading and writing messages via Sorcar.*
+
+##### `class SlackChannelAgent` — Agent that bridges Slack channels with the Sorcar chat window.
+
+**Constructor:** `SlackChannelAgent() -> None`
+
+- **get_tools** — Return the list of tools for use by SorcarAgent.<br/>`get_tools() -> list`
+
+  - **Returns:** List of callable tool functions.
+
+- **start_polling** — Start polling a Slack channel for new messages in the background.<br/>`start_polling(channel: str, workspace: str | None = None, interval: float = 10.0, callback: Any = None) -> str`
+
+  - `channel`: Channel name to poll.
+  - `workspace`: Workspace name.
+  - `interval`: Polling interval in seconds.
+  - `callback`: Called with (channel, messages_text) when new messages arrive.
+  - **Returns:** Status message.
+
+- **stop_polling** — Stop polling a Slack channel.<br/>`stop_polling(channel: str, workspace: str | None = None) -> str`
+
+  - `channel`: Channel name to stop polling.
+  - `workspace`: Workspace name.
+  - **Returns:** Status message.
+
+- **stop_all_polling** — Stop all active polling threads.<br/>`stop_all_polling() -> None`
+  **`add_workspace`** — Add or update a Slack workspace configuration. Validates the token and saves if valid.<br/>`def add_workspace(name: str, token: str) -> str`
+
+- `name`: A friendly name for this workspace.
+
+- `token`: Slack bot token (xoxb-...).
+
+- **Returns:** Status message indicating success or failure.
+
+**`remove_workspace`** — Remove a Slack workspace configuration.<br/>`def remove_workspace(name: str) -> str`
+
+- `name`: The workspace name to remove.
+- **Returns:** Status message indicating success or failure.
+
+**`list_workspaces`** — List all configured Slack workspaces.<br/>`def list_workspaces() -> str`
+
+- **Returns:** Formatted string listing workspaces, or a message if none configured.
+
+**`list_channels`** — List public channels in a Slack workspace.<br/>`def list_channels(workspace: str | None = None) -> str`
+
+- `workspace`: Workspace name. Auto-selects if only one workspace configured.
+- **Returns:** Formatted string listing channels.
+
+**`read_messages`** — Read recent messages from a Slack channel.<br/>`def read_messages(channel: str, workspace: str | None = None, limit: int = 20) -> str`
+
+- `channel`: Channel name (without #) or channel ID.
+- `workspace`: Workspace name. Auto-selects if only one configured.
+- `limit`: Maximum number of messages to retrieve (default 20).
+- **Returns:** Formatted string with recent messages.
+
+**`send_message`** — Send a message to a Slack channel.<br/>`def send_message(channel: str, text: str, workspace: str | None = None) -> str`
+
+- `channel`: Channel name (without #) or channel ID.
+- `text`: Message text to send.
+- `workspace`: Workspace name. Auto-selects if only one configured.
+- **Returns:** Status message indicating success or failure.
 
 ______________________________________________________________________

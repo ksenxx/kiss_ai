@@ -9,9 +9,10 @@ from pathlib import Path
 
 import yaml
 
-from kiss.agents.sorcar.task_history import _get_task_history_md_path
+from kiss.agents.sorcar.task_history import HISTORY_FILE
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.channels.slack_agent import SlackChannelAgent
 from kiss.core import config as config_module
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
@@ -27,6 +28,7 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: DockerManager | None = None
+        self.slack_agent = SlackChannelAgent()
 
     def _get_tools(self) -> list:
         def _stream(text: str) -> None:
@@ -38,6 +40,7 @@ class SorcarAgent(RelentlessAgent):
         tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
+        tools.extend(self.slack_agent.get_tools())
         return tools
 
     def _reset(
@@ -106,8 +109,7 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool = WebUseTool(headless=actual_headless)
 
         try:
-            history_path = _get_task_history_md_path()
-            system_instructions = SYSTEM_PROMPT + f"\nTask History File: {history_path}\n"
+            system_instructions = SYSTEM_PROMPT + f"\nTask History File: {HISTORY_FILE}\n"
             prompt = prompt_template
             if attachments:
                 pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")

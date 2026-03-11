@@ -1,6 +1,5 @@
 """Console output formatting for KISS agents."""
 
-import json
 import logging
 import sys
 from typing import Any
@@ -14,6 +13,7 @@ from rich.text import Text
 
 from kiss.core.printer import (
     Printer,
+    StreamEventParser,
     extract_extras,
     extract_path_and_lang,
     truncate_result,
@@ -21,21 +21,17 @@ from kiss.core.printer import (
 
 logger = logging.getLogger(__name__)
 
-class ConsolePrinter(Printer):
+class ConsolePrinter(StreamEventParser, Printer):
     def __init__(self, file: Any = None) -> None:
+        StreamEventParser.__init__(self)
         self._console = Console(highlight=False, file=file)
         self._file = file or sys.stdout
         self._mid_line = False
-        self._current_block_type = ""
-        self._tool_name = ""
-        self._tool_json_buffer = ""
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
         self._mid_line = False
-        self._current_block_type = ""
-        self._tool_name = ""
-        self._tool_json_buffer = ""
+        self.reset_stream_state()
 
     @staticmethod
     def _format_result_content(raw: str) -> Group | str:
@@ -198,56 +194,32 @@ class ConsolePrinter(Printer):
         self._console.rule(style=style)
 
     def _handle_stream_event(self, event: Any) -> str:
-        evt = event.event
-        evt_type = evt.get("type", "")
-        text = ""
+        return self.parse_stream_event(event)
 
-        if evt_type == "content_block_start":
-            block = evt.get("content_block", {})
-            block_type = block.get("type", "")
-            self._current_block_type = block_type
-            if block_type == "thinking":
-                self._flush_newline()
-                self._console.rule("Thinking", style="dim cyan", align="center")
-                self._console.print()
-            elif block_type == "tool_use":
-                self._tool_name = block.get("name", "?")
-                self._tool_json_buffer = ""
-                self._flush_newline()
-                self._console.print(f"[bold blue]{self._tool_name}[/bold blue] ", end="")
-                self._mid_line = True
+    def _on_thinking_start(self) -> None:
+        self._flush_newline()
+        self._console.rule("Thinking", style="dim cyan", align="center")
+        self._console.print()
 
-        elif evt_type == "content_block_delta":
-            delta = evt.get("delta", {})
-            delta_type = delta.get("type", "")
-            if delta_type == "thinking_delta":
-                text = delta.get("thinking", "")
-            elif delta_type == "text_delta":
-                text = delta.get("text", "")
-            elif delta_type == "input_json_delta":
-                partial = delta.get("partial_json", "")
-                self._tool_json_buffer += partial
-                self._stream_delta(partial, style="dim")
+    def _on_thinking_end(self) -> None:
+        self._flush_newline()
+        self._console.rule(style="dim cyan")
+        self._console.print()
 
-        elif evt_type == "content_block_stop":
-            block_type = self._current_block_type
-            if block_type == "thinking":
-                self._flush_newline()
-                self._console.rule(style="dim cyan")
-                self._console.print()
-            elif block_type == "tool_use":
-                self._flush_newline()
-                try:
-                    tool_input = json.loads(self._tool_json_buffer)
-                except (json.JSONDecodeError, ValueError):
-                    logger.debug("Exception caught", exc_info=True)
-                    tool_input = {"_raw": self._tool_json_buffer}
-                self._format_tool_call(self._tool_name, tool_input)
-            else:
-                self._flush_newline()
-            self._current_block_type = ""
+    def _on_tool_use_start(self, name: str) -> None:
+        self._flush_newline()
+        self._console.print(f"[bold blue]{name}[/bold blue] ", end="")
+        self._mid_line = True
 
-        return text
+    def _on_tool_json_delta(self, partial: str) -> None:
+        self._stream_delta(partial, style="dim")
+
+    def _on_tool_use_end(self, name: str, tool_input: dict) -> None:
+        self._flush_newline()
+        self._format_tool_call(name, tool_input)
+
+    def _on_text_block_end(self) -> None:
+        self._flush_newline()
 
     def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
