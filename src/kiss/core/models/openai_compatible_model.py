@@ -22,8 +22,13 @@ logger = logging.getLogger(__name__)
 
 # DeepSeek R1 reasoning models use <think>...</think> tags for chain-of-thought
 # These models need text-based tool calling instead of native function calling
+# API-level model names (without provider routing prefixes) that use
+# <think>…</think> reasoning tags and need text-based tool calling.
+# _is_deepseek_reasoning_model() checks _api_model_name (which strips
+# the "openrouter/" prefix) against this set, so entries here should
+# match the name sent to the provider API.
 DEEPSEEK_REASONING_MODELS = {
-    # OpenRouter DeepSeek R1 models
+    # OpenRouter / direct DeepSeek R1 models (API name after "openrouter/" strip)
     "deepseek/deepseek-r1",
     "deepseek/deepseek-r1-0528",
     "deepseek/deepseek-r1-turbo",
@@ -33,15 +38,15 @@ DEEPSEEK_REASONING_MODELS = {
     "deepseek/deepseek-r1-distill-qwen-14b",
     "deepseek/deepseek-r1-distill-qwen-32b",
     "deepseek/deepseek-r1-distill-llama-70b",
-    # Together AI DeepSeek R1 models
-    "DeepSeek-R1",
-    "DeepSeek-R1-0528-tput",
-    "DeepSeek-R1-Distill-Llama-8B",
-    "DeepSeek-R1-Distill-Qwen-1.5B",
-    "DeepSeek-R1-Distill-Qwen-7B",
-    "DeepSeek-R1-Distill-Qwen-14B",
-    "DeepSeek-R1-Distill-Qwen-32B",
-    "DeepSeek-R1-Distill-Llama-70B",
+    # Together AI DeepSeek R1 models (full model name = API name)
+    "deepseek-ai/DeepSeek-R1",
+    "deepseek-ai/DeepSeek-R1-0528-tput",
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
 }
 
 
@@ -265,10 +270,13 @@ class OpenAICompatibleModel(Model):
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
 
+        Uses ``_api_model_name`` (which strips the ``openrouter/`` routing
+        prefix) so that models accessed via OpenRouter are matched correctly.
+
         Returns:
-            True if the model name is in the DEEPSEEK_REASONING_MODELS set, False otherwise.
+            True if the API model name is in DEEPSEEK_REASONING_MODELS.
         """
-        return self.model_name in DEEPSEEK_REASONING_MODELS
+        return self._api_model_name in DEEPSEEK_REASONING_MODELS
 
     def _is_openrouter_anthropic(self) -> bool:
         """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""

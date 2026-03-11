@@ -216,8 +216,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 _DEFAULT_TASK = """
-can you login to gmail using the username 'kissagent1@gmail.com' and
-password 'For AI Assistant.' and read the messages.
+can you find what the current weather is in San Francisco and summarize it?
 """
 
 
