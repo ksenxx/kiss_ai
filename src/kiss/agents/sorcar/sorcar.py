@@ -36,20 +36,19 @@ from kiss.agents.sorcar.code_server import (
 )
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
-    SAMPLE_TASKS,
+    _RECENT_CACHE_SIZE,
     _add_task,
-    _append_task_to_md,
     _cleanup_stale_cs_dirs,
-    _init_task_history_md,
+    _count_history,
+    _get_history_entry,
     _load_file_usage,
     _load_history,
     _load_last_model,
     _load_model_usage,
-    _load_proposals,
     _load_task_chat_events,
     _record_file_usage,
     _record_model_usage,
-    _save_proposals,
+    _search_history,
     _set_latest_chat_events,
 )
 from kiss.core import config as config_module
@@ -161,13 +160,9 @@ def run_chatbot(
     file_cache: list[str] = _scan_files(actual_work_dir)
     agent_thread: threading.Thread | None = None
     current_stop_event: threading.Event | None = None
-    proposed_tasks: list[str] = _load_proposals()
-    proposed_lock = threading.Lock()
     selected_model = _load_last_model() or default_model
     last = _load_last_model()
     selected_model = last if last and last not in _INTERNAL_MODELS else default_model
-
-    _init_task_history_md()
 
     # Clean up stale code-server data directories synchronously at startup
     _cleanup_stale_cs_dirs()
@@ -389,42 +384,6 @@ def run_chatbot(
         nonlocal file_cache
         file_cache = _scan_files(actual_work_dir)
 
-    def refresh_proposed_tasks() -> None:
-        nonlocal proposed_tasks
-        history = _load_history()
-        if not history:  # pragma: no cover – empty history on fresh install
-            with proposed_lock:
-                proposed_tasks = []
-            printer.broadcast({"type": "proposed_updated"})
-            return
-        task_list = "\n".join(f"- {e['task']}" for e in history[:20])
-        agent = KISSAgent("Task Proposer")
-        try:
-            result = agent.run(
-                model_name=_FAST_MODEL,
-                prompt_template=(
-                    "Based on these past tasks a developer has worked on, suggest 5 new "
-                    "tasks they might want to do next. Tasks should be natural follow-ups, "
-                    "related improvements, or complementary work.\n\n"
-                    "Past tasks:\n{task_list}\n\n"
-                    "Return ONLY a JSON array of 5 short task description strings. "
-                    'Example: ["Add unit tests for X", "Refactor Y module"]'
-                ),
-                arguments={"task_list": task_list},
-                is_agentic=False,
-            )
-            start = result.index("[")
-            end = result.index("]", start) + 1
-            proposals = json.loads(result[start:end])
-            proposals = [str(p) for p in proposals if isinstance(p, str) and p.strip()][:5]
-        except Exception:  # pragma: no cover – LLM API failure
-            logger.debug("Exception caught", exc_info=True)
-            proposals = []
-        with proposed_lock:
-            proposed_tasks = proposals
-        _save_proposals(proposals)
-        printer.broadcast({"type": "proposed_updated"})
-
     def generate_followup(task: str, result: str) -> None:
         try:
             agent = KISSAgent("Followup Proposer")
@@ -486,7 +445,7 @@ def run_chatbot(
                 if not printer.has_clients():
                     if no_client_since is None:
                         no_client_since = time.monotonic()
-                    elif time.monotonic() - no_client_since >= 10.0:
+                    elif time.monotonic() - no_client_since >= 2.0:
                         _schedule_shutdown()
                 else:
                     no_client_since = None
@@ -559,7 +518,6 @@ def run_chatbot(
         finally:
             printer._thread_local.stop_event = None
             chat_events = printer.stop_recording()
-            _append_task_to_md(task, result_text)
             with running_lock:
                 if agent_thread is not current_thread:
                     # Stopped externally; stop_agent already broadcast
@@ -593,10 +551,6 @@ def run_chatbot(
             except Exception:  # pragma: no cover – merge view error
                 logger.debug("Exception caught", exc_info=True)
             refresh_file_cache()
-            try:
-                refresh_proposed_tasks()
-            except Exception:  # pragma: no cover – proposal generation error
-                logger.debug("Exception caught", exc_info=True)
 
     def stop_agent() -> bool:
         """Kill the current agent thread and reset state for a new task.
@@ -685,7 +639,7 @@ def run_chatbot(
         if shutdown_handle is not None:
             shutdown_handle.cancel()
         loop = asyncio.get_event_loop()
-        shutdown_handle = loop.call_later(10.0, _do_shutdown)
+        shutdown_handle = loop.call_later(1.0, _do_shutdown)
 
     def _schedule_shutdown() -> None:  # pragma: no cover – timer-triggered shutdown
         if printer.has_clients():
@@ -848,20 +802,11 @@ def run_chatbot(
             return JSONResponse((frequent + rest)[:20])
         if not query:
             return JSONResponse([])
-        q_lower = query.lower()
         results = []
-        for entry in _load_history():
-            task = str(entry["task"])
-            if q_lower in task.lower():
-                results.append({"type": "task", "text": task})
-                if len(results) >= 5:
-                    break
-        with proposed_lock:
-            for t in proposed_tasks:
-                if q_lower in t.lower():
-                    results.append({"type": "suggested", "text": t})
+        for entry in _search_history(query, limit=5):
+            results.append({"type": "task", "text": str(entry["task"])})
         words = query.split()
-        last_word = words[-1].lower() if words else q_lower
+        last_word = words[-1].lower() if words else query.lower()
         if last_word and len(last_word) >= 2:
             count = 0
             for path in file_cache:
@@ -873,11 +818,31 @@ def run_chatbot(
         return JSONResponse(results)
 
     async def tasks(request: Request) -> JSONResponse:
-        history = _load_history()
+        """Return task history with optional limit, offset, and search.
+
+        Query params:
+            limit: max entries (default 100, 0 = all)
+            offset: skip first N entries (default 0)
+            q: search substring (case-insensitive)
+        """
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+        except (ValueError, TypeError):
+            limit = 100
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+        except (ValueError, TypeError):
+            offset = 0
+        query = request.query_params.get("q", "")
+        if query:
+            history = _search_history(query, limit=limit + offset)
+        else:
+            history = _load_history(limit=limit + offset)
+        page = history[offset : offset + limit] if limit > 0 else history[offset:]
         return JSONResponse(
             [
                 {"task": e["task"], "has_events": bool(e.get("has_events"))}
-                for e in history
+                for e in page
             ]
         )
 
@@ -887,22 +852,15 @@ def run_chatbot(
             idx = int(request.query_params.get("idx", "0"))
         except (ValueError, TypeError):
             return JSONResponse({"error": "Invalid index"}, status_code=400)
-        history = _load_history()
-        if idx < 0 or idx >= len(history):
+        entry = _get_history_entry(idx)
+        if entry is None:
             return JSONResponse({"error": "Index out of range"}, status_code=404)
-        events = _load_task_chat_events(str(history[idx]["task"]))
+        events = _load_task_chat_events(str(entry["task"]))
         return JSONResponse(events)
-
-    async def proposed_tasks_endpoint(request: Request) -> JSONResponse:
-        with proposed_lock:
-            tasks_list = list(proposed_tasks)
-        if not tasks_list:  # pragma: no cover – depends on LLM response timing
-            tasks_list = [str(t["task"]) for t in SAMPLE_TASKS[:5]]
-        return JSONResponse(tasks_list)
 
     def _fast_complete(raw_query: str, query: str) -> str:
         query_lower = query.lower()
-        for entry in _load_history():
+        for entry in _load_history(limit=_RECENT_CACHE_SIZE):
             task = str(entry.get("task", ""))
             if task.lower().startswith(query_lower) and len(task) > len(query):
                 return task[len(query):]
@@ -926,8 +884,8 @@ def run_chatbot(
             return JSONResponse({"suggestion": fast})
 
         def _generate() -> str:
-            history = _load_history()
-            task_list = "\n".join(f"- {e['task']}" for e in history[:20])
+            history = _load_history(limit=20)
+            task_list = "\n".join(f"- {e['task']}" for e in history)
             files_list = "\n".join(file_cache[:200])
             active_path = _read_active_file(cs_data_dir)
             active_content = ""
@@ -1002,6 +960,29 @@ def run_chatbot(
             )
         )
         return JSONResponse({"models": models_list, "selected": selected_model})
+
+    async def get_ui_state(request: Request) -> JSONResponse:
+        """Return saved UI state (divider position, etc.)."""
+        ui_state_file = os.path.join(cs_data_dir, "ui-state.json")
+        try:
+            if os.path.exists(ui_state_file):
+                with open(ui_state_file) as f:
+                    return JSONResponse(json.load(f))
+        except (OSError, json.JSONDecodeError):
+            logger.debug("Exception caught", exc_info=True)
+        return JSONResponse({})
+
+    async def save_ui_state(request: Request) -> JSONResponse:
+        """Save UI state (divider position, etc.)."""
+        body = await request.json()
+        ui_state_file = os.path.join(cs_data_dir, "ui-state.json")
+        try:
+            Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
+            with open(ui_state_file, "w") as f:
+                json.dump(body, f)
+        except OSError:
+            logger.debug("Exception caught", exc_info=True)
+        return JSONResponse({"status": "ok"})
 
     async def closing(request: Request) -> JSONResponse:
         """Handle browser tab/window closing. Schedule a quick shutdown."""
@@ -1208,7 +1189,8 @@ def run_chatbot(
 
         def _generate() -> dict[str, str]:
             cfg = config_module.DEFAULT_CONFIG
-            history = _load_history()
+            total = _count_history()
+            recent_entries = _load_history(limit=5)
             info_parts = [
                 f"Work directory: {actual_work_dir}",
                 f"Selected model: {model}",
@@ -1217,9 +1199,9 @@ def run_chatbot(
                 f"Global max budget: ${cfg.agent.global_max_budget:.2f}",
                 f"Headless browser: {cfg.sorcar.sorcar_agent.headless}",
                 f"Code-server: {'running' if code_server_url else 'not available'}",
-                f"Tasks completed: {len(history)}",
+                f"Tasks completed: {total}",
             ]
-            recent = [str(e["task"]) for e in history[:5]] if history else []
+            recent = [str(e["task"]) for e in recent_entries]
             if recent:  # pragma: no branch – history always has SAMPLE_TASKS fallback
                 info_parts.append("Recent tasks: " + "; ".join(recent))
             config_info = "\n".join(info_parts)
@@ -1256,6 +1238,8 @@ def run_chatbot(
             Route("/run-selection", run_selection, methods=["POST"]),
             Route("/stop", stop_task, methods=["POST"]),
             Route("/open-file", open_file, methods=["POST"]),
+            Route("/ui-state", get_ui_state),
+            Route("/ui-state", save_ui_state, methods=["POST"]),
             Route("/closing", closing, methods=["POST"]),
             Route("/focus-chatbox", focus_chatbox, methods=["POST"]),
             Route("/focus-editor", focus_editor, methods=["POST"]),
@@ -1271,16 +1255,11 @@ def run_chatbot(
             Route("/complete", complete),
             Route("/tasks", tasks),
             Route("/task-events", task_events),
-            Route("/proposed_tasks", proposed_tasks_endpoint),
+
             Route("/models", models_endpoint),
             Route("/theme", theme),
         ]
     )
-
-    try:
-        refresh_proposed_tasks()
-    except Exception:  # pragma: no cover – LLM API failure
-        logger.debug("Exception caught", exc_info=True)
 
     import atexit
 

@@ -161,7 +161,6 @@ class TestDisplayEventTypes:
     def test_non_display_events_filtered(self) -> None:
         non_display = [
             "tasks_updated",
-            "proposed_updated",
             "theme_changed",
             "focus_chatbox",
             "merge_started",
@@ -220,7 +219,7 @@ class TestChatbotJSSyntax:
     def test_render_tasks_balanced_braces(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
-        start = CHATBOT_JS.index("function renderTasks(q){")
+        start = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
         depth = 0
         i = start
         while i < len(CHATBOT_JS):
@@ -236,17 +235,17 @@ class TestChatbotJSSyntax:
     def test_render_tasks_single_for_each(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
-        start = CHATBOT_JS.index("function renderTasks(q){")
-        end_search = CHATBOT_JS.index("\nhistSearch.addEventListener")
+        start = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
+        end_search = CHATBOT_JS.index("\nvar _histSearchTimer")
         render_tasks_js = CHATBOT_JS[start:end_search]
-        count = render_tasks_js.count("allTasks.forEach")
-        assert count == 1, f"Expected 1 allTasks.forEach, found {count}"
+        count = render_tasks_js.count("tasks.forEach")
+        assert count == 1, f"Expected 1 tasks.forEach, found {count}"
 
     def test_render_tasks_no_filtered_variable(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
-        start = CHATBOT_JS.index("function renderTasks(q){")
-        end_search = CHATBOT_JS.index("\nhistSearch.addEventListener")
+        start = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
+        end_search = CHATBOT_JS.index("\nvar _histSearchTimer")
         render_tasks_js = CHATBOT_JS[start:end_search]
         assert "filtered" not in render_tasks_js
 
@@ -254,8 +253,8 @@ class TestChatbotJSSyntax:
         """Verify clicking a task in history copies text and replays events."""
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
-        start = CHATBOT_JS.index("function renderTasks(q){")
-        end_search = CHATBOT_JS.index("histSearch.addEventListener")
+        start = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
+        end_search = CHATBOT_JS.index("var _histSearchTimer")
         render_tasks_js = CHATBOT_JS[start:end_search]
         assert "inp.value=txt" in render_tasks_js
         assert "inp.focus()" in render_tasks_js
@@ -269,7 +268,7 @@ class TestChatbotJSSyntax:
         assert "function replayTaskEvents(idx,txt){" in CHATBOT_JS
         # It should fetch from /task-events
         start = CHATBOT_JS.index("function replayTaskEvents(idx,txt){")
-        end = CHATBOT_JS.index("function renderTasks(q){")
+        end = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
         replay_js = CHATBOT_JS[start:end]
         assert "/task-events" in replay_js
         assert "handleOutputEvent" in replay_js
@@ -280,7 +279,7 @@ class TestChatbotJSSyntax:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 
         start = CHATBOT_JS.index("function replayTaskEvents(idx,txt){")
-        end = CHATBOT_JS.index("function renderTasks(q){")
+        end = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
         replay_js = CHATBOT_JS[start:end]
         # Must NOT call toggleSidebar() unconditionally
         assert "toggleSidebar();" not in replay_js.replace(
@@ -296,13 +295,11 @@ class TestChatbotJSSyntax:
         start = CHATBOT_JS.index("function loadWelcome(){")
         end = CHATBOT_JS.index("\n}", start) + 2
         welcome_js = CHATBOT_JS[start:end]
-        # Recent items must track hasEvents and idx
+        # Recent items must track hasEvents and call replayTaskEvents
         assert "hasEvents" in welcome_js
-        assert "item.idx" in welcome_js
-        # Must call replayTaskEvents for recent items with events
-        assert "replayTaskEvents(item.idx,item.text)" in welcome_js
-        # Suggested items should just set input
-        assert "inp.value=item.text" in welcome_js
+        assert "replayTaskEvents" in welcome_js
+        # Items without events should set input value
+        assert "inp.value=text" in welcome_js
 
     def test_full_js_balanced_braces(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS

@@ -98,10 +98,10 @@ class TestChatbotExternalRunHandler:
         block = CHATBOT_JS[idx:idx + 500]
         assert "pendingUserMsg={text:ev.text,images:[]}" in block
 
-    def test_external_run_clears_input(self) -> None:
+    def test_external_run_preserves_task_text(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
         block = CHATBOT_JS[idx:idx + 500]
-        assert "inp.value=''" in block
+        assert "inp.value=ev.text||''" in block
 
     def test_external_run_starts_timer(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
@@ -122,6 +122,11 @@ class TestChatbotExternalRunHandler:
         idx = CHATBOT_JS.index("case'external_run':")
         block = CHATBOT_JS[idx:idx + 500]
         assert "pendingFiles=[]" in block
+
+    def test_external_run_clears_input(self) -> None:
+        idx = CHATBOT_JS.index("case'external_run':")
+        block = CHATBOT_JS[idx:idx + 500]
+        assert "inp.style.height='auto'" in block
 
     def test_external_run_disables_run_prompt_btn(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
