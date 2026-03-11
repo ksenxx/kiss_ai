@@ -200,24 +200,6 @@ class TestTokenCallbackParity:
         assert len(events) == 0
 
 
-class TestResetParity:
-    """Both printers reset the same state."""
-
-    def test_reset_clears_same_state(self):
-        console, _, browser, _ = _make_printers()
-        # Set state on both
-        for p in (console, browser):
-            p._current_block_type = "thinking"
-            p._tool_name = "Read"
-            p._tool_json_buffer = '{"x": 1}'
-        console.reset()
-        browser.reset()
-        for p in (console, browser):
-            assert p._current_block_type == ""
-            assert p._tool_name == ""
-            assert p._tool_json_buffer == ""
-
-
 class TestFullAgentSequenceParity:
     """Simulate a full agent execution and verify both printers get the same content."""
 

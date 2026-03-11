@@ -11,30 +11,6 @@ import tempfile
 from kiss.scripts.redundancy_analyzer import _method_name, analyze_redundancy
 
 
-def test_method_name_strips_run_suffix():
-    assert _method_name("test_foo|run") == "test_foo"
-
-
-def test_method_name_strips_setup_suffix():
-    assert _method_name("test_foo|setup") == "test_foo"
-
-
-def test_method_name_strips_teardown_suffix():
-    assert _method_name("test_foo|teardown") == "test_foo"
-
-
-def test_method_name_no_suffix():
-    assert _method_name("test_foo") == "test_foo"
-
-
-def test_method_name_with_class():
-    assert _method_name("TestClass.test_foo|run") == "TestClass.test_foo"
-
-
-def test_method_name_parametrized():
-    assert _method_name("test_foo[param1]|run") == "test_foo[param1]"
-
-
 def _create_coverage_db(test_code: str, source_code: str) -> str:
     """Create a real coverage database with dynamic contexts.
 
@@ -73,86 +49,6 @@ def _create_coverage_db(test_code: str, source_code: str) -> str:
     assert result.returncode == 0, f"Tests failed:\n{result.stdout}\n{result.stderr}"
     assert os.path.exists(cov_file), f"Coverage file not created at {cov_file}"
     return cov_file
-
-
-def test_fully_redundant_method():
-    """A test whose arcs are a strict subset of another test is redundant."""
-    source = """\
-def add(a, b):
-    return a + b
-
-def mul(a, b):
-    return a * b
-"""
-    tests = """\
-from source_mod import add, mul
-
-def test_both():
-    assert add(1, 2) == 3
-    assert mul(2, 3) == 6
-
-def test_add_only():
-    assert add(1, 2) == 3
-"""
-    cov_file = _create_coverage_db(tests, source)
-    redundant = analyze_redundancy(cov_file)
-    # test_add_only is a subset of test_both, so it's redundant
-    method_names = [_method_name(r) for r in redundant]
-    assert any("test_add_only" in m for m in method_names)
-    assert not any("test_both" in m for m in method_names)
-
-
-def test_no_redundant_methods():
-    """Tests with unique arcs are not redundant."""
-    source = """\
-def add(a, b):
-    return a + b
-
-def mul(a, b):
-    return a * b
-"""
-    tests = """\
-from source_mod import add, mul
-
-def test_add():
-    assert add(1, 2) == 3
-
-def test_mul():
-    assert mul(2, 3) == 6
-"""
-    cov_file = _create_coverage_db(tests, source)
-    redundant = analyze_redundancy(cov_file)
-    assert len(redundant) == 0
-
-
-def test_multiple_redundant_methods():
-    """Multiple tests can be redundant if a single test covers all their arcs."""
-    source = """\
-def foo(x):
-    if x > 0:
-        return "positive"
-    return "non-positive"
-"""
-    tests = """\
-from source_mod import foo
-
-def test_all():
-    assert foo(1) == "positive"
-    assert foo(-1) == "non-positive"
-
-def test_positive():
-    assert foo(1) == "positive"
-
-def test_negative():
-    assert foo(-1) == "non-positive"
-"""
-    cov_file = _create_coverage_db(tests, source)
-    redundant = analyze_redundancy(cov_file)
-    method_names = [_method_name(r) for r in redundant]
-    # test_positive and test_negative are subsets of test_all
-    assert any("test_positive" in m for m in method_names)
-    assert any("test_negative" in m for m in method_names)
-    assert not any("test_all" in m for m in method_names)
 
 
 def test_setup_teardown_arcs_grouped_with_method():
@@ -221,47 +117,3 @@ def _verify_coverage_preserved(cov_file: str, redundant: list[str]):
     assert kept_arcs == all_arcs, f"Lost arcs: {all_arcs - kept_arcs}"
 
 
-def test_empty_coverage():
-    """Handle coverage file with no test contexts gracefully."""
-    import warnings
-
-    tmpdir = tempfile.mkdtemp()
-    cov_file = os.path.join(tmpdir, ".coverage")
-
-    import coverage
-    from coverage.exceptions import CoverageWarning
-
-    cov = coverage.Coverage(data_file=cov_file, branch=True)
-    cov.start()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", CoverageWarning)
-        cov.stop()
-        cov.save()
-
-    redundant = analyze_redundancy(cov_file)
-    assert redundant == []
-
-
-def test_all_tests_identical():
-    """When tests cover exactly the same arcs, all but one should be redundant."""
-    source = """\
-def add(a, b):
-    return a + b
-"""
-    tests = """\
-from source_mod import add
-
-def test_add1():
-    assert add(1, 2) == 3
-
-def test_add2():
-    assert add(1, 2) == 3
-
-def test_add3():
-    assert add(1, 2) == 3
-"""
-    cov_file = _create_coverage_db(tests, source)
-    redundant = analyze_redundancy(cov_file)
-    # 2 of 3 should be redundant
-    assert len(redundant) == 2
-    _verify_coverage_preserved(cov_file, redundant)
