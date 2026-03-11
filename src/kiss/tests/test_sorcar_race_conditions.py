@@ -722,19 +722,6 @@ class TestTaskHistory:
         th.MODEL_USAGE_FILE.write_text("not json")
         assert th._load_model_usage() == {}
 
-    def test_append_task_to_md(self) -> None:
-        import kiss.core.config as cfg
-        old_artifact = cfg.DEFAULT_CONFIG.agent.artifact_dir
-        try:
-            cfg.DEFAULT_CONFIG.agent.artifact_dir = str(
-                Path(self.tmpdir) / "artifacts"
-            )
-            th._init_task_history_md()
-            th._append_task_to_md("Test task", "done")
-            md_path = th._get_task_history_md_path()
-            assert "Test task" in md_path.read_text()
-        finally:
-            cfg.DEFAULT_CONFIG.agent.artifact_dir = old_artifact
 
 class TestExtractCommandNames:
 

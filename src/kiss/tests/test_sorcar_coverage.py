@@ -90,7 +90,6 @@ class TestTaskHistory:
     # --- model usage ---
     # --- file usage ---
     # --- _load_json_dict ---
-    # --- _append_task_to_md ---
 
     # --- thread safety ---
 # ---------------------------------------------------------------------------
@@ -223,7 +222,7 @@ class TestSetupCodeServerAdditional:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
-# Additional task_history.py coverage - save_history OSError, _init_task_history_md
+# Additional task_history.py coverage - save_history OSError
 # ---------------------------------------------------------------------------
 class TestTaskHistoryAdditional:
     def setup_method(self) -> None:

@@ -352,21 +352,6 @@ class TestTaskHistoryEdgeCases:
         task_history._history_cache = None
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_append_task_to_md_creates_file(self) -> None:
-        """Test _append_task_to_md when file doesn't exist."""
-        from kiss.agents.sorcar.task_history import (
-            _append_task_to_md,
-            _get_task_history_md_path,
-        )
-
-        path = _get_task_history_md_path()
-        if path.exists():
-            path.unlink()
-        _append_task_to_md("new task", "new result")
-        assert path.exists()
-        content = path.read_text()
-        assert "Task History" in content
-        assert "new task" in content
 
 # ---------------------------------------------------------------------------
 # code_server.py - _install_copilot_extension edge cases
