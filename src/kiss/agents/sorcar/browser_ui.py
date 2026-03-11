@@ -1,6 +1,5 @@
 """Shared browser UI components for KISS agent viewers."""
 
-import json
 import logging
 import queue
 import socket
@@ -10,7 +9,13 @@ from typing import Any
 
 import yaml
 
-from kiss.core.printer import Printer, extract_extras, extract_path_and_lang, truncate_result
+from kiss.core.printer import (
+    Printer,
+    StreamEventParser,
+    extract_extras,
+    extract_path_and_lang,
+    truncate_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -434,13 +439,11 @@ def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-class BaseBrowserPrinter(Printer):
+class BaseBrowserPrinter(StreamEventParser, Printer):
     def __init__(self) -> None:
+        StreamEventParser.__init__(self)
         self._clients: list[queue.Queue[dict[str, Any]]] = []
         self._lock = threading.Lock()
-        self._current_block_type = ""
-        self._tool_name = ""
-        self._tool_json_buffer = ""
         self._bash_lock = threading.Lock()
         self._bash_buffer: list[str] = []
         self._bash_last_flush = 0.0
@@ -452,9 +455,7 @@ class BaseBrowserPrinter(Printer):
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
-        self._current_block_type = ""
-        self._tool_name = ""
-        self._tool_json_buffer = ""
+        self.reset_stream_state()
         with self._bash_lock:
             self._bash_buffer.clear()
             if self._bash_flush_timer is not None:
@@ -695,46 +696,19 @@ class BaseBrowserPrinter(Printer):
         self.broadcast(event)
 
     def _handle_stream_event(self, event: Any) -> str:
-        evt = event.event
-        evt_type = evt.get("type", "")
-        text = ""
+        return self.parse_stream_event(event)
 
-        if evt_type == "content_block_start":
-            block = evt.get("content_block", {})
-            block_type = block.get("type", "")
-            self._current_block_type = block_type
-            if block_type == "thinking":
-                self.broadcast({"type": "thinking_start"})
-            elif block_type == "tool_use":
-                self._tool_name = block.get("name", "?")
-                self._tool_json_buffer = ""
+    def _on_thinking_start(self) -> None:
+        self.broadcast({"type": "thinking_start"})
 
-        elif evt_type == "content_block_delta":
-            delta = evt.get("delta", {})
-            delta_type = delta.get("type", "")
-            if delta_type == "thinking_delta":
-                text = delta.get("thinking", "")
-            elif delta_type == "text_delta":
-                text = delta.get("text", "")
-            elif delta_type == "input_json_delta":
-                self._tool_json_buffer += delta.get("partial_json", "")
+    def _on_thinking_end(self) -> None:
+        self.broadcast({"type": "thinking_end"})
 
-        elif evt_type == "content_block_stop":
-            block_type = self._current_block_type
-            if block_type == "thinking":
-                self.broadcast({"type": "thinking_end"})
-            elif block_type == "tool_use":
-                try:
-                    tool_input = json.loads(self._tool_json_buffer)
-                except (json.JSONDecodeError, ValueError):
-                    logger.debug("Exception caught", exc_info=True)
-                    tool_input = {"_raw": self._tool_json_buffer}
-                self._format_tool_call(self._tool_name, tool_input)
-            else:
-                self.broadcast({"type": "text_end"})
-            self._current_block_type = ""
+    def _on_tool_use_end(self, name: str, tool_input: dict) -> None:
+        self._format_tool_call(name, tool_input)
 
-        return text
+    def _on_text_block_end(self) -> None:
+        self.broadcast({"type": "text_end"})
 
     def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):

@@ -75,6 +75,76 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
+  var dataDir=path.resolve(ctx.globalStorageUri.fsPath,'..','..','..');
+  var editorStateFile=path.join(dataDir,'editor-state.json');
+  function saveEditorState(){
+    try{
+      var tabs=[];
+      for(var g of vscode.window.tabGroups.all){
+        for(var t of g.tabs){
+          if(t.input&&t.input.uri&&t.input.uri.scheme==='file'){
+            tabs.push({path:t.input.uri.fsPath,viewColumn:g.viewColumn,isActive:t.isActive});
+          }
+        }
+      }
+      var ae=vscode.window.activeTextEditor;
+      var cursors={};
+      for(var ed of vscode.window.visibleTextEditors){
+        if(ed.document.uri.scheme==='file'){
+          cursors[ed.document.uri.fsPath]={
+            line:ed.selection.active.line,
+            character:ed.selection.active.character
+          };
+        }
+      }
+      var st={tabs:tabs,activeFile:ae&&ae.document?ae.document.uri.fsPath:'',cursors:cursors};
+      if(!fs.existsSync(dataDir))fs.mkdirSync(dataDir,{recursive:true});
+      fs.writeFileSync(editorStateFile,JSON.stringify(st));
+    }catch(e){}
+  }
+  async function restoreEditorState(){
+    try{
+      if(!fs.existsSync(editorStateFile))return;
+      var st=JSON.parse(fs.readFileSync(editorStateFile,'utf8'));
+      if(!st.tabs||!st.tabs.length)return;
+      var currentPaths=new Set();
+      for(var g of vscode.window.tabGroups.all){
+        for(var t of g.tabs){
+          if(t.input&&t.input.uri)currentPaths.add(t.input.uri.fsPath);
+        }
+      }
+      for(var tab of st.tabs){
+        if(!currentPaths.has(tab.path)&&fs.existsSync(tab.path)){
+          try{
+            var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(tab.path));
+            var opts={preview:false,viewColumn:tab.viewColumn||1,preserveFocus:true};
+            await vscode.window.showTextDocument(doc,opts);
+          }catch(e){}
+        }
+      }
+      if(st.activeFile&&fs.existsSync(st.activeFile)){
+        try{
+          var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(st.activeFile));
+          var ed=await vscode.window.showTextDocument(doc,{preview:false});
+          var c=st.cursors&&st.cursors[st.activeFile];
+          if(c){
+            var pos=new vscode.Position(c.line,c.character);
+            ed.selection=new vscode.Selection(pos,pos);
+            ed.revealRange(new vscode.Range(pos,pos),vscode.TextEditorRevealType.InCenter);
+          }
+        }catch(e){}
+      }
+    }catch(e){}
+  }
+  setTimeout(function(){restoreEditorState();},3000);
+  var saveTimer=null;
+  function debouncedSaveState(){
+    if(saveTimer)clearTimeout(saveTimer);
+    saveTimer=setTimeout(saveEditorState,500);
+  }
+  ctx.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(function(){debouncedSaveState();}));
+  var saveStateInterval=setInterval(saveEditorState,30000);
+  ctx.subscriptions.push({dispose:function(){clearInterval(saveStateInterval);}});
   function writeTheme(){
     var k=vscode.window.activeColorTheme.kind;
     var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
@@ -249,7 +319,7 @@ function activate(ctx){
     firePost('/merge-action',{action:'all-done'});
   }));
   function readPort(){
-    try{return fs.readFileSync(path.join(home,'.kiss','assistant-port'),'utf8').trim();}
+    try{return fs.readFileSync(path.join(dataDir,'assistant-port'),'utf8').trim();}
     catch(e){return '';}
   }
   function postAssistant(p,body){
@@ -340,20 +410,19 @@ function activate(ctx){
     var ed=vscode.window.activeTextEditor;
     var fp=ed&&ed.document?ed.document.uri.fsPath:'';
     try{
-      var d=path.join(home,'.kiss','code-server-data');
-      if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});
-      fs.writeFileSync(path.join(d,'active-file.json'),JSON.stringify({path:fp}));
+      if(!fs.existsSync(dataDir))fs.mkdirSync(dataDir,{recursive:true});
+      fs.writeFileSync(path.join(dataDir,'active-file.json'),JSON.stringify({path:fp}));
     }catch(e){}
   }
   writeActiveFile();
-  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile()}));
-  var mp=path.join(home,'.kiss','code-server-data','pending-merge.json');
-  var op=path.join(home,'.kiss','code-server-data','pending-open.json');
-  var ap=path.join(home,'.kiss','code-server-data','pending-action.json');
-  var sp=path.join(home,'.kiss','code-server-data','pending-scm-message.json');
+  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile();debouncedSaveState();}));
+  var mp=path.join(dataDir,'pending-merge.json');
+  var op=path.join(dataDir,'pending-open.json');
+  var ap=path.join(dataDir,'pending-action.json');
+  var sp=path.join(dataDir,'pending-scm-message.json');
   var iv=setInterval(function(){
     try{
-      var fep=path.join(home,'.kiss','code-server-data','pending-focus-editor.json');
+      var fep=path.join(dataDir,'pending-focus-editor.json');
       if(fs.existsSync(fep)){
         fs.unlinkSync(fep);
         vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
@@ -555,7 +624,8 @@ def _setup_code_server(data_dir: str) -> bool:
 
     state_db = user_dir / "globalStorage" / "state.vscdb"
     state_db.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(state_db)) as conn:
+    conn = sqlite3.connect(str(state_db))
+    try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)"
         )
@@ -565,6 +635,8 @@ def _setup_code_server(data_dir: str) -> bool:
                 (key, value),
             )
         conn.commit()
+    finally:
+        conn.close()
 
     ws_storage = user_dir / "workspaceStorage"
     if ws_storage.exists():
@@ -771,19 +843,50 @@ def _save_untracked_base(
 
 
 def _cleanup_merge_data(data_dir: str) -> None:
-    """Remove temporary merge and untracked-base directories after merge completes.
+    """Remove temporary merge directories and manifest after merge completes.
 
-    Should be called when the user finishes reviewing all merge changes.
+    Cleans up merge-temp, merge-current, untracked-base, and pending-merge.json.
 
     Args:
         data_dir: Code-server data directory (merge-temp lives here).
     """
-    merge_dir = Path(data_dir) / "merge-temp"
-    if merge_dir.exists():
-        shutil.rmtree(merge_dir, ignore_errors=True)
+    for dirname in ("merge-temp", "merge-current"):
+        d = Path(data_dir) / dirname
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
     base_dir = _untracked_base_dir()
     if base_dir.exists():
         shutil.rmtree(base_dir, ignore_errors=True)
+    manifest = Path(data_dir) / "pending-merge.json"
+    if manifest.exists():
+        try:
+            manifest.unlink()
+        except OSError:
+            logger.debug("Exception caught", exc_info=True)
+
+
+def _restore_merge_files(data_dir: str, work_dir: str) -> None:
+    """Restore files to their new-lines-only state and cleanup all merge data.
+
+    Called when Sorcar closes while hunks remain unreviewed. Copies the
+    pre-merge-view file versions (containing only the agent's new lines)
+    back to the work directory, then removes all temporary merge data.
+
+    Args:
+        data_dir: Code-server data directory.
+        work_dir: Repository root.
+    """
+    current_dir = Path(data_dir) / "merge-current"
+    if not current_dir.is_dir():
+        return
+    for src in current_dir.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(current_dir)
+        dest = Path(work_dir) / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+    _cleanup_merge_data(data_dir)
 
 
 def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, int]]:
@@ -904,7 +1007,7 @@ def _prepare_merge_view(
     merge_dir = Path(data_dir) / "merge-temp"
     if merge_dir.exists():
         shutil.rmtree(merge_dir)
-    manifest_files = []
+    manifest_files: list[dict[str, Any]] = []
     for fname, fh in file_hunks.items():
         current_path = Path(work_dir) / fname
         base_path = merge_dir / fname
@@ -931,6 +1034,17 @@ def _prepare_merge_view(
                 "hunks": fh,
             }
         )
+    # Save current file copies (new lines only) for restoration on ungraceful close
+    current_dir = Path(data_dir) / "merge-current"
+    if current_dir.exists():
+        shutil.rmtree(current_dir)
+    for mf in manifest_files:
+        src = Path(mf["current"])
+        if src.is_file():
+            dest = current_dir / mf["name"]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+
     manifest = Path(data_dir) / "pending-merge.json"
     manifest.write_text(
         json.dumps(

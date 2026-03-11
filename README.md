@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.19-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.26-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -64,7 +64,7 @@ cd kiss_ai
 # To launch sorcar
 ./sorcar
 # To use sorcar CLI
-./sorcar --task "Mutiply 45278*2983"
+./sorcar --task "Multiply 45278*2983"
 # or
 ./sorcar --f example_prompt.md
 
@@ -78,7 +78,7 @@ uv run sorcar
 
 # Introduction to KISS Sorcar
 
-**KISS Sorcar** (named after the [Famous Bengali Magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general pupose agent with web browsing capabilities**. It runs **locally** as a VSCode IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been on top of the KISS Multi Agentic Framework, which I describe in the next section.
+**KISS Sorcar** (named after the [Famous Bengali Magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general purpose agent with web browsing capabilities**. It runs **locally** as a VSCode IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
 #whatispossible #KISSSorcar
 
@@ -124,7 +124,7 @@ Well, you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, Cre
 
 - KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.
 - It has the GEPA prompt optimizer built-in with a simple API.
-- It has a [RelentlessAgent](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.
+- It has a [`RelentlessAgent`](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.
 - No bloat and simple codebase.
 - New techniques will be incorporated to the framework as we research them.
 
@@ -179,7 +179,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **RelentlessAgent for Long-Running Tasks**: Extends `KISSAgent` with auto-continuation across multiple sub-sessions (up to 10000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
 - **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, plus full browser automation via Playwright with accessibility-tree-based element selection.
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
-- **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (400+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
+- **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (300+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
 - **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
 - **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
 - **RepoOptimizer for Iterative Code Improvement**: Wraps `SorcarAgent` to run a command, monitor output in real time, fix errors, and iteratively optimize code for specified metrics — tracking tried ideas to avoid repeating failed approaches.
@@ -193,13 +193,13 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **Radical Simplicity over Abstraction**: KISS rejects the layered abstraction and ceremony found in frameworks like LangChain, CrewAI, or DSPy. Agents are just functions, orchestration is plain Python function composition, and tools are ordinary callables — no decorators, annotations, or boilerplate required.
 - **No Bloat, No Overengineering**: Every function should do one thing well. After implementation, code is aggressively simplified — unnecessary attributes, variables, config options, conditional checks, and comments are removed. The codebase stays lean by design.
 - **No Mocks, No Patches, No Test Doubles**: Tests must use real inputs and verify real outputs. Integration tests are heavily favored over unit tests. This philosophy ensures tests validate actual behavior rather than implementation assumptions.
-- **100% Branch Coverage with Redundancy Detection**: The project targets full branch coverage and uses a custom `redundancy_analyzer.py` (powered by coverage.py's dynamic context feature) to identify and remove tests whose coverage is a strict subset of other tests — keeping the test suite minimal and meaningful.
+- **100% Branch Coverage with Redundancy Detection**: The project targets full branch coverage and uses a custom [`redundancy_analyzer.py`](src/kiss/scripts/redundancy_analyzer.py) (powered by coverage.py's dynamic context feature) to identify and remove tests whose coverage is a strict subset of other tests — keeping the test suite minimal and meaningful.
 - **Self-Improvement Loop**: The Sorcar agent maintains a `LESSONS.md` file where it records rules and patterns learned during tasks, reviewing them at the start of each new task to avoid repeating mistakes.
 - **Free and Open-Source**: KISS Sorcar is a fully functional alternative to proprietary coding assistants like Cursor, with zero monthly subscription fees and complete source transparency under Apache 2.0.
 
 ## 🔧 Using Repo Optimizer
 
-The `RepoOptimizer` (`repo_optimizer.py`) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
+The `RepoOptimizer` ([`repo_optimizer.py`](src/kiss/agents/coding_agents/repo_optimizer.py)) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
 
 ```bash
 # Optimize a program for speed and cost
@@ -373,7 +373,7 @@ KISS has a fresh implementation of GEPA with some key improvements. GEPA (Geneti
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
 
-This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run. Finally I switched to \[`repo_optimizer`\] for efficiency and simplicity. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
+This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run. Finally I switched to [`repo_optimizer`](src/kiss/agents/coding_agents/repo_optimizer.py) for efficiency and simplicity. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
@@ -502,6 +502,8 @@ kiss/
 │   │       ├── openai_compatible_model.py # OpenAI-compatible API model
 │   │       ├── anthropic_model.py # Anthropic model implementation
 │   │       └── model_info.py      # Model info: pricing, context, capabilities
+│   ├── channels/        # Communication channel integrations
+│   │   └── slack_agent.py          # Slack bot agent
 │   ├── docker/          # Docker integration
 │   │   └── docker_manager.py
 │   ├── scripts/         # Utility scripts
@@ -512,21 +514,24 @@ kiss/
 │   │   └── update_models.py            # Model info updater script
 │   ├── tests/           # Test suite
 │   │   ├── _sorcar_test_server.py
+│   │   ├── _sorcar_test_server_with_cov.py
 │   │   ├── conftest.py
 │   │   ├── run_all_models_test.py          # Run tests across all models
 │   │   ├── test_a_model.py
 │   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
 │   │   ├── test_autoresearch.py
+│   │   ├── test_browser_close_shutdown.py
 │   │   ├── test_chat_history_events.py
 │   │   ├── test_chatbot_tasks.py
 │   │   ├── test_chatbot_ui_spinner.py
 │   │   ├── test_chatbot_ui.py
 │   │   ├── test_cli_options.py
-│   │   ├── test_code_server_integration.py
 │   │   ├── test_code_server_keybinding.py
+│   │   ├── test_code_server_watchdog.py
 │   │   ├── test_commit_push.py
 │   │   ├── test_core_branch_coverage.py
+│   │   ├── test_cs_data_dir_isolation.py
 │   │   ├── test_current_editor_file.py
 │   │   ├── test_disable_copilot_scm.py
 │   │   ├── test_docker_manager.py
@@ -537,35 +542,45 @@ kiss/
 │   │   ├── test_generate_api_docs.py
 │   │   ├── test_gepa_batched.py
 │   │   ├── test_gepa_progress_callback.py
+│   │   ├── test_increment_usage.py
+│   │   ├── test_integration_branch_coverage.py
 │   │   ├── test_internal.py
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_coverage.py
 │   │   ├── test_kiss_agent_non_agentic.py
-│   │   ├── test_merge_view_deletion_hunk.py
+│   │   ├── test_merge_restore_on_close.py
 │   │   ├── test_merge_view_second_change.py
 │   │   ├── test_model_base_class.py
 │   │   ├── test_model_implementations.py
 │   │   ├── test_multimodal.py
 │   │   ├── test_print_to_browser.py
 │   │   ├── test_print_to_console.py
+│   │   ├── test_printer_parity.py
 │   │   ├── test_race_conditions.py
-│   │   ├── test_relentless_agent.py
+│   │   ├── test_redundancy_analyzer.py
 │   │   ├── test_run_prompt_button.py
 │   │   ├── test_scm_commit_message.py
+│   │   ├── test_slack_agent.py
 │   │   ├── test_sorcar_bash_streaming.py
+│   │   ├── test_sorcar_branch_coverage.py
 │   │   ├── test_sorcar_coverage.py
-│   │   ├── test_sorcar_file_task.py
+│   │   ├── test_sorcar_cs_integ.py
+│   │   ├── test_sorcar_instance_isolation.py
+│   │   ├── test_sorcar_integ_branch.py
 │   │   ├── test_sorcar_integration.py
 │   │   ├── test_sorcar_race_conditions.py
 │   │   ├── test_sorcar_race_fixes.py
 │   │   ├── test_sorcar_run_selection.py
+│   │   ├── test_sorcar_server_endpoints.py
 │   │   ├── test_sorcar_text_wrap.py
 │   │   ├── test_sse_reconnection.py
 │   │   ├── test_stop_agent_thread.py
-│   │   ├── test_system_prompt.py
+│   │   ├── test_stream_event_parser.py
+│   │   ├── test_task_history_jsonl.py
 │   │   ├── test_token_callback.py
 │   │   ├── test_tool_exception_handling.py
 │   │   ├── test_update_models_preview.py
+│   │   ├── test_usage_info_string.py
 │   │   ├── test_useful_tools.py
 │   │   ├── test_vscode_panel.py
 │   │   ├── test_web_use_tool.py
@@ -586,7 +601,8 @@ kiss/
 │   └── test_fresh_repo_install.sh  # Fresh repo install test
 ├── API.md               # KISSAgent API reference
 ├── example_prompt.md    # Example prompt for the assistant
-├── install.sh           # Installation script
+├── install.sh           # Installation script (development)
+├── installlib.sh        # Installation script (library)
 ├── LICENSE              # Apache-2.0 license
 ├── pyproject.toml       # Project configuration
 └── README.md
@@ -596,9 +612,9 @@ kiss/
 
 The project uses semantic versioning (MAJOR.MINOR.PATCH). The version is defined in a single source of truth:
 
-- **Version file**: `src/kiss/_version.py` - Edit this file to update the version
+- **Version file**: [`src/kiss/_version.py`](src/kiss/_version.py) - Edit this file to update the version
 - **Package access**: `kiss.__version__` - Access the version programmatically
-- **Build system**: `pyproject.toml` automatically reads the version from `_version.py` using dynamic versioning
+- **Build system**: [`pyproject.toml`](pyproject.toml) automatically reads the version from [`_version.py`](src/kiss/_version.py) using dynamic versioning
 
 Example:
 
@@ -607,7 +623,7 @@ from kiss import __version__
 print(f"KISS version: {__version__}")
 ```
 
-To update the version, simply edit `src/kiss/_version.py`:
+To update the version, simply edit [`src/kiss/_version.py`](src/kiss/_version.py):
 
 ```python
 __version__ = "0.2.0"  # Update to new version
@@ -618,25 +634,25 @@ __version__ = "0.2.0"  # Update to new version
 Configuration is managed through environment variables and the `DEFAULT_CONFIG` object:
 
 - **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, and/or `MINIMAX_API_KEY` environment variables
-- **Agent Settings**: Modify `DEFAULT_CONFIG.agent` in `src/kiss/core/config.py`:
+- **Agent Settings**: Modify `DEFAULT_CONFIG.agent` in [`src/kiss/core/config.py`](src/kiss/core/config.py):
   - `max_steps`: Maximum iterations in the ReAct loop (default: 100)
   - `verbose`: Enable verbose output (default: True)
   - `debug`: Enable debug mode (default: False)
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
-- **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in `src/kiss/agents/coding_agents/config.py`:
+- **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in [`src/kiss/agents/coding_agents/config.py`](src/kiss/agents/coding_agents/config.py):
   - `model_name`: Model for task execution (default: "claude-opus-4-6")
   - `max_steps`: Maximum steps per sub-session (default: 100)
   - `max_budget`: Maximum budget in USD (default: 200.0)
   - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 10000)
-- **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in `src/kiss/agents/gepa/config.py`:
+- **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in [`src/kiss/agents/gepa/config.py`](src/kiss/agents/gepa/config.py):
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
   - `max_generations`: Maximum number of evolutionary generations (default: 10)
   - `population_size`: Number of candidates to maintain in population (default: 8)
   - `pareto_size`: Maximum size of Pareto frontier (default: 4)
   - `mutation_rate`: Probability of mutating a prompt template (default: 0.5)
-- **KISSEvolve Settings**: Modify `DEFAULT_CONFIG.kiss_evolve` in `src/kiss/agents/kiss_evolve/config.py`:
+- **KISSEvolve Settings**: Modify `DEFAULT_CONFIG.kiss_evolve` in [`src/kiss/agents/kiss_evolve/config.py`](src/kiss/agents/kiss_evolve/config.py):
   - `max_generations`: Maximum number of evolutionary generations (default: 10)
   - `population_size`: Number of variants to maintain in population (default: 8)
   - `mutation_rate`: Probability of mutating a variant (default: 0.7)
@@ -651,7 +667,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `parent_sampling_method`: Parent sampling: 'tournament', 'power_law', or 'performance_novelty' (default: "power_law")
   - `power_law_alpha`: Power-law sampling parameter for rank-based selection (default: 1.0)
   - `performance_novelty_lambda`: Selection pressure parameter for sigmoid (default: 1.0)
-- **Self-Evolving Multi-Agent Settings**: Modify `DEFAULT_CONFIG.self_evolving_multi_agent` in `src/kiss/agents/self_evolving_multi_agent/config.py`:
+- **Self-Evolving Multi-Agent Settings**: Modify `DEFAULT_CONFIG.self_evolving_multi_agent` in [`src/kiss/agents/self_evolving_multi_agent/config.py`](src/kiss/agents/self_evolving_multi_agent/config.py):
   - `model`: LLM model to use for the main agent (default: "gemini-3-flash-preview")
   - `sub_agent_model`: Model for sub-agents (default: "gemini-3-flash-preview")
   - `evolver_model`: Model for evolution (default: "gemini-3-flash-preview")
@@ -729,7 +745,7 @@ find . -type f -name "*.pyc" -delete
 - **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.2/v0.3, Mistral-Small-24B
 - **Together AI (Z.AI)**: GLM-5.0, GLM-4.5-Air, GLM-4.7
 - **Together AI (Other)**: Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2/2-Small, essentialai/rnj-1, marin-community/marin-8b
-- **OpenRouter**: Access to 400+ models from 60+ providers via unified API:
+- **OpenRouter**: Access to 300+ models from 60+ providers via unified API:
   - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
   - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6 with 1M context)
   - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-2-9b/27b, gemma-3-4b/12b/27b, gemma-3n-e4b)
@@ -764,7 +780,7 @@ Each model in `MODEL_INFO` includes capability flags:
 - `is_generation_supported`: Whether the model supports text generation
 - `is_embedding_supported`: Whether the model is an embedding model
 
-> **Note**: Additional models can be used, but context length, pricing, and capability information must be added to `src/kiss/core/models/model_info.py` for accurate token tracking, budget monitoring, and test filtering.
+> **Note**: Additional models can be used, but context length, pricing, and capability information must be added to [`src/kiss/core/models/model_info.py`](src/kiss/core/models/model_info.py) for accurate token tracking, budget monitoring, and test filtering.
 
 Token counts are extracted directly from API responses, ensuring accuracy and supporting multiple agents sharing the same model instance.
 
@@ -783,7 +799,7 @@ The framework provides embedding generation capabilities through the `get_embedd
   - Usage: `model.get_embedding(text, embedding_model="text-embedding-004")`
 - **Anthropic Models**: Embeddings not supported (raises `NotImplementedError`)
 
-Embeddings are primarily used by the `SimpleRAG` system (`src/kiss/agents/kiss_evolve/simple_rag.py`) for document retrieval. When using `SimpleRAG`, ensure you use an OpenAI, Together AI, or Gemini model that supports embeddings.
+Embeddings are primarily used by the `SimpleRAG` system ([`src/kiss/agents/kiss_evolve/simple_rag.py`](src/kiss/agents/kiss_evolve/simple_rag.py)) for document retrieval. When using `SimpleRAG`, ensure you use an OpenAI, Together AI, or Gemini model that supports embeddings.
 
 ## 🤗 Contributing
 

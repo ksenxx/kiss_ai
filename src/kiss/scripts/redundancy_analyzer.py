@@ -1,26 +1,36 @@
 """Find redundant tests using branch coverage with dynamic contexts.
 
-A test is redundant if the set of branches (arcs) it covers is a subset
-of the branches covered by the remaining tests in the suite.  Tests are
-removed iteratively (smallest arc-set first) so the final set is safe
-to delete without losing any branch coverage.
+A test method is redundant if the set of branches (arcs) it covers
+(across all its contexts: run, setup, teardown) is a subset of the
+branches covered by the remaining test methods.  Methods are removed
+iteratively (smallest arc-set first) so the final set is safe to delete
+without losing any branch coverage.
 
 Requires: coverage.py database (.coverage) generated with
   branch = true  and  dynamic_context = "test_function"
 """
 
+import re
+
 import coverage
 
 
-def _load_test_arcs(
+def _method_name(context: str) -> str:
+    """Strip |run, |setup, |teardown suffix to get the test method name."""
+    return re.sub(r"\|(run|setup|teardown)$", "", context)
+
+
+def _load_method_arcs(
     coverage_file: str,
 ) -> dict[str, set[tuple[str, int, int]]]:
+    """Load arcs grouped by test method (union of all context suffixes)."""
     cov = coverage.Coverage(data_file=coverage_file)
     cov.load()
     data = cov.get_data()
     contexts = sorted(c for c in data.measured_contexts() if c)
-    test_arcs: dict[str, set[tuple[str, int, int]]] = {}
+    method_arcs: dict[str, set[tuple[str, int, int]]] = {}
     for ctx in contexts:
+        method = _method_name(ctx)
         data.set_query_context(ctx)
         arcs: set[tuple[str, int, int]] = set()
         for src_file in data.measured_files():
@@ -29,40 +39,49 @@ def _load_test_arcs(
                 for from_line, to_line in file_arcs:
                     arcs.add((src_file, from_line, to_line))
         if arcs:
-            test_arcs[ctx] = arcs
-    return test_arcs
+            if method not in method_arcs:
+                method_arcs[method] = set()
+            method_arcs[method].update(arcs)
+    return method_arcs
 
 
 def analyze_redundancy(coverage_file: str = ".coverage") -> list[str]:
-    test_arcs = _load_test_arcs(coverage_file)
+    """Return sorted list of test method names that are safe to remove.
 
-    arc_to_tests: dict[tuple[str, int, int], set[str]] = {}
-    for ctx, arcs in test_arcs.items():
+    Uses a greedy algorithm that iteratively removes the method with the
+    smallest arc set, as long as every arc it covers is also covered by
+    at least one other remaining method.  This guarantees that removing
+    all returned methods preserves full branch coverage.
+    """
+    method_arcs = _load_method_arcs(coverage_file)
+
+    arc_to_methods: dict[tuple[str, int, int], set[str]] = {}
+    for method, arcs in method_arcs.items():
         for arc in arcs:
-            arc_to_tests.setdefault(arc, set()).add(ctx)
+            arc_to_methods.setdefault(arc, set()).add(method)
 
-    remaining = set(test_arcs)
+    remaining = set(method_arcs)
     redundant: list[str] = []
 
     changed = True
     while changed:
         changed = False
         candidates = []
-        for ctx in sorted(remaining):
+        for method in sorted(remaining):
             is_redundant = all(
-                len(arc_to_tests[arc] & remaining) >= 2
-                for arc in test_arcs[ctx]
+                len(arc_to_methods[arc] & remaining) >= 2
+                for arc in method_arcs[method]
             )
             if is_redundant:
-                candidates.append(ctx)
+                candidates.append(method)
 
         if candidates:
-            victim = min(candidates, key=lambda c: len(test_arcs[c]))
+            victim = min(candidates, key=lambda m: len(method_arcs[m]))
             remaining.discard(victim)
             redundant.append(victim)
             changed = True
 
-    print(f"Total test contexts: {len(test_arcs)}")
+    print(f"Total test methods: {len(method_arcs)}")
     print(f"Redundant (safe to remove): {len(redundant)}")
     for t in sorted(redundant):
         print(f"  REDUNDANT: {t}")

@@ -22,7 +22,7 @@ def _generate_artifact_dir() -> str:
     from pathlib import Path
 
     artifact_subdir_name = f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
-    artifact_path = Path("artifacts").resolve() / artifact_subdir_name
+    artifact_path = Path(".kiss.artifacts").resolve() / artifact_subdir_name
     artifact_path.mkdir(parents=True, exist_ok=True)
     return str(artifact_path)
 
