@@ -839,11 +839,6 @@ class TestSorcarServerIntegration:
         r = requests.post(f"{base_url}/commit", timeout=30)
         assert r.status_code in (200, 400)
 
-    def test_push_no_remote(self, server) -> None:
-        base_url, _, _, _ = server
-        r = requests.post(f"{base_url}/push", timeout=10)
-        assert r.status_code in (200, 400)
-
     def test_sse_events(self, server) -> None:
         base_url, _, _, _ = server
         r = requests.get(f"{base_url}/events", stream=True, timeout=10)

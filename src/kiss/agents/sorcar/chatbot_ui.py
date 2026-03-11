@@ -1144,7 +1144,7 @@ function handleEvent(ev){
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
     inp.placeholder='Ask anything\u2026 (@ files'
- +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)';
+ +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)';
     inp.focus();break;
   case'code_server_restarted':{
     var csFrame=document.getElementById('code-server-frame');
@@ -1492,8 +1492,15 @@ function getAtCtx(){
 function fetchAC(){
   var atCtx=getAtCtx();
   if(!atCtx){hideAC();return}
-  fetch('/suggestions?mode=files&q='+encodeURIComponent(atCtx.query))
-    .then(function(r){return r.json()}).then(renderAC).catch(function(){hideAC()});
+  var doFetch=function(){
+    fetch('/suggestions?mode=files&q='+encodeURIComponent(atCtx.query))
+      .then(function(r){return r.json()}).then(renderAC).catch(function(){hideAC()});
+  };
+  if(!atCtx.query){
+    fetch('/refresh-files',{method:'POST'}).then(doFetch).catch(doFetch);
+  }else{
+    doFetch();
+  }
 }
 function hlMatch(text,query){
   if(!query)return esc(text);
@@ -2035,8 +2042,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files,
- \u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)"
+              placeholder="Ask anything\u2026 (@ files,\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple
