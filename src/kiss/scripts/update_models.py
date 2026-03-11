@@ -621,7 +621,7 @@ def compute_changes(
         or_info = _lookup_openrouter_pricing(name, source, openrouter)
         if not or_info:
             continue
-        changed: dict[str, Any] = {}
+        changed = {}
         if not has_pricing and or_info.get("input_price_per_1M", 0) > 0:
             changed["input_price_per_1M"] = or_info["input_price_per_1M"]
             changed["output_price_per_1M"] = or_info["output_price_per_1M"]

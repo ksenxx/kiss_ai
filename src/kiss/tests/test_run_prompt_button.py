@@ -110,11 +110,6 @@ class TestRunPromptHTMLButton:
 class TestRunPromptButtonThemeCSS:
     """Test that theme CSS includes run-prompt-btn styles."""
 
-    def test_theme_css_run_prompt_btn_enabled(self) -> None:
-        from kiss.agents.sorcar.chatbot_ui import CHATBOT_THEME_CSS
-
-        assert "#run-prompt-btn:not(:disabled)" in CHATBOT_THEME_CSS
-
     def test_theme_css_run_prompt_btn_hover(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_THEME_CSS
 

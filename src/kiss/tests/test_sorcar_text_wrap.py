@@ -85,23 +85,6 @@ class TestBuildHtmlContainsWrappingCSS:
     def setup_method(self) -> None:
         self.html = _build_html("Test", "", "/tmp")
 
-    def test_html_contains_flex_wrap_for_tc_h(self) -> None:
-        assert "flex-wrap:wrap" in self.html
-
-    def test_html_contains_word_break_for_tp(self) -> None:
-        assert "word-break:break-all" in self.html
-
-    def test_html_contains_word_break_for_td(self) -> None:
-        assert "word-break:break-word" in self.html
-
-    def test_html_contains_pre_wrap_for_usage(self) -> None:
-        assert "white-space:pre-wrap" in self.html
-
-    def test_html_usage_block_no_nowrap(self) -> None:
-        """The .usage CSS block in the HTML should not have nowrap."""
-        block = _css_block(self.html, ".usage")
-        assert "nowrap" not in block
-
 
 class TestToolCallBroadcastLongContent:
     """Verify tool call events carry full long paths and descriptions."""

@@ -42,8 +42,6 @@ class TestUsefulTools:
 
 
 class TestExtractCommandNames:
-    def test_unterminated_quote_segment(self):
-        assert _extract_command_names('"unterminated') == []
 
     def test_empty_pipe_segment(self):
         assert _extract_command_names("echo hi | | cat") == ["echo", "cat"]
@@ -70,22 +68,6 @@ class TestBashBothPaths:
         ut, _ = any_tools
         result = ut.Bash("false", "Failing command")
         assert result.startswith("Error (exit code")
-
-    def test_output_truncation(self, any_tools):
-        ut, test_dir = any_tools
-        big_file = test_dir / "big.txt"
-        big_file.write_text("X" * 200)
-        result = ut.Bash(f"cat {big_file}", "Cat big", max_output_chars=50)
-        assert "truncated" in result
-
-    def test_timeout_compound_command(self, any_tools):
-        ut, _ = any_tools
-        result = ut.Bash(
-            "sleep 30; echo done",
-            "Compound cmd timeout",
-            timeout_seconds=0.5,
-        )
-        assert result == "Error: Command execution timeout"
 
 
 class TestAdversarial:

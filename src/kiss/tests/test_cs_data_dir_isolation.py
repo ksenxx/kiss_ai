@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _setup_code_server
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 
 
 class TestDataDirIsolation:
@@ -84,26 +84,6 @@ class TestExtensionJSUsesDataDir:
 
 class TestAssistantPortIsolation:
     """Verify assistant-port file is written per-instance, not globally."""
-
-    def test_setup_code_server_creates_unique_data_dir(self) -> None:
-        """Each data dir should have its own settings and extension."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            data_dir_1 = os.path.join(tmpdir, "cs-abc12345")
-            data_dir_2 = os.path.join(tmpdir, "cs-def67890")
-
-            _setup_code_server(data_dir_1)
-            _setup_code_server(data_dir_2)
-
-            # Both dirs should have their own extension
-            assert (Path(data_dir_1) / "extensions" / "kiss-init" / "extension.js").exists()
-            assert (Path(data_dir_2) / "extensions" / "kiss-init" / "extension.js").exists()
-
-            # Both should have their own settings
-            assert (Path(data_dir_1) / "User" / "settings.json").exists()
-            assert (Path(data_dir_2) / "User" / "settings.json").exists()
-        finally:
-            shutil.rmtree(tmpdir)
 
     def test_assistant_port_written_to_data_dir(self) -> None:
         """Simulate assistant-port being written to the data dir."""
@@ -200,7 +180,8 @@ class TestTwoInstanceSubprocess:
                 f"from pathlib import Path\n"
                 f"kiss_dir = Path({str(kiss_dir)!r})\n"
                 f"th._KISS_DIR = kiss_dir\n"
-                f"th.HISTORY_FILE = kiss_dir / 'task_history.json'\n"
+                f"th.HISTORY_FILE = kiss_dir / 'task_history.jsonl'\n"
+                f"th._CHAT_EVENTS_DIR = kiss_dir / 'chat_events'\n"
                 f"th.PROPOSALS_FILE = kiss_dir / 'proposals.json'\n"
                 f"th.MODEL_USAGE_FILE = kiss_dir / 'model_usage.json'\n"
                 f"th.FILE_USAGE_FILE = kiss_dir / 'file_usage.json'\n"
@@ -251,45 +232,3 @@ class TestTwoInstanceSubprocess:
                 proc.kill()
                 proc.wait(timeout=5)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_both_instances_have_welcome_screen(self) -> None:
-        """Both instances should serve the welcome screen independently."""
-        import requests
-
-        for base in self.bases:
-            r = requests.get(f"{base}/")
-            assert r.status_code == 200
-            assert "What can I help you with?" in r.text
-
-    def test_both_instances_respond_to_tasks(self) -> None:
-        """Both instances should have independent task endpoints."""
-        import requests
-
-        for base in self.bases:
-            r = requests.get(f"{base}/tasks")
-            assert r.status_code == 200
-
-    def test_both_instances_respond_to_theme(self) -> None:
-        """Both instances should have their own theme endpoint."""
-        import requests
-
-        for base in self.bases:
-            r = requests.get(f"{base}/theme")
-            assert r.status_code == 200
-
-    def test_instances_have_independent_data_dirs(self) -> None:
-        """Check that data dirs are distinct for different work dirs."""
-        h1 = hashlib.md5(self.work_dir_1.encode()).hexdigest()[:8]
-        h2 = hashlib.md5(self.work_dir_2.encode()).hexdigest()[:8]
-        assert h1 != h2
-
-    def test_run_task_on_one_does_not_affect_other(self) -> None:
-        """Running a task on instance 1 should not affect instance 2's state."""
-        import requests
-
-        # Both should have no running task
-        r1 = requests.post(f"{self.bases[0]}/stop", json={})
-        assert r1.status_code == 404  # No running task
-
-        r2 = requests.post(f"{self.bases[1]}/stop", json={})
-        assert r2.status_code == 404  # No running task

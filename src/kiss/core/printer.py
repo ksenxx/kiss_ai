@@ -1,5 +1,7 @@
 """Abstract base class and shared utilities for KISS agent printers."""
 
+import json
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -98,6 +100,96 @@ def extract_extras(tool_input: dict) -> dict[str, str]:
                 val = val[:200] + "..."
             extras[k] = val
     return extras
+
+
+class StreamEventParser:
+    """Shared parser for LLM stream events used by both console and browser printers.
+
+    Tracks block type and tool JSON buffer state, dispatching parsed events
+    to subclass callbacks.
+    """
+
+    def __init__(self) -> None:
+        self._current_block_type = ""
+        self._tool_name = ""
+        self._tool_json_buffer = ""
+
+    def reset_stream_state(self) -> None:
+        """Reset block type and tool buffer state."""
+        self._current_block_type = ""
+        self._tool_name = ""
+        self._tool_json_buffer = ""
+
+    def parse_stream_event(self, event: Any) -> str:
+        """Parse a stream event, dispatch to on_* callbacks, return extracted text.
+
+        Args:
+            event: An event object with an `event` dict attribute.
+
+        Returns:
+            str: Any text content extracted from text or thinking deltas.
+        """
+        evt = event.event
+        evt_type = evt.get("type", "")
+        text = ""
+
+        if evt_type == "content_block_start":
+            block = evt.get("content_block", {})
+            block_type = block.get("type", "")
+            self._current_block_type = block_type
+            if block_type == "thinking":
+                self._on_thinking_start()
+            elif block_type == "tool_use":
+                self._tool_name = block.get("name", "?")
+                self._tool_json_buffer = ""
+                self._on_tool_use_start(self._tool_name)
+
+        elif evt_type == "content_block_delta":
+            delta = evt.get("delta", {})
+            delta_type = delta.get("type", "")
+            if delta_type == "thinking_delta":
+                text = delta.get("thinking", "")
+            elif delta_type == "text_delta":
+                text = delta.get("text", "")
+            elif delta_type == "input_json_delta":
+                partial = delta.get("partial_json", "")
+                self._tool_json_buffer += partial
+                self._on_tool_json_delta(partial)
+
+        elif evt_type == "content_block_stop":
+            block_type = self._current_block_type
+            if block_type == "thinking":
+                self._on_thinking_end()
+            elif block_type == "tool_use":
+                try:
+                    tool_input = json.loads(self._tool_json_buffer)
+                except (json.JSONDecodeError, ValueError):
+                    logging.getLogger(__name__).debug("Exception caught", exc_info=True)
+                    tool_input = {"_raw": self._tool_json_buffer}
+                self._on_tool_use_end(self._tool_name, tool_input)
+            else:
+                self._on_text_block_end()
+            self._current_block_type = ""
+
+        return text
+
+    def _on_thinking_start(self) -> None:
+        """Called when a thinking block starts."""
+
+    def _on_thinking_end(self) -> None:
+        """Called when a thinking block ends."""
+
+    def _on_tool_use_start(self, name: str) -> None:
+        """Called when a tool_use block starts."""
+
+    def _on_tool_json_delta(self, partial: str) -> None:
+        """Called for each partial JSON delta in a tool_use block."""
+
+    def _on_tool_use_end(self, name: str, tool_input: dict) -> None:
+        """Called when a tool_use block ends with the parsed input."""
+
+    def _on_text_block_end(self) -> None:
+        """Called when a non-thinking, non-tool block ends."""
 
 
 class Printer(ABC):

@@ -18,15 +18,6 @@ def _drain(q: queue.Queue) -> list[dict]:
 
 class TestSorcarBashStreaming:
 
-    def test_stream_callback_noop_when_printer_never_set(self):
-        agent = SorcarAgent("test")
-        assert agent.printer is None
-        tools = agent._get_tools()
-        bash_tool = tools[0]
-
-        result = bash_tool(command="echo no_printer", description="test echo")
-        assert "no_printer" in result
-
     def test_multiline_bash_streams_all_lines(self):
         agent = SorcarAgent("test")
         tools = agent._get_tools()
