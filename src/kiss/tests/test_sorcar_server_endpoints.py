@@ -320,6 +320,44 @@ class TestServerGetFileContent:
         )
         assert resp.status_code == 404
 
+class TestServerUIState:
+    def test_get_ui_state_empty(self, server):
+        base_url, _, _ = server
+        resp = requests.get(f"{base_url}/ui-state", timeout=5)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, dict)
+
+    def test_save_and_get_ui_state(self, server):
+        base_url, _, _ = server
+        state = {"editorPct": 65.5}
+        resp = requests.post(
+            f"{base_url}/ui-state",
+            json=state,
+            timeout=5,
+        )
+        assert resp.status_code == 200
+        resp = requests.get(f"{base_url}/ui-state", timeout=5)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["editorPct"] == 65.5
+
+    def test_save_ui_state_overwrites(self, server):
+        base_url, _, _ = server
+        requests.post(
+            f"{base_url}/ui-state",
+            json={"editorPct": 40},
+            timeout=5,
+        )
+        requests.post(
+            f"{base_url}/ui-state",
+            json={"editorPct": 70},
+            timeout=5,
+        )
+        resp = requests.get(f"{base_url}/ui-state", timeout=5)
+        assert resp.json()["editorPct"] == 70
+
+
 class TestServerSuggestionsFilesMode:
     def test_suggestions_files_empty_query(self, server):
         base_url, _, _ = server

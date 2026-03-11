@@ -62,7 +62,7 @@ ______________________________________________________________________
 
 **Transparent execution.** Every step of the agent's reasoning is streamed to the UI in real time: thinking blocks, tool calls with full arguments, tool results, usage stats (tokens, cost, session count). There is no hidden planning phase. The user is always in the loop.
 
-**Structured continuation over lossy compaction.** The `RelentlessAgent` continuation mechanism is the single most important architectural advantage. It lets Sorcar handle tasks that take 50+ tool calls across multiple context windows without the "context rot" that plagues single-session approaches. The summary checkpoint between sessions is an auditable artifact, not a black-box heuristic.
+**Structured continuation over lossy compaction.** The `RelentlessAgent` continuation mechanism is the single most important architectural advantage. It lets Sorcar handle tasks that take millions of tool calls across multiple context windows without the "context rot" that plagues single-session approaches. The summary checkpoint between sessions is an auditable artifact, not a black-box heuristic.
 
 **Self-improvement loop.** The system prompt instructs the agent to maintain a `LESSONS.md` file with learned behaviors and mistakes, and to review it at the start of each task. Combined with a `TASK_HISTORY.md` file that logs completed work, this gives Sorcar a form of persistent memory across sessions that is fully transparent and user-editable.
 
