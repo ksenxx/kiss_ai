@@ -319,7 +319,7 @@ def _resolve_channel_id(client: Any, channel: str) -> str:
     # Search through channels
     cursor = None
     while True:
-        kwargs: dict[str, Any] = {"types": "public_channel,private_channel", "limit": 200}
+        kwargs: dict[str, Any] = {"types": "public_channel", "limit": 200}
         if cursor:
             kwargs["cursor"] = cursor
         result = client.conversations_list(**kwargs)

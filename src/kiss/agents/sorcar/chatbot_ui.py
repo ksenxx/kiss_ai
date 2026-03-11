@@ -1157,6 +1157,49 @@ function handleEvent(ev){
     _scrollLock=false;
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
+  case'user_browser_action':{
+    var card=mkEl('div','ev user-action-card');
+    card.innerHTML=
+      '<div style="border:2px solid var(--yellow);border-radius:8px;'
+      +'padding:16px;margin:10px 0;background:rgba(210,153,34,.08)">'
+      +'<div style="font-weight:600;color:var(--yellow);margin-bottom:8px">'
+      +'\u23F8\uFE0F User Action Required</div>'
+      +'<div style="margin-bottom:12px">'+esc(ev.instruction||'')+'</div>'
+      +'<button onclick="fetch(\'/user-browser-done\',{method:\'POST\'})'
+      +'.then(function(){this.disabled=true;this.textContent=\'Resumed\';}.bind(this))"'
+      +' style="padding:8px 20px;background:var(--green);color:#000;'
+      +'border:none;border-radius:6px;cursor:pointer;font-weight:600">'
+      +'I\'m Done</button></div>';
+    O.appendChild(card);sb();break}
+  case'user_question':{
+    var qcard=mkEl('div','ev user-action-card');
+    var qid='uq-'+Date.now();
+    qcard.innerHTML=
+      '<div style="border:2px solid var(--yellow);border-radius:8px;'
+      +'padding:16px;margin:10px 0;background:rgba(210,153,34,.08)">'
+      +'<div style="font-weight:600;color:var(--yellow);margin-bottom:8px">'
+      +'\u2753 Agent Question</div>'
+      +'<div style="margin-bottom:12px">'+esc(ev.question||'')+'</div>'
+      +'<textarea id="'+qid+'" rows="3" style="width:100%;box-sizing:border-box;'
+      +'padding:8px;border:1px solid var(--border);border-radius:6px;'
+      +'background:var(--bg);color:var(--fg);font-family:inherit;font-size:13px;'
+      +'margin-bottom:10px;resize:vertical" placeholder="Type your answer here..."></textarea>'
+      +'<button onclick="(function(btn){'
+      +'var ta=document.getElementById(\''+qid+'\');'
+      +'var ans=ta?ta.value:\'\';'
+      +'fetch(\'/user-question-done\',{method:\'POST\','
+      +'headers:{\'Content-Type\':\'application/json\'},'
+      +'body:JSON.stringify({answer:ans})})'
+      +'.then(function(){btn.disabled=true;btn.textContent=\'Answered\';'
+      +'if(ta)ta.disabled=true;});'
+      +'})(this)"'
+      +' style="padding:8px 20px;background:var(--green);color:#000;'
+      +'border:none;border-radius:6px;cursor:pointer;font-weight:600">'
+      +'I\'m Done</button></div>';
+    O.appendChild(qcard);sb();
+    var qta=document.getElementById(qid);
+    if(qta)qta.focus();
+    break}
   case'task_done':{
     var el=t0?Math.floor((Date.now()-t0)/1000):0;
     var em=Math.floor(el/60);

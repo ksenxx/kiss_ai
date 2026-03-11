@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -24,8 +25,15 @@ from kiss.docker.docker_manager import DockerManager
 class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        wait_for_user_callback: Callable[[str, str], None] | None = None,
+        ask_user_question_callback: Callable[[str], str] | None = None,
+    ) -> None:
         super().__init__(name)
+        self._wait_for_user_callback = wait_for_user_callback
+        self._ask_user_question_callback = ask_user_question_callback
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: DockerManager | None = None
         self.slack_agent = SlackChannelAgent()
@@ -35,11 +43,32 @@ class SorcarAgent(RelentlessAgent):
             if self.printer:
                 self.printer.print(text, type="bash_stream")
 
+        ask_callback = self._ask_user_question_callback
+
+        def ask_user_question(question: str) -> str:
+            """Ask the user a question and wait for their typed response.
+
+            Use when the agent needs clarification, confirmation, or additional
+            information from the user in the middle of a task. The user sees
+            the question in the chat window, types their answer, and clicks
+            "I'm Done". The agent blocks until the answer is provided.
+
+            Args:
+                question: The question to display to the user.
+
+            Returns:
+                The user's typed response text.
+            """
+            if ask_callback:
+                return ask_callback(question)
+            return "(ask_user_question not available in this environment)"
+
         useful_tools = UsefulTools(stream_callback=_stream)
         bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
         tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
+        tools.append(ask_user_question)
         tools.extend(self.slack_agent.get_tools())
         return tools
 
@@ -106,7 +135,10 @@ class SorcarAgent(RelentlessAgent):
         """
         cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
         actual_headless = headless if headless is not None else cfg.headless
-        self.web_use_tool = WebUseTool(headless=actual_headless)
+        self.web_use_tool = WebUseTool(
+            headless=actual_headless,
+            wait_for_user_callback=self._wait_for_user_callback,
+        )
 
         try:
             system_instructions = SYSTEM_PROMPT + f"\nTask History File: {HISTORY_FILE}\n"
