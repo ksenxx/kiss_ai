@@ -178,6 +178,7 @@ def server():
         stderr=subprocess.PIPE,
     )
 
+    keepalive = None
     try:
         port = _wait_for_port_file(port_file)
         base_url = f"http://127.0.0.1:{port}"
@@ -199,7 +200,8 @@ def server():
 
         yield base_url, work_dir, proc, tmpdir
     finally:
-        keepalive.close()
+        if keepalive is not None:
+            keepalive.close()
         proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=10)

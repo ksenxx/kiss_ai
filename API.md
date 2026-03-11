@@ -523,7 +523,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using Playwright with zero JS injection.
 
-**Constructor:** `WebUseTool(browser_type: str = 'chromium', headless: bool = False, viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _AUTO_DETECT) -> None`
+**Constructor:** `WebUseTool(browser_type: str = 'chromium', headless: bool = False, viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _AUTO_DETECT, wait_for_user_callback: Callable[[str, str], None] | None = None) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -568,9 +568,15 @@ ______________________________________________________________________
 
   - **Returns:** "Browser closed." (always, even if nothing was open).
 
+- **ask_user_browser_action** — Launch browser for user interaction, wait for completion, return page state. Use when the agent needs the human to interact with the browser directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
+
+  - `instruction`: What the user should do (e.g. "Please solve the CAPTCHA").
+  - `url`: Optional URL to navigate to before handing control to the user.
+  - **Returns:** Updated accessibility tree after the user signals they are done.
+
 - **get_tools** — Return callable web tools for registration with an agent.<br/>`get_tools() -> list[Callable[..., str]]`
 
-  - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content. Does not include close.
+  - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content, ask_user_browser_action. Does not include close.
 
 ______________________________________________________________________
 
@@ -736,7 +742,7 @@ ______________________________________________________________________
 
 ##### `class SorcarAgent(RelentlessAgent)` — Agent with both coding tools and browser automation for web + code tasks.
 
-**Constructor:** `SorcarAgent(name: str) -> None`
+**Constructor:** `SorcarAgent(name: str, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> None`
 
 - **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.

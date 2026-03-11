@@ -145,7 +145,7 @@ In Sorcar, every tool call, every LLM response, and every token count is streame
 
 ______________________________________________________________________
 
-## The Tool Surface: Four Tools and a Browser
+## The Tool Surface: Four Tools and a set of Browser tools
 
 SorcarAgent provides five core tools:
 
@@ -172,3 +172,158 @@ KISS Sorcar demonstrates that you do not need a complex multi-agent architecture
 The elegance of the system is not in what it adds, but in what it leaves out. There are no subagent hierarchies, no shadow file systems, no lock contention, no planner/worker/judge roles, and no context compaction heuristics. There is just a loop: prompt the LLM, execute the tools, check the limits, and if the work isn't done, summarize and continue.
 
 That's it. That's the whole thing.
+
+______________________________________________________________________
+
+## Design: Human-in-the-Loop Browser Actions
+
+### Problem
+
+The agent sometimes needs the human to interact with the browser directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. Currently, the agent either fails or tries to work around these situations.
+
+### Solution: `ask_user_browser_action` Tool
+
+A new tool that lets the agent hand control of the browser to the human, wait for them to finish, then resume with the updated page state.
+
+### Architecture
+
+The design uses a **callback-based approach** that keeps `WebUseTool` decoupled from the server:
+
+```
+Agent calls ask_user_browser_action("Please solve the CAPTCHA", url="...")
+  → WebUseTool ensures browser is open (non-headless)
+  → Optionally navigates to the given URL
+  → Calls wait_for_user_callback(instruction, current_url)
+    → Server stores a new threading.Event
+    → Server broadcasts SSE: {"type": "user_browser_action", "instruction": "..."}
+    → Chat UI shows a prominent card with instruction + "I'm Done" button
+    → Callback blocks on event.wait(timeout=300)
+    → User interacts with the browser directly
+    → User clicks "I'm Done" in chat UI
+    → UI POSTs to /user-browser-done
+    → Server sets the threading.Event
+    → Callback unblocks, returns
+  → WebUseTool captures page accessibility tree
+  → Returns updated page state to agent
+```
+
+### Components (4 touch points)
+
+| Component | File | Change |
+|-----------|------|--------|
+| `ask_user_browser_action(instruction, url?)` | `web_use_tool.py` | New tool method; calls `_wait_for_user_callback` then returns `_get_ax_tree()` |
+| `_wait_for_user_callback` | `web_use_tool.py` | Constructor parameter: `Callable[[str, str], None]` — blocks until user is done |
+| `/user-browser-done` REST endpoint | `sorcar.py` | Sets a `threading.Event` stored in server state |
+| `user_browser_action` SSE event handler | `chatbot_ui.py` | Renders a card with instruction text + "I'm Done" button |
+
+### Key Design Decision: Why Callback-Based?
+
+- **No coupling:** `WebUseTool` doesn't import or know about the server, printer, or SSE. It just calls a callback.
+- **Testable:** In tests, provide a callback that immediately returns.
+- **Works in non-sorcar contexts:** The `SorcarAgent` CLI mode (without the server UI) could use a different callback that prints to console and waits for `input("Press Enter when done...")`.
+
+### Implementation Details
+
+**`WebUseTool` changes:**
+
+```python
+class WebUseTool:
+    def __init__(self, ..., wait_for_user_callback=None):
+        self._wait_for_user_callback = wait_for_user_callback
+        # ... existing init ...
+
+    def ask_user_browser_action(self, instruction: str, url: str = "") -> str:
+        """Launch browser for user interaction, wait for completion, return page state.
+
+        Args:
+            instruction: What the user should do (e.g. "Please solve the CAPTCHA").
+            url: Optional URL to navigate to before handing control to the user.
+
+        Returns:
+            Updated accessibility tree after the user signals they are done.
+        """
+        self._ensure_browser()
+        if url:
+            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            self._wait_for_stable()
+        if self._wait_for_user_callback:
+            self._wait_for_user_callback(instruction, self._page.url)
+        return self._get_ax_tree()
+
+    def get_tools(self):
+        return [
+            # ... existing tools ...
+            self.ask_user_browser_action,
+        ]
+```
+
+**Server-side callback (in `sorcar.py`):**
+
+```python
+user_action_event: threading.Event | None = None
+
+def _wait_for_user_browser(instruction: str, url: str) -> None:
+    nonlocal user_action_event
+    event = threading.Event()
+    user_action_event = event
+    printer.broadcast({
+        "type": "user_browser_action",
+        "instruction": instruction,
+        "url": url,
+    })
+    # Wait for user to click "Done" — also check stop event
+    while not event.wait(timeout=0.5):
+        stop_ev = current_stop_event
+        if stop_ev and stop_ev.is_set():
+            user_action_event = None
+            raise KeyboardInterrupt("Agent stopped while waiting for user")
+    user_action_event = None
+```
+
+**REST endpoint:**
+
+```python
+async def user_browser_done(request: Request) -> JSONResponse:
+    if user_action_event is not None:
+        user_action_event.set()
+        return JSONResponse({"status": "ok"})
+    return JSONResponse({"error": "No pending action"}, status_code=404)
+
+# Add to routes:
+Route("/user-browser-done", user_browser_done, methods=["POST"]),
+```
+
+**Chat UI (JavaScript event handler):**
+
+```javascript
+case 'user_browser_action': {
+    var card = mkEl('div', 'ev user-action-card');
+    card.innerHTML =
+        '<div style="border:2px solid var(--yellow);border-radius:8px;'
+        + 'padding:16px;margin:10px 0;background:rgba(210,153,34,.08)">'
+        + '<div style="font-weight:600;color:var(--yellow);margin-bottom:8px">'
+        + '⏸️ User Action Required</div>'
+        + '<div style="margin-bottom:12px">' + esc(ev.instruction) + '</div>'
+        + '<button onclick="fetch(\'/user-browser-done\',{method:\'POST\'})'
+        + '.then(()=>this.disabled=true,this.textContent=\'Resumed\')"'
+        + ' style="padding:8px 20px;background:var(--green);color:#000;'
+        + 'border:none;border-radius:6px;cursor:pointer;font-weight:600">'
+        + 'I\'m Done</button></div>';
+    O.appendChild(card);
+    break;
+}
+```
+
+### Edge Cases
+
+| Scenario | Handling |
+|----------|----------|
+| Agent stopped while waiting | Check `current_stop_event` in the wait loop; raise `KeyboardInterrupt` |
+| Timeout (no user action for 5 min) | `event.wait(timeout=0.5)` loop with an overall timeout counter |
+| Browser was headless | The tool could error, or close/relaunch in non-headless mode |
+| No server UI (CLI mode) | Fallback callback: `print(instruction); input("Press Enter when done...")` |
+| Multiple concurrent actions | Only one `user_action_event` at a time (enforced by single agent thread) |
+
+### Thread Count Impact
+
+This design adds **zero new threads**. The blocking happens in the existing agent thread via `event.wait()`. The REST endpoint runs in the existing asyncio event loop.
