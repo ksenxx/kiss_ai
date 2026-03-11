@@ -10,7 +10,6 @@ import pytest
 
 from kiss.core.base import Base
 from kiss.core.utils import (
-    get_config_value,
     read_project_file,
     read_project_file_from_package,
 )
