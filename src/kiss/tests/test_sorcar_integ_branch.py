@@ -209,8 +209,14 @@ def server():
         else:
             raise TimeoutError("Server not responsive")
 
+        # Keep an SSE client connected to prevent auto-shutdown
+        keepalive = requests.get(
+            f"{base_url}/events", stream=True, timeout=300,
+        )
+
         yield base_url, work_dir, proc, tmpdir
     finally:
+        keepalive.close()
         proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=10)
@@ -543,9 +549,13 @@ def inproc_server():
 
     cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
 
+    # Keep an SSE client connected to prevent auto-shutdown
+    keepalive = requests.get(f"{base_url}/events", stream=True, timeout=300)
+
     yield base_url, work_dir, cs_data_dir
 
-    # Cleanup: trigger shutdown
+    # Cleanup: close keepalive and trigger shutdown
+    keepalive.close()
     try:
         requests.post(f"{base_url}/closing", json={}, timeout=2)
     except Exception:
