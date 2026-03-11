@@ -182,7 +182,6 @@ class TestTwoInstanceSubprocess:
                 f"th._KISS_DIR = kiss_dir\n"
                 f"th.HISTORY_FILE = kiss_dir / 'task_history.jsonl'\n"
                 f"th._CHAT_EVENTS_DIR = kiss_dir / 'chat_events'\n"
-                f"th.PROPOSALS_FILE = kiss_dir / 'proposals.json'\n"
                 f"th.MODEL_USAGE_FILE = kiss_dir / 'model_usage.json'\n"
                 f"th.FILE_USAGE_FILE = kiss_dir / 'file_usage.json'\n"
                 f"th._history_cache = None\n"

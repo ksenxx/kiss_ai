@@ -36,7 +36,6 @@ from kiss.agents.sorcar.code_server import (
 )
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
-    SAMPLE_TASKS,
     _add_task,
     _append_task_to_md,
     _cleanup_stale_cs_dirs,
@@ -45,11 +44,9 @@ from kiss.agents.sorcar.task_history import (
     _load_history,
     _load_last_model,
     _load_model_usage,
-    _load_proposals,
     _load_task_chat_events,
     _record_file_usage,
     _record_model_usage,
-    _save_proposals,
     _set_latest_chat_events,
 )
 from kiss.core import config as config_module
@@ -161,8 +158,6 @@ def run_chatbot(
     file_cache: list[str] = _scan_files(actual_work_dir)
     agent_thread: threading.Thread | None = None
     current_stop_event: threading.Event | None = None
-    proposed_tasks: list[str] = _load_proposals()
-    proposed_lock = threading.Lock()
     selected_model = _load_last_model() or default_model
     last = _load_last_model()
     selected_model = last if last and last not in _INTERNAL_MODELS else default_model
@@ -389,42 +384,6 @@ def run_chatbot(
         nonlocal file_cache
         file_cache = _scan_files(actual_work_dir)
 
-    def refresh_proposed_tasks() -> None:
-        nonlocal proposed_tasks
-        history = _load_history()
-        if not history:  # pragma: no cover – empty history on fresh install
-            with proposed_lock:
-                proposed_tasks = []
-            printer.broadcast({"type": "proposed_updated"})
-            return
-        task_list = "\n".join(f"- {e['task']}" for e in history[:20])
-        agent = KISSAgent("Task Proposer")
-        try:
-            result = agent.run(
-                model_name=_FAST_MODEL,
-                prompt_template=(
-                    "Based on these past tasks a developer has worked on, suggest 5 new "
-                    "tasks they might want to do next. Tasks should be natural follow-ups, "
-                    "related improvements, or complementary work.\n\n"
-                    "Past tasks:\n{task_list}\n\n"
-                    "Return ONLY a JSON array of 5 short task description strings. "
-                    'Example: ["Add unit tests for X", "Refactor Y module"]'
-                ),
-                arguments={"task_list": task_list},
-                is_agentic=False,
-            )
-            start = result.index("[")
-            end = result.index("]", start) + 1
-            proposals = json.loads(result[start:end])
-            proposals = [str(p) for p in proposals if isinstance(p, str) and p.strip()][:5]
-        except Exception:  # pragma: no cover – LLM API failure
-            logger.debug("Exception caught", exc_info=True)
-            proposals = []
-        with proposed_lock:
-            proposed_tasks = proposals
-        _save_proposals(proposals)
-        printer.broadcast({"type": "proposed_updated"})
-
     def generate_followup(task: str, result: str) -> None:
         try:
             agent = KISSAgent("Followup Proposer")
@@ -593,10 +552,6 @@ def run_chatbot(
             except Exception:  # pragma: no cover – merge view error
                 logger.debug("Exception caught", exc_info=True)
             refresh_file_cache()
-            try:
-                refresh_proposed_tasks()
-            except Exception:  # pragma: no cover – proposal generation error
-                logger.debug("Exception caught", exc_info=True)
 
     def stop_agent() -> bool:
         """Kill the current agent thread and reset state for a new task.
@@ -856,10 +811,6 @@ def run_chatbot(
                 results.append({"type": "task", "text": task})
                 if len(results) >= 5:
                     break
-        with proposed_lock:
-            for t in proposed_tasks:
-                if q_lower in t.lower():
-                    results.append({"type": "suggested", "text": t})
         words = query.split()
         last_word = words[-1].lower() if words else q_lower
         if last_word and len(last_word) >= 2:
@@ -892,13 +843,6 @@ def run_chatbot(
             return JSONResponse({"error": "Index out of range"}, status_code=404)
         events = _load_task_chat_events(str(history[idx]["task"]))
         return JSONResponse(events)
-
-    async def proposed_tasks_endpoint(request: Request) -> JSONResponse:
-        with proposed_lock:
-            tasks_list = list(proposed_tasks)
-        if not tasks_list:  # pragma: no cover – depends on LLM response timing
-            tasks_list = [str(t["task"]) for t in SAMPLE_TASKS[:5]]
-        return JSONResponse(tasks_list)
 
     def _fast_complete(raw_query: str, query: str) -> str:
         query_lower = query.lower()
@@ -1271,16 +1215,11 @@ def run_chatbot(
             Route("/complete", complete),
             Route("/tasks", tasks),
             Route("/task-events", task_events),
-            Route("/proposed_tasks", proposed_tasks_endpoint),
+
             Route("/models", models_endpoint),
             Route("/theme", theme),
         ]
     )
-
-    try:
-        refresh_proposed_tasks()
-    except Exception:  # pragma: no cover – LLM API failure
-        logger.debug("Exception caught", exc_info=True)
 
     import atexit
 

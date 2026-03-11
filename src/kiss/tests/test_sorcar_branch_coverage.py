@@ -90,7 +90,6 @@ class TestTaskHistory:
         self.tmpdir = tempfile.mkdtemp()
         # Save originals
         self._orig_history_file = th.HISTORY_FILE
-        self._orig_proposals_file = th.PROPOSALS_FILE
         self._orig_model_usage_file = th.MODEL_USAGE_FILE
         self._orig_file_usage_file = th.FILE_USAGE_FILE
         self._orig_kiss_dir = th._KISS_DIR
@@ -99,7 +98,6 @@ class TestTaskHistory:
         th._KISS_DIR = Path(self.tmpdir)
         th.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
         th._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        th.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         th.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         th.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
         # Clear cache
@@ -108,7 +106,6 @@ class TestTaskHistory:
     def teardown_method(self) -> None:
         th.HISTORY_FILE = self._orig_history_file
         th._CHAT_EVENTS_DIR = self._orig_events_dir
-        th.PROPOSALS_FILE = self._orig_proposals_file
         th.MODEL_USAGE_FILE = self._orig_model_usage_file
         th.FILE_USAGE_FILE = self._orig_file_usage_file
         th._KISS_DIR = self._orig_kiss_dir
@@ -443,7 +440,6 @@ class TestTaskHistoryEdgeCases:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self._orig_history_file = th.HISTORY_FILE
-        self._orig_proposals_file = th.PROPOSALS_FILE
         self._orig_model_usage_file = th.MODEL_USAGE_FILE
         self._orig_file_usage_file = th.FILE_USAGE_FILE
         self._orig_kiss_dir = th._KISS_DIR
@@ -451,7 +447,6 @@ class TestTaskHistoryEdgeCases:
         th._KISS_DIR = Path(self.tmpdir)
         th.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
         th._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        th.PROPOSALS_FILE = Path(self.tmpdir) / "proposed_tasks.json"
         th.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
         th.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
         th._history_cache = None
@@ -459,7 +454,6 @@ class TestTaskHistoryEdgeCases:
     def teardown_method(self) -> None:
         th.HISTORY_FILE = self._orig_history_file
         th._CHAT_EVENTS_DIR = self._orig_events_dir
-        th.PROPOSALS_FILE = self._orig_proposals_file
         th.MODEL_USAGE_FILE = self._orig_model_usage_file
         th.FILE_USAGE_FILE = self._orig_file_usage_file
         th._KISS_DIR = self._orig_kiss_dir
@@ -687,11 +681,6 @@ class TestSorcarServerIntegration:
         r = requests.get(f"{base_url}/tasks", timeout=5)
         assert r.status_code == 200
         assert isinstance(r.json(), list)
-
-    def test_proposed_tasks(self, server) -> None:
-        base_url, _, _, _ = server
-        r = requests.get(f"{base_url}/proposed_tasks", timeout=5)
-        assert r.status_code == 200
 
     def test_suggestions_empty(self, server) -> None:
         base_url, _, _, _ = server
