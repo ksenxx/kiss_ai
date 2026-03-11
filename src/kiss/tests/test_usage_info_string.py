@@ -37,8 +37,8 @@ class TestUsageInfoString:
         max_tokens = get_max_context_length("claude-sonnet-4-20250514")
         agent.total_tokens_used = max_tokens + 50000
         result = agent._get_usage_info_string()
-        # Token display should be capped at max, not show the larger value
-        assert f"Tokens: {max_tokens}/{max_tokens}" in result
+        # Token display wraps via modulo, not capped at max
+        assert f"Tokens: {50000}/{max_tokens}" in result
 
     def test_tokens_below_max_shown_as_is(self) -> None:
         agent = self._make_agent()
@@ -53,4 +53,5 @@ class TestUsageInfoString:
         agent.total_tokens_used = max_tokens + 100
         result = agent._get_usage_info_string()
         assert result.startswith("Session: 1/3, ")
-        assert f"Tokens: {max_tokens}/{max_tokens}" in result
+        # Token display wraps via modulo, not capped at max
+        assert f"Tokens: {100}/{max_tokens}" in result

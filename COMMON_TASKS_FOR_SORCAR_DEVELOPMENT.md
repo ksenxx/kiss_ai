@@ -4,11 +4,15 @@ Select a task below in sorcar editor and press cmd/ctrl-L to run the task in the
 
 ## increase test coverage
 
-can you write integration tests (possibly running 'uv run sorcar') with no mocks or test doubles to achieve 100% branch coverage of the files under src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool.  Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 10 tries.
+can you write integration tests (possibly running 'uv run sorcar') with no mocks or test doubles to achieve 100% branch coverage of the files under [src/kiss/agents/sorcar/](src/kiss/agents/sorcar/)? Please check the branch coverage first for the existing tests with the coverage tool.  Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 10 tries.
 
 ## code review
 
 find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and fix them. Make sure that you test every change by writing and running integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not change any functionality or UI. Make that existing tests pass.
+
+## documentation update
+
+Can you carefully read all *.md files, except API.md, in the project and check their consistency against the code in the project, grammar, and correctness? Fix them with precision.
 
 ## check
 
@@ -20,11 +24,11 @@ run 'uv run pytest -v' with 900 seconds timeout and fix tests
 
 ## race detection
 
-can you please work hard and carefully to precisly detect all actual race conditions in src/kiss/agents/sorcar/sorcar.py? You can add random delays within 0.1 seconds before racing events to reliably trigger a race condition to confirm a race condition.
+can you please work hard and carefully to precisly detect all actual race conditions in [src/kiss/agents/sorcar/sorcar.py](src/kiss/agents/sorcar/sorcar.py)? You can add random delays within 0.1 seconds before racing events to reliably trigger a race condition to confirm a race condition.
 
 ## test compaction
 
-can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.
+can you use [src/kiss/scripts/redundancy_analyzer.py](src/kiss/scripts/redundancy_analyzer.py) to get rid of redundant test methods in [src/kiss/tests/](src/kiss/tests/)?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.
 
 # Pending
 
@@ -38,9 +42,9 @@ When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorc
 
 You have implemented a restart logic for code-server in case the code-server shuts down, but I want you to investigate the root cause of why the code-server is shutting down intermittently in the first place. See if you can fix the intermittent shutdown of the code server without changing any functionality in the project except for the fix.
 
-can you check if print_to_console.py and chatbot_ui.py print exactly the same contents when an agent is executed on a task? Write a regression test for this.
+can you check if [print_to_console.py](src/kiss/core/print_to_console.py) and [chatbot_ui.py](src/kiss/agents/sorcar/chatbot_ui.py) print exactly the same contents when an agent is executed on a task? Write a regression test for this.
 
-Can you read sorcar.py and carefully find all threads, timers, processes, and other forms of concurrency introduced by sorcar.py? Then can you write a task in PLAN.md which when given to the agent will reduce the amount of concurrency present in sorcar.
+Can you read [sorcar.py](src/kiss/agents/sorcar/sorcar.py) and carefully find all threads, timers, processes, and other forms of concurrency introduced by [sorcar.py](src/kiss/agents/sorcar/sorcar.py)? Then can you write a task in [PLAN.md](PLAN.md) which when given to the agent will reduce the amount of concurrency present in sorcar.
 
 When I run sorcar on a task for very long time, the mac os x runs out of resources. Can you investigate the code for resource and memory hogs. For example, task_history.json could be very large. You may want to convert it into jsonl
 format and read tasks on demand by sorcar. Find other memory and resource hogging issues in the prject.

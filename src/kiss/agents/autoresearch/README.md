@@ -8,7 +8,7 @@ minimize validation loss without human intervention.
 ## What is Autoresearch?
 
 Autoresearch gives an AI agent a small but real LLM training setup and lets it
-experiment autonomously. The agent reads a `program.md` file for instructions,
+experiment autonomously. The agent reads a [`program.md`](program.md) file for instructions,
 then enters an infinite loop:
 
 1. Modify `train.py` with an experimental idea
@@ -41,9 +41,9 @@ indefinite autonomous operation.
 
 | File | Purpose |
 |---|---|
-| `autoresearch_agent.py` | Agent class, CLI entry point, program file loading |
-| `config.py` | Pydantic configuration (model, steps, budget, etc.) |
-| `__init__.py` | Module init, registers config |
+| [`autoresearch_agent.py`](autoresearch_agent.py) | Agent class, CLI entry point, program file loading |
+| [`config.py`](config.py) | Pydantic configuration (model, steps, budget, etc.) |
+| [`__init__.py`](__init__.py) | Module init, registers config |
 
 ### Tools Available
 
@@ -58,14 +58,14 @@ No browser tools are included — autoresearch is entirely CLI-driven.
 
 ### Program File
 
-The agent's behavior is driven by `program.md`, a Markdown file containing:
+The agent's behavior is driven by [`program.md`](program.md), a Markdown file containing:
 
 - Setup instructions (create git branch, read repo files, verify data)
 - Experimentation rules (what can/cannot be modified, the metric to optimize)
 - Output format and logging conventions
 - The experiment loop (modify → commit → train → evaluate → keep/discard)
 
-The default `program.md` from the original repo instructs the agent to:
+The default [`program.md`](program.md) from the original repo instructs the agent to:
 
 - Only modify `train.py` (architecture, optimizer, hyperparameters — everything
   is fair game)
@@ -150,7 +150,7 @@ python -m kiss.agents.autoresearch.autoresearch_agent \
 
 ### Configuration
 
-Defaults are configured in `config.py` and can be overridden via KISS config:
+Defaults are configured in [`config.py`](config.py) and can be overridden via KISS config:
 
 ```yaml
 autoresearch:
@@ -165,7 +165,7 @@ autoresearch:
 ## KISS Autoresearch vs. Original Autoresearch
 
 The [original autoresearch](https://github.com/karpathy/autoresearch) is not a
-standalone agent — it's a repo with a `program.md` file that you point any
+standalone agent — it's a repo with a [`program.md`](program.md) file that you point any
 coding agent at (Claude Code, Codex, etc.). The KISS implementation wraps
 this pattern into a proper, self-contained agent with several advantages:
 

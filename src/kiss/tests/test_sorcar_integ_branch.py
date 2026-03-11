@@ -1109,6 +1109,24 @@ class TestInProcessEndpoints:
         data = resp.json()
         assert "suggestion" in data
 
+    def test_complete_with_active_file_context(self, inproc_server) -> None:
+        """LLM autocomplete includes active file content and file list."""
+        base_url, work_dir, cs_data_dir = inproc_server
+        # Create a file in the work dir
+        test_file = os.path.join(work_dir, "context_test.txt")
+        Path(test_file).write_text("unique_context_content_for_autocomplete")
+        # Set active-file.json so autocomplete reads it
+        af_path = os.path.join(cs_data_dir, "active-file.json")
+        os.makedirs(cs_data_dir, exist_ok=True)
+        Path(af_path).write_text(json.dumps({"path": test_file}))
+        resp = requests.get(
+            f"{base_url}/complete",
+            params={"q": "what is in context_test"},
+            timeout=30,
+        )
+        data = resp.json()
+        assert "suggestion" in data
+
     def test_complete_short_last_word(self, inproc_server) -> None:
         """Query where last word is < 2 chars → skips file matching in _fast_complete."""
         base_url, _, _ = inproc_server
