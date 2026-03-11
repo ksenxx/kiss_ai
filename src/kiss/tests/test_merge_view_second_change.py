@@ -10,6 +10,7 @@ from kiss.agents.sorcar.code_server import (
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
+    _untracked_base_dir,
     _snapshot_files,
 )
 

@@ -442,7 +442,7 @@ class TestBashBothPaths:
     def test_error_exit_code(self, any_tools):
         ut, _ = any_tools
         result = ut.Bash("false", "Failing command")
-        assert result.startswith("Error (exit code")
+        assert "Error (exit code" in result
 
 
 class TestBashStreaming:

@@ -30,11 +30,14 @@ from kiss.agents.sorcar.browser_ui import (
 from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
+    _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
+    _save_untracked_base,
     _scan_files,
     _setup_code_server,
     _snapshot_files,
+    _untracked_base_dir,
 )
 from kiss.agents.sorcar.prompt_detector import PromptDetector
 from kiss.agents.sorcar.sorcar import (
