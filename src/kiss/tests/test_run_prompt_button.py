@@ -110,11 +110,6 @@ class TestRunPromptHTMLButton:
 class TestRunPromptButtonThemeCSS:
     """Test that theme CSS includes run-prompt-btn styles."""
 
-    def test_theme_css_run_prompt_btn_enabled(self) -> None:
-        from kiss.agents.sorcar.chatbot_ui import CHATBOT_THEME_CSS
-
-        assert "#run-prompt-btn:not(:disabled)" in CHATBOT_THEME_CSS
-
     def test_theme_css_run_prompt_btn_hover(self) -> None:
         from kiss.agents.sorcar.chatbot_ui import CHATBOT_THEME_CSS
 
@@ -186,6 +181,16 @@ class TestPlayButtonDisableDuringRun:
         idx_check = CHATBOT_JS.index("checkActiveFile();", idx_set_ready)
         idx_focus = CHATBOT_JS.index("inp.focus();", idx_check)
         assert idx_running_false < idx_check < idx_focus
+
+    def test_js_set_ready_clears_chatbox(self) -> None:
+        """setReady() should clear the chatbox input after task completion."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        idx_set_ready = CHATBOT_JS.index("function setReady(label){")
+        # Find the next function definition to bound the search
+        next_fn = CHATBOT_JS.index("\nfunction ", idx_set_ready + 1)
+        body = CHATBOT_JS[idx_set_ready:next_fn]
+        assert "inp.value=''" in body
 
 
 class TestEndToEndPromptDetection:

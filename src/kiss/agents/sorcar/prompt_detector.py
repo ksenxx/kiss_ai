@@ -12,6 +12,15 @@ class PromptDetector:
 
     THRESHOLD = 3.0
 
+    # Filenames (case-insensitive stems) that are almost certainly prompts/instructions.
+    PROMPT_FILENAMES: set[str] = {
+        "plan",
+        "prompt",
+        "task",
+        "instructions",
+        "spec",
+    }
+
     STRONG_INDICATORS: dict[str, float] = {
         r"(?i)^(?:#\s*)?(?:system\s+)?prompt": 3.0,
         r"(?i)you\s+are\s+a(?:n)?\s+\w+": 2.0,
@@ -22,6 +31,7 @@ class PromptDetector:
 
     MEDIUM_INDICATORS: dict[str, float] = {
         r"(?i)^#+\s*(?:role|persona|context|instruction|task|constraints|output\s+format)": 1.5,
+        r"(?i)^#+\s*(?:goal|steps|changes?\s+to\s+make|how|plan|expected\s+result)": 1.5,
         r"(?i)few-shot": 1.5,
         r"(?i)chain\s+of\s+thought": 1.5,
         r"(?i)step-by-step": 1.0,
@@ -70,6 +80,11 @@ class PromptDetector:
 
         score = 0.0
         reasons = []
+
+        # 0. Filename-based detection
+        if path.stem.lower() in self.PROMPT_FILENAMES:
+            score += 3.0
+            reasons.append(f"Filename '{path.name}' is a known prompt/instruction name (+3.0)")
 
         # 1. Analyze Frontmatter
         frontmatter, content = self._extract_frontmatter(raw_content)
@@ -121,67 +136,3 @@ class PromptDetector:
         is_prompt = score >= self.THRESHOLD
         return is_prompt, score, reasons
 
-
-# ==========================================
-# Run the test suite
-# ==========================================
-if __name__ == "__main__":
-    import os
-    import tempfile
-
-    detector = PromptDetector()
-
-    test_files = {
-        "coding_agent.md": """
-# System Prompt
-You are an expert Python developer.
-## Constraints
-- Do not use classes unless necessary.
-- Return only code.
-""",
-        "email_template.md": """
----
-description: generate marketing email
-model: gpt-4
----
-# Task
-Write a marketing email for {{ product_name }} targeting {{ audience }}.
-Ensure the tone is professional.
-""",
-        "xml_prompt.md": """
-<system>
-You are a helpful assistant.
-</system>
-<instruction>
-Analyze the following text.
-</instruction>
-""",
-        "readme.md": """
-# Project Documentation
-This project is a web scraper.
-## Installation
-Run `pip install -r requirements.txt`.
-## Usage
-Run `python main.py`.
-""",
-        "blog_post.md": """
-# My Trip to Japan
-I went to Tokyo last week. It was amazing.
-You should go there if you have the chance.
-The food is great.
-""",
-    }
-
-    print(f"{'File Name':<20} | {'Is Prompt?':<10} | {'Score':<6} | {'Reasoning'}")
-    print("-" * 100)
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        for filename, content in test_files.items():
-            file_path = os.path.join(temp_dir, filename)
-            with open(file_path, "w") as f:
-                f.write(content)
-
-            is_prompt, score, reasons = detector.analyze(file_path)
-
-            status = "YES" if is_prompt else "NO"
-            print(f"{filename:<20} | {status:<10} | {score:<6.1f} | {str(reasons)[:60]}...")

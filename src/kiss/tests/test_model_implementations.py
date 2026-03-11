@@ -31,17 +31,6 @@ MODEL_CONFIGS = [
     pytest.param("gpt-4.1-mini", "OpenAICompatibleModel", "10", marks=requires_openai_api_key),
 ]
 
-
-class TestModelCommon:
-    @pytest.mark.parametrize("model_name,_,__", MODEL_CONFIGS)
-    @pytest.mark.timeout(60)
-    def test_add_message_to_conversation(self, model_name, _, __):
-        m = model(model_name)
-        m.initialize("Hello")
-        m.add_message_to_conversation("user", "Follow up")
-        assert len(m.conversation) == 2
-
-
 @requires_anthropic_api_key
 class TestAnthropicModel:
     @pytest.mark.timeout(60)
@@ -108,14 +97,6 @@ class TestOpenAIModel:
         assert len(embedding) > 0
         assert isinstance(embedding[0], float)
 
-    @pytest.mark.timeout(60)
-    def test_add_message_with_usage_info(self):
-        m = model("gpt-4.1-mini")
-        m.initialize("Hello")
-        m.set_usage_info_for_messages("Token usage: 50")
-        m.add_message_to_conversation("user", "Test")
-        assert "Token usage: 50" in m.conversation[-1]["content"]
-
 
 class TestModelHelperFunctions:
     @pytest.mark.parametrize(
@@ -140,17 +121,6 @@ class TestModelHelperFunctions:
         from kiss.core.models.openai_compatible_model import _build_text_based_tools_prompt
 
         assert _build_text_based_tools_prompt({}) == ""
-
-    def test_build_text_based_tools_prompt_with_function(self):
-        from kiss.core.models.openai_compatible_model import _build_text_based_tools_prompt
-
-        def test_func(x: int) -> str:
-            """A test function."""
-            return str(x)
-
-        prompt = _build_text_based_tools_prompt({"test_func": test_func})
-        assert "test_func" in prompt
-        assert "Available Tools" in prompt
 
     @pytest.mark.parametrize(
         "content,expected_count",

@@ -163,7 +163,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   max-height:50vh;min-height:68px;overflow-y:hidden;
   position:relative;z-index:1;
 }
-#task-input::placeholder{color:rgba(255,255,255,0.28)}
+#task-input::placeholder{color:rgba(255,255,255,0.45)}
 #task-input:disabled{opacity:0.35;cursor:not-allowed}
 #ghost-overlay{
   position:absolute;top:0;left:0;right:0;bottom:0;
@@ -412,7 +412,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   letter-spacing:0.04em;margin-bottom:5px;display:block;
 }
 .chip-label.recent{color:rgba(88,166,255,0.7)}
-.chip-label.suggested{color:rgba(188,140,255,0.7)}
+
 #sidebar{
   position:fixed;right:0;top:0;bottom:0;width:340px;
   background:rgba(12,12,14,0.95);backdrop-filter:blur(24px);
@@ -426,12 +426,12 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
-#history-btn,#proposals-btn,#run-prompt-btn{
+#history-btn,#run-prompt-btn{
   background:none;border:none;
   color:rgba(255,255,255,0.3);cursor:pointer;
   padding:4px;transition:color 0.15s,opacity 0.15s;display:flex;align-items:center;
 }
-#history-btn:hover,#proposals-btn:hover{color:rgba(255,255,255,0.6)}
+#history-btn:hover{color:rgba(255,255,255,0.6)}
 #run-prompt-btn:not(:disabled):hover{color:rgba(34,197,94,0.9)}
 #run-prompt-btn:disabled{opacity:0.15;cursor:not-allowed}
 #run-prompt-btn:not(:disabled){color:rgba(34,197,94,0.7)}
@@ -560,7 +560,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel header{padding:8px 12px}
 #assistant-panel .logo{font-size:11px}
 #assistant-panel .status{font-size:11px}
-#assistant-panel #history-btn svg,#assistant-panel #proposals-btn svg{width:12px;height:12px}
+#assistant-panel #history-btn svg{width:12px;height:12px}
 #assistant-panel #welcome{padding:20px 14px}
 #assistant-panel #welcome h2{font-size:17px;margin-bottom:3px;letter-spacing:-0.3px}
 #assistant-panel #welcome p{font-size:11px;margin-bottom:14px}
@@ -732,7 +732,7 @@ body{background:var(--bg)}
     0 4px 24px rgba(0,0,0,0.25);
 }
 #assistant-panel #task-input{color:var(--text)}
-#assistant-panel #task-input::placeholder{color:rgba(var(--fg-rgb),0.3)}
+#assistant-panel #task-input::placeholder{color:rgba(var(--fg-rgb),0.45)}
 #assistant-panel .gs{color:rgba(var(--fg-rgb),0.4)}
 #assistant-panel #input-footer{border-top:1px solid rgba(var(--fg-rgb),0.06)}
 #assistant-panel #model-btn{
@@ -858,15 +858,15 @@ body{background:var(--bg)}
   box-shadow:0 4px 20px rgba(0,0,0,0.25);
 }
 #assistant-panel .chip-label.recent{color:rgba(var(--accent-rgb),0.75)}
-#assistant-panel .chip-label.suggested{color:rgba(var(--purple-rgb),0.75)}
+
 #assistant-panel #sidebar{
   background:rgba(var(--bg2-rgb),0.97);border-left:1px solid var(--border);
 }
 #assistant-panel #sidebar-overlay{background:rgba(0,0,0,0.35)}
-#assistant-panel #history-btn,#assistant-panel #proposals-btn{
+#assistant-panel #history-btn{
   color:rgba(var(--fg-rgb),0.35);
 }
-#assistant-panel #history-btn:hover,#assistant-panel #proposals-btn:hover{
+#assistant-panel #history-btn:hover{
   color:rgba(var(--fg-rgb),0.6);
 }
 #assistant-panel #run-prompt-btn:not(:disabled){color:rgba(var(--green-rgb),0.7)}
@@ -941,7 +941,6 @@ var btn=document.getElementById('send-btn');
 var stopBtn=document.getElementById('stop-btn');
 var clearBtn=document.getElementById('clear-btn');
 var ac=document.getElementById('autocomplete');var rl=document.getElementById('recent-list');
-var pl=document.getElementById('proposed-list');
 var histSearch=document.getElementById('history-search');
 var allTasks=[];
 var modelLabel=document.getElementById('model-label');
@@ -1020,14 +1019,7 @@ inp.addEventListener('input',function(){
     ghostTimer2=setTimeout(fetchGhost,200);
   }
 });
-var sidebarHistSec=document.getElementById('sidebar-history-sec');
-var sidebarPropSec=document.getElementById('sidebar-proposals-sec');
-function toggleSidebar(mode){
-  if(mode){
-    sidebarHistSec.style.display=mode==='proposals'?'none':'';
-    sidebarPropSec.style.display=mode==='history'?'none':'';
-    if(sidebar.classList.contains('open'))return;
-  }
+function toggleSidebar(){
   sidebar.classList.toggle('open');
   sidebarOverlay.classList.toggle('open');
 }
@@ -1076,6 +1068,7 @@ function setReady(label){
   if(!merging){inp.disabled=false;btn.disabled=false;uploadBtn.disabled=false;}
   btn.style.display='';
   stopBtn.style.display='none';
+  inp.value='';
   checkActiveFile();
   if(!merging)inp.focus();
 }
@@ -1125,7 +1118,7 @@ function handleEvent(ev){
     ||t==='prompt')removeSpinner();
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
-  case'proposed_updated':loadProposed();loadWelcome();break;
+
   case'theme_changed':applyTheme(ev);break;
   case'focus_chatbox':window.focus();inp.focus();break;
   case'external_run':
@@ -1135,7 +1128,7 @@ function handleEvent(ev){
     stopBtn.style.display='inline-flex';
     D.classList.add('running');hideAC();startTimer();
     inp.style.height='auto';inp.style.overflowY='hidden';
-    inp.value='';
+    inp.value=ev.text||'';
     pendingUserMsg={text:ev.text,images:[]};
     pendingFiles=[];renderFileChips();
     showSpinner();loadModels();
@@ -1150,8 +1143,8 @@ function handleEvent(ev){
     document.getElementById('merge-toolbar').style.display='none';
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
-    inp.placeholder='Ask anything\u2026 (@ for files, '
-    +'cmd/ctrl-k to toggle editor, cmd/ctrl-L to run selection)';
+    inp.placeholder='Ask anything\u2026 (@ files'
+ +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)';
     inp.focus();break;
   case'code_server_restarted':{
     var csFrame=document.getElementById('code-server-frame');
@@ -1182,12 +1175,12 @@ function handleEvent(ev){
     var err=mkEl('div','ev tr err');
     err.innerHTML='<div class="rl fail">ERROR</div>'+esc(ev.text||'Unknown error');
     O.appendChild(err);
-    setReady('Error');loadTasks();loadProposed();break}
+    setReady('Error');loadTasks();break}
   case'task_stopped':{
     var stEl=mkEl('div','ev tr err');
     stEl.innerHTML='<div class="rl fail">STOPPED</div>Agent execution stopped by user';
     O.appendChild(stEl);
-    setReady('Stopped');loadTasks();loadProposed();break}
+    setReady('Stopped');loadTasks();break}
   default:{
     if(t==='tool_call'){
       lastToolName=ev.name||'';
@@ -1339,7 +1332,7 @@ function doSubmitTask(task){
     body:JSON.stringify(payload)
   }).then(function(r){
     if(!r.ok){r.json().then(function(d){setReady('Error');alert(d.error||'Failed')});return;}
-    inp.value='';pendingFiles=[];renderFileChips();loadModels();
+    pendingFiles=[];renderFileChips();loadModels();
   }).catch(function(){setReady('Error');alert('Network error')});
 }
 function submitTask(){
@@ -1622,7 +1615,7 @@ function fetchGhost(){
 }
 function cycleHistory(dir){
   if(!histCache.length){
-    fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
+    fetch('/tasks?limit=100').then(function(r){return r.json()}).then(function(tasks){
       histCache=tasks.map(function(t){return typeof t==='string'?t:(t.task||'')});
       doHistCycle(dir);
     });return;
@@ -1636,112 +1629,98 @@ function doHistCycle(dir){
   inp.value=histCache[histIdx];
 }
 function loadTasks(){
-  fetch('/tasks').then(function(r){return r.json()}).then(function(tasks){
-    allTasks=tasks;renderTasks('');histSearch.value='';
+  fetch('/tasks?limit=100').then(function(r){return r.json()}).then(function(tasks){
+    allTasks=tasks;renderSidebarTasks(tasks);histSearch.value='';
   }).catch(function(){});
 }
-function renderTasks(q){
+function replayTaskEvents(idx,txt){
+  inp.value=txt;inp.focus();
+  if(sidebar.classList.contains('open')){toggleSidebar();}
+  O.innerHTML='';state=mkS();llmPanel=null;llmPanelState=mkS();
+  lastToolName='';pendingPanel=false;_scrollLock=false;
+  suggestionsEl=null;
+  showUserMsg({text:txt,images:[]});
+  fetch('/task-events?idx='+idx).then(function(r){return r.json()})
+  .then(function(events){
+    if(!Array.isArray(events))return;
+    events.forEach(function(ev){
+      var t=ev.type;
+      if(t==='clear')return;
+      if(t==='task_done'||t==='task_error'||t==='task_stopped'
+        ||t==='followup_suggestion'){
+        handleEvent(ev);return;
+      }
+      if(t==='tool_call'){
+        lastToolName=ev.name||'';
+        llmPanel=null;llmPanelState=mkS();pendingPanel=false;
+      }
+      if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
+      if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
+        llmPanel=mkEl('div','llm-panel');
+        O.appendChild(llmPanel);
+        llmPanelState=mkS();pendingPanel=false;
+      }
+      var target=O,tState=state;
+      if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
+        ||t==='text_delta'||t==='text_end')){
+        target=llmPanel;tState=llmPanelState;
+      }
+      handleOutputEvent(ev,target,tState);
+      if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+    });
+    sb();
+  }).catch(function(){});
+}
+function renderSidebarTasks(tasks){
   rl.innerHTML='';
-  var ql=q.toLowerCase(),any=false;
-  allTasks.forEach(function(t,idx){
+  if(!tasks.length){
+    rl.innerHTML='<div class="sidebar-empty">No recent tasks</div>';
+    return;
+  }
+  tasks.forEach(function(t,idx){
     var txt=typeof t==='string'?t:(t.task||'');
     var hasEvents=typeof t==='object'&&t.has_events;
-    if(ql&&txt.toLowerCase().indexOf(ql)<0)return;
-    any=true;
     var d=mkEl('div','sidebar-item');
     d.textContent=txt;d.title=txt;
     d.addEventListener('click',function(){
       if(hasEvents){replayTaskEvents(idx,txt)}
-      else{inp.value=txt;inp.focus()}
-      toggleSidebar();
+      else{inp.value=txt;inp.focus();toggleSidebar()}
     });
     rl.appendChild(d);
   });
-  if(!any){rl.innerHTML='<div class="sidebar-empty">'
-    +(ql?'No matches':'No recent tasks')+'</div>'}
 }
-function replayTaskEvents(idx,taskText){
-  O.innerHTML='';state=mkS();_scrollLock=false;
-  llmPanel=null;llmPanelState=mkS();lastToolName='';pendingPanel=false;
-  suggestionsEl=null;
-  fetch('/task-events?index='+idx)
-    .then(function(r){return r.json()})
-    .then(function(data){
-      if(!data.events||!data.events.length){inp.value=taskText;inp.focus();return}
-      var activeFile='';
-      data.events.forEach(function(ev){if(ev.type==='clear'&&ev.active_file)activeFile=ev.active_file});
-      var msgText=taskText;
-      showUserMsg({text:msgText,images:[]});
-      data.events.forEach(function(ev){
-        var t=ev.type;
-        if(t==='clear'||t==='tasks_updated'||t==='proposed_updated'
-          ||t==='theme_changed'||t==='focus_chatbox'||t==='merge_started'
-          ||t==='merge_ended')return;
-        if(t==='task_done')return;
-        if(t==='task_error'){
-          var err=mkEl('div','ev tr err');
-          err.innerHTML='<div class="rl fail">ERROR</div>'+esc(ev.text||'Unknown error');
-          O.appendChild(err);return;
-        }
-        if(t==='task_stopped'){
-          var stEl=mkEl('div','ev tr err');
-          stEl.innerHTML='<div class="rl fail">STOPPED</div>Agent execution stopped by user';
-          O.appendChild(stEl);return;
-        }
-        if(t==='followup_suggestion'){
-          var fu=mkEl('div','followup-bar');fu.title=ev.text;
-          fu.innerHTML='<span class="fu-label">Suggested next</span>'
-            +'<span class="fu-text">'+esc(ev.text)+'</span>';
-          fu.addEventListener('click',function(){inp.value=ev.text;inp.focus()});
-          O.appendChild(fu);return;
-        }
-        if(t==='tool_call'){lastToolName=ev.name||'';llmPanel=null;llmPanelState=mkS();pendingPanel=false}
-        if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true}
-        if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
-          llmPanel=mkEl('div','llm-panel');O.appendChild(llmPanel);llmPanelState=mkS();pendingPanel=false;
-        }
-        var target=O,tState=state;
-        if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
-          ||t==='text_delta'||t==='text_end')){target=llmPanel;tState=llmPanelState}
-        handleOutputEvent(ev,target,tState);
-        if(target===llmPanel&&llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
-      });
-      O.scrollTo({top:O.scrollHeight,behavior:'instant'});
-    }).catch(function(err){console.error('Replay error:',err);inp.value=taskText;inp.focus()});
-}
-histSearch.addEventListener('input',function(){renderTasks(this.value)});
-function loadProposed(){
-  fetch('/proposed_tasks').then(function(r){return r.json()}).then(function(tasks){
-    pl.innerHTML='';
-    if(!tasks.length){pl.innerHTML='<div class="sidebar-empty">No suggestions yet</div>';return}
-    tasks.forEach(function(t){
-      var d=mkEl('div','sidebar-item');
-      d.textContent=t;d.title=t;
-      d.addEventListener('click',function(){inp.value=t;inp.focus();toggleSidebar()});
-      pl.appendChild(d);
-    });
-  }).catch(function(){});
-}
+var _histSearchTimer=null;
+histSearch.addEventListener('input',function(){
+  var q=this.value.trim();
+  if(_histSearchTimer)clearTimeout(_histSearchTimer);
+  _histSearchTimer=setTimeout(function(){
+    var url='/tasks?limit=100';
+    if(q)url+='&q='+encodeURIComponent(q);
+    fetch(url).then(function(r){return r.json()}).then(function(tasks){
+      if(!tasks.length&&q){
+        rl.innerHTML='<div class="sidebar-empty">No matches</div>';
+      }else{
+        renderSidebarTasks(tasks);
+      }
+    }).catch(function(){});
+  },200);
+});
+
 function loadWelcome(){
   if(!suggestionsEl)return;
-  Promise.all([
-    fetch('/tasks').then(function(r){return r.json()}).catch(function(){return []}),
-    fetch('/proposed_tasks').then(function(r){return r.json()}).catch(function(){return []})
-  ]).then(function(res){
-    var tasks=res[0],proposed=res[1];
+  fetch('/tasks?limit=10').then(function(r){return r.json()})
+  .catch(function(){return []}).then(function(tasks){
     suggestionsEl.innerHTML='';
-    var items=[];
-    proposed.slice(0,5).forEach(function(t){items.push({text:t,type:'suggested'})});
-    tasks.slice(0,5).forEach(function(t){
-      items.push({text:typeof t==='string'?t:(t.task||''),type:'recent'});
-    });
-    items.slice(0,10).forEach(function(item){
+    tasks.forEach(function(t,i){
+      var hasEvents=typeof t==='object'&&t.has_events;
+      var text=typeof t==='string'?t:(t.task||'');
       var chip=mkEl('div','suggestion-chip');
-      chip.title=item.text;
-      chip.innerHTML='<span class="chip-label '+item.type+'">'
-        +(item.type==='recent'?'Recent':'Suggested')+'</span>'
-        +esc(item.text);
-      chip.addEventListener('click',function(){inp.value=item.text;inp.focus()});
+      chip.title=text;
+      chip.innerHTML='<span class="chip-label recent">Recent</span>'+esc(text);
+      chip.addEventListener('click',function(){
+        if(hasEvents){replayTaskEvents(i,text)}
+        else{inp.value=text;inp.focus()}
+      });
       suggestionsEl.appendChild(chip);
     });
   });
@@ -1776,7 +1755,17 @@ if(divider){
     document.body.style.userSelect='';
     var frame=document.getElementById('code-server-frame');
     if(frame)frame.style.pointerEvents='';
+    var ep=editorPanel.style.flex.split(' ')[0];
+    fetch('/ui-state',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({editorPct:parseFloat(ep)})}).catch(function(){});
   });
+  fetch('/ui-state').then(function(r){return r.json()}).then(function(d){
+    if(d.editorPct){
+      var pct=Math.max(15,Math.min(85,d.editorPct));
+      editorPanel.style.flex=pct+' 1 0%';
+      assistantPanel.style.flex=(100-pct)+' 1 0%';
+    }
+  }).catch(function(){});
 }
 function openInEditor(path){
   fetch('/open-file',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1824,7 +1813,8 @@ function loadTheme(){
   fetch('/theme').then(function(r){return r.json()}).then(applyTheme).catch(function(){});
 }
 loadTheme();
-connectSSE();loadModels();loadTasks();loadProposed();loadWelcome();inp.focus();
+connectSSE();loadModels();loadTasks();loadWelcome();inp.focus();
+window.addEventListener('beforeunload',function(){navigator.sendBeacon('/closing','')});
 var runPromptBtn=document.getElementById('run-prompt-btn');
 var _promptPath='';
 function checkActiveFile(){
@@ -1976,10 +1966,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           autocomplete="off"/>
         <div id="recent-list"></div>
       </div>
-      <div class="sidebar-section" id="sidebar-proposals-sec">
-        <div class="sidebar-hdr">Suggested Tasks</div>
-        <div id="proposed-list"></div>
-      </div>
+
     </div>
     <header>
       <div class="logo">KISS Sorcar</div>
@@ -2002,7 +1989,8 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files, \u2318/ctrl-k editor, \u2318/ctrl-L run)"
+              placeholder="Ask anything\u2026 (@ files,
+ \u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple
@@ -2028,19 +2016,13 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
               -8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2
               2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button id="history-btn" onclick="toggleSidebar('history')" title="Task history">
+            <button id="history-btn" onclick="toggleSidebar()" title="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
             </button>
-            <button id="proposals-btn" onclick="toggleSidebar('proposals')" title="Suggested tasks">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
-                <path d="M2 12l10 5 10-5"/>
-              </svg>
-            </button>
+
             <button id="run-prompt-btn" title="Run current file as prompt" disabled>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
                 stroke="none">

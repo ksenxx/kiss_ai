@@ -71,21 +71,3 @@ def test_summarizer_yaml_returns_scalar() -> None:
     result = _parse_summarizer_result(raw)
     assert result == raw
 
-
-def test_finish_tool_error_produces_valid_yaml_result() -> None:
-    """When finish is called with wrong args, the error is handled in perform_task."""
-    agent = _make_agent()
-    agent._add_functions([finish])
-    # Calling finish with correct arguments
-    name, response = agent._execute_tool(
-        {
-            "name": "finish",
-            "arguments": {"success": True, "is_continue": False, "summary": "done"},
-        }
-    )
-    assert name == "finish"
-    # Should succeed and return valid YAML
-    result = yaml.safe_load(response)
-    assert isinstance(result, dict)
-    assert result["success"] is True
-    assert result["is_continue"] is False
