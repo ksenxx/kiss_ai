@@ -11,7 +11,7 @@ The entire IDE ships as a Python package. Run `sorcar` on any directory, and a b
 
 ## Architecture at a Glance
 
-Sorcar's architecture can be described in one sentence: **a Starlette web server streams SSE events from a `RelentlessAgent` that runs in a background thread, using `KISSAgent` for each sub-session of tool-calling against any LLM**.
+Sorcar's architecture can be described in one sentence: **a Starlette web server streams SSE events from a `RelentlessAgent` that runs in a background thread, using `KISSAgent` for each sub-session of tool-calling against any LLM**.  Claude Opus 4.6 is highly recommended.
 
 ```
 Browser UI (HTML/JS)
@@ -31,7 +31,7 @@ KISSAgent._run_agentic_loop()   (~460 lines total)
      |
      | model.generate_and_process_with_tools()
      v
-Any LLM  (Claude, GPT, Gemini, OpenRouter, ...)
+Any LLM  (Claude, GPT, Gemini, OpenRouter, Together AI)
 ```
 
 There are no subagent hierarchies. No shadow file systems. No planner/worker/judge roles. No lock files. No MCP servers. The entire agent stack is three classes deep: `SorcarAgent` -> `RelentlessAgent` -> `KISSAgent`.
@@ -128,7 +128,6 @@ Sorcar avoids this by trusting the LLM to compose the right Unix commands from a
 The Sorcar IDE is a single HTML page served by a Starlette application. The left panel embeds code-server (VS Code in the browser); the right panel is the chat interface. A draggable divider lets the user control the split. The two panels are integrated through:
 
 - **Merge view.** After the agent completes a task, Sorcar computes a diff of all changes, opens a merge view in the editor, and presents accept/reject controls in a floating toolbar. The user reviews changes file-by-file before they land.
-- **Theme synchronization.** The chat panel reads the VS Code theme (dark, light, high-contrast) and adapts its colors to match.
 - **Keyboard shortcuts.** `Cmd/Ctrl-K` toggles focus between editor and chat. `Cmd/Ctrl-L` runs selected editor text as an agent task.
 
 This is a meaningfully different experience from both Cursor and Claude Code:
@@ -141,9 +140,9 @@ This is a meaningfully different experience from both Cursor and Claude Code:
 
 ## Model Freedom
 
-Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
+I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
 
-This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus to GPT-4.1 to Gemini 2.5 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
+This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.3 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
 
 ---
 
