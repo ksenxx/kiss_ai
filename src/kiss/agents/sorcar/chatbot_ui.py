@@ -163,7 +163,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   max-height:50vh;min-height:68px;overflow-y:hidden;
   position:relative;z-index:1;
 }
-#task-input::placeholder{color:rgba(255,255,255,0.28)}
+#task-input::placeholder{color:rgba(255,255,255,0.45)}
 #task-input:disabled{opacity:0.35;cursor:not-allowed}
 #ghost-overlay{
   position:absolute;top:0;left:0;right:0;bottom:0;
@@ -732,7 +732,7 @@ body{background:var(--bg)}
     0 4px 24px rgba(0,0,0,0.25);
 }
 #assistant-panel #task-input{color:var(--text)}
-#assistant-panel #task-input::placeholder{color:rgba(var(--fg-rgb),0.3)}
+#assistant-panel #task-input::placeholder{color:rgba(var(--fg-rgb),0.45)}
 #assistant-panel .gs{color:rgba(var(--fg-rgb),0.4)}
 #assistant-panel #input-footer{border-top:1px solid rgba(var(--fg-rgb),0.06)}
 #assistant-panel #model-btn{
@@ -1151,7 +1151,7 @@ function handleEvent(ev){
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
     inp.placeholder='Ask anything\u2026 (@ for files, '
-    +'cmd/ctrl-k to toggle editor, cmd/ctrl-L to run selected text)';
+    +'cmd/ctrl-k to toggle editor, cmd/ctrl-l to run selected text)';
     inp.focus();break;
   case'code_server_restarted':{
     var csFrame=document.getElementById('code-server-frame');
@@ -1995,7 +1995,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files, \u2318/ctrl-k editor, \u2318/ctrl-L to run selected text)"
+              placeholder="Ask anything\u2026 (@ files, \u2318/ctrl-k editor, \u2318/ctrl-l to run selected text)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple

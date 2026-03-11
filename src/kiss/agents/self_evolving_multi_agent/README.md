@@ -298,10 +298,10 @@ class AgentEvolver:
 
 | File | Description |
 |------|-------------|
-| `multi_agent.py` | Main `SelfEvolvingMultiAgent` implementation with complex task example |
-| `agent_evolver.py` | `AgentEvolver` for evolving the agent with evaluation tasks |
-| `config.py` | Configuration with Pydantic models |
-| `__init__.py` | Package exports |
+| [`multi_agent.py`](multi_agent.py) | Main `SelfEvolvingMultiAgent` implementation with complex task example |
+| [`agent_evolver.py`](agent_evolver.py) | `AgentEvolver` for evolving the agent with evaluation tasks |
+| [`config.py`](config.py) | Configuration with Pydantic models |
+| [`__init__.py`](__init__.py) | Package exports |
 
 ## License
 

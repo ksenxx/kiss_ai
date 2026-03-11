@@ -2,7 +2,7 @@
 **How do you make an AI agent work on a task for hours — without losing its mind in [KISS Sorcar](https://github.com/ksenxx/kiss_ai)?**
 Cursor compresses context in-place. Claude Code triggers compaction APIs. Both degrade over time as context drift accumulates.
 We took the opposite path: **session boundaries with first-person progress summaries.** No vector databases. No RAG. No embeddings. No compaction. Just a `for` loop and the insight that an LLM can summarize its own work better than any retrieval system can reconstruct it.
-The result is [`RelentlessAgent`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/relentless_agent.py) — 282 lines of Python that can run for thousands of sub-sessions with **flat performance characteristics**. Session 9,999 has exactly the same working memory as session 1.
+The result is [`RelentlessAgent`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/relentless_agent.py) — ~284 lines of Python that can run for thousands of sub-sessions with **flat performance characteristics**. Session 9,999 has exactly the same working memory as session 1.
 
 How it works:
 → Each sub-session gets a **fresh context window** — original task + chronological progress summary with explanation and relevant code snippets

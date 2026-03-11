@@ -928,21 +928,46 @@ def run_chatbot(
         def _generate() -> str:
             history = _load_history()
             task_list = "\n".join(f"- {e['task']}" for e in history[:20])
+            files_list = "\n".join(file_cache[:200])
+            active_path = _read_active_file(cs_data_dir)
+            active_content = ""
+            if active_path:
+                try:
+                    with open(active_path) as f:
+                        active_content = f.read(10000)
+                except OSError:
+                    pass
+            context_parts = [
+                "Past tasks:\n{task_list}",
+                "Files and folders:\n{files_list}",
+            ]
+            if active_content:
+                context_parts.append(
+                    "Active file ({active_path}):\n{active_content}"
+                )
             agent = KISSAgent("Autocomplete")
             try:
                 result = agent.run(
                     model_name=_FAST_MODEL,
                     prompt_template=(
                         "You are an inline autocomplete engine for a coding assistant. "
-                        "Given the user's partial input and their past task history, "
+                        "Given the user's partial input, their past task history, "
+                        "the list of files/folders in the project, and the content of "
+                        "the currently open file in the editor, "
                         "predict what they want to type and return ONLY the remaining "
                         "text to complete their input. Do NOT repeat the text they already typed. "
                         "Keep the completion concise and natural."
                         "If no good completion, return empty string.\n\n"
-                        "Past tasks:\n{task_list}\n\n"
-                        'Partial input: "{query}"\n\n'
+                        + "\n\n".join(context_parts)
+                        + '\n\nPartial input: "{query}"\n\n'
                     ),
-                    arguments={"task_list": task_list, "query": query},
+                    arguments={
+                        "task_list": task_list,
+                        "files_list": files_list,
+                        "active_path": active_path,
+                        "active_content": active_content,
+                        "query": query,
+                    },
                     is_agentic=False,
                 )
                 s = _clean_llm_output(result)
