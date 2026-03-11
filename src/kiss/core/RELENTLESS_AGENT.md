@@ -1,3 +1,4 @@
+\#whatispossible
 # RelentlessAgent: The Elegant Engine Behind Multi-Hour Agentic Tasks in KISS Sorcar IDE
 
 *How 280 lines of Python solve the hardest problem in agentic coding — and why it deliberately ignores the patterns everyone else uses.*
@@ -6,7 +7,7 @@ ______________________________________________________________________
 
 ## Overview
 
-The `RelentlessAgent` (defined in `relentless_agent.py`) is the KISS framework's answer to a deceptively hard problem: **how do you make an AI agent work on a task for hours or even days without losing its mind?**
+The `RelentlessAgent` (defined in [`relentless_agent.py`](relentless_agent.py)) is the KISS framework's answer to a deceptively hard problem: **how do you make an AI agent work on a task for hours or even days without losing its mind?**
 
 Cursor, Claude Code, and every other agentic coding tool eventually hit the same wall — the context window fills up, the model starts forgetting earlier decisions, and the work degrades or halts. The industry's response has been a growing stack of complexity: vector databases for long-term memory, RAG pipelines for retrieval, compaction APIs, embedding-based search, layered memory hierarchies (short-term, mid-term, long-term), and elaborate context management subsystems.
 
@@ -163,9 +164,9 @@ The RelentlessAgent's summary is written by the working agent itself, in the mom
 
 The default `max_sub_sessions` is 10,000. With 100 steps per session, that is 1,000,000 potential steps (each step can include multiple tool calls). No context window management is needed to reach this scale because each session is independent. Cursor and Claude Code can theoretically run indefinitely with compaction, but their effective capacity degrades with each cycle. The RelentlessAgent's capacity is flat — session 9,999 has exactly the same working memory as session 1.
 
-### 4. Total Cost: 280 Lines
+### 4. Total Cost: ~284 Lines
 
-The entire `relentless_agent.py` is approximately 280 lines of Python, including imports, docstrings, and the prompt templates. For comparison:
+The entire [`relentless_agent.py`](relentless_agent.py) is approximately 284 lines of Python, including imports, docstrings, and the prompt templates. For comparison:
 
 - Cursor's context management involves dynamic context discovery, summarization systems, sub-agent orchestration, and a custom-trained MoE model.
 - Claude Code's context management involves the compaction API, session memory systems, CLAUDE.md file management, and manual intervention workflows.
@@ -235,7 +236,7 @@ ______________________________________________________________________
 
 ## How SorcarAgent Uses RelentlessAgent
 
-The `SorcarAgent` (`src/kiss/agents/sorcar/sorcar_agent.py`) is a coding-plus-general-purpose agent built as a thin subclass of `RelentlessAgent`. It demonstrates how concrete agents are assembled on top of the continuation engine without altering any of its mechanics.
+The `SorcarAgent` ([`src/kiss/agents/sorcar/sorcar_agent.py`](../agents/sorcar/sorcar_agent.py)) is a coding-plus-general-purpose agent built as a thin subclass of `RelentlessAgent`. It demonstrates how concrete agents are assembled on top of the continuation engine without altering any of its mechanics.
 
 ### What SorcarAgent Adds
 

@@ -304,7 +304,7 @@ with Progress(
 
 ## Configuration
 
-Default values in `src/kiss/agents/gepa/config.py`.
+Default values in [`src/kiss/agents/gepa/config.py`](config.py).
 
 ## Authors
 

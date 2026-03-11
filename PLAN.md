@@ -3,13 +3,13 @@
 ## Goal
 
 Reduce the number of threads, timers, and other concurrency primitives in
-`src/kiss/agents/sorcar/sorcar.py` without changing user-visible behavior.
+[`src/kiss/agents/sorcar/sorcar.py`](src/kiss/agents/sorcar/sorcar.py) without changing user-visible behavior.
 After each change, run `uv run pytest -v` with 500-second timeout to ensure
 tests pass. Run `uv run check --full` to ensure lint and type checks pass.
 
 ## Current Concurrency Inventory
 
-`sorcar.py` creates the following concurrent entities (line numbers approximate):
+[`sorcar.py`](src/kiss/agents/sorcar/sorcar.py) creates the following concurrent entities (line numbers approximate):
 
 ### Daemon Threads (8 total)
 
