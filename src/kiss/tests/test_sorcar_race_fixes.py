@@ -14,7 +14,6 @@ import time
 from kiss.agents.sorcar.task_history import (
     _add_task,
     _load_history,
-    _save_history,
     _set_latest_chat_events,
 )
 from kiss.core.base import Base
@@ -123,7 +122,7 @@ class TestHistoryLock:
 
         try:
             task_history._history_cache = None
-            _save_history([{"task": "initial_task", "has_events": False}])
+            _add_task("initial_task")
             task_history._history_cache = None  # Force reload
 
             errors: list[Exception] = []

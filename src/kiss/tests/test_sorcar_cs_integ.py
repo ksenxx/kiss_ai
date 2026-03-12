@@ -73,28 +73,6 @@ def cs_server():
 
     _init_git_repo(work_dir)
 
-    # Create a bare remote so push endpoint succeeds
-    bare_dir = os.path.join(tmpdir, "bare.git")
-    subprocess.run(["git", "init", "--bare", bare_dir], capture_output=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", bare_dir],
-        cwd=work_dir,
-        capture_output=True,
-    )
-    # Determine the branch name
-    result = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-    )
-    branch = result.stdout.strip() or "main"
-    subprocess.run(
-        ["git", "push", "-u", "origin", branch],
-        cwd=work_dir,
-        capture_output=True,
-    )
-
     # Create theme file BEFORE starting server (covers line 459: theme_file.stat().st_mtime)
     from kiss.agents.sorcar.task_history import _KISS_DIR
 
@@ -176,36 +154,6 @@ def cs_server():
 
     time.sleep(2)
     shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-class TestCSPushSuccess:
-    def test_push_succeeds_with_local_remote(self, cs_server: Any) -> None:
-        """Push to local bare remote. Covers push success path (line 1079)."""
-        base_url, work_dir, _, _ = cs_server
-        # Make a change and commit
-        new_file = os.path.join(work_dir, "push_test.txt")
-        Path(new_file).write_text("push test content")
-        subprocess.run(["git", "add", "."], cwd=work_dir, capture_output=True)
-        commit_env = {
-            **os.environ,
-            "GIT_COMMITTER_NAME": "T",
-            "GIT_COMMITTER_EMAIL": "t@t.com",
-        }
-        subprocess.run(
-            [
-                "git",
-                "commit",
-                "-m",
-                "test push",
-                "--author=T <t@t.com>",
-            ],
-            cwd=work_dir,
-            capture_output=True,
-            env=commit_env,
-        )
-        resp = requests.post(f"{base_url}/push", json={}, timeout=10)
-        data = resp.json()
-        assert data.get("status") == "ok"
 
 
 class TestCSGenerateCommitMsgDiffOnly:

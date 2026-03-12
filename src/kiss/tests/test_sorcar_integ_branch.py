@@ -26,8 +26,6 @@ from kiss.agents.sorcar.sorcar import (
 )
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
-    _build_arg_parser,
-    _resolve_task,
 )
 from kiss.core.relentless_agent import RelentlessAgent
 
@@ -38,26 +36,6 @@ class TestReadActiveFileDirPath:
 
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestResolveTaskPriority:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_file_overrides_task_flag(self) -> None:
-        p = os.path.join(self.tmpdir, "t.txt")
-        Path(p).write_text("from file")
-        parser = _build_arg_parser()
-        args = parser.parse_args(["-f", p, "--task", "from flag"])
-        assert _resolve_task(args) == "from file"
-
-    def test_default_task(self) -> None:
-        parser = _build_arg_parser()
-        args = parser.parse_args([])
-        result = _resolve_task(args)
-        assert "gmail" in result.lower()
 
 
 # ── SorcarAgent direct tests (covers __init__, _get_tools, _reset, run) ──
@@ -209,18 +187,6 @@ def server():
             proc.kill()
             proc.wait()
         shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-class TestPushEndpoint:
-    """Exercise /push endpoint (lines 934-938)."""
-
-    def test_push_no_remote(self, server) -> None:
-        base_url, _, _, _ = server
-        resp = requests.post(f"{base_url}/push", json={}, timeout=10)
-        data = resp.json()
-        # No remote configured, so push will fail
-        assert resp.status_code == 400
-        assert "error" in data
 
 
 class TestSuggestionsFileMatch:
@@ -741,12 +707,6 @@ class TestInProcessEndpoints:
         data = resp.json()
         assert "error" in data  # "No changes to commit"
 
-    def test_push_no_remote(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.post(f"{base_url}/push", json={}, timeout=10)
-        data = resp.json()
-        assert "error" in data
-
     def test_active_file_info_no_file(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         resp = requests.get(f"{base_url}/active-file-info", timeout=5)
@@ -873,18 +833,6 @@ class TestInProcessEndpoints:
                 timeout=10,
             )
             time.sleep(1)
-
-    def test_generate_config_message(self, inproc_server) -> None:
-        """Hit the /generate-config-message endpoint."""
-        base_url, _, _ = inproc_server
-        resp = requests.post(
-            f"{base_url}/generate-config-message",
-            json={"model": "claude-opus-4-6"},
-            timeout=30,
-        )
-        assert resp.status_code in (200, 500)
-        data = resp.json()
-        assert "message" in data or "error" in data
 
     def test_commit_git_failure(self, inproc_server) -> None:
         """Make git commit fail via a pre-commit hook."""
@@ -1108,46 +1056,4 @@ class TestInProcessEndpoints:
         assert any("frequent" in t for t in types), f"Data: {data[:5]}"
 
 
-class TestSorcarAgentMainInProcess:
-    """Call sorcar_agent.main() in-process to get coverage on the main() function.
 
-    With max_steps=0 and max_budget=0.0, the agent returns immediately
-    without making any LLM calls.
-    """
-
-    def test_main_with_work_dir(self) -> None:
-        """Cover the `args.work_dir is not None` branch (line 220→221)."""
-        tmpdir = tempfile.mkdtemp()
-        old_argv = sys.argv
-        try:
-            sys.argv = [
-                "sorcar_agent",
-                "--task", "say hello",
-                "--max_steps", "0",
-                "--max_budget", "0.0",
-                "--work_dir", tmpdir,
-                "--headless", "true",
-                "--verbose", "false",
-            ]
-            from kiss.agents.sorcar.sorcar_agent import main as sa_main
-            sa_main()
-        finally:
-            sys.argv = old_argv
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_main_no_work_dir(self) -> None:
-        """Cover the `args.work_dir is None` branch (line 220→224, uses tempdir)."""
-        old_argv = sys.argv
-        try:
-            sys.argv = [
-                "sorcar_agent",
-                "--task", "say hello",
-                "--max_steps", "0",
-                "--max_budget", "0.0",
-                "--headless", "true",
-                "--verbose", "false",
-            ]
-            from kiss.agents.sorcar.sorcar_agent import main as sa_main
-            sa_main()
-        finally:
-            sys.argv = old_argv

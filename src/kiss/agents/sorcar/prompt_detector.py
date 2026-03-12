@@ -1,3 +1,5 @@
+"""Heuristic detector for Markdown files that contain AI prompts or system instructions."""
+
 import logging
 import re
 from pathlib import Path
