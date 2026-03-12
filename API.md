@@ -680,7 +680,7 @@ from kiss.agents.coding_agents import Base, SYSTEM_PROMPT
 
 - `name`: The name identifier for the agent.
 
-- **set_printer** — Configure the output printer for this agent.<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
+- **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled (either explicitly or via config).<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
 
   - `printer`: An existing Printer instance to use directly. If provided, verbose is ignored.
   - `verbose`: Whether to print to the console. If None, uses the verbose config value.
@@ -1042,7 +1042,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.sorcar.prompt_detector`
+#### `kiss.agents.sorcar.prompt_detector` — *Heuristic detector for Markdown files that contain AI prompts or system instructions.*
 
 ##### `class PromptDetector` — An intelligent detector that analyzes Markdown content to determine if it
 
