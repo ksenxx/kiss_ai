@@ -36,7 +36,7 @@ def server():
     work_dir = os.path.join(tmpdir, "work")
     os.makedirs(work_dir)
 
-    # Initialize a git repo so commit/push endpoints work
+    # Initialize a git repo so commit endpoint works
     subprocess.run(["git", "init"], cwd=work_dir, capture_output=True, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],

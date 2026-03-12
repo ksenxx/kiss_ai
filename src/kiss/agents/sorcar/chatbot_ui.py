@@ -1144,7 +1144,7 @@ function handleEvent(ev){
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
     inp.placeholder='Ask anything\u2026 (@ files'
- +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)';
+ +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)';
     inp.focus();break;
   case'code_server_restarted':{
     var csFrame=document.getElementById('code-server-frame');
@@ -1492,8 +1492,15 @@ function getAtCtx(){
 function fetchAC(){
   var atCtx=getAtCtx();
   if(!atCtx){hideAC();return}
-  fetch('/suggestions?mode=files&q='+encodeURIComponent(atCtx.query))
-    .then(function(r){return r.json()}).then(renderAC).catch(function(){hideAC()});
+  var doFetch=function(){
+    fetch('/suggestions?mode=files&q='+encodeURIComponent(atCtx.query))
+      .then(function(r){return r.json()}).then(renderAC).catch(function(){hideAC()});
+  };
+  if(!atCtx.query){
+    fetch('/refresh-files',{method:'POST'}).then(doFetch).catch(doFetch);
+  }else{
+    doFetch();
+  }
 }
 function hlMatch(text,query){
   if(!query)return esc(text);
@@ -1504,8 +1511,6 @@ function hlMatch(text,query){
     +esc(text.substring(idx+query.length));
 }
 var _acSvg={
-  dir:'<svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 01-2 2H4a2'
-    +' 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>',
   file:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2'
     +' 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>'
     +'<polyline points="14 2 14 8 20 8"/></svg>',
@@ -1514,8 +1519,8 @@ var _acSvg={
     +' 14.14 2 9.27l6.91-1.01L12 2z"/></svg>'
 };
 function _acIcon(type){
-  if(type.startsWith('frequent_'))return _acSvg.star;
-  return _acSvg[type]||_acSvg.file;
+  if(type==='frequent')return _acSvg.star;
+  return _acSvg.file;
 }
 function _acPathHtml(text,query){
   var last=text.lastIndexOf('/');
@@ -1530,13 +1535,8 @@ function renderAC(data){
   ac.innerHTML='';acIdx=-1;
   var atCtx=getAtCtx();
   var searchQ=atCtx?atCtx.query:'';
-  var order=[
-    'frequent_file','frequent_dir','file','dir'
-  ];
-  var labels={
-    frequent_file:'Frequent',frequent_dir:'Frequent',
-    dir:'Directories',file:'Files'
-  };
+  var order=['frequent','file'];
+  var labels={frequent:'Frequent',file:'Files'};
   var groups={};
   data.forEach(function(item){
     var t=item.type;
@@ -1544,20 +1544,12 @@ function renderAC(data){
     groups[t].push(item);
   });
   var isFirst=true;
-  var shownFrequent=false;
   order.forEach(function(type){
     var g=groups[type];if(!g)return;
     var lbl=labels[type]||type;
-    if(type.startsWith('frequent_')){
-      if(shownFrequent)lbl=null;
-      shownFrequent=true;
-    }
-    if(lbl){
-      var hdr=mkEl('div','ac-section');
-      hdr.textContent=lbl;ac.appendChild(hdr);
-    }
+    var hdr=mkEl('div','ac-section');
+    hdr.textContent=lbl;ac.appendChild(hdr);
     g.forEach(function(item){
-      var baseType=item.type.replace('frequent_','');
       var d=mkEl('div','ac-item');
       d.dataset.text=item.text;
       var useSearch=searchQ&&searchQ.length>0;
@@ -1572,7 +1564,7 @@ function renderAC(data){
         isFirst=false;
       }
       d.addEventListener('click',function(){
-        selectAC({type:baseType,text:item.text});
+        selectAC({type:'file',text:item.text});
       });
       ac.appendChild(d);
     });
@@ -2035,8 +2027,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files,
- \u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text in the editor)"
+              placeholder="Ask anything\u2026 (@ files,\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)"
               autocomplete="off"></textarea>
           </div>
           <input type="file" id="file-input" multiple

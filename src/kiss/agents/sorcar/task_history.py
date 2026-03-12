@@ -16,10 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import shutil
 import socket
-import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -347,13 +345,6 @@ def _load_history(limit: int = 0) -> list[_HistoryEntry]:
         return _read_recent_entries(limit)
 
 
-def _count_history() -> int:
-    """Return the total number of history entries. Thread-safe."""
-    with _history_lock:
-        if _history_cache is None:
-            _refresh_cache()
-        return _total_count
-
 
 def _search_history(
     query: str, limit: int = 50
@@ -434,54 +425,6 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
         logger.debug("Exception caught", exc_info=True)
     return None
 
-
-def _write_entries(entries: list[_HistoryEntry]) -> None:
-    """Write entries to HISTORY_FILE atomically using a temp file."""
-    try:
-        _ensure_kiss_dir()
-        fd, tmp = tempfile.mkstemp(
-            dir=HISTORY_FILE.parent, suffix=".tmp"
-        )
-        try:
-            with os.fdopen(fd, "w") as f:
-                for e in entries:
-                    f.write(
-                        json.dumps(
-                            {
-                                "task": e["task"],
-                                "has_events": bool(
-                                    e.get("has_events")
-                                ),
-                            }
-                        )
-                    )
-                    f.write("\n")
-            os.replace(tmp, HISTORY_FILE)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-    except OSError:
-        logger.debug("Exception caught", exc_info=True)
-
-
-def _save_history_unlocked(
-    entries: list[_HistoryEntry],
-) -> None:
-    """Save history to cache and disk as JSONL. Must hold _history_lock."""
-    global _history_cache, _total_count
-    truncated = entries[:MAX_HISTORY]
-    _write_entries(truncated)
-    _history_cache = truncated[:_RECENT_CACHE_SIZE]
-    _total_count = len(truncated)
-
-
-def _save_history(entries: list[_HistoryEntry]) -> None:
-    """Save history to cache and disk. Thread-safe."""
-    with _history_lock:
-        _save_history_unlocked(entries)
 
 
 def _load_task_chat_events(

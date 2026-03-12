@@ -137,18 +137,22 @@ class Base:
     ) -> None:
         """Configure the output printer for this agent.
 
+        If an explicit *printer* is provided, it is always used regardless
+        of the verbose setting.  Otherwise a ``ConsolePrinter`` is created
+        when verbose output is enabled (either explicitly or via config).
+
         Args:
             printer: An existing Printer instance to use directly. If provided,
                 verbose is ignored.
             verbose: Whether to print to the console. If None,
                 uses the verbose config value.
         """
-        self.printer: Printer | None = None
-        if config_module.DEFAULT_CONFIG.agent.verbose:
-            if printer:
-                self.printer = printer
-            elif verbose is not False:
-                self.printer = ConsolePrinter()
+        if printer:
+            self.printer = printer
+        elif verbose is not False and config_module.DEFAULT_CONFIG.agent.verbose:
+            self.printer = ConsolePrinter()
+        else:
+            self.printer = None
 
     def _build_state_dict(self) -> dict[str, Any]:
         """Build state dictionary for saving.

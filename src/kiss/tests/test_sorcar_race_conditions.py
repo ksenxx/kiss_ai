@@ -913,17 +913,6 @@ class TestTaskHistoryRemaining:
         history = th._load_history()
         assert len(history) > 0  # SAMPLE_TASKS
 
-    def test_save_history_oserror(self) -> None:
-        """OSError when saving history."""
-        th._load_history()
-        # Make history file directory read-only
-        th.HISTORY_FILE.parent.chmod(0o444)
-        try:
-            # Should not raise
-            th._save_history([{"task": "test", "has_events": False}])
-        finally:
-            th.HISTORY_FILE.parent.chmod(0o755)
-
 class TestCodeServerOSErrors:
     """Cover OSError branches in code_server.py."""
 

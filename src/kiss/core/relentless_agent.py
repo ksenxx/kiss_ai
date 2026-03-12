@@ -107,6 +107,8 @@ class RelentlessAgent(Base):
         self.total_tokens_used: int = 0
         self.docker_image = docker_image
         self.docker_manager: DockerManager | None = None
+        self.task_description: str = ""
+        self.system_instructions: str = ""
         self.set_printer(printer, verbose=verbose)
 
     def _docker_bash(self, command: str, description: str) -> str:
