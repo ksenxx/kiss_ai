@@ -372,6 +372,69 @@ class TestReplayTaskEventsRestoresInput:
         )
 
 
+class TestMergeWarningOnDisabledChatbox:
+    """Tests that clicking the chatbox during merge view shows a warning."""
+
+    def test_merge_warning_element_in_html(self):
+        """The merge-warning div exists in the HTML output."""
+        from kiss.agents.sorcar.chatbot_ui import _build_html
+
+        html = _build_html("test")
+        assert 'id="merge-warning"' in html
+        assert "Resolve all diffs before proceeding" in html
+
+    def test_merge_warning_css_exists(self):
+        """CSS rules for #merge-warning are defined."""
+        from kiss.agents.sorcar.chatbot_ui import _build_html
+
+        html = _build_html("test")
+        assert "#merge-warning{" in html
+        assert "#merge-warning.visible{opacity:1}" in html
+
+    def test_show_merge_warning_function_in_js(self):
+        """showMergeWarning function is defined in CHATBOT_JS."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        assert "function showMergeWarning(){" in CHATBOT_JS
+
+    def test_input_text_wrap_click_calls_show_merge_warning(self):
+        """Click handler on input-text-wrap calls showMergeWarning when merging."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        # Find the click handler on input-text-wrap
+        handler_idx = CHATBOT_JS.index(
+            "getElementById('input-text-wrap').addEventListener('click'"
+        )
+        # Extract the handler body (next ~100 chars)
+        handler = CHATBOT_JS[handler_idx : handler_idx + 200]
+        assert "if(merging)showMergeWarning()" in handler
+
+    def test_merge_warning_inside_input_text_wrap(self):
+        """merge-warning div is inside input-text-wrap for proper positioning."""
+        from kiss.agents.sorcar.chatbot_ui import _build_html
+
+        html = _build_html("test")
+        wrap_start = html.index('id="input-text-wrap"')
+        # Find the closing </div> of input-text-wrap
+        warning_pos = html.index('id="merge-warning"')
+        assert warning_pos > wrap_start
+
+    def test_merge_warning_has_timeout_to_hide(self):
+        """showMergeWarning removes 'visible' class after a timeout."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        fn_start = CHATBOT_JS.index("function showMergeWarning(){")
+        # Find the end of the function by looking for the closing brace
+        # after addEventListener (which comes right after showMergeWarning)
+        fn_end = CHATBOT_JS.index(
+            "addEventListener('click'", fn_start
+        )
+        fn_body = CHATBOT_JS[fn_start:fn_end]
+        assert "classList.add('visible')" in fn_body
+        assert "classList.remove('visible')" in fn_body
+        assert "setTimeout" in fn_body
+
+
 class TestDeepSeekReasoningModelsConsistency:
     """Verify DEEPSEEK_REASONING_MODELS entries match model_info.py entries."""
 

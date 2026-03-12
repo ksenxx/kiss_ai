@@ -164,7 +164,14 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   position:relative;z-index:1;
 }
 #task-input::placeholder{color:rgba(255,255,255,0.45)}
-#task-input:disabled{opacity:0.35;cursor:not-allowed}
+#task-input:disabled{opacity:0.35;cursor:not-allowed;pointer-events:none}
+#merge-warning{
+  position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);
+  background:rgba(220,38,38,0.95);color:#fff;font-size:14px;font-weight:800;
+  padding:6px 14px;border-radius:6px;white-space:nowrap;pointer-events:none;
+  opacity:0;transition:opacity 0.25s;z-index:200;
+}
+#merge-warning.visible{opacity:1}
 #ghost-overlay{
   position:absolute;top:0;left:0;right:0;bottom:0;
   pointer-events:none;user-select:none;
@@ -965,6 +972,16 @@ var fileInput=document.getElementById('file-input');
 var uploadBtn=document.getElementById('upload-btn');
 var fileChips=document.getElementById('file-chips');
 var pendingFiles=[];
+var mergeWarn=document.getElementById('merge-warning');
+var _mwTimer=null;
+function showMergeWarning(){
+  if(_mwTimer){clearTimeout(_mwTimer);_mwTimer=null}
+  mergeWarn.classList.add('visible');
+  _mwTimer=setTimeout(function(){mergeWarn.classList.remove('visible');_mwTimer=null},2000);
+}
+document.getElementById('input-text-wrap').addEventListener('click',function(){
+  if(merging)showMergeWarning();
+});
 uploadBtn.addEventListener('click',function(){if(!running)fileInput.click()});
 fileInput.addEventListener('change',function(){
   Array.from(this.files||[]).forEach(function(f){
@@ -1138,6 +1155,7 @@ function handleEvent(ev){
     merging=true;inp.disabled=true;
     btn.disabled=true;uploadBtn.disabled=true;
     inp.placeholder='Resolve all diffs in the merge view to continue\u2026';
+    document.getElementById('input-text-wrap').style.cursor='not-allowed';
     break;
   case'merge_ended':
     document.getElementById('merge-toolbar').style.display='none';
@@ -1145,6 +1163,7 @@ function handleEvent(ev){
     btn.disabled=false;uploadBtn.disabled=false;
     inp.placeholder='Ask anything\u2026 (@ files'
  +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)';
+    document.getElementById('input-text-wrap').style.cursor='';
     inp.focus();break;
   case'code_server_restarted':{
     var csFrame=document.getElementById('code-server-frame');
@@ -2030,6 +2049,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
             <textarea id="task-input" rows="3"
               placeholder="Ask anything\u2026 (@ files,\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)"
               autocomplete="off"></textarea>
+            <div id="merge-warning">Resolve all diffs before proceeding</div>
           </div>
           <input type="file" id="file-input" multiple
             accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
