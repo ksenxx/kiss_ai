@@ -323,6 +323,55 @@ class TestRelentlessAgentAttributeInit:
         assert agent.system_instructions == ""
 
 
+class TestReplayTaskEventsRestoresInput:
+    """Tests that replayTaskEvents restores inp.value after replaying events.
+
+    When task_done/task_error/task_stopped events are replayed, setReady()
+    clears inp.value. The fix ensures inp.value is restored to the task text
+    after all events are replayed.
+    """
+
+    def test_replay_restores_input_after_task_done(self):
+        """After replaying events including task_done, inp.value=txt is set."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        start = CHATBOT_JS.index("function replayTaskEvents(idx,txt){")
+        end = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
+        replay_js = CHATBOT_JS[start:end]
+
+        # The fetch callback should restore inp.value=txt after the forEach loop
+        # Find the .then(function(events){ block
+        then_start = replay_js.index(".then(function(events){")
+        then_block = replay_js[then_start:]
+
+        # After the forEach loop ends (with "});"), inp.value=txt must appear
+        # before the sb() call
+        foreach_end = then_block.index("});", then_block.index("events.forEach"))
+        after_foreach = then_block[foreach_end:]
+        sb_pos = after_foreach.index("sb();")
+        between = after_foreach[:sb_pos]
+        assert "inp.value=txt" in between, (
+            "replayTaskEvents must restore inp.value=txt after replaying events "
+            "and before sb(), so task_done/setReady clearing is undone"
+        )
+
+    def test_replay_sets_input_at_start_and_after_fetch(self):
+        """inp.value=txt is set both at function start and after event replay."""
+        from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
+
+        start = CHATBOT_JS.index("function replayTaskEvents(idx,txt){")
+        end = CHATBOT_JS.index("function renderSidebarTasks(tasks){")
+        replay_js = CHATBOT_JS[start:end]
+
+        # Count occurrences of inp.value=txt - should be at least 2
+        # (once at top, once after forEach)
+        count = replay_js.count("inp.value=txt")
+        assert count >= 2, (
+            f"Expected inp.value=txt at least twice in replayTaskEvents "
+            f"(top + after replay), found {count}"
+        )
+
+
 class TestDeepSeekReasoningModelsConsistency:
     """Verify DEEPSEEK_REASONING_MODELS entries match model_info.py entries."""
 
