@@ -1706,6 +1706,7 @@ function replayTaskEvents(idx,txt){
       handleOutputEvent(ev,target,tState);
       if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
     });
+    inp.value=txt;
     sb();
   }).catch(function(){});
 }
