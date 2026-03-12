@@ -211,8 +211,8 @@ class TestTokenDisplayFix:
         info = agent._get_usage_info_string()
         assert "Tokens: 50000/" in info
 
-    def test_tokens_exceeding_context_capped_at_max(self):
-        """Tokens exceeding context length are capped at max (not wrapped via modulo)."""
+    def test_tokens_exceeding_context_wrapped_via_modulo(self):
+        """Tokens exceeding context length are wrapped via modulo."""
         from kiss.core.kiss_agent import KISSAgent
 
         agent = KISSAgent("test")
@@ -231,11 +231,11 @@ class TestTokenDisplayFix:
         agent.model = FakeModel()  # type: ignore[assignment]
 
         info = agent._get_usage_info_string()
-        # With min(), should show 128000/128000, not 250000 % 128000 = 122000
-        assert "Tokens: 128000/128000" in info
+        # 250000 % 128000 = 122000
+        assert "Tokens: 122000/128000" in info
 
     def test_tokens_exactly_at_context(self):
-        """Tokens exactly at context length shown correctly."""
+        """Tokens exactly at context length wrap to zero via modulo."""
         from kiss.core.kiss_agent import KISSAgent
 
         agent = KISSAgent("test")
@@ -253,7 +253,8 @@ class TestTokenDisplayFix:
         agent.model = FakeModel()  # type: ignore[assignment]
 
         info = agent._get_usage_info_string()
-        assert "Tokens: 128000/128000" in info
+        # 128000 % 128000 = 0
+        assert "Tokens: 0/128000" in info
 
     def test_session_info_included(self):
         """Session info is prepended when present."""

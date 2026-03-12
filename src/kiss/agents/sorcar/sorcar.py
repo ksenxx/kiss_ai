@@ -846,8 +846,7 @@ def run_chatbot(
             rest: list[dict[str, str]] = []
             for path in file_cache:
                 if not q or q in path.lower():
-                    ptype = "dir" if path.endswith("/") else "file"
-                    item = {"type": ptype, "text": path}
+                    item = {"type": "file", "text": path}
                     if usage.get(path, 0) > 0:
                         frequent.append(item)
                     else:
@@ -869,13 +868,12 @@ def run_chatbot(
             frequent.sort(
                 key=lambda m: (
                     _end_dist(m["text"]),
-                    m["type"] != "file",
                     -usage.get(m["text"], 0),
                 )
             )
-            rest.sort(key=lambda m: (_end_dist(m["text"]), m["type"] != "file"))
+            rest.sort(key=lambda m: _end_dist(m["text"]))
             for f in frequent:
-                f["type"] = "frequent_" + f["type"]
+                f["type"] = "frequent"
             return JSONResponse((frequent + rest)[:20])
         if not query:
             return JSONResponse([])
