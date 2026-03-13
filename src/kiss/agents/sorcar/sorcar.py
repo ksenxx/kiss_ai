@@ -47,6 +47,7 @@ from kiss.agents.sorcar.task_history import (
     _load_task_chat_events,
     _record_file_usage,
     _record_model_usage,
+    _save_last_model,
     _search_history,
     _set_latest_chat_events,
 )
@@ -1044,6 +1045,7 @@ def run_chatbot(
         if not name:
             return JSONResponse({"error": "No model"}, status_code=400)
         selected_model = name
+        _save_last_model(name)
         return JSONResponse({"status": "ok"})
 
     async def get_ui_state(request: Request) -> JSONResponse:
