@@ -49,6 +49,9 @@ dependencies = [
     "uvicorn>=0.30.0",
     "starlette>=0.38.0",
     "slack_sdk>=3.30.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
 ]
 
 [build-system]
@@ -161,6 +164,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "google.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "google_auth_oauthlib.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "googleapiclient.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -38,7 +38,8 @@
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
       - [`kiss.agents.sorcar.prompt_detector`](#kissagentssorcarprompt_detector)
   - [`kiss.channels`](#kisschannels)
-    - [`kiss.channels.channel_agent`](#kisschannelschannel_agent)
+    - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
+    - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
 
 </details>
 
@@ -1065,61 +1066,18 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.channel_agent` — *Channel agent that creates app-specific tools and agents dynamically.*
+#### `kiss.channels.gmail_agent` — *Gmail Agent — SorcarAgent extension with Gmail API tools.*
 
-##### `class ChannelAgent` — Creates app-specific API tools and agents dynamically for any app.
+##### `class GmailAgent(SorcarAgent)` — SorcarAgent extended with Gmail API tools.
 
-**Constructor:** `ChannelAgent(app_name: str) -> None`
+**Constructor:** `GmailAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
 
-- **is_authenticated** — True if a valid access token is stored.<br/>`is_authenticated() -> bool` *(property)*
+______________________________________________________________________
 
-- **authenticate_with_token** — Store a direct access token (e.g. GitHub PAT, API key).<br/>`authenticate_with_token(token: str) -> str`
+#### `kiss.channels.slack_agent` — *Slack Agent — SorcarAgent extension with Slack API tools.*
 
-  - `token`: The access token string.
-  - **Returns:** Status message.
+##### `class SlackAgent(SorcarAgent)` — SorcarAgent extended with Slack workspace tools.
 
-- **configure_oauth2** — Configure OAuth2 settings for this app. Call this before starting the OAuth2 flow. The settings are persisted to disk so they survive restarts.<br/>`configure_oauth2(auth_url: str, token_url: str, client_id_env: str, client_secret_env: str, scopes: str = '') -> str`
-
-  - `auth_url`: OAuth2 authorization endpoint URL.
-  - `token_url`: OAuth2 token endpoint URL.
-  - `client_id_env`: Environment variable name for the client ID.
-  - `client_secret_env`: Environment variable name for the client secret.
-  - `scopes`: Space-separated OAuth2 scopes.
-  - **Returns:** Status message.
-
-- **authenticate_oauth2** — Complete OAuth2 auth by exchanging an authorization code for tokens. Requires :meth:`configure_oauth2` to have been called first.<br/>`authenticate_oauth2(code: str, redirect_uri: str) -> str`
-
-  - `code`: Authorization code from the OAuth2 callback.
-  - `redirect_uri`: The redirect URI used during authorization.
-  - **Returns:** Status message.
-
-- **refresh_access_token** — Refresh the OAuth2 access token using the stored refresh token.<br/>`refresh_access_token() -> str`
-
-  - **Returns:** Status message.
-
-- **get_auth_url** — Get the OAuth2 authorization URL for this app. Requires :meth:`configure_oauth2` to have been called and the client ID environment variable to be set.<br/>`get_auth_url() -> str`
-
-  - **Returns:** The full authorization URL, or an error message.
-
-- **get_tools** — Return generic REST API tools (requires prior authentication).<br/>`get_tools() -> list`
-
-  - **Returns:** List of callable tool functions, or empty list if not authenticated.
-
-- **clear_auth** — Delete the stored authentication token for this app.<br/>`clear_auth() -> str`
-
-  - **Returns:** Status message.
-
-- **create_app_agent** — Create an app-specific agent Python file on disk. Generates a standalone Python file at `<channels_dir>/<app>/<App>Agent.py` that defines a `<App>Agent` class extending `AppAgent`. The file can be run independently with `python <App>Agent.py --task "..."` to perform app-specific tasks.<br/>`create_app_agent() -> Path`
-
-  - **Returns:** Path to the generated agent file.
-
-##### `class AppAgent(SorcarAgent)` — SorcarAgent extended with app-specific API tools and auth management.
-
-**Constructor:** `AppAgent(channel: ChannelAgent, wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
-
-**`create_channel`** — Create a ChannelAgent for the named app. Any app name is accepted — no hardcoded registry.<br/>`def create_channel(app_name: str) -> ChannelAgent`
-
-- `app_name`: App identifier (e.g. 'github', 'google', 'spotify', 'jira', 'slack', or any other app).
-- **Returns:** Configured ChannelAgent instance.
+**Constructor:** `SlackAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
 
 ______________________________________________________________________
