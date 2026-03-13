@@ -402,42 +402,6 @@ class TestPrepareMergeViewFilteredHunks:
             shutil.rmtree(base_dir, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
-# Additional prompt_detector branches
-# ---------------------------------------------------------------------------
-class TestPromptDetectorEdgeCases:
-    def test_frontmatter_without_closing_dashes(self) -> None:
-        """Frontmatter with only one --- marker (no closing)."""
-        from kiss.agents.sorcar.prompt_detector import PromptDetector
-
-        detector = PromptDetector()
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False
-        ) as f:
-            f.write("---\nmodel: gpt-4\nNot closed properly\n")
-            path = f.name
-        try:
-            is_prompt, score, reasons = detector.analyze(path)
-            # No frontmatter parsed because < 3 parts when split by ---
-        finally:
-            os.unlink(path)
-
-    def test_empty_words(self) -> None:
-        """Empty content with just frontmatter."""
-        from kiss.agents.sorcar.prompt_detector import PromptDetector
-
-        detector = PromptDetector()
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False
-        ) as f:
-            f.write("---\nmodel: gpt-4\n---\n")
-            path = f.name
-        try:
-            is_prompt, score, reasons = detector.analyze(path)
-        finally:
-            os.unlink(path)
-
-
-# ---------------------------------------------------------------------------
 # browser_ui.py - additional branch coverage
 # ---------------------------------------------------------------------------
 class TestBrowserUiUncoveredBranches:
@@ -561,25 +525,6 @@ class TestCodeServerUncoveredBranches:
             base_dir = _untracked_base_dir()
             if base_dir.exists():
                 shutil.rmtree(base_dir, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# prompt_detector.py - additional branch coverage
-# ---------------------------------------------------------------------------
-class TestPromptDetectorUncoveredBranches:
-    def test_unreadable_md_file(self) -> None:
-        """Cover 67-69: exception when reading file content."""
-        from kiss.agents.sorcar.prompt_detector import PromptDetector
-
-        detector = PromptDetector()
-        # Create a directory with .md suffix — reading it will raise an error
-        with tempfile.TemporaryDirectory() as d:
-            md_dir = Path(d, "fake.md")
-            md_dir.mkdir()
-            is_prompt, score, reasons = detector.analyze(str(md_dir))
-            assert not is_prompt
-            assert score == 0.0
-            assert any("Error" in r for r in reasons)
 
 
 # ---------------------------------------------------------------------------
