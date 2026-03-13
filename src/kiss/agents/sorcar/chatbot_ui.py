@@ -1023,10 +1023,25 @@ function recordFileUsage(path){
   }).catch(function(){});
 }
 function mkS(){return{thinkEl:null,txtEl:null,bashPanel:null}}
+function resizeInput(){
+  inp.style.height='auto';
+  inp.style.height=inp.scrollHeight+'px';
+  inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+}
+function resetOutputState(){
+  state=mkS();llmPanel=null;llmPanelState=mkS();
+  lastToolName='';pendingPanel=false;_scrollLock=false;
+}
+function enterRunning(){
+  running=true;inp.disabled=true;
+  runPromptBtn.disabled=true;
+  btn.style.display='none';
+  stopBtn.style.display='inline-flex';
+  D.classList.add('running');hideAC();startTimer();
+  inp.style.height='auto';inp.style.overflowY='hidden';
+}
 inp.addEventListener('input',function(){
-  this.style.height='auto';
-  this.style.height=this.scrollHeight+'px';
-  this.style.overflowY=this.scrollHeight>this.clientHeight?'auto':'hidden';
+  resizeInput();
   histIdx=-1;
   clearGhost();
   if(getAtCtx()){
@@ -1161,12 +1176,7 @@ function handleEvent(ev){
   case'theme_changed':applyTheme(ev);break;
   case'focus_chatbox':window.focus();inp.focus();break;
   case'external_run':
-    running=true;inp.disabled=true;
-    runPromptBtn.disabled=true;
-    btn.style.display='none';
-    stopBtn.style.display='inline-flex';
-    D.classList.add('running');hideAC();startTimer();
-    inp.style.height='auto';inp.style.overflowY='hidden';
+    enterRunning();
     inp.value=ev.text||'';
     pendingUserMsg={text:ev.text,images:[]};
     pendingFiles=[];renderFileChips();
@@ -1193,9 +1203,7 @@ function handleEvent(ev){
     }
     break};
   case'clear':
-    O.innerHTML='';state=mkS();
-    llmPanel=null;llmPanelState=mkS();
-    lastToolName='';pendingPanel=false;_scrollLock=false;
+    O.innerHTML='';resetOutputState();
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
   case'user_browser_action':{
@@ -1384,12 +1392,7 @@ function looksLikeFilePath(s){
   return false;
 }
 function doSubmitTask(task){
-  running=true;inp.disabled=true;
-  runPromptBtn.disabled=true;
-  btn.style.display='none';
-  stopBtn.style.display='inline-flex';
-  D.classList.add('running');hideAC();startTimer();
-  inp.style.height='auto';inp.style.overflowY='hidden';
+  enterRunning();
   pendingUserMsg={text:task,images:pendingFiles.filter(function(f){
     return f.mime_type.startsWith('image/');
   }).map(function(f){return f.url})};
@@ -1429,9 +1432,7 @@ clearBtn.addEventListener('click',function(){
     +'<p>Describe a task and the agent will work on it</p>'
     +'<div id="suggestions"></div></div>';
   suggestionsEl=document.getElementById('suggestions');
-  state=mkS();
-  llmPanel=null;llmPanelState=mkS();
-  lastToolName='';pendingPanel=false;_scrollLock=false;
+  resetOutputState();
   pendingFiles=[];renderFileChips();
   loadWelcome();inp.value='';inp.focus();
 });
@@ -1616,9 +1617,7 @@ function selectAC(item){
     var np=before.length+item.text.length+sep.length;
     inp.setSelectionRange(np,np);
     recordFileUsage(item.text);
-    inp.style.height='auto';
-    inp.style.height=inp.scrollHeight+'px';
-    inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+    resizeInput();
   }
   hideAC();inp.focus();
 }
@@ -1650,9 +1649,7 @@ function updateGhost(){
 }
 function acceptGhost(){
   inp.value+=ghostSuggest;
-  inp.style.height='auto';
-  inp.style.height=inp.scrollHeight+'px';
-  inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+  resizeInput();
   clearGhost();inp.focus();
 }
 function fetchGhost(){
@@ -1699,8 +1696,7 @@ function loadTasks(){
 function replayTaskEvents(idx,txt){
   inp.value=txt;inp.focus();
   if(sidebar.classList.contains('open')){toggleSidebar();}
-  O.innerHTML='';state=mkS();llmPanel=null;llmPanelState=mkS();
-  lastToolName='';pendingPanel=false;_scrollLock=false;
+  O.innerHTML='';resetOutputState();
   suggestionsEl=null;
   showUserMsg({text:txt,images:[]});
   fetch('/task-events?idx='+idx).then(function(r){return r.json()})
@@ -1889,8 +1885,7 @@ runPromptBtn.addEventListener('click',function(){
     .then(function(r){return r.json()}).then(function(d){
     if(d.content){
       inp.value=d.content;
-      inp.style.height='auto';
-      inp.style.height=inp.scrollHeight+'px';
+      resizeInput();
       submitTask();
     }
   }).catch(function(){});

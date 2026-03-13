@@ -51,14 +51,19 @@ class TestClearButtonWelcome:
         assert "suggestionsEl=document.getElementById('suggestions')" in handler
 
     def test_resets_state(self) -> None:
-        """Internal state variables must be reset."""
+        """Internal state variables must be reset (via resetOutputState())."""
         handler = _get_clear_handler()
-        assert "state=mkS()" in handler
-        assert "llmPanel=null" in handler
-        assert "llmPanelState=mkS()" in handler
-        assert "lastToolName=''" in handler
-        assert "pendingPanel=false" in handler
-        assert "_scrollLock=false" in handler
+        assert "resetOutputState()" in handler
+        # Verify resetOutputState contains all necessary resets
+        assert "function resetOutputState(){" in CHATBOT_JS
+        fn_start = CHATBOT_JS.index("function resetOutputState(){")
+        fn_body = CHATBOT_JS[fn_start : CHATBOT_JS.index("}", fn_start) + 1]
+        assert "state=mkS()" in fn_body
+        assert "llmPanel=null" in fn_body
+        assert "llmPanelState=mkS()" in fn_body
+        assert "lastToolName=''" in fn_body
+        assert "pendingPanel=false" in fn_body
+        assert "_scrollLock=false" in fn_body
 
     def test_clears_pending_files(self) -> None:
         """Pending file attachments must be cleared."""
