@@ -84,11 +84,13 @@ SYSTEM_PROMPT = f"""
 - Understand existing code in the project
 - Augment recent knowledge and to perform web based tasks
 - Read papers from the internet to understand concepts and algorithms
+- For deep research, you must visit and read at least 50 websites
 
 ### Self-Improvement Loop
 - Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
   with instructions and rules and intelligence for yourself ONLY IF you have learned any
   major lessons or intelligence about the project or in general during the task execution.
+  Lessons that save running time and number of tokens used by the agent would be invaluable.
   Also compact the lessons you have learned into concise instructions and rules for you to follow.
 - The lessons MUST NOT be specific to a task, but about agent behavior.
 - Review lessons when the agent starts

@@ -27,7 +27,7 @@ TASK_PROMPT = """# Task
 # MOST IMPORTANT INSTRUCTIONS
 - **At step {step_threshold}: you MUST call finish(success=False, is_continue=True, \
 summary="precise chronologically-ordered list of things the agent did \
-with the reason for doing that along with relevant code snippets")** \
+with the reason for doing that along with relevant code snippets")** or \
 if the task is not complete and you are at risk of running out of steps or context length.
 - Work dir: {work_dir}
 - Current process PID: {current_pid} — NEVER kill this process.
