@@ -19,16 +19,19 @@ from kiss.core.models.model_info import (
     model,
 )
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+from kiss.core.models.novita_model import NovitaModel
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,
     requires_openai_api_key,
+    requires_novita_api_key,
 )
 
 MODEL_CONFIGS = [
     pytest.param("claude-haiku-4-5", "AnthropicModel", "4", marks=requires_anthropic_api_key),
     pytest.param("gemini-3-flash-preview", "GeminiModel", "6", marks=requires_gemini_api_key),
     pytest.param("gpt-4.1-mini", "OpenAICompatibleModel", "10", marks=requires_openai_api_key),
+    pytest.param("novita/deepseek/deepseek-v3.2", "NovitaModel", "10", marks=requires_novita_api_key),
 ]
 
 @requires_anthropic_api_key
