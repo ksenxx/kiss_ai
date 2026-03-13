@@ -564,6 +564,21 @@ def _increment_usage(
         logger.debug("Exception caught", exc_info=True)
 
 
+def _save_last_model(model: str) -> None:
+    """Persist the selected model name without incrementing usage count.
+
+    Args:
+        model: The model name to save as the last-selected model.
+    """
+    usage = _load_json_dict(MODEL_USAGE_FILE)
+    usage["_last"] = model
+    try:
+        _ensure_kiss_dir()
+        MODEL_USAGE_FILE.write_text(json.dumps(usage))
+    except OSError:
+        logger.debug("Exception caught", exc_info=True)
+
+
 def _record_model_usage(model: str) -> None:
     _increment_usage(
         MODEL_USAGE_FILE, model, extra={"_last": model}

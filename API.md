@@ -38,7 +38,6 @@
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
       - [`kiss.agents.sorcar.prompt_detector`](#kissagentssorcarprompt_detector)
   - [`kiss.channels`](#kisschannels)
-    - [`kiss.channels.app_agent`](#kisschannelsapp_agent)
     - [`kiss.channels.channel_agent`](#kisschannelschannel_agent)
 
 </details>
@@ -1063,16 +1062,6 @@ ______________________________________________________________________
 ______________________________________________________________________
 
 ### `kiss.channels` — *Channel integrations for KISS agents.*
-
-______________________________________________________________________
-
-#### `kiss.channels.app_agent` — *Pre-configured AppAgent factory for named apps.*
-
-**`create_app_agent`** — Create an AppAgent pre-configured for the named app.<br/>`def create_app_agent(app_name: str, **kwargs: Any) -> AppAgent`
-
-- `app_name`: App identifier (e.g. 'slack', 'github', 'spotify').
-- `**kwargs`: Passed through to AppAgent (e.g. wait_for_user_callback).
-- **Returns:** An AppAgent instance with a ChannelAgent for the named app.
 
 ______________________________________________________________________
 

@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import kiss.agents.sorcar.task_history as task_history
 from kiss.agents.sorcar.sorcar import (
     run_chatbot,
 )
@@ -1055,5 +1056,17 @@ class TestInProcessEndpoints:
         types = [item.get("type", "") for item in data]
         assert any("frequent" in t for t in types), f"Data: {data[:5]}"
 
-
-
+    def test_select_model_persists(self, inproc_server) -> None:
+        """Selecting a model via /select-model persists it for next startup."""
+        base_url, _, _ = inproc_server
+        resp = requests.post(
+            f"{base_url}/select-model",
+            json={"model": "gemini-2.5-pro"},
+            timeout=5,
+        )
+        assert resp.status_code == 200
+        # Verify the model is remembered
+        assert task_history._load_last_model() == "gemini-2.5-pro"
+        # Verify models endpoint reflects the selection
+        resp = requests.get(f"{base_url}/models", timeout=5)
+        assert resp.json()["selected"] == "gemini-2.5-pro"

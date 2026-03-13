@@ -764,7 +764,7 @@ def main() -> None:
     channel = ChannelAgent(args.app)
     path = channel.create_app_agent()
     print(f"Created {channel.display_name} agent at: {path}")
-    print(f"Run it with: python {path} --task 'your task here'")
+    print(f"Run it with: uv run {path} --task 'your task here'")
 
 
 if __name__ == "__main__":
