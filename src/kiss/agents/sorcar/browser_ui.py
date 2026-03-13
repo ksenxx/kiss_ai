@@ -451,7 +451,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self.stop_event = threading.Event()
         self._thread_local = threading.local()
         self._recordings: dict[int, list[dict[str, Any]]] = {}
-        self._recording_lock = threading.Lock()
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
@@ -494,7 +493,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         agent threads do not interfere with each other's recordings.
         """
         tid = threading.current_thread().ident
-        with self._recording_lock:
+        with self._lock:
             if tid is not None:
                 self._recordings[tid] = []
 
@@ -506,7 +505,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         """
         tid = threading.current_thread().ident
         assert tid is not None
-        with self._recording_lock:
+        with self._lock:
             raw = self._recordings.pop(tid, [])
         filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
         return _coalesce_events(filtered)
@@ -519,10 +518,9 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         Args:
             event: The event dictionary to broadcast.
         """
-        with self._recording_lock:
+        with self._lock:
             for events_list in self._recordings.values():
                 events_list.append(event)
-        with self._lock:
             for cq in self._clients:
                 cq.put(event)
 
