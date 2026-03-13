@@ -742,6 +742,26 @@ def _scan_files(work_dir: str) -> list[str]:
     return paths
 
 
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _parse_hunk_line(line: str) -> tuple[int, int, int, int] | None:
+    """Parse a unified-diff @@ hunk header line.
+
+    Returns:
+        (old_start, old_count, new_start, new_count) or None if not a hunk header.
+    """
+    hm = _HUNK_RE.match(line)
+    if not hm:
+        return None
+    return (
+        int(hm.group(1)),
+        int(hm.group(2)) if hm.group(2) is not None else 1,
+        int(hm.group(3)),
+        int(hm.group(4)) if hm.group(4) is not None else 1,
+    )
+
+
 def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]]]:
     result = subprocess.run(
         ["git", "diff", "-U0", "HEAD", "--no-color"],
@@ -756,16 +776,9 @@ def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]
         if dm:
             current_file = dm.group(1)
             continue
-        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
-        if hm and current_file:
-            hunks.setdefault(current_file, []).append(
-                (
-                    int(hm.group(1)),
-                    int(hm.group(2)) if hm.group(2) is not None else 1,
-                    int(hm.group(3)),
-                    int(hm.group(4)) if hm.group(4) is not None else 1,
-                )
-            )
+        hunk = _parse_hunk_line(line)
+        if hunk and current_file:
+            hunks.setdefault(current_file, []).append(hunk)
     return hunks
 
 
@@ -904,17 +917,7 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
         capture_output=True,
         text=True,
     )
-    hunks: list[tuple[int, int, int, int]] = []
-    for line in result.stdout.split("\n"):
-        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
-        if hm:
-            hunks.append((
-                int(hm.group(1)),
-                int(hm.group(2)) if hm.group(2) is not None else 1,
-                int(hm.group(3)),
-                int(hm.group(4)) if hm.group(4) is not None else 1,
-            ))
-    return hunks
+    return [h for line in result.stdout.split("\n") if (h := _parse_hunk_line(line))]
 
 
 def _prepare_merge_view(

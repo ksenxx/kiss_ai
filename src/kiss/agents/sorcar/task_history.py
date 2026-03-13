@@ -13,15 +13,18 @@ entries, most-recent-first) avoids file I/O for the common case.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
+import os
 import shutil
 import socket
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
+
+from filelock import FileLock
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +113,23 @@ SAMPLE_TASKS: list[_HistoryEntry] = [
 ]
 
 
+def _new_events_filename() -> str:
+    """Generate a unique non-existent filename for storing chat events.
+
+    Returns:
+        Filename string (e.g. ``evt_abcdef1234567890.json``).
+    """
+    while True:
+        name = f"evt_{uuid.uuid4().hex[:16]}.json"
+        if not (_CHAT_EVENTS_DIR / name).exists():
+            return name
+
+
 def _task_events_path(task: str) -> Path:
-    """Return the file path for storing a task's chat events.
+    """Return the file path for a task's chat events by looking up the history.
+
+    Searches the in-memory cache for the task's ``events_file`` field.
+    Returns a non-existent path if the task is not found.
 
     Args:
         task: The task description string.
@@ -119,8 +137,16 @@ def _task_events_path(task: str) -> Path:
     Returns:
         Path to the chat events JSON file.
     """
-    h = hashlib.sha256(task.encode()).hexdigest()[:24]
-    return _CHAT_EVENTS_DIR / f"{h}.json"
+    with _history_lock:
+        if _history_cache is None:
+            _refresh_cache()
+        assert _history_cache is not None
+        for entry in _history_cache:
+            if entry["task"] == task:
+                filename = str(entry.get("events_file", ""))
+                if filename:
+                    return _CHAT_EVENTS_DIR / filename
+    return _CHAT_EVENTS_DIR / "nonexistent.json"
 
 
 # In-memory cache of the most recent entries (most-recent-first).
@@ -154,12 +180,18 @@ def _migrate_old_format() -> None:
                 continue
             seen.add(task)
             has_events = bool(item.get("chat_events"))
+            events_file = _new_events_filename()
             if has_events:
-                _task_events_path(task).write_text(
+                (_CHAT_EVENTS_DIR / events_file).write_text(
                     json.dumps(item["chat_events"])
                 )
             lines.append(
-                json.dumps({"task": task, "has_events": has_events})
+                json.dumps({
+                    "task": task,
+                    "has_events": has_events,
+                    "result": "",
+                    "events_file": events_file,
+                })
             )
         _ensure_kiss_dir()
         HISTORY_FILE.write_text(
@@ -177,9 +209,12 @@ def _parse_line(line: str) -> _HistoryEntry | None:
         return None
     try:
         item = json.loads(line)
+        task = item["task"]
         return {
-            "task": item["task"],
+            "task": task,
             "has_events": bool(item.get("has_events")),
+            "result": item.get("result", ""),
+            "events_file": item.get("events_file", ""),
         }
     except (json.JSONDecodeError, KeyError):
         return None
@@ -432,13 +467,27 @@ def _load_task_chat_events(
 ) -> list[dict[str, object]]:
     """Load chat events for a specific task from its dedicated file.
 
+    Looks up the ``events_file`` from the task history entry.
+    Returns an empty list if the task is not found in the history.
+
     Args:
         task: The task description string.
 
     Returns:
         List of chat event dicts, or empty list if none stored.
     """
-    path = _task_events_path(task)
+    filename = ""
+    with _history_lock:
+        if _history_cache is None:
+            _refresh_cache()
+        assert _history_cache is not None
+        for entry in _history_cache:
+            if entry["task"] == task:
+                filename = str(entry.get("events_file", ""))
+                break
+    if not filename:
+        return []
+    path = _CHAT_EVENTS_DIR / filename
     if path.exists():
         try:
             data = json.loads(path.read_text())
@@ -452,6 +501,7 @@ def _load_task_chat_events(
 def _set_latest_chat_events(
     events: list[dict[str, object]],
     task: str | None = None,
+    result: str = "",
 ) -> None:
     """Save chat events for a task to a separate file.
 
@@ -462,6 +512,7 @@ def _set_latest_chat_events(
         events: The chat events to store.
         task: If given, find the history entry by task name.
               Otherwise update history[0].
+        result: The task result text to store in the history entry.
     """
     with _history_lock:
         if _history_cache is None:
@@ -469,11 +520,15 @@ def _set_latest_chat_events(
         if not _history_cache:
             return
         target_task: str
+        target_entry: _HistoryEntry
         if task:
             for entry in _history_cache:
                 if entry["task"] == task:
                     entry["has_events"] = bool(events)
+                    if result:
+                        entry["result"] = result
                     target_task = str(entry["task"])
+                    target_entry = entry
                     break
             else:
                 return
@@ -481,32 +536,63 @@ def _set_latest_chat_events(
             _history_cache[0]["has_events"] = bool(events)
             _history_cache[0].pop("result", None)
             target_task = str(_history_cache[0]["task"])
+            target_entry = _history_cache[0]
+        events_file = str(target_entry.get("events_file", ""))
         # Append updated entry to file; dedup keeps last occurrence
         _ensure_kiss_dir()
+        entry_dict: _HistoryEntry = {
+            "task": target_task,
+            "has_events": bool(events),
+            "result": result,
+            "events_file": events_file,
+        }
         with HISTORY_FILE.open("a") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "task": target_task,
-                        "has_events": bool(events),
-                    }
-                )
-                + "\n"
-            )
-    # Write events to separate file outside the lock
+            f.write(json.dumps(entry_dict) + "\n")
+    # Write events to separate file outside the lock using atomic replace
+    if not events_file:
+        return
+    path = _CHAT_EVENTS_DIR / events_file
     if events:
         try:
             _CHAT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-            _task_events_path(target_task).write_text(
-                json.dumps(events)
-            )
+            _atomic_write_json(path, events)
         except OSError:
             logger.debug("Exception caught", exc_info=True)
     else:
         try:
-            _task_events_path(target_task).unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
         except OSError:
             logger.debug("Exception caught", exc_info=True)
+
+
+def _update_task_result(task: str, result: str) -> None:
+    """Update the result field of a task in the history. Thread-safe.
+
+    Appends an updated entry to the history file so the dedup logic
+    picks up the new result.
+
+    Args:
+        task: The task description string.
+        result: The result text to store.
+    """
+    with _history_lock:
+        if _history_cache is None:
+            _refresh_cache()
+        if not _history_cache:
+            return
+        for entry in _history_cache:
+            if entry["task"] == task:
+                entry["result"] = result
+                _ensure_kiss_dir()
+                entry_dict: _HistoryEntry = {
+                    "task": task,
+                    "has_events": bool(entry.get("has_events")),
+                    "result": result,
+                    "events_file": str(entry.get("events_file", "")),
+                }
+                with HISTORY_FILE.open("a") as f:
+                    f.write(json.dumps(entry_dict) + "\n")
+                return
 
 
 def _load_json_dict(path: Path) -> dict:
@@ -541,6 +627,18 @@ def _load_last_model() -> str:
     return last if isinstance(last, str) else ""
 
 
+def _atomic_write_json(path: Path, data: object) -> None:
+    """Write *data* as JSON to *path* atomically (write-tmp-then-replace)."""
+    tmp = path.with_suffix(".tmp")
+    try:
+        _ensure_kiss_dir()
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug("Exception caught", exc_info=True)
+        tmp.unlink(missing_ok=True)
+
+
 def _increment_usage(
     file_path: Path,
     key: str,
@@ -548,18 +646,23 @@ def _increment_usage(
 ) -> None:
     """Increment a usage counter in a JSON file and optionally set extra keys.
 
+    Uses a cross-process file lock to prevent read-modify-write races when
+    multiple sorcar instances run concurrently.
+
     Args:
         file_path: Path to the JSON usage file.
         key: The key whose integer count to increment.
         extra: Optional extra key-value pairs to merge into the file.
     """
-    usage = _load_json_dict(file_path)
-    usage[key] = int(usage.get(key, 0)) + 1
-    if extra:
-        usage.update(extra)
+    lock_path = file_path.with_suffix(".lock")
     try:
         _ensure_kiss_dir()
-        file_path.write_text(json.dumps(usage))
+        with FileLock(lock_path):
+            usage = _load_json_dict(file_path)
+            usage[key] = int(usage.get(key, 0)) + 1
+            if extra:
+                usage.update(extra)
+            _atomic_write_json(file_path, usage)
     except OSError:
         logger.debug("Exception caught", exc_info=True)
 
@@ -567,14 +670,18 @@ def _increment_usage(
 def _save_last_model(model: str) -> None:
     """Persist the selected model name without incrementing usage count.
 
+    Uses a cross-process file lock to avoid racing with _increment_usage.
+
     Args:
         model: The model name to save as the last-selected model.
     """
-    usage = _load_json_dict(MODEL_USAGE_FILE)
-    usage["_last"] = model
+    lock_path = MODEL_USAGE_FILE.with_suffix(".lock")
     try:
         _ensure_kiss_dir()
-        MODEL_USAGE_FILE.write_text(json.dumps(usage))
+        with FileLock(lock_path):
+            usage = _load_json_dict(MODEL_USAGE_FILE)
+            usage["_last"] = model
+            _atomic_write_json(MODEL_USAGE_FILE, usage)
     except OSError:
         logger.debug("Exception caught", exc_info=True)
 
@@ -606,7 +713,12 @@ def _add_task(task: str) -> None:
     Args:
         task: The task description string.
     """
-    entry: _HistoryEntry = {"task": task, "has_events": False}
+    entry: _HistoryEntry = {
+        "task": task,
+        "has_events": False,
+        "result": "",
+        "events_file": _new_events_filename(),
+    }
     with _history_lock:
         if _history_cache is None:
             _refresh_cache()

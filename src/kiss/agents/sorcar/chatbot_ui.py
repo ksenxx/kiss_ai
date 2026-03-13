@@ -1995,6 +1995,10 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
     )
 
     _sep = '<span class="mt-sep"></span>'
+    _textarea_placeholder = (
+        "Ask anything\u2026 (@ files,\u2318/ctrl-k toggle to editor,"
+        " \u2318/ctrl-l to run selected text from the editor)"
+    )
 
     return (
         HTML_HEAD.format(title=title, css=css)
@@ -2047,7 +2051,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files,\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)"
+              placeholder="{_textarea_placeholder}"
               autocomplete="off"></textarea>
             <div id="merge-warning">Resolve all diffs before proceeding</div>
           </div>

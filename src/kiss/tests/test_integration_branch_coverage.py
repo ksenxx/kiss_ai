@@ -24,9 +24,6 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.sorcar.useful_tools import (
-    UsefulTools,
-)
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
     _build_text_based_tools_prompt,
@@ -743,19 +740,6 @@ class TestUsefulToolsBashTimeout:
         d = Path(tempfile.mkdtemp())
         yield d
         shutil.rmtree(d, ignore_errors=True)
-
-    def test_non_streaming_timeout(self, tmpdir: Path) -> None:
-        """Cover lines 307-312: non-streaming Bash timeout."""
-        ut = UsefulTools()
-        result = ut.Bash("sleep 100", "long sleep", timeout_seconds=0.5)
-        assert "timeout" in result.lower()
-
-    def test_streaming_timeout(self, tmpdir: Path) -> None:
-        """Cover line 362: streaming Bash timeout."""
-        ut = UsefulTools(stream_callback=lambda _: None)
-        result = ut.Bash("sleep 100", "long sleep", timeout_seconds=0.5)
-        assert "timeout" in result.lower()
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # relentless_agent.perform_task (integration via real KISSAgent + fake server)

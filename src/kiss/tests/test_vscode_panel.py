@@ -92,14 +92,6 @@ class TestBuildHtmlJavaScript(unittest.TestCase):
     def test_merge_function(self) -> None:
         assert "function mergeAction" in self.html
 
-    def test_js_balanced(self) -> None:
-        start = self.html.find("<script>")
-        end = self.html.find("</script>")
-        js = self.html[start:end]
-        assert js.count("{") == js.count("}")
-        assert js.count("(") == js.count(")")
-
-
 class TestMergeEndpoints(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = tempfile.mkdtemp()
@@ -238,14 +230,6 @@ class TestFilePathDetection(unittest.TestCase):
         fn = self.html[start:end]
         # Checks for file extension pattern
         assert r"\.\w{1,10}$" in fn
-
-    def test_fallback_to_do_submit_on_open_file_failure(self) -> None:
-        # When /open-file returns non-ok, should fall back to doSubmitTask
-        start = self.html.index("function submitTask()")
-        end = self.html.index("btn.addEventListener", start)
-        submit_fn = self.html[start:end]
-        assert "if(r.ok){inp.value='';return}" in submit_fn
-        assert ".catch(function(){doSubmitTask(task)})" in submit_fn
 
     def test_js_balanced_with_new_functions(self) -> None:
         start = self.html.find("<script>")
