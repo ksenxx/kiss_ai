@@ -58,7 +58,10 @@ You have implemented a restart logic for code-server in case the code-server shu
 
 can you check if [print_to_console.py](src/kiss/core/print_to_console.py) and [chatbot_ui.py](src/kiss/agents/sorcar/chatbot_ui.py) print exactly the same contents when an agent is executed on a task? Write a regression test for this.
 
-Can you read [sorcar.py](src/kiss/agents/sorcar/sorcar.py) and carefully find all threads, timers, processes, and other forms of concurrency introduced by [sorcar.py](src/kiss/agents/sorcar/sorcar.py)? Then can you write a task in [PLAN.md](PLAN.md) which when given to the agent will reduce the amount of concurrency present in sorcar.
+Can you read src/kiss/agents/sorcar/sorcar.py and carefully find all threads, timers, processes, and other forms of concurrency introduced by src/kiss/agents/sorcar/sorcar.py? Then can you write a task in PLAN.md which when given to the agent will reduce the amount of concurrency present in sorcar.
 
 When I run sorcar on a task for very long time, the mac os x runs out of resources. Can you investigate the code for resource and memory hogs. For example, task_history.json could be very large. You may want to convert it into jsonl
 format and read tasks on demand by sorcar. Find other memory and resource hogging issues in the prject.
+
+Can you write an agent using SorcarAgent, called channel_agent.py in src/kiss/channels, so that when it is given an app name, channel_agent.py will create a minimal set of all access tools using the sdk of the app so that an agent can have total access to the app. The channel_agent.py when executed will also create an app agent, an
+extension of SorcarAgent with the set of tools, which will help the user to get authenticated to the app via the browser if not authenticated yet, store the autentication token safely in the artifacts dir, and use it along with the tools to perform an app related task given to the app agent.

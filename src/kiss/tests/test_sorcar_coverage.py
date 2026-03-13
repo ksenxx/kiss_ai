@@ -26,25 +26,9 @@ from kiss.agents.sorcar.code_server import (
     _prepare_merge_view,
     _snapshot_files,
 )
-from kiss.agents.sorcar.prompt_detector import PromptDetector
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
 )
-
-
-class TestPromptDetector:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.detector = PromptDetector()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _write(self, name: str, content: str) -> str:
-        p = os.path.join(self.tmpdir, name)
-        with open(p, "w") as f:
-            f.write(content)
-        return p
 
 # ---------------------------------------------------------------------------
 # task_history.py  (52% -> target higher)
@@ -444,22 +428,6 @@ class TestWebUseToolResolveLocator:
 # ---------------------------------------------------------------------------
 
 
-class TestPromptDetectorBranches:
-    """Cover remaining branches in prompt_detector.py."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.detector = PromptDetector()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _write(self, name: str, content: str) -> str:
-        p = os.path.join(self.tmpdir, name)
-        with open(p, "w") as f:
-            f.write(content)
-        return p
-
 class TestBrowserUiBranches:
     """Cover remaining branches in browser_ui.py."""
 
@@ -632,16 +600,6 @@ class TestUsefulToolsBranchesR2:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestPromptDetectorBranchesR2:
-    """Cover remaining prompt_detector.py branches."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.detector = PromptDetector()
 
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
