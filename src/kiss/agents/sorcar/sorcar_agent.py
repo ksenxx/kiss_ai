@@ -13,7 +13,6 @@ import yaml
 from kiss.agents.sorcar.task_history import HISTORY_FILE
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.channels.slack_agent import SlackChannelAgent
 from kiss.core import config as config_module
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
@@ -36,7 +35,6 @@ class SorcarAgent(RelentlessAgent):
         self._ask_user_question_callback = ask_user_question_callback
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: DockerManager | None = None
-        self.slack_agent = SlackChannelAgent()
 
     def _get_tools(self) -> list:
         def _stream(text: str) -> None:
@@ -69,7 +67,6 @@ class SorcarAgent(RelentlessAgent):
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
         tools.append(ask_user_question)
-        tools.extend(self.slack_agent.get_tools())
         return tools
 
     def _reset(
@@ -242,6 +239,32 @@ def _resolve_task(args: argparse.Namespace) -> str:
     return _DEFAULT_TASK
 
 
+def cli_wait_for_user(instruction: str, url: str) -> None:
+    """CLI callback for browser-action prompts (prints and waits for Enter).
+
+    Args:
+        instruction: What the user should do.
+        url: Current browser URL (printed if non-empty).
+    """
+    print(f"\n>>> Browser action needed: {instruction}")
+    if url:
+        print(f"    Current URL: {url}")
+    input("Press Enter when done... ")
+
+
+def cli_ask_user_question(question: str) -> str:
+    """CLI callback for agent questions (prints and reads from stdin).
+
+    Args:
+        question: The question to display to the user.
+
+    Returns:
+        The user's typed response text.
+    """
+    print(f"\n>>> Agent asks: {question}")
+    return input("Your answer: ")
+
+
 def main() -> None:
     """Run a demo of the SorcarAgent with a sample Gmail task."""
     import time as time_mod
@@ -255,7 +278,12 @@ def main() -> None:
         Path(work_dir).mkdir(parents=True, exist_ok=True)
     else:
         work_dir = tempfile.mkdtemp()
-    agent = SorcarAgent("Sorcar Agent Test")
+
+    agent = SorcarAgent(
+        "Sorcar Agent Test",
+        wait_for_user_callback=cli_wait_for_user,
+        ask_user_question_callback=cli_ask_user_question,
+    )
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
