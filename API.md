@@ -38,7 +38,8 @@
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
       - [`kiss.agents.sorcar.prompt_detector`](#kissagentssorcarprompt_detector)
   - [`kiss.channels`](#kisschannels)
-    - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
+    - [`kiss.channels.app_agent`](#kisschannelsapp_agent)
+    - [`kiss.channels.channel_agent`](#kisschannelschannel_agent)
 
 </details>
 
@@ -760,6 +761,16 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
+**`cli_wait_for_user`** — CLI callback for browser-action prompts (prints and waits for Enter).<br/>`def cli_wait_for_user(instruction: str, url: str) -> None`
+
+- `instruction`: What the user should do.
+- `url`: Current browser URL (printed if non-empty).
+
+**`cli_ask_user_question`** — CLI callback for agent questions (prints and reads from stdin).<br/>`def cli_ask_user_question(question: str) -> str`
+
+- `question`: The question to display to the user.
+- **Returns:** The user's typed response text.
+
 ______________________________________________________________________
 
 #### `kiss.agents.sorcar.sorcar` — *Browser-based chatbot for RelentlessAgent-based agents.*
@@ -1055,65 +1066,71 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.slack_agent` — *Slack channel agent for reading and writing messages via Sorcar.*
+#### `kiss.channels.app_agent` — *Pre-configured AppAgent factory for named apps.*
 
-##### `class SlackChannelAgent` — Agent that bridges Slack channels with the Sorcar chat window.
+**`create_app_agent`** — Create an AppAgent pre-configured for the named app.<br/>`def create_app_agent(app_name: str, **kwargs: Any) -> AppAgent`
 
-**Constructor:** `SlackChannelAgent() -> None`
+- `app_name`: App identifier (e.g. 'slack', 'github', 'spotify').
+- `**kwargs`: Passed through to AppAgent (e.g. wait_for_user_callback).
+- **Returns:** An AppAgent instance with a ChannelAgent for the named app.
 
-- **get_tools** — Return the list of tools for use by SorcarAgent.<br/>`get_tools() -> list`
+______________________________________________________________________
 
-  - **Returns:** List of callable tool functions.
+#### `kiss.channels.channel_agent` — *Channel agent that creates app-specific tools and agents dynamically.*
 
-- **start_polling** — Start polling a Slack channel for new messages in the background.<br/>`start_polling(channel: str, workspace: str | None = None, interval: float = 10.0, callback: Any = None) -> str`
+##### `class ChannelAgent` — Creates app-specific API tools and agents dynamically for any app.
 
-  - `channel`: Channel name to poll.
-  - `workspace`: Workspace name.
-  - `interval`: Polling interval in seconds.
-  - `callback`: Called with (channel, messages_text) when new messages arrive.
+**Constructor:** `ChannelAgent(app_name: str) -> None`
+
+- **is_authenticated** — True if a valid access token is stored.<br/>`is_authenticated() -> bool` *(property)*
+
+- **authenticate_with_token** — Store a direct access token (e.g. GitHub PAT, API key).<br/>`authenticate_with_token(token: str) -> str`
+
+  - `token`: The access token string.
   - **Returns:** Status message.
 
-- **stop_polling** — Stop polling a Slack channel.<br/>`stop_polling(channel: str, workspace: str | None = None) -> str`
+- **configure_oauth2** — Configure OAuth2 settings for this app. Call this before starting the OAuth2 flow. The settings are persisted to disk so they survive restarts.<br/>`configure_oauth2(auth_url: str, token_url: str, client_id_env: str, client_secret_env: str, scopes: str = '') -> str`
 
-  - `channel`: Channel name to stop polling.
-  - `workspace`: Workspace name.
+  - `auth_url`: OAuth2 authorization endpoint URL.
+  - `token_url`: OAuth2 token endpoint URL.
+  - `client_id_env`: Environment variable name for the client ID.
+  - `client_secret_env`: Environment variable name for the client secret.
+  - `scopes`: Space-separated OAuth2 scopes.
   - **Returns:** Status message.
 
-- **stop_all_polling** — Stop all active polling threads.<br/>`stop_all_polling() -> None`
-  **`add_workspace`** — Add or update a Slack workspace configuration. Validates the token and saves if valid.<br/>`def add_workspace(name: str, token: str) -> str`
+- **authenticate_oauth2** — Complete OAuth2 auth by exchanging an authorization code for tokens. Requires :meth:`configure_oauth2` to have been called first.<br/>`authenticate_oauth2(code: str, redirect_uri: str) -> str`
 
-- `name`: A friendly name for this workspace.
+  - `code`: Authorization code from the OAuth2 callback.
+  - `redirect_uri`: The redirect URI used during authorization.
+  - **Returns:** Status message.
 
-- `token`: Slack bot token (xoxb-...).
+- **refresh_access_token** — Refresh the OAuth2 access token using the stored refresh token.<br/>`refresh_access_token() -> str`
 
-- **Returns:** Status message indicating success or failure.
+  - **Returns:** Status message.
 
-**`remove_workspace`** — Remove a Slack workspace configuration.<br/>`def remove_workspace(name: str) -> str`
+- **get_auth_url** — Get the OAuth2 authorization URL for this app. Requires :meth:`configure_oauth2` to have been called and the client ID environment variable to be set.<br/>`get_auth_url() -> str`
 
-- `name`: The workspace name to remove.
-- **Returns:** Status message indicating success or failure.
+  - **Returns:** The full authorization URL, or an error message.
 
-**`list_workspaces`** — List all configured Slack workspaces.<br/>`def list_workspaces() -> str`
+- **get_tools** — Return generic REST API tools (requires prior authentication).<br/>`get_tools() -> list`
 
-- **Returns:** Formatted string listing workspaces, or a message if none configured.
+  - **Returns:** List of callable tool functions, or empty list if not authenticated.
 
-**`list_channels`** — List public channels in a Slack workspace.<br/>`def list_channels(workspace: str | None = None) -> str`
+- **clear_auth** — Delete the stored authentication token for this app.<br/>`clear_auth() -> str`
 
-- `workspace`: Workspace name. Auto-selects if only one workspace configured.
-- **Returns:** Formatted string listing channels.
+  - **Returns:** Status message.
 
-**`read_messages`** — Read recent messages from a Slack channel.<br/>`def read_messages(channel: str, workspace: str | None = None, limit: int = 20) -> str`
+- **create_app_agent** — Create an app-specific agent Python file on disk. Generates a standalone Python file at `<channels_dir>/<app>/<App>Agent.py` that defines a `<App>Agent` class extending `AppAgent`. The file can be run independently with `python <App>Agent.py --task "..."` to perform app-specific tasks.<br/>`create_app_agent() -> Path`
 
-- `channel`: Channel name (without #) or channel ID.
-- `workspace`: Workspace name. Auto-selects if only one configured.
-- `limit`: Maximum number of messages to retrieve (default 20).
-- **Returns:** Formatted string with recent messages.
+  - **Returns:** Path to the generated agent file.
 
-**`send_message`** — Send a message to a Slack channel.<br/>`def send_message(channel: str, text: str, workspace: str | None = None) -> str`
+##### `class AppAgent(SorcarAgent)` — SorcarAgent extended with app-specific API tools and auth management.
 
-- `channel`: Channel name (without #) or channel ID.
-- `text`: Message text to send.
-- `workspace`: Workspace name. Auto-selects if only one configured.
-- **Returns:** Status message indicating success or failure.
+**Constructor:** `AppAgent(channel: ChannelAgent, wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+
+**`create_channel`** — Create a ChannelAgent for the named app. Any app name is accepted — no hardcoded registry.<br/>`def create_channel(app_name: str) -> ChannelAgent`
+
+- `app_name`: App identifier (e.g. 'github', 'google', 'spotify', 'jira', 'slack', or any other app).
+- **Returns:** Configured ChannelAgent instance.
 
 ______________________________________________________________________

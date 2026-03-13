@@ -49,7 +49,8 @@ SYSTEM_PROMPT = f"""
   task from the task history. DO NOT WRITE/EDIT the task history.
 - Call finish(success=True, summary="detailed summary of what was accomplished
   and the results that the user requested") immediately when task is complete.
-- Run Bash tool with timeout.  Double timeout if the commands timesout.
+- Whenever the user asks the agent to show something, create a webpage and show
+  the webpage in the user's default browser.
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 
 ## Code Style Guidelines
@@ -69,10 +70,10 @@ SYSTEM_PROMPT = f"""
 - Carefully read the code, find and fix redundancies, duplications,
   inconsistencies, errors, and AI slop in the code
 - Generate comprehensive tests so that you achieve 100% branch coverage
-- Tests MUST NOT use mocks, patches, or any form of test doubles
+- Tests MUST NOT use mocks, patches, fakes, or any form of test doubles
 - Integration tests are HIGHLY encouraged
 - You MUST not add tests that are redundant or duplicate of existing
-  tests or does not add new coverage over existing tests
+  tests or does not add new branch coverage over existing tests
 - Generate meaningful stress tests for the code if you are
   optimizing the code for performance
 - Each test should be independent and verify actual behavior
@@ -86,10 +87,9 @@ SYSTEM_PROMPT = f"""
 
 ### Self-Improvement Loop
 - Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
-  with instructions and rules for yourself ONLY IF you have learned any major lessons
-  or intelligence about the project during the task execution.
-  Also compact the lessons you have learned
-  into concise instructions and rules for you to follow.
+  with instructions and rules and intelligence for yourself ONLY IF you have learned any
+  major lessons or intelligence about the project or in general during the task execution.
+  Also compact the lessons you have learned into concise instructions and rules for you to follow.
 - The lessons MUST NOT be specific to a task, but about agent behavior.
 - Review lessons when the agent starts
 

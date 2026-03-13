@@ -34,7 +34,6 @@ from kiss.agents.sorcar.code_server import (
     _snapshot_files,
 )
 from kiss.agents.sorcar.config import AgentConfig, SorcarConfig
-from kiss.agents.sorcar.prompt_detector import PromptDetector
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
 )
@@ -46,17 +45,6 @@ from kiss.agents.sorcar.web_use_tool import (
     INTERACTIVE_ROLES,
     WebUseTool,
 )
-
-
-class TestPromptDetector:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.detector = PromptDetector()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        # No crash, just no frontmatter bonus
-
 
 # ---------------------------------------------------------------------------
 # useful_tools.py
@@ -436,18 +424,6 @@ class TestTaskHistoryEdgeCases:
         th._KISS_DIR = self._orig_kiss_dir
         th._history_cache = None
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestPromptDetectorEdgeCases:
-    """Cover remaining prompt_detector.py branches."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.detector = PromptDetector()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        # Should not have frontmatter bonus
 
 
 class TestWebUseToolEdgeCases:

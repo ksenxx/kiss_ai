@@ -278,17 +278,6 @@ class TestTokenDisplayFix:
         assert info.startswith("Session: 1/5, ")
 
 
-class TestPromptDetectorDocstring:
-    """Test that prompt_detector module has a docstring."""
-
-    def test_module_has_docstring(self):
-        """prompt_detector module should have a docstring."""
-        from kiss.agents.sorcar import prompt_detector
-
-        assert prompt_detector.__doc__ is not None
-        assert "prompt" in prompt_detector.__doc__.lower()
-
-
 class TestDefaultTaskNoCredentials:
     """Test that _DEFAULT_TASK doesn't contain hardcoded credentials."""
 

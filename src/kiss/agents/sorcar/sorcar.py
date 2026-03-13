@@ -1224,13 +1224,9 @@ def run_chatbot(
         fpath = _read_active_file(cs_data_dir)
         if not fpath or not fpath.lower().endswith(".md"):
             return JSONResponse({"is_prompt": False, "path": fpath})
-        from kiss.agents.sorcar.prompt_detector import PromptDetector
-
-        detector = PromptDetector()
-        is_prompt, _score, _reasons = detector.analyze(fpath)
         return JSONResponse(
             {
-                "is_prompt": is_prompt,
+                "is_prompt": True,
                 "path": fpath,
                 "filename": os.path.basename(fpath),
             }
