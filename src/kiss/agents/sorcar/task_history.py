@@ -18,7 +18,6 @@ import logging
 import os
 import shutil
 import socket
-import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -137,7 +136,7 @@ def _task_events_path(task: str) -> Path:
     Returns:
         Path to the chat events JSON file.
     """
-    with _history_lock:
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
         assert _history_cache is not None
@@ -150,10 +149,10 @@ def _task_events_path(task: str) -> Path:
 
 
 # In-memory cache of the most recent entries (most-recent-first).
-# Named _history_cache for backward compat with tests and other modules.
 _history_cache: list[_HistoryEntry] | None = None
 _total_count: int = 0
-_history_lock = threading.Lock()
+# Single cross-process + cross-thread lock for both the file and the in-memory cache.
+_HISTORY_LOCK = FileLock(HISTORY_FILE.with_suffix(".lock"))
 
 
 def _migrate_old_format() -> None:
@@ -322,7 +321,7 @@ def _read_file_entries(
 
 
 def _refresh_cache() -> list[_HistoryEntry]:
-    """Reload the recent cache from disk.  Must hold _history_lock."""
+    """Reload the recent cache from disk.  Must hold _HISTORY_LOCK."""
     global _history_cache, _total_count
     _migrate_old_format()
     entries = _read_recent_entries(_RECENT_CACHE_SIZE)
@@ -366,7 +365,7 @@ def _load_history(limit: int = 0) -> list[_HistoryEntry]:
     Returns:
         List of history entries with 'task' and 'has_events' keys.
     """
-    with _history_lock:
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
         assert _history_cache is not None
@@ -399,7 +398,7 @@ def _search_history(
     if not query:
         return _load_history(limit=limit)
     q_lower = query.lower()
-    with _history_lock:
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
     if not HISTORY_FILE.exists():
@@ -433,7 +432,7 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
     Returns:
         The entry, or None if index is out of range.
     """
-    with _history_lock:
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
         assert _history_cache is not None
@@ -477,7 +476,7 @@ def _load_task_chat_events(
         List of chat event dicts, or empty list if none stored.
     """
     filename = ""
-    with _history_lock:
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
         assert _history_cache is not None
@@ -514,7 +513,7 @@ def _set_latest_chat_events(
               Otherwise update history[0].
         result: The task result text to store in the history entry.
     """
-    with _history_lock:
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
         if not _history_cache:
@@ -575,7 +574,7 @@ def _update_task_result(task: str, result: str) -> None:
         task: The task description string.
         result: The result text to store.
     """
-    with _history_lock:
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
         if not _history_cache:
@@ -719,7 +718,8 @@ def _add_task(task: str) -> None:
         "result": "",
         "events_file": _new_events_filename(),
     }
-    with _history_lock:
+
+    with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
         _ensure_kiss_dir()

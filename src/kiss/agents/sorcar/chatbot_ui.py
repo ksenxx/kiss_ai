@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from kiss.agents.sorcar.browser_ui import (
     BASE_CSS,
     EVENT_HANDLER_JS,
@@ -1127,6 +1129,26 @@ function connectSSE(){
     _sseReconnTimer=setTimeout(connectSSE,delay);
   };
 }
+function processOutputEvent(ev){
+  var t=ev.type;
+  if(t==='tool_call'){
+    lastToolName=ev.name||'';
+    llmPanel=null;llmPanelState=mkS();pendingPanel=false;
+  }
+  if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
+  if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
+    llmPanel=mkEl('div','llm-panel');
+    O.appendChild(llmPanel);
+    llmPanelState=mkS();pendingPanel=false;
+  }
+  var target=O,tState=state;
+  if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
+    ||t==='text_delta'||t==='text_end')){
+    target=llmPanel;tState=llmPanelState;
+  }
+  handleOutputEvent(ev,target,tState);
+  if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+}
 function handleEvent(ev){
   var t=ev.type;
   if(t==='thinking_start'||t==='thinking_delta'||t==='text_delta'
@@ -1161,8 +1183,7 @@ function handleEvent(ev){
     document.getElementById('merge-toolbar').style.display='none';
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
-    inp.placeholder='Ask anything\u2026 (@ files'
- +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)';
+    inp.placeholder=_inputPlaceholder;
     document.getElementById('input-text-wrap').style.cursor='';
     inp.focus();break;
   case'code_server_restarted':{
@@ -1173,7 +1194,8 @@ function handleEvent(ev){
     break};
   case'clear':
     O.innerHTML='';state=mkS();
-    _scrollLock=false;
+    llmPanel=null;llmPanelState=mkS();
+    lastToolName='';pendingPanel=false;_scrollLock=false;
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
   case'user_browser_action':{
@@ -1244,23 +1266,7 @@ function handleEvent(ev){
     O.appendChild(stEl);
     setReady('Stopped');loadTasks();break}
   default:{
-    if(t==='tool_call'){
-      lastToolName=ev.name||'';
-      llmPanel=null;llmPanelState=mkS();pendingPanel=false;
-    }
-    if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
-    if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
-      llmPanel=mkEl('div','llm-panel');
-      O.appendChild(llmPanel);
-      llmPanelState=mkS();pendingPanel=false;
-    }
-    var target=O,tState=state;
-    if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
-      ||t==='text_delta'||t==='text_end')){
-      target=llmPanel;tState=llmPanelState;
-    }
-    handleOutputEvent(ev,target,tState);
-    if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+    processOutputEvent(ev);
     if(running)showSpinner();
   }}
   sb();
@@ -1707,23 +1713,7 @@ function replayTaskEvents(idx,txt){
         ||t==='followup_suggestion'){
         handleEvent(ev);return;
       }
-      if(t==='tool_call'){
-        lastToolName=ev.name||'';
-        llmPanel=null;llmPanelState=mkS();pendingPanel=false;
-      }
-      if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
-      if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
-        llmPanel=mkEl('div','llm-panel');
-        O.appendChild(llmPanel);
-        llmPanelState=mkS();pendingPanel=false;
-      }
-      var target=O,tState=state;
-      if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
-        ||t==='text_delta'||t==='text_end')){
-        target=llmPanel;tState=llmPanelState;
-      }
-      handleOutputEvent(ev,target,tState);
-      if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+      processOutputEvent(ev);
     });
     inp.value=txt;
     sb();
@@ -1971,11 +1961,6 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         ' stroke-width="2.5" stroke-linecap="round"'
         ' stroke-linejoin="round"'
     )
-    _s20 = (
-        ' viewBox="0 0 24 24" fill="none" stroke="currentColor"'
-        ' stroke-width="2" stroke-linecap="round"'
-        ' stroke-linejoin="round"'
-    )
     _svg_accept = f'<svg{_s25}><polyline points="20 6 9 17 4 12"/></svg>'
     _svg_reject = (
         f'<svg{_s25}><line x1="18" y1="6" x2="6" y2="18"/>'
@@ -1996,9 +1981,10 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
 
     _sep = '<span class="mt-sep"></span>'
     _textarea_placeholder = (
-        "Ask anything\u2026 (@ files,\u2318/ctrl-k toggle to editor,"
+        "Ask anything\u2026 (@ files, \u2318/ctrl-k toggle to editor,"
         " \u2318/ctrl-l to run selected text from the editor)"
     )
+    json_placeholder = json.dumps(_textarea_placeholder)
 
     return (
         HTML_HEAD.format(title=title, css=css)
@@ -2112,6 +2098,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
   </div>
 </div>
 <script>
+var _inputPlaceholder={json_placeholder};
 {EVENT_HANDLER_JS}
 {CHATBOT_JS}
 </script>
