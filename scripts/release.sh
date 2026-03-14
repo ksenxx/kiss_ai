@@ -238,7 +238,29 @@ main() {
             --notes "Release $VERSION
 
 ## Downloads
-- **kiss-offline-installer.pkg** — macOS offline installer (bundles uv, code-server, Python 3.13, git, and all dependencies)"
+- **kiss-offline-installer.pkg** — macOS offline installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
+
+## macOS Installation
+
+The installer package is not signed with an Apple Developer certificate. macOS Gatekeeper will block it by default. To install, use **one** of these methods:
+
+### Method 1: System Settings (recommended)
+1. Double-click \`kiss-offline-installer.pkg\` — you'll see a warning dialog
+2. Open **System Settings → Privacy & Security**
+3. Scroll down to find *\"kiss-offline-installer.pkg\" was blocked*
+4. Click **Open Anyway** and confirm
+
+### Method 2: Remove quarantine attribute
+\`\`\`bash
+xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
+open ~/Downloads/kiss-offline-installer.pkg
+\`\`\`
+
+### Method 3: Command-line install
+\`\`\`bash
+xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
+sudo installer -pkg ~/Downloads/kiss-offline-installer.pkg -target /
+\`\`\`"
         print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
     else
         print_warn "Offline installer .pkg not found at $OFFLINE_PKG — skipping GitHub release asset upload"
