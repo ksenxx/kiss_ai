@@ -173,6 +173,7 @@ fi
 mkdir -p "$HOME/.local/bin"
 cp "$INSTALL_BASE/bin/uv" "$HOME/.local/bin/uv"
 [ -f "$INSTALL_BASE/bin/uvx" ] && cp "$INSTALL_BASE/bin/uvx" "$HOME/.local/bin/uvx"
+ln -sf "$INSTALL_BASE/code-server/bin/code-server" "$HOME/.local/bin/code-server"
 
 # 2. Install code-server
 echo ">>> Installing code-server..."
