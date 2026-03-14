@@ -107,6 +107,7 @@ class TestUsefulTools:
         ut, test_dir = tools
         test_file = test_dir / "missing.txt"
         test_file.write_text("alpha beta")
+        ut.Read(str(test_file))
         result = ut.Edit(str(test_file), "gamma", "delta")
         assert result.startswith("Error:")
         assert "String not found" in result
@@ -115,6 +116,7 @@ class TestUsefulTools:
         ut, test_dir = tools
         test_file = test_dir / "timeout_edit.txt"
         test_file.write_text("a" * 5_000_000)
+        ut.Read(str(test_file))
         result = ut.Edit(str(test_file), "a", "b", replace_all=True, timeout_seconds=0.0001)
         assert result == "Error: Command execution timeout"
 
@@ -122,6 +124,7 @@ class TestUsefulTools:
         ut, test_dir = tools
         f = test_dir / "edit_me.txt"
         f.write_text("hello world")
+        ut.Read(str(f))
         result = ut.Edit(str(f), "hello", "goodbye")
         assert "Successfully replaced" in result
         assert f.read_text() == "goodbye world"
@@ -130,6 +133,7 @@ class TestUsefulTools:
         ut, test_dir = tools
         f = test_dir / "multi.txt"
         f.write_text("aaa bbb aaa")
+        ut.Read(str(f))
         result = ut.Edit(str(f), "aaa", "ccc", replace_all=True)
         assert "Successfully replaced" in result
         assert f.read_text() == "ccc bbb ccc"
@@ -138,6 +142,7 @@ class TestUsefulTools:
         ut, test_dir = tools
         f = test_dir / "dup.txt"
         f.write_text("aaa\naaa\n")
+        ut.Read(str(f))
         result = ut.Edit(str(f), "aaa", "ccc")
         assert "Error:" in result
         assert "not unique" in result
@@ -146,9 +151,32 @@ class TestUsefulTools:
         ut, test_dir = tools
         f = test_dir / "replace_all.txt"
         f.write_text("foo bar foo")
+        ut.Read(str(f))
         result = ut.Edit(str(f), "foo", "baz", replace_all=True)
         assert "Successfully replaced" in result
         assert f.read_text() == "baz bar baz"
+
+    def test_edit_requires_read_first(self, tools):
+        ut, test_dir = tools
+        f = test_dir / "needs_read.txt"
+        f.write_text("hello world")
+
+        result = ut.Edit(str(f), "hello", "goodbye")
+
+        assert result.startswith("Error:")
+        assert "must be read with Read()" in result
+
+    def test_edit_fails_if_file_changed_since_read(self, tools):
+        ut, test_dir = tools
+        f = test_dir / "stale.txt"
+        f.write_text("hello world")
+        ut.Read(str(f))
+        f.write_text("hello there")
+
+        result = ut.Edit(str(f), "hello", "goodbye")
+
+        assert result.startswith("Error:")
+        assert "changed since last Read" in result
 
     def test_read_success(self, tools):
         ut, test_dir = tools
@@ -217,6 +245,17 @@ class TestUsefulTools:
         assert "Successfully wrote" in result
         assert f.read_text() == "nested content"
 
+    def test_write_refuses_existing_file(self, tools):
+        ut, test_dir = tools
+        f = test_dir / "existing.txt"
+        f.write_text("old content")
+
+        result = ut.Write(str(f), "new content")
+
+        assert result.startswith("Error:")
+        assert "only creates new files" in result
+        assert f.read_text() == "old content"
+
     def test_write_to_directory_path(self, tools):
         ut, test_dir = tools
         subdir = test_dir / "subdir"
@@ -245,6 +284,7 @@ class TestUsefulTools:
         ut, test_dir = tools
         target = test_dir / "git_bash_edit.txt"
         target.write_text("alpha beta")
+        ut.Read(_to_git_bash_path(target))
         result = ut.Edit(_to_git_bash_path(target), "alpha", "omega")
         assert "Successfully replaced" in result
         assert target.read_text() == "omega beta"
@@ -270,6 +310,7 @@ class TestUsefulTools:
         ut, test_dir = tools
         target = test_dir / "edit_lf.txt"
         target.write_bytes(b"alpha\nbeta\n")
+        ut.Read(str(target))
         result = ut.Edit(str(target), "alpha", "omega")
         assert "Successfully replaced" in result
         assert target.read_bytes() == b"omega\nbeta\n"
@@ -279,9 +320,101 @@ class TestUsefulTools:
         ut, test_dir = tools
         target = test_dir / "edit_crlf.txt"
         target.write_bytes(b"alpha\r\nbeta\r\n")
+        ut.Read(str(target))
         result = ut.Edit(str(target), "alpha", "omega")
         assert "Successfully replaced" in result
         assert target.read_bytes() == b"omega\r\nbeta\r\n"
+
+    def test_overwrite_requires_read_first(self, tools):
+        ut, test_dir = tools
+        target = test_dir / "overwrite.txt"
+        target.write_text("old")
+
+        result = ut.Overwrite(str(target), "new")
+
+        assert result.startswith("Error:")
+        assert "must be read with Read()" in result
+
+    def test_overwrite_fails_if_file_changed_since_read(self, tools):
+        ut, test_dir = tools
+        target = test_dir / "overwrite_stale.txt"
+        target.write_text("old")
+        ut.Read(str(target))
+        target.write_text("changed")
+
+        result = ut.Overwrite(str(target), "new")
+
+        assert result.startswith("Error:")
+        assert "changed since last Read" in result
+
+    def test_overwrite_small_replacement_succeeds_without_confirmation(self, tools):
+        ut, test_dir = tools
+        target = test_dir / "overwrite_small.txt"
+        target.write_text("\n".join(f"line {i}" for i in range(20)) + "\n")
+        ut.Read(str(target))
+
+        result = ut.Overwrite(
+            str(target),
+            "\n".join(["line 0 updated", *[f"line {i}" for i in range(1, 20)]]) + "\n",
+        )
+
+        assert "Successfully overwrote" in result
+        assert target.read_text().startswith("line 0 updated\n")
+
+    def test_overwrite_large_replacement_requires_confirmation(self, temp_test_dir):
+        asked: list[str] = []
+
+        def ask(question: str) -> str:
+            asked.append(question)
+            return "yes"
+
+        ut = UsefulTools(ask_user_question_callback=ask)
+        target = temp_test_dir / "overwrite_large.txt"
+        target.write_text("\n".join(f"old {i}" for i in range(120)) + "\n")
+        ut.Read(str(target))
+
+        result = ut.Overwrite(
+            str(target),
+            "\n".join(f"new {i}" for i in range(120)) + "\n",
+        )
+
+        assert "Successfully overwrote" in result
+        assert asked
+        assert "Confirm large overwrite" in asked[0]
+
+    def test_overwrite_large_replacement_can_be_denied(self, temp_test_dir):
+        def ask(_question: str) -> str:
+            return "no"
+
+        ut = UsefulTools(ask_user_question_callback=ask)
+        target = temp_test_dir / "overwrite_denied.txt"
+        target.write_text("\n".join(f"old {i}" for i in range(120)) + "\n")
+        original = target.read_text()
+        ut.Read(str(target))
+
+        result = ut.Overwrite(
+            str(target),
+            "\n".join(f"new {i}" for i in range(120)) + "\n",
+        )
+
+        assert result == "Error: Overwrite cancelled by user"
+        assert target.read_text() == original
+
+    def test_overwrite_large_replacement_fails_closed_without_callback(self, tools):
+        ut, test_dir = tools
+        target = test_dir / "overwrite_no_callback.txt"
+        target.write_text("\n".join(f"old {i}" for i in range(120)) + "\n")
+        original = target.read_text()
+        ut.Read(str(target))
+
+        result = ut.Overwrite(
+            str(target),
+            "\n".join(f"new {i}" for i in range(120)) + "\n",
+        )
+
+        assert result.startswith("Error:")
+        assert "refused a large rewrite" in result
+        assert target.read_text() == original
 
 
 class TestExtractLeadingCommandName:
@@ -577,6 +710,18 @@ class TestBashStreaming:
         assert ut.stream_callback is None
         result = ut.Bash("echo normal", "No streaming")
         assert "normal" in result
+
+
+class TestDocumentation:
+    def test_docs_describe_safe_write_and_overwrite(self):
+        root = Path(__file__).resolve().parents[3]
+
+        api_doc = (root / "API.md").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+
+        assert "Write content to a new file" in api_doc
+        assert "Overwrite" in api_doc
+        assert "explicit `Overwrite`" in readme
 
 
 if __name__ == "__main__":

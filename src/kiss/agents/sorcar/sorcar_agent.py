@@ -95,9 +95,18 @@ class SorcarAgent(RelentlessAgent):
                 return ask_callback(question)
             return "(ask_user_question not available in this environment)"
 
-        useful_tools = UsefulTools(stream_callback=_stream)
+        useful_tools = UsefulTools(
+            stream_callback=_stream,
+            ask_user_question_callback=ask_callback,
+        )
         bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
-        tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+        tools = [
+            bash_tool,
+            useful_tools.Read,
+            useful_tools.Edit,
+            useful_tools.Write,
+            useful_tools.Overwrite,
+        ]
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
         tools.append(ask_user_question)

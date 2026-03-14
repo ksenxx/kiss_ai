@@ -577,8 +577,7 @@ def _setup_code_server(data_dir: str) -> bool:
 
     state_db = user_dir / "globalStorage" / "state.vscdb"
     state_db.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(state_db))
-    try:
+    with sqlite3.connect(str(state_db)) as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT)"
         )
@@ -588,8 +587,6 @@ def _setup_code_server(data_dir: str) -> bool:
                 (key, value),
             )
         conn.commit()
-    finally:
-        conn.close()
 
     ws_storage = user_dir / "workspaceStorage"
     if ws_storage.exists():

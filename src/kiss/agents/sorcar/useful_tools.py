@@ -1,5 +1,7 @@
 """Useful tools for agents: file editing and bash execution."""
 
+import difflib
+import hashlib
 import locale
 import logging
 import os
@@ -8,10 +10,9 @@ import shlex
 import signal
 import shutil
 import subprocess
-import sys
-import tempfile
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,134 @@ def _read_text_with_fallback(path: Path) -> str:
             logger.debug("Exception caught", exc_info=True)
 
     return raw.decode(encodings[-1], errors="replace")
+
+
+@dataclass(frozen=True)
+class _ReadSnapshot:
+    content_hash: str
+    size_bytes: int
+    line_count: int
+
+
+@dataclass(frozen=True)
+class _EditOutcome:
+    updated_text: str
+    replaced_count: int
+
+
+def _hash_bytes(raw: bytes) -> str:
+    return hashlib.md5(raw).hexdigest()
+
+
+def _count_lines(text: str) -> int:
+    return len(text.splitlines())
+
+
+def _read_text_and_snapshot(path: Path) -> tuple[str, _ReadSnapshot]:
+    raw = path.read_bytes()
+    if b"\x00" in raw:
+        raise ValueError("Binary file cannot be displayed as text")
+
+    encodings: list[str] = []
+    for encoding in ("utf-8", "utf-8-sig", locale.getpreferredencoding(False) or "utf-8"):
+        if encoding not in encodings:
+            encodings.append(encoding)
+
+    for encoding in encodings:
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            logger.debug("Exception caught", exc_info=True)
+    else:
+        text = raw.decode(encodings[-1], errors="replace")
+
+    return text, _ReadSnapshot(
+        content_hash=_hash_bytes(raw),
+        size_bytes=len(raw),
+        line_count=_count_lines(text),
+    )
+
+
+def _write_text_preserving_newlines(path: Path, content: str) -> None:
+    with path.open("w", newline="") as f:
+        f.write(content)
+
+
+def _compute_edit_outcome(
+    content: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool,
+) -> _EditOutcome:
+    occurrence_count = content.count(old_string)
+    if replace_all:
+        if occurrence_count == 0:
+            raise ValueError("String not found in file")
+        updated = content.replace(old_string, new_string)
+        return _EditOutcome(updated_text=updated, replaced_count=occurrence_count)
+
+    if occurrence_count == 0:
+        raise ValueError("String not found in file")
+    if occurrence_count > 1:
+        raise ValueError(
+            f"String appears {occurrence_count} times (not unique)\n"
+            "Hint: Use replace_all=true to replace all occurrences"
+        )
+    updated = content.replace(old_string, new_string, 1)
+    return _EditOutcome(updated_text=updated, replaced_count=1)
+
+
+def _run_with_timeout(
+    timeout_seconds: float,
+    operation: Callable[[], _EditOutcome],
+) -> _EditOutcome | None:
+    result: dict[str, _EditOutcome] = {}
+    error: dict[str, Exception] = {}
+
+    def _worker() -> None:
+        try:
+            result["value"] = operation()
+        except Exception as exc:  # pragma: no cover - exercised via caller
+            error["value"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        return None
+    if "value" in error:
+        raise error["value"]
+    return result["value"]
+
+
+def _format_changed_section(updated_text: str, needle: str) -> str:
+    lines = updated_text.splitlines()
+    matched = [f"{idx}:{line}" for idx, line in enumerate(lines, start=1) if needle in line]
+    if not matched:
+        matched = ["(No context available)"]
+    if len(matched) > 8:
+        matched = matched[:8] + [f"... [{len(matched) - 8} more matching lines]"]
+    return "\n".join(
+        [
+            "Changed section:",
+            "----------------------------------------",
+            *matched,
+            "----------------------------------------",
+        ]
+    )
+
+
+def _count_changed_lines(old_text: str, new_text: str) -> int:
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
+    changed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        changed += max(i2 - i1, j2 - j1)
+    return changed
 
 
 def _detect_shell_prefix(
@@ -143,234 +272,6 @@ def _rewrite_windows_bash_command(command: str, shell_prefix: list[str]) -> str:
     rewritten_path = shlex.quote(_to_git_bash_drive_path(raw_path))
     suffix = match.group("suffix") or ""
     return f"{match.group('prefix')}cd {rewritten_path}{suffix}"
-
-
-EDIT_SCRIPT = r"""
-#!/usr/bin/env bash
-#
-# Edit Tool - Claude Code Implementation
-# Performs precise string replacements in files with exact matching
-#
-# Usage: edit_tool.sh <file_path> <old_string> <new_string> [replace_all]
-#
-# Parameters:
-#   file_path    - Absolute path to the file to modify (required)
-#   old_string   - Exact text to find and replace (required)
-#   new_string   - Replacement text, must differ from old_string (required)
-#   replace_all  - If "true", replace all occurrences (optional, default: false)
-#
-# Exit codes:
-#   0 - Success
-#   1 - Invalid arguments
-#   2 - File not found
-#   3 - String not found or not unique
-#   4 - Read-before-edit validation failed
-
-set -euo pipefail
-
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Validate arguments
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    echo -e "${RED}Error: Invalid number of arguments${NC}" >&2
-    echo "Usage: $0 <file_path> <old_string> <new_string> [replace_all]" >&2
-    exit 1
-fi
-
-FILE_PATH="$1"
-OLD_STRING="$2"
-NEW_STRING="$3"
-REPLACE_ALL="${4:-false}"
-
-# Validate file path is absolute
-if [[ ! "$FILE_PATH" = /* ]]; then
-    echo -e "${RED}Error: file_path must be absolute, not relative${NC}" >&2
-    exit 1
-fi
-
-# Check if file exists
-if [ ! -f "$FILE_PATH" ]; then
-    echo -e "${RED}Error: File not found: $FILE_PATH${NC}" >&2
-    exit 2
-fi
-
-# Check if old_string and new_string are different
-if [ "$OLD_STRING" = "$NEW_STRING" ]; then
-    echo -e "${RED}Error: new_string must be different from old_string${NC}" >&2
-    exit 1
-fi
-
-# Create a state tracking directory (simulating session state)
-STATE_DIR="${HOME}/.claude-edit-state"
-mkdir -p "$STATE_DIR"
-
-# Check read-before-edit validation
-# In a real implementation, this would check session state
-# For demo purposes, we'll create a marker file when files are "read"
-if command -v md5sum &>/dev/null; then
-    FILE_HASH=$(echo -n "$FILE_PATH" | md5sum | cut -d' ' -f1)
-else
-    FILE_HASH=$(echo -n "$FILE_PATH" | md5 -q)
-fi
-READ_MARKER="$STATE_DIR/$FILE_HASH"
-
-if [ ! -f "$READ_MARKER" ]; then
-    echo -e "${YELLOW}Warning: File has not been read in this session${NC}" >&2
-    echo -e "${YELLOW}Creating read marker for demo purposes...${NC}" >&2
-    touch "$READ_MARKER"
-fi
-
-# Count literal occurrences of old_string (not just matching lines)
-export EDIT_FILE_PATH="$FILE_PATH" EDIT_OLD_STRING="$OLD_STRING"
-OCCURRENCE_COUNT=$(python3 -c "
-import os
-file_path = os.environ['EDIT_FILE_PATH']
-old_string = os.environ['EDIT_OLD_STRING']
-with open(file_path, 'r', newline='') as f:
-    content = f.read()
-print(content.count(old_string))
-")
-
-echo "File: $FILE_PATH"
-echo "Looking for: '$OLD_STRING'"
-echo "Replacing with: '$NEW_STRING'"
-echo "Occurrences found: $OCCURRENCE_COUNT"
-echo "Replace all: $REPLACE_ALL"
-echo ""
-
-# Handle replacement based on mode
-export EDIT_NEW_STRING="$NEW_STRING"
-
-if [ "$REPLACE_ALL" = "true" ]; then
-    if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
-        echo -e "${RED}Error: String not found in file${NC}" >&2
-        exit 3
-    fi
-    REPLACE_COUNT=""
-else
-    if [ "$OCCURRENCE_COUNT" -eq 0 ]; then
-        echo -e "${RED}Error: String not found in file${NC}" >&2
-        exit 3
-    elif [ "$OCCURRENCE_COUNT" -gt 1 ]; then
-        echo -e "${RED}Error: String appears $OCCURRENCE_COUNT times (not unique)${NC}" >&2
-        echo -e "${YELLOW}Hint: Use replace_all=true to replace all occurrences${NC}" >&2
-        exit 3
-    fi
-    REPLACE_COUNT="1"
-fi
-
-export EDIT_REPLACE_COUNT="$REPLACE_COUNT"
-python3 -c "
-import os
-file_path = os.environ['EDIT_FILE_PATH']
-old_string = os.environ['EDIT_OLD_STRING']
-new_string = os.environ['EDIT_NEW_STRING']
-count = int(os.environ['EDIT_REPLACE_COUNT']) if os.environ['EDIT_REPLACE_COUNT'] else -1
-with open(file_path, 'r', newline='') as f:
-    content = f.read()
-if count >= 0:
-    content = content.replace(old_string, new_string, count)
-else:
-    content = content.replace(old_string, new_string)
-with open(file_path, 'w', newline='') as f:
-    f.write(content)
-"
-
-if [ "$REPLACE_ALL" = "true" ]; then
-    echo -e "${GREEN}✓ Successfully replaced $OCCURRENCE_COUNT occurrence(s)${NC}"
-else
-    echo -e "${GREEN}✓ Successfully replaced 1 occurrence${NC}"
-fi
-
-# Show the changed section (context around the change)
-echo ""
-echo "Changed section:"
-echo "----------------------------------------"
-grep -Fn -C 2 "$NEW_STRING" "$FILE_PATH" || echo "(No context available)"
-echo "----------------------------------------"
-
-exit 0
-"""
-
-
-# Cross-platform edit implementation used when bash isn't available
-# (most Windows setups) while preserving the same external behavior.
-EDIT_SCRIPT_PYTHON = r"""
-import pathlib
-import sys
-
-
-def _main() -> None:
-    if len(sys.argv) != 5:
-        print("Error: Invalid number of arguments", file=sys.stderr)
-        sys.exit(1)
-
-    file_path = pathlib.Path(sys.argv[1])
-    old_string = sys.argv[2]
-    new_string = sys.argv[3]
-    replace_all = sys.argv[4].lower() == "true"
-
-    if not file_path.is_absolute():
-        print("Error: file_path must be absolute, not relative", file=sys.stderr)
-        sys.exit(1)
-    if not file_path.is_file():
-        print(f"Error: File not found: {file_path}", file=sys.stderr)
-        sys.exit(2)
-    if old_string == new_string:
-        print("Error: new_string must be different from old_string", file=sys.stderr)
-        sys.exit(1)
-
-    with file_path.open("r", newline="") as f:
-        content = f.read()
-    occurrence_count = content.count(old_string)
-
-    print(f"File: {file_path}")
-    print(f"Looking for: '{old_string}'")
-    print(f"Replacing with: '{new_string}'")
-    print(f"Occurrences found: {occurrence_count}")
-    print(f"Replace all: {str(replace_all).lower()}")
-    print("")
-
-    if replace_all:
-        if occurrence_count == 0:
-            print("Error: String not found in file", file=sys.stderr)
-            sys.exit(3)
-        updated = content.replace(old_string, new_string)
-        replaced_count = occurrence_count
-    else:
-        if occurrence_count == 0:
-            print("Error: String not found in file", file=sys.stderr)
-            sys.exit(3)
-        if occurrence_count > 1:
-            print(f"Error: String appears {occurrence_count} times (not unique)", file=sys.stderr)
-            print("Hint: Use replace_all=true to replace all occurrences", file=sys.stderr)
-            sys.exit(3)
-        updated = content.replace(old_string, new_string, 1)
-        replaced_count = 1
-
-    with file_path.open("w", newline="") as f:
-        f.write(updated)
-
-    if replaced_count == 1:
-        print("Successfully replaced 1 occurrence")
-    else:
-        print(f"Successfully replaced {replaced_count} occurrence(s)")
-    print("")
-    print("Changed section:")
-    print("----------------------------------------")
-    for line_number, line in enumerate(updated.splitlines(), start=1):
-        if new_string in line:
-            print(f"{line_number}:{line}")
-    print("----------------------------------------")
-
-
-if __name__ == "__main__":
-    _main()
-"""
 
 
 DISALLOWED_BASH_COMMANDS = {
@@ -524,13 +425,66 @@ def _kill_process_group(process: subprocess.Popen) -> None:
 class UsefulTools:
     """A hardened collection of useful tools with improved security."""
 
+    LARGE_OVERWRITE_LINE_THRESHOLD = 80
+    LARGE_OVERWRITE_RATIO_THRESHOLD = 0.25
+
     def __init__(
         self,
         stream_callback: Callable[[str], None] | None = None,
+        ask_user_question_callback: Callable[[str], str] | None = None,
     ) -> None:
         self.stream_callback = stream_callback
+        self.ask_user_question_callback = ask_user_question_callback
+        self._read_snapshots: dict[Path, _ReadSnapshot] = {}
         # Resolve shell once at startup so behavior is stable for this session.
         self.shell_prefix = _detect_shell_prefix()
+
+    def _load_tracked_file(
+        self,
+        resolved: Path,
+        action_name: str,
+    ) -> tuple[str, _ReadSnapshot] | str:
+        if not resolved.exists():
+            return f"Error: File not found: {resolved}"
+        if not resolved.is_file():
+            return f"Error: Path is not a file: {resolved}"
+
+        previous_snapshot = self._read_snapshots.get(resolved)
+        if previous_snapshot is None:
+            return (
+                f"Error: File must be read with Read() before {action_name}(). "
+                f"Read {resolved} and try again."
+            )
+
+        text, current_snapshot = _read_text_and_snapshot(resolved)
+        if current_snapshot.content_hash != previous_snapshot.content_hash:
+            return (
+                f"Error: File changed since last Read(); read {resolved} again "
+                f"before {action_name}()."
+            )
+        return text, current_snapshot
+
+    def _confirm_large_overwrite(
+        self,
+        resolved: Path,
+        changed_lines: int,
+        total_lines: int,
+    ) -> str | None:
+        if self.ask_user_question_callback is None:
+            return (
+                "Error: Overwrite() refused a large rewrite and no "
+                "ask_user_question_callback is available for confirmation"
+            )
+
+        question = (
+            f"Confirm large overwrite of {resolved}? "
+            f"Estimated changed lines: {changed_lines} of {total_lines}. "
+            "Reply yes to continue."
+        )
+        answer = self.ask_user_question_callback(question).strip().lower()
+        if answer not in {"y", "yes"}:
+            return "Error: Overwrite cancelled by user"
+        return None
 
     def Read(  # noqa: N802
         self,
@@ -545,7 +499,8 @@ class UsefulTools:
         """
         try:
             resolved = _resolve_tool_path(file_path)
-            text = _read_text_with_fallback(resolved)
+            text, snapshot = _read_text_and_snapshot(resolved)
+            self._read_snapshots[resolved] = snapshot
             lines = text.splitlines(keepends=True)
             if len(lines) > max_lines:
                 return (
@@ -562,18 +517,65 @@ class UsefulTools:
         file_path: str,
         content: str,
     ) -> str:
-        """Write content to a file, creating it if it doesn't exist or overwriting if it does.
+        """Write content to a new file.
 
         Args:
             file_path: Path to the file to write.
-            content: The full content to write to the file.
+            content: The full content to write to the file. The file must not exist yet.
         """
         try:
             resolved = _resolve_tool_path(file_path)
+            if resolved.exists():
+                return (
+                    "Error: Write() only creates new files and will not overwrite "
+                    f"existing paths: {resolved}. Use Overwrite() after Read()."
+                )
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            with resolved.open("w", newline="") as f:
-                f.write(content)
+            _write_text_preserving_newlines(resolved, content)
             return f"Successfully wrote {len(content)} characters to {file_path}"
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error: {e}"
+
+    def Overwrite(  # noqa: N802
+        self,
+        file_path: str,
+        content: str,
+    ) -> str:
+        """Replace the full contents of an existing file after it has been read.
+
+        Args:
+            file_path: Absolute path to the file to replace.
+            content: The full replacement content for the file.
+        """
+        try:
+            resolved = _resolve_tool_path(file_path)
+            tracked = self._load_tracked_file(resolved, "Overwrite")
+            if isinstance(tracked, str):
+                return tracked
+
+            current_text, current_snapshot = tracked
+            new_line_count = _count_lines(content)
+            changed_lines = _count_changed_lines(current_text, content)
+            max_lines = max(current_snapshot.line_count, new_line_count)
+            is_large_rewrite = (
+                changed_lines > self.LARGE_OVERWRITE_LINE_THRESHOLD
+                or (
+                    max_lines > 0
+                    and changed_lines / max_lines > self.LARGE_OVERWRITE_RATIO_THRESHOLD
+                )
+            )
+            if is_large_rewrite:
+                confirmation_error = self._confirm_large_overwrite(
+                    resolved,
+                    changed_lines,
+                    max_lines,
+                )
+                if confirmation_error is not None:
+                    return confirmation_error
+
+            _write_text_preserving_newlines(resolved, content)
+            return f"Successfully overwrote {file_path} with {len(content)} characters"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -600,90 +602,47 @@ class UsefulTools:
         """
         try:
             resolved = _resolve_tool_path(file_path)
+            if old_string == new_string:
+                return "Error: new_string must be different from old_string"
+            if timeout_seconds < 0.001:
+                return "Error: Command execution timeout"
+            tracked = self._load_tracked_file(resolved, "Edit")
+            if isinstance(tracked, str):
+                return tracked
+
+            current_text, _ = tracked
+            outcome = _run_with_timeout(
+                timeout_seconds,
+                lambda: _compute_edit_outcome(
+                    current_text,
+                    old_string,
+                    new_string,
+                    replace_all,
+                ),
+            )
+            if outcome is None:
+                return "Error: Command execution timeout"
+
+            _write_text_preserving_newlines(resolved, outcome.updated_text)
+            count = current_text.count(old_string)
+            parts = [
+                f"File: {resolved}",
+                f"Looking for: '{old_string}'",
+                f"Replacing with: '{new_string}'",
+                f"Occurrences found: {count}",
+                f"Replace all: {str(replace_all).lower()}",
+                "",
+            ]
+            if outcome.replaced_count == 1:
+                parts.append("Successfully replaced 1 occurrence")
+            else:
+                parts.append(f"Successfully replaced {outcome.replaced_count} occurrence(s)")
+            parts.append("")
+            parts.append(_format_changed_section(outcome.updated_text, new_string))
+            return "\n".join(parts)
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
-
-        # Windows commonly lacks bash; run a Python edit helper instead.
-        bash_path = shutil.which("bash")
-        if os.name == "nt" or bash_path is None:
-            command = [
-                sys.executable,
-                "-c",
-                EDIT_SCRIPT_PYTHON,
-                str(resolved),
-                old_string,
-                new_string,
-                "true" if replace_all else "false",
-            ]
-            try:
-                result = subprocess.run(
-                    command,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                )
-                return result.stdout
-            except subprocess.TimeoutExpired:
-                return "Error: Command execution timeout"
-            except subprocess.CalledProcessError as e:
-                error_msg = e.stderr.strip() if e.stderr else str(e)
-                return f"Error: {error_msg}"
-            except Exception as e:  # pragma: no cover
-                logger.debug("Exception caught", exc_info=True)
-                return f"Error: {e}"
-
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".sh",
-            delete=False,
-            encoding="utf-8",
-            newline="\n",
-        ) as f:
-            f.write(EDIT_SCRIPT)
-            script_path = f.name
-
-        try:
-            # Make script executable
-            Path(script_path).chmod(0o755)
-
-            # Build command with arguments
-            command = [
-                bash_path,
-                script_path,
-                str(resolved),
-                old_string,
-                new_string,
-                "true" if replace_all else "false",
-            ]
-
-            # Execute with timeout for safety
-            result = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            logger.debug("Exception caught", exc_info=True)
-            return "Error: Command execution timeout"
-        except subprocess.CalledProcessError as e:
-            # Include stderr which contains the actual error message from the script
-            logger.debug("Exception caught", exc_info=True)
-            error_msg = e.stderr.strip() if e.stderr else str(e)
-            return f"Error: {error_msg}"
-        except Exception as e:  # pragma: no cover
-            logger.debug("Exception caught", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            # Clean up temporary script
-            try:
-                Path(script_path).unlink()
-            except Exception:  # pragma: no cover
-                logger.debug("Exception caught", exc_info=True)
 
     def _start_bash_process(self, command: str) -> subprocess.Popen[str]:
         command = _rewrite_windows_bash_command(command, self.shell_prefix)

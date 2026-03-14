@@ -156,6 +156,20 @@ class TestUsefulToolsWrite:
         result = tools.Write("/dev/null/impossible/file.txt", "content")
         assert "Error:" in result
 
+    def test_write_refuses_existing_file(self) -> None:
+        from kiss.agents.sorcar.useful_tools import UsefulTools
+
+        tools = UsefulTools()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("hello")
+            path = f.name
+        try:
+            result = tools.Write(path, "goodbye")
+            assert "only creates new files" in result
+            assert Path(path).read_text() == "hello"
+        finally:
+            os.unlink(path)
+
 
 class TestUsefulToolsEdit:
     def test_edit_file_not_found(self) -> None:
@@ -173,8 +187,22 @@ class TestUsefulToolsEdit:
             f.write("hello")
             path = f.name
         try:
+            tools.Read(path)
             result = tools.Edit(path, "hello", "hello")
             assert "must be different" in result
+        finally:
+            os.unlink(path)
+
+    def test_edit_requires_read_first(self) -> None:
+        from kiss.agents.sorcar.useful_tools import UsefulTools
+
+        tools = UsefulTools()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("hello")
+            path = f.name
+        try:
+            result = tools.Edit(path, "xyz", "abc")
+            assert "must be read with Read()" in result
         finally:
             os.unlink(path)
 
@@ -186,6 +214,7 @@ class TestUsefulToolsEdit:
             f.write("hello")
             path = f.name
         try:
+            tools.Read(path)
             result = tools.Edit(path, "xyz", "abc")
             assert "not found" in result
         finally:
@@ -199,6 +228,7 @@ class TestUsefulToolsEdit:
             f.write("aa bb aa")
             path = f.name
         try:
+            tools.Read(path)
             result = tools.Edit(path, "aa", "cc")
             assert "appears 2 times" in result
         finally:
@@ -212,9 +242,28 @@ class TestUsefulToolsEdit:
             f.write("aa bb aa")
             path = f.name
         try:
+            tools.Read(path)
             result = tools.Edit(path, "aa", "cc", replace_all=True)
             assert "replaced 2" in result
             assert Path(path).read_text() == "cc bb cc"
+        finally:
+            os.unlink(path)
+
+    def test_overwrite_small_file(self) -> None:
+        from kiss.agents.sorcar.useful_tools import UsefulTools
+
+        tools = UsefulTools()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("\n".join(f"line {i}" for i in range(20)) + "\n")
+            path = f.name
+        try:
+            tools.Read(path)
+            result = tools.Overwrite(
+                path,
+                "\n".join(["line 0 updated", *[f"line {i}" for i in range(1, 20)]]) + "\n",
+            )
+            assert "Successfully overwrote" in result
+            assert Path(path).read_text().startswith("line 0 updated\n")
         finally:
             os.unlink(path)
 
@@ -772,6 +821,7 @@ class TestUsefulToolsUncoveredBranches:
             f.write("hello world")
             path = f.name
         try:
+            tools.Read(path)
             os.chmod(path, 0o444)
             result = tools.Edit(path, "hello", "goodbye")
             assert "Error:" in result

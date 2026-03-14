@@ -494,17 +494,17 @@ ______________________________________________________________________
 
 ##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
-**Constructor:** `UsefulTools(stream_callback: Callable[[str], None] | None = None) -> None`
+**Constructor:** `UsefulTools(stream_callback: Callable[[str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> None`
 
 - **Read** — Read file contents.<br/>`Read(file_path: str, max_lines: int = 2000) -> str`
 
   - `file_path`: Absolute path to file.
   - `max_lines`: Maximum number of lines to return.
 
-- **Write** — Write content to a file, creating it if it doesn't exist or overwriting if it does.<br/>`Write(file_path: str, content: str) -> str`
+- **Write** — Write content to a new file and fail if the path already exists.<br/>`Write(file_path: str, content: str) -> str`
 
   - `file_path`: Path to the file to write.
-  - `content`: The full content to write to the file.
+  - `content`: The full content to write to the new file.
 
 - **Edit** — Performs precise string replacements in files with exact matching.<br/>`Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False, timeout_seconds: float = 30) -> str`
 
@@ -514,6 +514,11 @@ ______________________________________________________________________
   - `replace_all`: If True, replace all occurrences.
   - `timeout_seconds`: Timeout in seconds for the edit command.
   - **Returns:** The output of the edit operation.
+
+- **Overwrite** — Replace the full contents of an existing file after it has been read, with confirmation for large rewrites.<br/>`Overwrite(file_path: str, content: str) -> str`
+
+  - `file_path`: Absolute path to the file to replace.
+  - `content`: The full replacement content for the file.
 
 - **Bash** — Runs a bash command and returns its output.<br/>`Bash(command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str`
 

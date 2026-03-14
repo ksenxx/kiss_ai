@@ -948,6 +948,7 @@ def run_chatbot(
         pre_file_hashes: dict[str, str] = {}
         result_text = ""
         done_event: dict[str, str] = {}
+        should_finalize = True
         try:
             _add_task(task)
             printer.broadcast({"type": "tasks_updated"})
@@ -1044,8 +1045,7 @@ def run_chatbot(
                 with running_lock:
                     merging = True
                 printer.broadcast({"type": "merge_started"})
-        except Exception:  # pragma: no cover – merge view error
-            if _should_warn_no_changes(done_event, merge_result):
+            elif _should_warn_no_changes(done_event, merge_result):
                 printer.broadcast(
                     {
                         "type": "system_output",

@@ -207,3 +207,5 @@ def test_system_prompt_prefers_synchronous_bash_and_forbids_same_turn_finish() -
     assert "Run bash commands synchronously by default" in SYSTEM_PROMPT
     assert "Run all bash commands in the background" not in SYSTEM_PROMPT
     assert "Never call finish() in the same response as a Bash command" in SYSTEM_PROMPT
+    assert "Write() only for creating new files" in SYSTEM_PROMPT
+    assert "Read() before Edit() or Overwrite()" in SYSTEM_PROMPT

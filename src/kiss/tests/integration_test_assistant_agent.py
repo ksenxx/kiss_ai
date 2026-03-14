@@ -22,13 +22,14 @@ the browser and coding tools.
 3. Use Bash() to run: echo "Report generated at $(date)" > {work_dir}/report.txt
 4. Use go_to_url() to navigate to https://httpbin.org/json
 5. Use get_page_content(text_only=True) to read the JSON content
-6. Use Write() to append the extracted content to {work_dir}/report.txt
+6. Use Read() to inspect {work_dir}/report.txt, then use Overwrite() to append the extracted content
+   to the same file
 7. Use Bash() to verify the file exists: cat {work_dir}/report.txt
 8. Take a screenshot with screenshot("{work_dir}/screenshot.png")
 9. Call finish(success=True, summary="Created report with web content and bash commands")
 
 **Important:** You MUST use BOTH browser tools (go_to_url, get_page_content, screenshot)
-AND coding tools (Bash, Write) to complete this task.
+AND coding tools (Bash, Read, Overwrite) to complete this task.
 """
     work_dir = tempfile.mkdtemp()
     old_cwd = os.getcwd()

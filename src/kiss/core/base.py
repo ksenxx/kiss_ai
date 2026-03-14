@@ -51,7 +51,8 @@ SYSTEM_PROMPT = f"""
 # FOCUS ON THE GIVEN TASK.  IT'S COMPLETION IS YOUR SOLE GOAL.  BE RELENTLESS.
 
 # Rules
-- Write() for new files. Edit() for small changes.
+- Write() only for creating new files. Read() before Edit() or Overwrite().
+- Use Edit() for surgical changes and Overwrite() only for intentional full-file replacement.
 - Run bash commands synchronously by default so you can inspect the actual
   tool result immediately in the next observation.
 - Only background a bash command when it is truly long-running (for example

@@ -959,7 +959,33 @@ class TestSorcarAgentArgParser:
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
         agent = SorcarAgent("test")
         tools = agent._get_tools()
-        assert len(tools) >= 4  # Bash, Read, Edit, Write
+        tool_names = {tool.__name__ for tool in tools}
+        assert len(tools) >= 5  # Bash, Read, Edit, Write, Overwrite
+        assert "Overwrite" in tool_names
+
+    def test_agent_tools_thread_question_callback_into_overwrite(self) -> None:
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
+        asked: list[str] = []
+
+        def ask(question: str) -> str:
+            asked.append(question)
+            return "yes"
+
+        agent = SorcarAgent("test", ask_user_question_callback=ask)
+        tools = {tool.__name__: tool for tool in agent._get_tools()}
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "large.txt"
+            path.write_text("\n".join(f"old {i}" for i in range(120)) + "\n")
+            assert tools["Read"](str(path)).startswith("old 0")
+            result = tools["Overwrite"](
+                str(path),
+                "\n".join(f"new {i}" for i in range(120)) + "\n",
+            )
+
+        assert "Successfully overwrote" in result
+        assert asked
 
     def test_agent_reset(self) -> None:
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
