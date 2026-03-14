@@ -23,6 +23,22 @@ echo "=== Building KISS Offline Installer Package ==="
 echo "Architecture: $ARCH"
 echo "Staging: $STAGE"
 
+# ---------------------------------------------------------------------------
+# Helper: clear macOS quarantine/provenance attributes and re-sign binaries.
+# macOS Sequoia kills ad-hoc signed binaries that carry provenance/quarantine
+# attributes.  Removing the xattrs alone is insufficient because the OS caches
+# the original quarantine decision per-path; re-signing forces re-evaluation.
+# ---------------------------------------------------------------------------
+strip_quarantine() {
+    local target="$1"
+    xattr -d com.apple.quarantine "$target" 2>/dev/null || true
+    xattr -d com.apple.provenance "$target" 2>/dev/null || true
+    codesign --force --sign - "$target" 2>/dev/null || true
+}
+
+# Ensure the local uv binary can run during this build
+strip_quarantine "$(which uv)"
+
 # Clean staging
 rm -rf "$STAGE"
 mkdir -p "$PAYLOAD/kiss-offline" "$SCRIPTS"
@@ -37,10 +53,12 @@ mkdir -p "$BUNDLE/bin"
 UV_BIN="$(which uv)"
 cp "$UV_BIN" "$BUNDLE/bin/uv"
 chmod +x "$BUNDLE/bin/uv"
+strip_quarantine "$BUNDLE/bin/uv"
 # Also copy uvx if it exists
 if [ -f "$(dirname "$UV_BIN")/uvx" ]; then
     cp "$(dirname "$UV_BIN")/uvx" "$BUNDLE/bin/uvx"
     chmod +x "$BUNDLE/bin/uvx"
+    strip_quarantine "$BUNDLE/bin/uvx"
 fi
 echo "   uv: $(du -sh "$BUNDLE/bin/uv" | cut -f1)"
 
@@ -61,6 +79,8 @@ fi
 echo "   Extracting code-server..."
 mkdir -p "$BUNDLE/code-server"
 tar xzf "$CS_CACHE" -C "$BUNDLE/code-server" --strip-components=1
+# Strip quarantine from code-server executables
+find "$BUNDLE/code-server" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
 echo "   code-server: $(du -sh "$BUNDLE/code-server" | cut -f1)"
 
 # ---------------------------------------------------------------------------
@@ -82,6 +102,8 @@ echo "   Copying from $PYTHON_DIR ($PYTHON_DIRNAME)..."
 cp -R "$PYTHON_DIR" "$BUNDLE/python"
 # Save the original directory name so the installer can restore it
 echo "$PYTHON_DIRNAME" > "$BUNDLE/python-dirname.txt"
+# Strip quarantine from Python executables
+find "$BUNDLE/python" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
 echo "   Python: $(du -sh "$BUNDLE/python" | cut -f1)"
 
 # ---------------------------------------------------------------------------
@@ -102,6 +124,8 @@ if [ -f "$GIT_BIN" ]; then
             cp "/Library/Developer/CommandLineTools/usr/bin/$helper" "$BUNDLE/git/bin/$helper"
         fi
     done
+    # Strip quarantine from git executables
+    find "$BUNDLE/git" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
     echo "   git: $(du -sh "$BUNDLE/git" | cut -f1)"
 else
     echo "   WARNING: Xcode CLT git not found at $GIT_BIN, git not bundled"
@@ -150,6 +174,14 @@ cat > "$BUNDLE/install-offline.sh" << 'INSTALL_SCRIPT'
 #
 set -euo pipefail
 
+# macOS Sequoia kills ad-hoc signed binaries that carry quarantine/provenance attrs.
+# Removing xattrs alone is insufficient; re-signing forces macOS to re-evaluate.
+_strip_quarantine() {
+    xattr -d com.apple.quarantine "$1" 2>/dev/null || true
+    xattr -d com.apple.provenance "$1" 2>/dev/null || true
+    codesign --force --sign - "$1" 2>/dev/null || true
+}
+
 KISS_BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_BASE="${KISS_INSTALL_DIR:-$HOME/.kiss-install}"
 PROJECT_DIR="${KISS_PROJECT_DIR:-$HOME/kiss_ai}"
@@ -165,9 +197,11 @@ mkdir -p "$INSTALL_BASE/bin"
 echo ">>> Installing uv..."
 cp "$KISS_BUNDLE_DIR/bin/uv" "$INSTALL_BASE/bin/uv"
 chmod +x "$INSTALL_BASE/bin/uv"
+_strip_quarantine "$INSTALL_BASE/bin/uv"
 if [ -f "$KISS_BUNDLE_DIR/bin/uvx" ]; then
     cp "$KISS_BUNDLE_DIR/bin/uvx" "$INSTALL_BASE/bin/uvx"
     chmod +x "$INSTALL_BASE/bin/uvx"
+    _strip_quarantine "$INSTALL_BASE/bin/uvx"
 fi
 # Also install to ~/.local/bin for standard uv location
 mkdir -p "$HOME/.local/bin"
@@ -180,6 +214,7 @@ echo ">>> Installing code-server..."
 mkdir -p "$INSTALL_BASE/code-server"
 cp -R "$KISS_BUNDLE_DIR/code-server/"* "$INSTALL_BASE/code-server/"
 chmod +x "$INSTALL_BASE/code-server/bin/code-server"
+find "$INSTALL_BASE/code-server" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
 # Symlink to bin
 ln -sf "$INSTALL_BASE/code-server/bin/code-server" "$INSTALL_BASE/bin/code-server"
 
@@ -190,6 +225,7 @@ PYTHON_DEST="$HOME/.local/share/uv/python/$PYTHON_DIRNAME"
 mkdir -p "$(dirname "$PYTHON_DEST")"
 if [ ! -d "$PYTHON_DEST" ]; then
     cp -R "$KISS_BUNDLE_DIR/python" "$PYTHON_DEST"
+    find "$PYTHON_DEST" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
 fi
 
 # 4. Install git
@@ -198,6 +234,7 @@ if [ -d "$KISS_BUNDLE_DIR/git" ]; then
     mkdir -p "$INSTALL_BASE/git"
     cp -R "$KISS_BUNDLE_DIR/git/"* "$INSTALL_BASE/git/"
     chmod +x "$INSTALL_BASE/git/bin/git"
+    find "$INSTALL_BASE/git" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
     ln -sf "$INSTALL_BASE/git/bin/git" "$INSTALL_BASE/bin/git"
     # Set GIT_EXEC_PATH for the installed git
     export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
