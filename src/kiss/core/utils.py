@@ -161,13 +161,15 @@ def read_project_file(file_path_relative_to_project_root: str) -> str:
         with open(abs_path, encoding="utf-8") as f:
             return f.read()
 
-    rel_parts = file_path_relative_to_project_root.strip("/").split("/")
+    # Normalize separators so Windows-style "a\\b\\c.txt" works the same as "a/b/c.txt".
+    normalized_rel = file_path_relative_to_project_root.replace("\\", "/")
+    rel_parts = normalized_rel.strip("/").split("/")
     if len(rel_parts) > 1:
         pkg = ".".join(rel_parts[:-1])
         file = rel_parts[-1]
     else:
         pkg = ""
-        file = file_path_relative_to_project_root
+        file = normalized_rel
 
     try:
         if pkg:

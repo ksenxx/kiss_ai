@@ -12,6 +12,10 @@ FLAKY MODEL MARKERS:
 """
 
 import logging
+import os
+import shutil
+import subprocess
+from functools import lru_cache
 from typing import Any
 
 from kiss.core import config as config_module
@@ -37,6 +41,21 @@ try:
 except ImportError:
     logger.debug("Exception caught", exc_info=True)
     GeminiModel = None  # type: ignore[assignment,misc]
+
+try:
+    from kiss.core.models.codex_cli_model import CodexCliModel
+except ImportError:
+    CodexCliModel = None  # type: ignore[assignment,misc]
+
+try:
+    from kiss.core.models.codex_native_model import CodexNativeModel
+except ImportError:
+    CodexNativeModel = None  # type: ignore[assignment,misc]
+
+try:
+    from kiss.core.models.codex_oauth import OpenAICodexOAuthManager
+except ImportError:
+    OpenAICodexOAuthManager = None  # type: ignore[assignment,misc]
 
 
 class ModelInfo:
@@ -101,7 +120,43 @@ def _emb(ctx: int, inp: float) -> ModelInfo:
     return ModelInfo(ctx, inp, 0.0, False, True, False)
 
 
-_OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
+_OPENAI_PREFIXES = ("chatgpt", "gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
+# Curated model IDs shown under explicit "Codex" provider selection in UI.
+_CODEX_PROVIDER_MODELS = frozenset(
+    {
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2-codex",
+        "gpt-5.1-codex-max",
+        "gpt-5.2",
+        "gpt-5.1-codex-mini",
+    }
+)
+# Subscription auth (ChatGPT/Codex) does not mirror the full platform API catalog.
+# Keep this allow-list explicit so API-only models continue to use OPENAI_API_KEY.
+_CODEX_SUBSCRIPTION_MODELS = frozenset(
+    {
+        "chatgpt-4o-latest",
+        "codex-mini-latest",
+        "computer-use-preview",
+        "gpt-5",
+        "gpt-5.4",
+        "gpt-5-chat-latest",
+        "gpt-5-codex",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-5.1",
+        "gpt-5.1-chat-latest",
+        "gpt-5.1-codex",
+        "gpt-5.1-codex-max",
+        "gpt-5.1-codex-mini",
+        "gpt-5.2",
+        "gpt-5.2-codex",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+    }
+)
 _TOGETHER_PREFIXES = (
     "meta-llama/",
     "Qwen/",
@@ -121,6 +176,20 @@ _TOGETHER_PREFIXES = (
 )
 
 
+def _is_openai_family_model(model_name: str) -> bool:
+    return model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss")
+
+
+def _is_codex_subscription_model(model_name: str) -> bool:
+    """Return True when model_name is known to be available on ChatGPT/Codex auth."""
+    return model_name in _CODEX_SUBSCRIPTION_MODELS
+
+
+def is_codex_provider_model(model_name: str) -> bool:
+    """Return True when model_name belongs to the explicit Codex UI provider catalog."""
+    return model_name in _CODEX_PROVIDER_MODELS
+
+
 def _openai_compatible(
     model_name: str,
     base_url: str,
@@ -137,6 +206,122 @@ def _openai_compatible(
         model_config=model_config,
         token_callback=token_callback,
     )
+
+
+def _codex_cli(
+    model_name: str,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+) -> Model:
+    if CodexCliModel is None:
+        raise KISSError(
+            "Codex CLI adapter is unavailable. Ensure codex_cli_model dependencies are present."
+        )
+    return CodexCliModel(
+        model_name=model_name,
+        model_config=model_config,
+        token_callback=token_callback,
+    )
+
+
+def _codex_native(
+    model_name: str,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+) -> Model:
+    if CodexNativeModel is None:
+        raise KISSError(
+            "Codex native adapter is unavailable. "
+            "Ensure codex_native_model dependencies are present."
+        )
+    return CodexNativeModel(
+        model_name=model_name,
+        model_config=model_config,
+        token_callback=token_callback,
+    )
+
+
+@lru_cache(maxsize=1)
+def _is_codex_cli_auth_available() -> bool:
+    """Return True when Codex CLI is installed and has an authenticated login."""
+    if os.environ.get("KISS_DISABLE_CODEX_AUTH") == "1":
+        return False
+    codex_path = shutil.which("codex")
+    if not codex_path:
+        return False
+    try:
+        result = subprocess.run(
+            [codex_path, "login", "status"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    status_text = f"{result.stdout}\n{result.stderr}".lower()
+    return "logged in" in status_text
+
+
+@lru_cache(maxsize=1)
+def _is_codex_native_auth_available() -> bool:
+    """Return True when native Codex OAuth credentials are locally available."""
+    if os.environ.get("KISS_DISABLE_CODEX_AUTH") == "1":
+        return False
+    if OpenAICodexOAuthManager is None:
+        return False
+    try:
+        manager = OpenAICodexOAuthManager()
+        return manager.has_credentials()
+    except Exception:
+        return False
+
+
+def _is_codex_auth_available() -> bool:
+    """Return True when either native OAuth or Codex CLI auth is available."""
+    return _is_codex_native_auth_available() or _is_codex_cli_auth_available()
+
+
+def _resolve_codex_transport() -> str:
+    """Resolve Codex transport backend ('native' or 'cli') for codex auth mode."""
+    forced = os.environ.get("KISS_CODEX_TRANSPORT", "").strip().lower()
+    if forced in {"native", "oauth", "direct"}:
+        # Keep CLI as fallback for environments without local OAuth credentials.
+        return "native" if _is_codex_native_auth_available() else "cli"
+    if forced in {"cli", "exec", "subprocess"}:
+        return "cli"
+    if _is_codex_native_auth_available():
+        return "native"
+    return "cli"
+
+
+def _resolve_openai_auth_mode(model_name: str, openai_api_key: str) -> str:
+    """Resolve which auth path to use for OpenAI-family models.
+
+    Modes:
+    - "api": use OPENAI_API_KEY against https://api.openai.com/v1
+    - "codex": use ChatGPT/Codex subscription auth (native OAuth preferred, CLI fallback)
+    """
+    forced = os.environ.get("KISS_OPENAI_AUTH", "").strip().lower()
+    if forced in {"api", "api_key", "platform"}:
+        return "api"
+    if forced in {"codex", "subscription", "chatgpt"}:
+        if _is_codex_auth_available() and _is_codex_subscription_model(model_name):
+            return "codex"
+        return "api"
+
+    codex_auth = _is_codex_auth_available()
+    supports_codex = _is_codex_subscription_model(model_name)
+    # Prefer subscription auth only for overlapping model IDs.
+    if codex_auth and supports_codex:
+        return "codex"
+    if openai_api_key:
+        return "api"
+    if codex_auth and supports_codex:
+        return "codex"
+    return "api"
 
 
 MODEL_INFO: dict[str, ModelInfo] = {
@@ -181,75 +366,60 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-3.1-pro-preview": _mi(1048576, 2.00, 12.00),  # 1M context, 64k output
     "gemini-embedding-001": _emb(2048, 0.15),  # Newest embedding model
     "google/gemma-3n-E4B-it": _mi(32768, 0.02, 0.04, fc=False),
-    "gpt-3.5-turbo": _mi(16385, 0.50, 1.50),  # NEW
-    "gpt-3.5-turbo-0125": _mi(16385, 0.50, 1.50),
-    "gpt-3.5-turbo-1106": _mi(16385, 1.00, 2.00),
-    "gpt-3.5-turbo-16k": _mi(16385, 3.00, 4.00),  # NEW
+    # OpenAI catalog (validated against https://developers.openai.com/api/docs/models
+    # on 2026-03-04).
+    # This catalog keeps the IDs KISS can route through its chat/tooling backends.
+    # Non-chat APIs (image generation, TTS-only, and specialized endpoints)
+    # are intentionally omitted.
+    "chatgpt-4o-latest": _mi(128000, 5.00, 15.00, fc=False),
+    "gpt-3.5-turbo": _mi(16385, 0.50, 1.50),
     "gpt-4": _mi(8192, 30.00, 60.00),
     "gpt-4-0125-preview": _mi(128000, 10.00, 30.00),
     "gpt-4-0314": _mi(8191, 30.00, 60.00),  # NEW
     "gpt-4-0613": _mi(8192, 30.00, 60.00),
     "gpt-4-1106-preview": _mi(128000, 10.00, 30.00),  # NEW
     "gpt-4-turbo": _mi(128000, 10.00, 30.00),
-    "gpt-4-turbo-2024-04-09": _mi(128000, 10.00, 30.00),  # NEW
-    "gpt-4-turbo-preview": _mi(128000, 10.00, 30.00),  # NEW
+    "gpt-4-turbo-preview": _mi(128000, 10.00, 30.00),
     "gpt-4.1": _mi(128000, 2.00, 8.00),
-    "gpt-4.1-2025-04-14": _mi(1047576, 2.00, 8.00),  # NEW
     "gpt-4.1-mini": _mi(128000, 0.40, 1.60),
-    "gpt-4.1-mini-2025-04-14": _mi(1047576, 0.40, 1.60),  # NEW
     "gpt-4.1-nano": _mi(128000, 0.10, 0.40, fc=False),
-    "gpt-4.1-nano-2025-04-14": _mi(1047576, 0.10, 0.40),  # NEW
-    "gpt-4.5-preview": _mi(128000, 2.50, 10.00),  # Deprecated
+    "gpt-4.5-preview": _mi(128000, 75.00, 150.00),  # Deprecated
     "gpt-4o": _mi(128000, 2.50, 10.00),
-    "gpt-4o-2024-05-13": _mi(128000, 5.00, 15.00),
-    "gpt-4o-2024-08-06": _mi(128000, 2.50, 10.00),  # NEW
-    "gpt-4o-2024-11-20": _mi(128000, 2.50, 10.00),  # NEW
+    "gpt-4o-audio-preview": _mi(128000, 2.50, 10.00, fc=False),
     "gpt-4o-mini": _mi(128000, 0.15, 0.60),
-    "gpt-4o-mini-2024-07-18": _mi(128000, 0.15, 0.60),  # NEW
     "gpt-4o-mini-audio-preview": _mi(128000, 0.15, 0.60, fc=False),
-    "gpt-4o-mini-realtime-preview": _mi(128000, 0.60, 2.40, fc=False),
-    "gpt-4o-mini-search-preview": _mi(128000, 0.15, 0.60),  # NEW
-    "gpt-4o-mini-search-preview-2025-03-11": _mi(128000, 0.15, 0.60),  # NEW
-    "gpt-4o-realtime-preview": _mi(128000, 5.00, 20.00, fc=False),
-    "gpt-4o-search-preview": _mi(128000, 2.50, 10.00),  # NEW
-    "gpt-4o-search-preview-2025-03-11": _mi(128000, 2.50, 10.00),  # NEW
-    "gpt-4o-transcribe-diarize": _mi(128000, 2.50, 10.00, fc=False),
+    "gpt-4o-mini-realtime-preview": _mi(16000, 0.60, 2.40, fc=False),
+    "gpt-4o-mini-search-preview": _mi(128000, 0.15, 0.60, fc=False),
+    "gpt-4o-realtime-preview": _mi(32000, 5.00, 20.00, fc=False),
+    "gpt-4o-search-preview": _mi(128000, 2.50, 10.00, fc=False),
+    "gpt-4o-transcribe-diarize": _mi(16000, 2.50, 10.00, fc=False),
     "gpt-5": _mi(400000, 1.25, 10.00),
-    "gpt-5-2025-08-07": _mi(400000, 1.25, 10.00),  # NEW
-    "gpt-5-chat-latest": _mi(400000, 1.25, 10.00),
+    "gpt-5-chat-latest": _mi(128000, 1.25, 10.00),
     "gpt-5-codex": _mi(400000, 1.25, 10.00),
     "gpt-5-mini": _mi(400000, 0.25, 2.00),
     "gpt-5-mini-2025-08-07": _mi(400000, 0.25, 2.00),  # NEW
     "gpt-5-nano": _mi(400000, 0.05, 0.40, fc=False),
     "gpt-5-nano-2025-08-07": _mi(400000, 0.05, 0.40),  # NEW
     "gpt-5-pro": _mi(400000, 15.00, 120.00),
-    "gpt-5-pro-2025-10-06": _mi(400000, 15.00, 120.00),  # NEW
-    "gpt-5-search-api": _mi(400000, 1.25, 10.00),
+    "gpt-5.4": _mi(400000, 2.50, 15.00),
     "gpt-5.1": _mi(400000, 1.25, 10.00),
-    "gpt-5.1-2025-11-13": _mi(400000, 1.25, 10.00),  # NEW
-    "gpt-5.1-chat-latest": _mi(400000, 1.25, 10.00),
+    "gpt-5.1-chat-latest": _mi(128000, 1.25, 10.00),
     "gpt-5.1-codex": _mi(400000, 1.25, 10.00),
     "gpt-5.1-codex-max": _mi(400000, 1.25, 10.00),
     "gpt-5.1-codex-mini": _mi(400000, 0.25, 2.00),
     "gpt-5.2": _mi(400000, 1.75, 14.00),
-    "gpt-5.2-2025-12-11": _mi(400000, 1.75, 14.00),  # NEW
-    "gpt-5.2-chat-latest": _mi(400000, 1.75, 14.00),
+    "gpt-5.2-chat-latest": _mi(128000, 1.75, 14.00),
     "gpt-5.2-codex": _mi(400000, 1.75, 14.00),
     "gpt-5.2-pro": _mi(400000, 21.00, 168.00),
-    "gpt-5.2-pro-2025-12-11": _mi(400000, 21.00, 168.00),  # NEW
-    "gpt-5.3-chat-latest": _mi(400000, 1.75, 14.00),
-    "gpt-5.3-codex": _mi(400000, 1.75, 14.00),  # NEW
-    "gpt-5.4": _mi(1050000, 2.50, 15.00),  # NEW
-    "gpt-5.4-2026-03-05": _mi(1050000, 2.50, 15.00),  # NEW
-    "gpt-5.4-pro": _mi(1050000, 30.00, 180.00),  # NEW
-    "gpt-5.4-pro-2026-03-05": _mi(1050000, 30.00, 180.00),  # NEW
+    "gpt-5.3-codex": _mi(400000, 1.75, 14.00),
+    "gpt-5.3-codex-spark": _mi(400000, 1.75, 14.00),
+    "gpt-5.3-chat-latest": _mi(128000, 1.75, 14.00),
     "gpt-audio": _mi(128000, 2.50, 10.00, fc=False),
+    "gpt-audio-1.5": _mi(128000, 2.50, 10.00, fc=False),
     "gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),
-    "gpt-image-1": _mi(32768, 5.00, 40.00, fc=False),
-    "gpt-image-1-mini": _mi(32768, 1.50, 12.00, fc=False),
-    "gpt-image-1.5": _mi(32768, 5.00, 40.00, fc=False),
-    "gpt-realtime": _mi(128000, 4.00, 16.00, fc=False),
-    "gpt-realtime-mini": _mi(128000, 0.60, 2.40, fc=False),
+    "gpt-realtime": _mi(32000, 4.00, 16.00, fc=False),
+    "gpt-realtime-1.5": _mi(32000, 4.00, 16.00, fc=False),
+    "gpt-realtime-mini": _mi(32000, 0.60, 2.40, fc=False),
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),  # 1024 dimensions
     "meta-llama/Llama-3-70b-chat-hf": _mi(8192, 0.88, 0.88, fc=False),
     "meta-llama/Llama-3.1-405B-Instruct": _mi(4096, 3.50, 3.50),  # NEW
@@ -280,6 +450,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
     "o1-2024-12-17": _mi(200000, 15.00, 60.00),  # NEW
     "o1-mini": _mi(128000, 1.10, 4.40, fc=False),
+    "o1-preview": _mi(128000, 15.00, 60.00, fc=False),
     "o1-pro": _mi(200000, 150.00, 600.00, fc=False),
     "o1-pro-2025-03-19": _mi(200000, 150.00, 600.00),  # NEW
     "o3": _mi(200000, 2.00, 8.00),
@@ -287,15 +458,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "o3-deep-research": _mi(200000, 10.00, 40.00, fc=False),
     "o3-deep-research-2025-06-26": _mi(200000, 10.00, 40.00),  # NEW
     "o3-mini": _mi(200000, 1.10, 4.40, fc=False),
-    "o3-mini-2025-01-31": _mi(200000, 1.10, 4.40),  # NEW
-    "o3-mini-high": _mi(200000, 1.10, 4.40),
     "o3-pro": _mi(200000, 20.00, 80.00, fc=False),
     "o3-pro-2025-06-10": _mi(200000, 20.00, 80.00),  # NEW
     "o4-mini": _mi(200000, 1.10, 4.40),
     "o4-mini-2025-04-16": _mi(200000, 1.10, 4.40),  # NEW
     "o4-mini-deep-research": _mi(200000, 2.00, 8.00, fc=False),
-    "o4-mini-deep-research-2025-06-26": _mi(200000, 2.00, 8.00),  # NEW
-    "o4-mini-high": _mi(200000, 1.10, 4.40),
     "openai/gpt-oss-120b": _mi(131072, 0.15, 0.60, fc=False),
     "openai/gpt-oss-20b": _mi(131072, 0.05, 0.20, fc=False),
     "openrouter/ai21/jamba-large-1.7": _mi(256000, 2.00, 8.00, fc=False),
@@ -736,7 +903,61 @@ def model(
             model_config=model_config,
             token_callback=token_callback,
         )
-    if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
+    if _is_openai_family_model(model_name):
+        auth_mode = _resolve_openai_auth_mode(model_name, keys.OPENAI_API_KEY)
+        if auth_mode == "codex":
+            transport = _resolve_codex_transport()
+            if transport == "native":
+                if _is_codex_native_auth_available():
+                    try:
+                        return _codex_native(
+                            model_name,
+                            model_config,
+                            token_callback,
+                        )
+                    except KISSError:
+                        if _is_codex_cli_auth_available():
+                            return _codex_cli(
+                                model_name,
+                                model_config,
+                                token_callback,
+                            )
+                        raise
+                if _is_codex_cli_auth_available():
+                    return _codex_cli(
+                        model_name,
+                        model_config,
+                        token_callback,
+                    )
+                raise KISSError(
+                    "Codex auth selected but no native OAuth credentials "
+                    "or CLI login are available."
+                )
+            if _is_codex_cli_auth_available():
+                return _codex_cli(
+                    model_name,
+                    model_config,
+                    token_callback,
+                )
+            if _is_codex_native_auth_available():
+                return _codex_native(
+                    model_name,
+                    model_config,
+                    token_callback,
+                )
+            raise KISSError(
+                "Codex auth selected but no native OAuth credentials or CLI login are available."
+            )
+        if not keys.OPENAI_API_KEY:
+            if _is_codex_auth_available() and not _is_codex_subscription_model(model_name):
+                raise KISSError(
+                    f"Model '{model_name}' is API-only in this setup. "
+                    "Configure OPENAI_API_KEY or choose a ChatGPT/Codex-supported model."
+                )
+            raise KISSError(
+                f"OPENAI_API_KEY is required for model '{model_name}' "
+                "(no matching ChatGPT/Codex subscription auth path available)."
+            )
         return _openai_compatible(
             model_name,
             "https://api.openai.com/v1",
@@ -786,13 +1007,15 @@ def model(
 
 
 def get_available_models() -> list[str]:
-    """Return model names for which an API key is configured and generation is supported.
+    """Return model names that are currently callable in this environment.
 
     Returns:
-        list[str]: Sorted list of model name strings that have a configured API key
-            and support text generation.
+        list[str]: Sorted list of generation model names that have either a provider API key
+            configured or available Codex subscription auth (native OAuth or CLI login).
     """
     keys = config_module.DEFAULT_CONFIG.agent.api_keys
+    openai_api_available = bool(keys.OPENAI_API_KEY)
+    codex_auth_available = _is_codex_auth_available()
     prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,
@@ -811,8 +1034,11 @@ def get_available_models() -> list[str]:
         if not api_key:
             if name == "text-embedding-004":
                 api_key = keys.GEMINI_API_KEY
-            elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
-                api_key = keys.OPENAI_API_KEY
+            elif _is_openai_family_model(name):
+                if openai_api_available or (
+                    codex_auth_available and _is_codex_subscription_model(name)
+                ):
+                    api_key = "available"
             elif name.startswith(_TOGETHER_PREFIXES):
                 api_key = keys.TOGETHER_API_KEY
         if api_key:

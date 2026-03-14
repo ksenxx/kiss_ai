@@ -135,9 +135,25 @@ class TestModelInfoFactory:
         m = model("openrouter/foo-bar")
         assert m.model_name == "openrouter/foo-bar"
 
-    def test_model_openai_prefix(self) -> None:
+    def test_model_openai_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from kiss.core.models.model_info import model
 
+        monkeypatch.setattr(
+            "kiss.core.config.DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY",
+            "sk-test",
+        )
+        monkeypatch.setattr(
+            "kiss.core.models.model_info._resolve_openai_auth_mode",
+            lambda *_args: "api",
+        )
+        monkeypatch.setattr(
+            "kiss.core.models.model_info._openai_compatible",
+            lambda model_name, *_args, **_kwargs: type(
+                "_ModelStub",
+                (),
+                {"model_name": model_name},
+            )(),
+        )
         m = model("gpt-4.1-mini")
         assert m.model_name == "gpt-4.1-mini"
 
@@ -178,9 +194,25 @@ class TestModelInfoFactory:
         with pytest.raises(KISSError, match="Unknown model name"):
             model("totally-unknown-model")
 
-    def test_model_o1_prefix(self) -> None:
+    def test_model_o1_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from kiss.core.models.model_info import model
 
+        monkeypatch.setattr(
+            "kiss.core.config.DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY",
+            "sk-test",
+        )
+        monkeypatch.setattr(
+            "kiss.core.models.model_info._resolve_openai_auth_mode",
+            lambda *_args: "api",
+        )
+        monkeypatch.setattr(
+            "kiss.core.models.model_info._openai_compatible",
+            lambda model_name, *_args, **_kwargs: type(
+                "_ModelStub",
+                (),
+                {"model_name": model_name},
+            )(),
+        )
         m = model("o1-mini")
         assert m.model_name == "o1-mini"
 

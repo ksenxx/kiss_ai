@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+from urllib.parse import quote
 
 from kiss.agents.sorcar.browser_ui import (
     BASE_CSS,
@@ -208,6 +211,61 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   flex-direction:column;
 }
 #model-dropdown.open{display:flex}
+#model-filter{
+  display:flex;align-items:center;gap:8px;padding:8px 14px;
+  border-bottom:1px solid rgba(255,255,255,0.06);
+}
+#model-filter label{
+  font-size:10px;text-transform:uppercase;letter-spacing:0.05em;
+  color:rgba(255,255,255,0.35);flex-shrink:0;
+}
+#model-provider{
+  flex:1;background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.78);
+  border:1px solid rgba(255,255,255,0.1);border-radius:7px;
+  font-size:11px;font-family:inherit;padding:5px 7px;outline:none;
+}
+#model-provider:focus{border-color:rgba(88,166,255,0.45)}
+#auth-panel{
+  position:fixed;left:0;top:0;right:auto;min-width:320px;max-width:420px;
+  background:rgba(18,18,20,0.97);backdrop-filter:blur(20px);
+  border:1px solid rgba(255,255,255,0.08);border-radius:12px;
+  display:none;z-index:16;
+  box-shadow:0 -8px 32px rgba(0,0,0,0.5);
+  padding:10px 12px;gap:8px;flex-direction:column;
+}
+#auth-panel.open{display:flex}
+.auth-head{
+  display:flex;align-items:center;justify-content:space-between;
+  font-size:11px;font-weight:600;letter-spacing:0.02em;
+  color:rgba(255,255,255,0.7);
+}
+.auth-summary{
+  font-size:12px;line-height:1.4;color:rgba(255,255,255,0.78);
+  border:1px solid rgba(255,255,255,0.08);
+  background:rgba(255,255,255,0.03);border-radius:8px;padding:8px 10px;
+}
+.auth-grid{
+  display:grid;grid-template-columns:1fr auto;gap:6px 8px;
+  font-size:11px;align-items:center;
+}
+.auth-k{color:rgba(255,255,255,0.42)}
+.auth-v{color:rgba(255,255,255,0.78);text-align:right}
+.auth-v.warn{color:rgba(248,81,73,0.88)}
+.auth-v.good{color:rgba(34,197,94,0.88)}
+.auth-note{
+  color:rgba(255,255,255,0.5);font-size:10px;line-height:1.45;
+  border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;
+}
+.auth-actions{display:flex;gap:6px}
+.auth-action{
+  flex:1;background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.72);
+  border:1px solid rgba(255,255,255,0.1);border-radius:7px;
+  font-size:11px;padding:6px 8px;cursor:pointer;transition:all 0.15s;
+}
+.auth-action:hover{
+  background:rgba(255,255,255,0.09);border-color:rgba(255,255,255,0.2);color:#fff;
+}
+.auth-action:disabled{opacity:0.35;cursor:not-allowed}
 #model-search{
   width:100%;background:transparent;border:none;
   border-bottom:1px solid rgba(255,255,255,0.06);
@@ -233,6 +291,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   border-bottom:1px solid rgba(255,255,255,0.04);
   position:sticky;top:0;z-index:1;
 }
+.model-empty{padding:10px 14px;font-size:11px;color:rgba(255,255,255,0.45)}
 #upload-btn{
   background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.5);
   border:1px solid rgba(255,255,255,0.08);border-radius:8px;
@@ -435,12 +494,12 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
   z-index:199;opacity:0;pointer-events:none;transition:opacity 0.3s;
 }
 #sidebar-overlay.open{opacity:1;pointer-events:auto}
-#history-btn,#run-prompt-btn{
+#history-btn,#proposals-btn,#auth-btn,#run-prompt-btn{
   background:none;border:none;
   color:rgba(255,255,255,0.3);cursor:pointer;
   padding:4px;transition:color 0.15s,opacity 0.15s;display:flex;align-items:center;
 }
-#history-btn:hover{color:rgba(255,255,255,0.6)}
+#history-btn:hover,#proposals-btn:hover,#auth-btn:hover{color:rgba(255,255,255,0.6)}
 #run-prompt-btn:not(:disabled):hover{color:rgba(34,197,94,0.9)}
 #run-prompt-btn:disabled{opacity:0.15;cursor:not-allowed}
 #run-prompt-btn:not(:disabled){color:rgba(34,197,94,0.7)}
@@ -569,7 +628,11 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel header{padding:8px 12px}
 #assistant-panel .logo{font-size:11px}
 #assistant-panel .status{font-size:11px}
-#assistant-panel #history-btn svg{width:12px;height:12px}
+#assistant-panel #history-btn svg,
+#assistant-panel #proposals-btn svg,
+#assistant-panel #auth-btn svg{
+  width:12px;height:12px
+}
 #assistant-panel #welcome{padding:20px 14px}
 #assistant-panel #welcome h2{font-size:17px;margin-bottom:3px;letter-spacing:-0.3px}
 #assistant-panel #welcome p{font-size:11px;margin-bottom:14px}
@@ -603,10 +666,20 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel #task-input,#assistant-panel #ghost-overlay{font-size:11px}
 #assistant-panel #input-footer{margin-top:5px;padding-top:5px}
 #assistant-panel #model-btn{font-size:11px;padding:4px 8px;border-radius:6px}
+#assistant-panel #model-filter{padding:6px 10px;gap:6px}
+#assistant-panel #model-filter label{font-size:9px}
+#assistant-panel #model-provider{font-size:10px;padding:4px 6px;border-radius:6px}
 #assistant-panel #model-search{font-size:11px;padding:7px 10px}
 #assistant-panel .model-item{font-size:11px;padding:5px 10px}
 #assistant-panel .model-cost{font-size:9px}
 #assistant-panel .model-group-hdr{font-size:9px;padding:4px 10px 3px}
+#assistant-panel .model-empty{font-size:10px;padding:7px 10px}
+#assistant-panel #auth-panel{min-width:270px;max-width:320px;padding:8px 9px;gap:6px}
+#assistant-panel .auth-head{font-size:10px}
+#assistant-panel .auth-summary{font-size:10px;padding:6px 8px}
+#assistant-panel .auth-grid{font-size:10px;gap:4px 6px}
+#assistant-panel .auth-note{font-size:9px;padding-top:6px}
+#assistant-panel .auth-action{font-size:10px;padding:5px 6px}
 #assistant-panel #send-btn{width:28px;height:28px}
 #assistant-panel #send-btn svg{width:12px;height:12px}
 #assistant-panel #stop-btn{width:28px;height:28px}
@@ -755,6 +828,15 @@ body{background:var(--bg)}
   background:rgba(var(--bg2-rgb),0.97);
   border:1px solid var(--border);box-shadow:0 -4px 24px rgba(0,0,0,0.4);
 }
+#assistant-panel #model-filter{border-bottom:1px solid rgba(var(--fg-rgb),0.08)}
+#assistant-panel #model-filter label{color:rgba(var(--fg-rgb),0.45)}
+#assistant-panel #model-provider{
+  background:rgba(var(--fg-rgb),0.04);
+  color:rgba(var(--fg-rgb),0.8);
+  border:1px solid rgba(var(--fg-rgb),0.15);
+}
+#assistant-panel #model-provider:focus{border-color:rgba(var(--accent-rgb),0.45)}
+#assistant-panel #model-provider option{background:var(--surface);color:var(--text)}
 #assistant-panel #model-search{
   border-bottom:1px solid rgba(var(--fg-rgb),0.08);color:rgba(var(--fg-rgb),0.8);
 }
@@ -770,6 +852,34 @@ body{background:var(--bg)}
 #assistant-panel .model-group-hdr{
   color:rgba(var(--fg-rgb),0.3);background:rgba(var(--bg2-rgb),0.97);
   border-bottom:1px solid rgba(var(--fg-rgb),0.05);
+}
+#assistant-panel .model-empty{color:rgba(var(--fg-rgb),0.45)}
+#assistant-panel #auth-panel{
+  background:rgba(var(--bg2-rgb),0.97);
+  border:1px solid var(--border);box-shadow:0 -4px 24px rgba(0,0,0,0.4);
+}
+#assistant-panel .auth-head{color:rgba(var(--fg-rgb),0.7)}
+#assistant-panel .auth-summary{
+  color:rgba(var(--fg-rgb),0.8);
+  border:1px solid rgba(var(--fg-rgb),0.1);
+  background:rgba(var(--fg-rgb),0.03);
+}
+#assistant-panel .auth-k{color:rgba(var(--fg-rgb),0.45)}
+#assistant-panel .auth-v{color:rgba(var(--fg-rgb),0.78)}
+#assistant-panel .auth-v.warn{color:rgba(var(--red-rgb),0.9)}
+#assistant-panel .auth-v.good{color:rgba(var(--green-rgb),0.9)}
+#assistant-panel .auth-note{
+  color:rgba(var(--fg-rgb),0.5);
+  border-top:1px solid rgba(var(--fg-rgb),0.08);
+}
+#assistant-panel .auth-action{
+  background:rgba(var(--fg-rgb),0.05);
+  color:rgba(var(--fg-rgb),0.75);
+  border:1px solid rgba(var(--fg-rgb),0.12);
+}
+#assistant-panel .auth-action:hover{
+  background:rgba(var(--fg-rgb),0.1);
+  border-color:rgba(var(--fg-rgb),0.22);
 }
 #assistant-panel #send-btn{
   background:rgba(var(--accent-rgb),0.18);color:var(--accent);
@@ -872,10 +982,12 @@ body{background:var(--bg)}
   background:rgba(var(--bg2-rgb),0.97);border-left:1px solid var(--border);
 }
 #assistant-panel #sidebar-overlay{background:rgba(0,0,0,0.35)}
-#assistant-panel #history-btn{
+#assistant-panel #history-btn,#assistant-panel #proposals-btn,#assistant-panel #auth-btn{
   color:rgba(var(--fg-rgb),0.35);
 }
-#assistant-panel #history-btn:hover{
+#assistant-panel #history-btn:hover,
+#assistant-panel #proposals-btn:hover,
+#assistant-panel #auth-btn:hover{
   color:rgba(var(--fg-rgb),0.6);
 }
 #assistant-panel #run-prompt-btn:not(:disabled){color:rgba(var(--green-rgb),0.7)}
@@ -954,9 +1066,18 @@ var histSearch=document.getElementById('history-search');
 var allTasks=[];
 var modelLabel=document.getElementById('model-label');
 var modelDD=document.getElementById('model-dropdown');
+var modelProvider=document.getElementById('model-provider');
 var modelSearch=document.getElementById('model-search');
 var modelList=document.getElementById('model-list');
 var allModels=[],selectedModel='',modelDDIdx=-1;
+var selectedProvider='all',providerPinned=false;
+var authPanel=document.getElementById('auth-panel');
+var authSummary=document.getElementById('auth-summary');
+var authDetails=document.getElementById('auth-details');
+var authNote=document.getElementById('auth-note');
+var authRefreshBtn=document.getElementById('auth-refresh-btn');
+var authLoginBtn=document.getElementById('auth-login-btn');
+var authLogoutBtn=document.getElementById('auth-logout-btn');
 var sidebar=document.getElementById('sidebar');
 var sidebarOverlay=document.getElementById('sidebar-overlay');
 var suggestionsEl=document.getElementById('suggestions');
@@ -1056,6 +1177,7 @@ inp.addEventListener('input',function(){
 function toggleSidebar(){
   sidebar.classList.toggle('open');
   sidebarOverlay.classList.toggle('open');
+  positionAuthPanel();
 }
 O.addEventListener('wheel',function(e){
   if(running&&e.deltaY<0)_scrollLock=true;
@@ -1172,7 +1294,10 @@ function handleEvent(ev){
     ||t==='prompt')removeSpinner();
   switch(t){
   case'tasks_updated':loadTasks();loadWelcome();break;
-
+  case'proposed_updated':loadProposed();loadWelcome();break;
+  case'auth_updated':
+    if(authPanel.classList.contains('open'))loadAuthStatus();
+    loadModels();break;
   case'theme_changed':applyTheme(ev);break;
   case'focus_chatbox':window.focus();inp.focus();break;
   case'external_run':
@@ -1287,16 +1412,54 @@ function loadModels(){
       selectedModel=d.selected;
       modelLabel.textContent=selectedModel;
     }
-    renderModelList('');
+    if(modelProvider){
+      if(!providerPinned&&selectedModel){
+        var selectedEntry=allModels.find(function(m){return m.name===selectedModel});
+        if(selectedEntry){
+          selectedProvider=modelProviderKey(selectedEntry);
+          modelProvider.value=selectedProvider;
+        }
+      }else{
+        selectedProvider=modelProvider.value||selectedProvider;
+      }
+    }
+    renderModelList(modelSearch.value||'');
+    if(authPanel.classList.contains('open'))loadAuthStatus();
   }).catch(function(){});
 }
-function modelVendor(name){
-  if(name.startsWith('claude-'))return'Anthropic';
-  if(/^(gpt|o[134]|codex|computer-use)/.test(name)&&!name.startsWith('openai/'))return'OpenAI';
-  if(name.startsWith('gemini-'))return'Gemini';
-  if(name.startsWith('minimax-'))return'MiniMax';
-  if(name.startsWith('openrouter/'))return'OpenRouter';
+function _isCodexCatalogName(name){
+  return name==='gpt-5.4'
+    ||name==='gpt-5.3-codex'
+    ||name==='gpt-5.3-codex-spark'
+    ||name==='gpt-5.2-codex'
+    ||name==='gpt-5.1-codex-max'
+    ||name==='gpt-5.2'
+    ||name==='gpt-5.1-codex-mini';
+}
+function modelProviderKey(m){
+  if(m&&m.provider)return m.provider;
+  var name=(m&&m.name)?m.name:String(m||'');
+  if(_isCodexCatalogName(name))return'codex';
+  if(name.startsWith('claude-'))return'anthropic';
+  if(/^(chatgpt|gpt|o[134]|codex|computer-use)/.test(name)&&!name.startsWith('openai/'))return'openai';
+  if(name.startsWith('gemini-'))return'gemini';
+  if(name.startsWith('minimax-'))return'minimax';
+  if(name.startsWith('openrouter/'))return'openrouter';
+  return'together';
+}
+function modelVendor(m){
+  var provider=modelProviderKey(m);
+  if(provider==='codex')return'Codex';
+  if(provider==='anthropic')return'Anthropic';
+  if(provider==='openai')return'OpenAI API';
+  if(provider==='gemini')return'Gemini';
+  if(provider==='minimax')return'MiniMax';
+  if(provider==='openrouter')return'OpenRouter';
   return'Together AI';
+}
+function modelMatchesProvider(m){
+  if(selectedProvider==='all')return true;
+  return modelProviderKey(m)===selectedProvider;
 }
 function renderModelItem(m){
   var d=mkEl('div','model-item'+(m.name===selectedModel?' active':''));
@@ -1310,10 +1473,17 @@ function renderModelList(q){
   var ql=q.toLowerCase();
   var used=[],rest=[];
   allModels.forEach(function(m){
+    if(!modelMatchesProvider(m))return;
     if(ql&&m.name.toLowerCase().indexOf(ql)<0)return;
     if(m.uses>0)used.push(m);else rest.push(m);
   });
   used.sort(function(a,b){return b.uses-a.uses});
+  if(!used.length&&!rest.length){
+    var empty=mkEl('div','model-empty');
+    empty.textContent='No models for selected provider.';
+    modelList.appendChild(empty);
+    return;
+  }
   if(used.length){
     var hdr=mkEl('div','model-group-hdr');
     hdr.textContent='Recently Used';
@@ -1322,7 +1492,7 @@ function renderModelList(q){
   }
   var lastVendor='';
   rest.forEach(function(m){
-    var v=modelVendor(m.name);
+    var v=modelVendor(m);
     if(v!==lastVendor){
       var hdr=mkEl('div','model-group-hdr');
       hdr.textContent=v;
@@ -1341,9 +1511,11 @@ function selectModel(name){
   fetch('/select-model',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({model:name})}).catch(function(){});
+  if(authPanel.classList.contains('open'))loadAuthStatus();
 }
 function toggleModelDD(){
   if(modelDD.classList.contains('open')){closeModelDD();return}
+  closeAuthPanel();
   modelDD.classList.add('open');
   modelSearch.value='';
   renderModelList('');
@@ -1353,6 +1525,160 @@ function closeModelDD(){
   modelDD.classList.remove('open');
   modelSearch.value='';
   modelDDIdx=-1;
+}
+function closeAuthPanel(){
+  authPanel.classList.remove('open');
+}
+function positionAuthPanel(){
+  if(!authPanel.classList.contains('open'))return;
+  var picker=document.getElementById('model-picker');
+  if(!picker)return;
+  var sidebarWidth=340;
+  var sb=document.getElementById('sidebar');
+  if(sb){
+    var sw=parseFloat(getComputedStyle(sb).width);
+    if(!isNaN(sw)&&sw>0)sidebarWidth=sw;
+  }
+  var left=Math.max(8,Math.round(window.innerWidth-sidebarWidth));
+  var rect=picker.getBoundingClientRect();
+  var top=Math.round(rect.top-authPanel.offsetHeight-8);
+  if(top<8)top=8;
+  authPanel.style.left=left+'px';
+  authPanel.style.top=top+'px';
+}
+function toggleAuthPanel(){
+  if(authPanel.classList.contains('open')){closeAuthPanel();return}
+  closeModelDD();
+  authPanel.classList.add('open');
+  positionAuthPanel();
+  loadAuthStatus();
+}
+function _authClass(ok){
+  return ok?'good':'warn';
+}
+function _authOverrideLabel(value){
+  if(!value||value==='auto')return'Auto';
+  if(value==='api')return'API only';
+  if(value==='codex'||value==='chatgpt'||value==='subscription')return'Plan only';
+  return value;
+}
+function renderAuthStatus(data){
+  if(!data)return;
+  var summary='Auth status unavailable';
+  if(data.is_openai_model){
+    if(data.preferred_auth==='codex'){
+      summary='Using ChatGPT plan auth for '+data.model;
+    }else if(data.preferred_auth==='api'){
+      summary='Using OPENAI_API_KEY for '+data.model;
+    }else{
+      summary='No auth path is available for '+data.model;
+    }
+  }else{
+    summary='Selected model is not OpenAI-family.';
+  }
+  authSummary.textContent=summary;
+  var apiClass=_authClass(data.openai_api_key_configured);
+  var planClass=_authClass(data.codex_auth_available);
+  var overlapClass=_authClass(data.codex_subscription_model);
+  var apiLabel=data.openai_api_key_configured?'Configured':'Missing';
+  var planLabel=data.codex_auth_available?'Signed in':'Not signed in';
+  var overlapLabel=data.codex_subscription_model?'Yes':'No';
+  var overrideLabel=_authOverrideLabel(data.forced_auth);
+  authDetails.innerHTML='<div class="auth-grid">'
+    +'<div class="auth-k">Model</div><div class="auth-v">'+esc(data.model||'-')+'</div>'
+    +'<div class="auth-k">API key</div><div class="auth-v '+apiClass+'">'+apiLabel+'</div>'
+    +'<div class="auth-k">Plan auth</div><div class="auth-v '+planClass+'">'+planLabel+'</div>'
+    +'<div class="auth-k">Plan-supported model</div><div class="auth-v '+overlapClass+'">'
+    +overlapLabel+'</div>'
+    +'<div class="auth-k">Transport</div>'
+    +'<div class="auth-v">'+esc(data.codex_transport||'none')+'</div>'
+    +'<div class="auth-k">Auth override</div>'
+    +'<div class="auth-v">'+esc(overrideLabel)+'</div>'
+    +'</div>';
+  var note='Click "Login plan" to authenticate your ChatGPT plan in the browser.';
+  if(data.login_pending){
+    note='Login is pending. Complete the browser flow and then click Refresh.';
+    if(data.oauth_callback_port){
+      note+=' Callback port: '+data.oauth_callback_port+'.';
+    }
+  }
+  if(data.login_error){
+    note='Login issue: '+data.login_error;
+  }
+  if(data.is_openai_model){
+    if(
+      data.codex_auth_available
+      &&data.openai_api_key_configured
+      &&data.codex_subscription_model
+    ){
+      note='Both auth sources are available. KISS prefers ChatGPT plan for overlapping model IDs.';
+    }else if(
+      data.codex_auth_available
+      &&data.openai_api_key_configured
+      &&!data.codex_subscription_model
+    ){
+      note='Both auth sources are available. This model is API-only, so OPENAI_API_KEY is used.';
+    }else if(
+      data.codex_auth_available
+      &&!data.openai_api_key_configured
+      &&!data.codex_subscription_model
+    ){
+      note='This model is not in the ChatGPT/Codex overlap list.';
+      note+=' Configure OPENAI_API_KEY or switch models.';
+    }else if(data.codex_auth_available){
+      note='Use "Logout plan" to unauthenticate ChatGPT plan for this session.';
+    }else if(data.openai_api_key_configured){
+      note='API key path is active. You can still use "Login plan" for overlap models.';
+    }
+  }else{
+    note='OpenAI auth routing applies only to OpenAI-family models.';
+  }
+  authNote.textContent=note;
+  authLoginBtn.disabled=!!data.codex_auth_available||!!data.login_pending;
+  authLogoutBtn.disabled=!data.codex_auth_available;
+}
+function loadAuthStatus(action){
+  var model=selectedModel||'';
+  if(action==='refresh'||action==='logout'||action==='login'){
+    fetch('/auth',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:action,model:model})
+    }).then(function(r){return r.json();}).then(function(d){
+      if(action==='login'&&d.login_url){
+        window.open(d.login_url,'_blank','noopener,noreferrer');
+      }
+      renderAuthStatus(d.auth||d);
+      positionAuthPanel();
+      if(d.logout&&d.logout.message){
+        authNote.textContent='Logout: '+d.logout.message;
+      }
+      if(action==='login'&&d.error){
+        authNote.textContent='Login failed: '+d.error;
+      }
+    }).catch(function(){
+      authSummary.textContent='Failed to load auth status.';
+    });
+    return;
+  }
+  fetch('/auth?model='+encodeURIComponent(model))
+    .then(function(r){return r.json();})
+    .then(function(data){
+      renderAuthStatus(data);
+      positionAuthPanel();
+    })
+    .catch(function(){authSummary.textContent='Failed to load auth status.';});
+}
+authRefreshBtn.addEventListener('click',function(){loadAuthStatus('refresh')});
+authLoginBtn.addEventListener('click',function(){loadAuthStatus('login')});
+authLogoutBtn.addEventListener('click',function(){loadAuthStatus('logout')});
+window.addEventListener('resize',positionAuthPanel);
+if(modelProvider){
+  modelProvider.addEventListener('change',function(){
+    selectedProvider=this.value||'all';
+    providerPinned=true;
+    renderModelList(modelSearch.value);
+  });
 }
 modelSearch.addEventListener('input',function(){renderModelList(this.value)});
 modelSearch.addEventListener('keydown',function(e){
@@ -1368,7 +1694,10 @@ function updateModelSel(items){
   if(modelDDIdx>=0)items[modelDDIdx].scrollIntoView({block:'nearest'});
 }
 document.addEventListener('click',function(e){
-  if(!document.getElementById('model-picker').contains(e.target))closeModelDD();
+  if(!document.getElementById('model-picker').contains(e.target)){
+    closeModelDD();
+    closeAuthPanel();
+  }
   if(!ac.contains(e.target)&&e.target!==inp)hideAC();
 });
 function showUserMsg(msg){
@@ -1823,6 +2152,29 @@ function mergeAction(action){
   fetch('/merge-action',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:action})}).catch(function(){});
 }
+function mergeCommit(){
+  var btn=document.getElementById('commit-btn');
+  btn.textContent='Committing...';btn.disabled=true;
+  fetch('/commit',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error)alert('Commit failed: '+d.error);
+    else{alert('Committed: '+d.message);
+      document.getElementById('merge-toolbar').style.display='none';}
+    btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;
+  }).catch(function(e){alert('Error: '+e);
+    btn.textContent='\uD83D\uDCE6 Commit';btn.disabled=false;});
+}
+function mergePush(){
+  var btn=document.getElementById('push-btn');
+  btn.textContent='Pushing...';btn.disabled=true;
+  fetch('/push',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error)alert('Push failed: '+d.error);
+    else alert('Pushed to remote successfully');
+    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;
+  }).catch(function(e){alert('Error: '+e);
+    btn.textContent='\uD83D\uDE80 Push';btn.disabled=false;});
+}
 
 function hexToRgb(h){
   var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
@@ -1929,12 +2281,14 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
     css = font_import + BASE_CSS + OUTPUT_CSS + CHATBOT_CSS + CHATBOT_THEME_CSS
 
     if code_server_url:
-        import urllib.parse
-
-        wd_enc = urllib.parse.quote(work_dir, safe="")
+        # On Windows, prefix with "/" so "C:" is not parsed as URI scheme "c".
+        folder_path = Path(work_dir).resolve().as_posix()
+        if os.name == "nt" and not folder_path.startswith("/"):
+            folder_path = "/" + folder_path
+        folder_path = quote(folder_path, safe="/:")
         editor_content = (
             f'<iframe id="code-server-frame"'
-            f' src="{code_server_url}/?folder={wd_enc}"'
+            f' src="{code_server_url}/?folder={folder_path}"'
             f' data-base-url="{code_server_url}"'
             f' data-work-dir="{work_dir}"></iframe>'
         )
@@ -1956,6 +2310,11 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         ' stroke-width="2.5" stroke-linecap="round"'
         ' stroke-linejoin="round"'
     )
+    _s20 = (
+        ' viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        ' stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round"'
+    )
     _svg_accept = f'<svg{_s25}><polyline points="20 6 9 17 4 12"/></svg>'
     _svg_reject = (
         f'<svg{_s25}><line x1="18" y1="6" x2="6" y2="18"/>'
@@ -1972,6 +2331,15 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         '<line x1="7" y1="5" x2="17" y2="15"/>'
         '<line x1="17" y1="9" x2="7" y2="19"/>'
         '<line x1="7" y1="9" x2="17" y2="19"/></svg>'
+    )
+    _svg_commit = (
+        f'<svg{_s20}><circle cx="12" cy="12" r="4"/>'
+        '<line x1="1.05" y1="12" x2="7" y2="12"/>'
+        '<line x1="17.01" y1="12" x2="22.96" y2="12"/></svg>'
+    )
+    _svg_push = (
+        f'<svg{_s20}><line x1="12" y1="19" x2="12" y2="5"/>'
+        '<polyline points="5 12 12 5 19 12"/></svg>'
     )
 
     _sep = '<span class="mt-sep"></span>'
@@ -1996,6 +2364,9 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
       {_sep}
       <button onclick="mergeAction('accept-all')" title="Accept all">{_svg_accept_all}</button>
       <button onclick="mergeAction('reject-all')" title="Reject all">{_svg_reject_all}</button>
+      {_sep}
+      <button id="commit-btn" onclick="mergeCommit()" title="Commit changes">{_svg_commit}</button>
+      <button id="push-btn" onclick="mergePush()" title="Push to remote">{_svg_push}</button>
     </div>
   </div>
   <div id="divider"></div>
@@ -2065,14 +2436,53 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
             </button>
-
+            <button id="proposals-btn" onclick="toggleSidebar('proposals')" title="Suggested tasks">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+              </svg>
+            </button>
+            <button id="auth-btn" onclick="toggleAuthPanel()" title="Codex authentication">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2l7 4v6c0 5-3.5 8-7 10-3.5-2-7-5-7-10V6l7-4z"/>
+                <path d="M9.5 12.5l1.5 1.5 3.5-3.5"/>
+              </svg>
+            </button>
             <button id="run-prompt-btn" title="Run current file as prompt" disabled>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
                 stroke="none">
                 <polygon points="5,3 19,12 5,21"/>
               </svg>
             </button>
+            <div id="auth-panel">
+              <div class="auth-head">Authentication</div>
+              <div id="auth-summary" class="auth-summary">Loading auth status...</div>
+              <div id="auth-details"></div>
+              <div class="auth-actions">
+                <button type="button" id="auth-refresh-btn" class="auth-action">Refresh</button>
+                <button type="button" id="auth-login-btn" class="auth-action">Login plan</button>
+                <button type="button" id="auth-logout-btn" class="auth-action">Logout plan</button>
+              </div>
+              <div id="auth-note" class="auth-note">
+                Click Login plan to authenticate your ChatGPT plan in the browser.
+              </div>
+            </div>
             <div id="model-dropdown">
+              <div id="model-filter">
+                <label for="model-provider">Provider</label>
+                <select id="model-provider">
+                  <option value="all">All</option>
+                  <option value="codex">Codex</option>
+                  <option value="openai">OpenAI API</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="minimax">MiniMax</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="together">Together AI</option>
+                </select>
+              </div>
               <input type="text" id="model-search"
                 placeholder="Search models\u2026" autocomplete="off"/>
               <div id="model-list"></div>

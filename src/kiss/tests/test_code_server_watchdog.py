@@ -116,5 +116,35 @@ class TestProcessMonitoringEdgeCases:
         proc.wait()
         ret = proc.poll()
         assert ret is not None
-        # On Unix, killed by signal returns -signal_number
-        assert ret == -signal.SIGTERM
+        if sys.platform == "win32":
+            assert ret == 1
+        else:
+            # On Unix, killed by signal returns -signal_number.
+            assert ret == -signal.SIGTERM
+
+    def test_rapid_crash_restart_cycle(self) -> None:
+        """Multiple crash-restart cycles work correctly."""
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        cq = printer.add_client()
+        restart_count = 0
+
+        for i in range(3):
+            proc = subprocess.Popen(
+                [sys.executable, "-c", f"import sys; sys.exit({i + 1})"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            proc.wait()
+            assert proc.poll() == i + 1
+            restart_count += 1
+            printer.broadcast({"type": "code_server_restarted"})
+
+        assert restart_count == 3
+        events = []
+        while not cq.empty():
+            events.append(cq.get_nowait())
+        assert len(events) == 3
+        assert all(e["type"] == "code_server_restarted" for e in events)
+        printer.remove_client(cq)

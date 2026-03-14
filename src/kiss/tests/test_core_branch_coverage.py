@@ -8,6 +8,7 @@ These tests target specific branches and edge cases in:
 
 import pytest
 
+from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.utils import (
     read_project_file,
@@ -38,6 +39,29 @@ class TestBaseClass:
         state = agent._build_state_dict()
         assert state["max_tokens"] is None
 
+    def test_save_skips_when_save_trajectory_disabled(self, tmp_path, monkeypatch):
+        agent = Base("no-save")
+        agent.save_trajectory = False
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG.agent, "artifact_dir", str(tmp_path))
+        agent._save()
+        assert not (tmp_path / "trajectories").exists()
+
+    def test_save_writes_trajectory_by_default(self, tmp_path, monkeypatch):
+        import time
+
+        agent = Base("save-me")
+        agent.model_name = "gpt-4o-mini"
+        agent.function_map = []
+        agent.messages = []
+        agent.step_count = 0
+        agent.total_tokens_used = 0
+        agent.budget_used = 0.0
+        agent.run_start_timestamp = int(time.time())
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG.agent, "artifact_dir", str(tmp_path))
+        agent._save()
+        files = list((tmp_path / "trajectories").glob("trajectory_save-me_*.yaml"))
+        assert len(files) == 1
+
 
 class TestUtils:
     def test_read_project_file_not_found(self):
@@ -51,6 +75,10 @@ class TestUtils:
 
         with pytest.raises(KISSError, match="Could not find"):
             read_project_file_from_package("nonexistent_file.txt")
+
+    def test_read_project_file_accepts_backslash_separators(self):
+        content = read_project_file(r"kiss\__init__.py")
+        assert "__version__" in content
 
 
 class TestModelHelpers:

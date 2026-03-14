@@ -44,6 +44,83 @@ def test_async_exc_injection_kills_thread():
     assert not t.is_alive()
 
 
+def test_abandoned_thread_does_not_interfere_with_new_thread():
+    """Simulates stop_agent resetting state, then a new thread starting."""
+    running = False
+    agent_thread = None
+    lock = threading.Lock()
+    events = []
+
+    def run_agent(task_name):
+        nonlocal running, agent_thread
+        current = threading.current_thread()
+        try:
+            while True:
+                time.sleep(0.01)
+        except _StopRequested:
+            with lock:
+                if agent_thread is not current:
+                    return
+            events.append(f"{task_name}_stopped")
+        finally:
+            with lock:
+                if agent_thread is current:
+                    running = False
+                    agent_thread = None
+
+    with lock:
+        running = True
+    t1 = threading.Thread(target=run_agent, args=("task1",), daemon=True)
+    with lock:
+        agent_thread = t1
+    t1.start()
+    time.sleep(0.05)
+
+    with lock:
+        old_thread = agent_thread
+        running = False
+        agent_thread = None
+    tid = old_thread.ident
+    assert tid is not None
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(tid),
+        ctypes.py_object(_StopRequested),
+    )
+
+    with lock:
+        assert not running
+        assert agent_thread is None
+
+    with lock:
+        running = True
+    t2 = threading.Thread(target=run_agent, args=("task2",), daemon=True)
+    with lock:
+        agent_thread = t2
+    t2.start()
+    time.sleep(0.05)
+
+    assert t2.is_alive()
+    with lock:
+        assert running
+        assert agent_thread is t2
+
+    t1.join(timeout=2)
+    assert "task1_stopped" not in events
+
+    with lock:
+        old_thread2 = agent_thread
+        running = False
+        agent_thread = None
+    tid2 = old_thread2.ident
+    assert tid2 is not None
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(tid2),
+        ctypes.py_object(_StopRequested),
+    )
+    t2.join(timeout=2)
+    assert "task2_stopped" not in events
+
+
 def test_stop_when_no_thread_returns_false():
     """stop_agent returns False when there's no running thread."""
     agent_thread = None
@@ -169,6 +246,7 @@ class _AgentController:
     def _thread_body(self, work: Callable[[], None], tag: str) -> None:
         current = threading.current_thread()
         result = "ok"
+        should_cleanup = False
         try:
             work()
             with self.lock:
@@ -189,11 +267,12 @@ class _AgentController:
             self.events.append(f"{tag}:error")
         finally:
             with self.lock:
-                if self.agent_thread is not current:
-                    return
-                self.running = False
-                self.agent_thread = None
-            self.events.append(f"{tag}:cleanup:{result}")
+                if self.agent_thread is current:
+                    self.running = False
+                    self.agent_thread = None
+                    should_cleanup = True
+            if should_cleanup:
+                self.events.append(f"{tag}:cleanup:{result}")
 
     def assert_idle(self) -> None:
         with self.lock:
@@ -322,6 +401,51 @@ def test_stop_on_already_finished_thread():
     ctrl.assert_idle()
 
     assert not ctrl.stop_task()
+
+
+def test_finally_runs_for_abandoned_thread_but_guard_prevents_reset():
+    """An abandoned thread's finally block runs but the guard prevents state mutation."""
+    running = False
+    agent_thread: threading.Thread | None = None
+    lock = threading.Lock()
+    finally_ran = threading.Event()
+    state_was_reset = threading.Event()
+
+    def worker():
+        nonlocal running, agent_thread
+        current = threading.current_thread()
+        should_reset_state = False
+        try:
+            while True:
+                time.sleep(0.01)
+        except _StopRequested:
+            pass
+        finally:
+            finally_ran.set()
+            with lock:
+                if agent_thread is current:
+                    running = False
+                    agent_thread = None
+                    should_reset_state = True
+            if should_reset_state:
+                state_was_reset.set()
+
+    with lock:
+        running = True
+    t = threading.Thread(target=worker, daemon=True)
+    with lock:
+        agent_thread = t
+    t.start()
+    time.sleep(0.05)
+
+    with lock:
+        running = False
+        agent_thread = None
+    _inject_stop(t)
+    t.join(timeout=3)
+
+    assert finally_ran.is_set()
+    assert not state_was_reset.is_set()
 
 
 def test_lock_not_leaked_after_stop_requested():

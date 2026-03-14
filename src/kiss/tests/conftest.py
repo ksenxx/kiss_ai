@@ -29,6 +29,16 @@ def pytest_addoption(parser):
 collect_ignore = ["test_openevolve.py", "run_all_models_test.py"]
 
 
+def _is_truthy_env(name: str) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def run_live_api_tests() -> bool:
+    """Return True only when live, potentially billable API tests are explicitly enabled."""
+    return _is_truthy_env("KISS_RUN_LIVE_API_TESTS")
+
+
 def simple_calculator(expression: str) -> str:
     """Evaluate a simple arithmetic expression.
 
@@ -75,7 +85,7 @@ def get_required_api_key_for_model(model_name: str) -> str | None:
     elif model_name == "text-embedding-004":
         return "GEMINI_API_KEY"
     elif model_name.startswith(
-        ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
+        ("chatgpt", "gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
     ) and not model_name.startswith("openai/gpt-oss"):
         return "OPENAI_API_KEY"
     elif model_name.startswith(
@@ -123,23 +133,58 @@ def skip_if_no_api_key_for_model(model_name: str) -> None:
         raise unittest.SkipTest(f"Skipping test: {key_name} is not set")
 
 
+_LIVE_API_TESTS_REASON = (
+    "Live API tests are disabled by default. "
+    "Set KISS_RUN_LIVE_API_TESTS=1 to enable provider-backed tests."
+)
+
 requires_openai_api_key = pytest.mark.skipif(
-    not has_openai_api_key(), reason="OPENAI_API_KEY environment variable not set"
+    (not has_openai_api_key()) or (not run_live_api_tests()),
+    reason=(
+        "OPENAI_API_KEY environment variable not set"
+        if not has_openai_api_key()
+        else _LIVE_API_TESTS_REASON
+    ),
 )
 requires_anthropic_api_key = pytest.mark.skipif(
-    not has_anthropic_api_key(), reason="ANTHROPIC_API_KEY environment variable not set"
+    (not has_anthropic_api_key()) or (not run_live_api_tests()),
+    reason=(
+        "ANTHROPIC_API_KEY environment variable not set"
+        if not has_anthropic_api_key()
+        else _LIVE_API_TESTS_REASON
+    ),
 )
 requires_gemini_api_key = pytest.mark.skipif(
-    not has_gemini_api_key(), reason="GEMINI_API_KEY environment variable not set"
+    (not has_gemini_api_key()) or (not run_live_api_tests()),
+    reason=(
+        "GEMINI_API_KEY environment variable not set"
+        if not has_gemini_api_key()
+        else _LIVE_API_TESTS_REASON
+    ),
 )
 requires_together_api_key = pytest.mark.skipif(
-    not has_together_api_key(), reason="TOGETHER_API_KEY environment variable not set"
+    (not has_together_api_key()) or (not run_live_api_tests()),
+    reason=(
+        "TOGETHER_API_KEY environment variable not set"
+        if not has_together_api_key()
+        else _LIVE_API_TESTS_REASON
+    ),
 )
 requires_openrouter_api_key = pytest.mark.skipif(
-    not has_openrouter_api_key(), reason="OPENROUTER_API_KEY environment variable not set"
+    (not has_openrouter_api_key()) or (not run_live_api_tests()),
+    reason=(
+        "OPENROUTER_API_KEY environment variable not set"
+        if not has_openrouter_api_key()
+        else _LIVE_API_TESTS_REASON
+    ),
 )
 requires_minimax_api_key = pytest.mark.skipif(
-    not has_minimax_api_key(), reason="MINIMAX_API_KEY environment variable not set"
+    (not has_minimax_api_key()) or (not run_live_api_tests()),
+    reason=(
+        "MINIMAX_API_KEY environment variable not set"
+        if not has_minimax_api_key()
+        else _LIVE_API_TESTS_REASON
+    ),
 )
 
 

@@ -6,6 +6,7 @@ No mocks — uses real files, real git repos, and real sockets.
 """
 
 import json
+import os
 import shutil
 import socket
 import sqlite3
@@ -82,6 +83,29 @@ class TestSetupCodeServer(unittest.TestCase):
         # saveAll passes notifyDone as both success and error handler
         assert ".then(notifyDone,notifyDone)" in snippet
 
+class TestBuildHtmlSplitLayout(unittest.TestCase):
+
+    def test_iframe_with_code_server_url(self) -> None:
+        html = chatbot_ui._build_html("T", "http://127.0.0.1:9999", "/tmp/work")
+        assert '<iframe id="code-server-frame"' in html
+        assert 'data-base-url="http://127.0.0.1:9999"' in html
+        assert 'data-work-dir="/tmp/work"' in html
+        assert 'id="editor-fallback"' not in html
+
+    def test_iframe_folder_url_encoded(self) -> None:
+        html = chatbot_ui._build_html("T", "http://x:1", "/path with spaces")
+        assert "path%20with%20spaces" in html
+
+    def test_iframe_folder_uses_forward_slash_path(self) -> None:
+        work_dir = r"C:\github\kiss_ai" if os.name == "nt" else "/tmp/work"
+        html = chatbot_ui._build_html("T", "http://x:1", work_dir)
+        assert "folder=file:///" not in html
+        if os.name == "nt":
+            assert "folder=/C:/github/kiss_ai" in html
+            assert "folder=C:/github/kiss_ai" not in html
+            assert "folder=C:\\github\\kiss_ai" not in html
+        else:
+            assert "folder=/tmp/work" in html
 class TestBuildHtmlJavaScript(unittest.TestCase):
     html: str
 

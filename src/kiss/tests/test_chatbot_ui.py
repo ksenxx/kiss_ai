@@ -4,7 +4,7 @@ import unittest
 
 import pytest
 
-from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS, CHATBOT_JS
+from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS, CHATBOT_JS, _build_html
 
 
 class TestTextareaAutoResize(unittest.TestCase):
@@ -46,6 +46,43 @@ def test_input_actions_no_shrink():
     idx = CHATBOT_CSS.index("#input-actions{")
     block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
     assert "flex-shrink:0" in block
+
+
+def test_auth_button_and_panel_exist():
+    html = _build_html("Test", "", "/tmp")
+    assert 'id="auth-btn"' in html
+    assert 'id="auth-panel"' in html
+    assert 'id="auth-refresh-btn"' in html
+    assert 'id="auth-login-btn"' in html
+    assert 'id="auth-logout-btn"' in html
+
+
+def test_auth_panel_js_uses_auth_endpoint():
+    assert "function toggleAuthPanel()" in CHATBOT_JS
+    assert "fetch('/auth?model='" in CHATBOT_JS
+    assert "fetch('/auth',{" in CHATBOT_JS
+    assert "loadAuthStatus('login')" in CHATBOT_JS
+    assert "loadAuthStatus('logout')" in CHATBOT_JS
+    assert "window.open(d.login_url" in CHATBOT_JS
+
+
+def test_model_vendor_groups_chatgpt_under_openai():
+    assert "^(chatgpt|gpt|o[134]|codex|computer-use)" in CHATBOT_JS
+
+
+def test_model_provider_selector_present_in_html():
+    html = _build_html("Test", "", "/tmp")
+    assert 'id="model-provider"' in html
+    assert '<option value="codex">Codex</option>' in html
+    assert '<option value="openai">OpenAI API</option>' in html
+
+
+def test_model_provider_js_has_codex_catalog_and_filtering():
+    assert "function modelProviderKey(m)" in CHATBOT_JS
+    assert "gpt-5.4" in CHATBOT_JS
+    assert "gpt-5.3-codex-spark" in CHATBOT_JS
+    assert "if(!modelMatchesProvider(m))return;" in CHATBOT_JS
+    assert "providerPinned=true;" in CHATBOT_JS
 
 
 if __name__ == "__main__":

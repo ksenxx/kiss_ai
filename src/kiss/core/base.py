@@ -207,6 +207,8 @@ class Base:
 
         The file is saved to {artifact_dir}/trajectories/trajectory_{name}_{id}_{timestamp}.yaml
         """
+        if getattr(self, "save_trajectory", True) is False:
+            return
         folder_path = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
         folder_path.mkdir(parents=True, exist_ok=True)
         name_safe = self.name.replace(" ", "_").replace("/", "_")

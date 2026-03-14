@@ -316,6 +316,58 @@ export TOGETHER_API_KEY="your-key-here"
 export OPENROUTER_API_KEY="your-key-here"
 ```
 
+```bash
+# Optional alternative for OpenAI-family models:
+# Use ChatGPT/Codex subscription auth instead of OPENAI_API_KEY
+codex login
+codex login status
+
+# Optional routing override
+export KISS_OPENAI_AUTH="codex"   # or "api"
+
+# Optional transport override when using KISS_OPENAI_AUTH=codex
+# default: native OAuth + direct /backend-api/codex/responses
+# fallback: codex CLI exec
+export KISS_CODEX_TRANSPORT="native"   # or "cli"
+
+# Optional: custom Codex auth source file
+export KISS_CODEX_AUTH_FILE="$HOME/.codex/auth.json"
+```
+
+```powershell
+# Windows (PowerShell) quick path
+# Install uv from https://docs.astral.sh/uv/getting-started/installation/
+git clone https://github.com/ksenxx/kiss_ai.git
+cd kiss_ai
+uv venv --python 3.13
+uv sync
+
+# Optional API keys
+$env:GEMINI_API_KEY = "your-key-here"
+$env:OPENAI_API_KEY = "your-key-here"
+$env:ANTHROPIC_API_KEY = "your-key-here"
+
+# Optional alternative for OpenAI-family models (no OPENAI_API_KEY)
+codex login
+codex login status
+$env:KISS_OPENAI_AUTH = "codex"   # or "api"
+$env:KISS_CODEX_TRANSPORT = "native"   # or "cli"
+$env:KISS_CODEX_AUTH_FILE = "$env:USERPROFILE\\.codex\\auth.json"
+```
+
+Auth precedence for OpenAI-family models:
+
+- ChatGPT/Codex auth is treated as an overlap subset, not a full replacement for OpenAI API.
+- If both ChatGPT/Codex auth and `OPENAI_API_KEY` are available:
+  - overlap model IDs prefer ChatGPT/Codex auth,
+  - API-only model IDs continue to use `OPENAI_API_KEY`.
+- In Sorcar UI, use the **Authentication** panel button to inspect active routing.
+- Native plan login is available from the panel via **Login plan** (OAuth browser flow; no Codex CLI required).
+- Codex CLI remains an optional fallback transport/login source.
+
+For ongoing Windows-specific behavior and compatibility decisions, see
+`docs/Windows/WINDOWS.md`.
+
 ### Selective Installation (Dependency Groups)
 
 KISS supports selective installation via dependency groups for minimal footprints:
@@ -733,9 +785,9 @@ find . -type f -name "*.pyc" -delete
 
 **Generation Models** (text generation with function calling support):
 
-- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4.5-preview, gpt-4-turbo, gpt-4, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro
-- **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, codex-mini-latest
-- **OpenAI (Reasoning)**: o1, o1-mini, o1-pro, o3, o3-mini, o3-mini-high, o3-pro, o3-deep-research, o4-mini, o4-mini-high, o4-mini-deep-research
+- **OpenAI**: chatgpt-4o-latest, gpt-3.5-turbo, gpt-4, gpt-4-turbo/gpt-4-turbo-preview, gpt-4.1 family, gpt-4o family (including audio/search/realtime variants), gpt-4.5-preview, gpt-5/5.1/5.2/5.3 families (chat/pro/codex variants)
+- **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, gpt-5.3-codex, codex-mini-latest
+- **OpenAI (Reasoning)**: o1, o1-preview, o1-mini, o1-pro, o3, o3-mini, o3-pro, o3-deep-research, o4-mini, o4-mini-deep-research
 - **OpenAI (Open Source)**: openai/gpt-oss-20b, openai/gpt-oss-120b
 - **Anthropic**: claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
 - **Anthropic (Legacy)**: claude-3-5-sonnet-20241022, claude-3-5-haiku, claude-3-5-haiku-20241022, claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307

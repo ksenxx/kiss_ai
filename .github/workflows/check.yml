@@ -8,7 +8,11 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Keep the matrix small while covering the Windows portability path.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -20,4 +24,5 @@ jobs:
         with:
           python-version: "3.13"
 
-      - run: uv run check --clean
+      # Run the full quality pipeline (not just artifact cleanup).
+      - run: uv run check

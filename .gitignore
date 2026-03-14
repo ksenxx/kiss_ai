@@ -27,6 +27,29 @@ artifacts/
 .cursor
 .claude
 .ipynb_checkpoints
-screenshots/    
 .kiss.artifacts
+# Python bytecode and cache files
+*.py[cod]
+*$py.class
+*.pyd
+*.pyo
+screenshots/
 
+# Python tooling and test caches
+.hypothesis/
+.nox/
+.pyre/
+.pytype/
+.tox/
+htmlcov/
+.coverage.*
+pip-wheel-metadata/
+
+# Local environment files
+.python-version
+.env
+.env.*
+
+# Windows explorer/system artifacts
+Thumbs.db
+Desktop.ini

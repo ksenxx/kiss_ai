@@ -102,6 +102,19 @@ class TestPrepareMergeViewTrackedPreHash:
             shutil.rmtree(base_dir, ignore_errors=True)
 
 class TestUsefulToolsRead:
+    def test_read_existing_file(self) -> None:
+        from kiss.agents.sorcar.useful_tools import UsefulTools
+
+        tools = UsefulTools()
+        expected = "hello\r\nworld\r\n" if os.name == "nt" else "hello\nworld\n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("hello\nworld\n")
+            path = f.name
+        try:
+            result = tools.Read(path)
+            assert expected == result
+        finally:
+            os.unlink(path)
 
     def test_read_nonexistent_file(self) -> None:
         from kiss.agents.sorcar.useful_tools import UsefulTools
@@ -283,6 +296,188 @@ class TestDisableCopilotScmButton:
             (ext_dir / "package.json").write_text("not json")
             _disable_copilot_scm_button(d)  # Should not raise
 
+    def test_utf8_package_json_on_windows_codepage(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            ext_dir = Path(d) / "extensions" / "github.copilot-chat-1.0.0"
+            ext_dir.mkdir(parents=True)
+            pkg = {
+                "displayName": "Copilot Ё",
+                "contributes": {
+                    "menus": {
+                        "scm/inputBox": [
+                            {
+                                "command": "github.copilot.git.generateCommitMessage",
+                                "when": "scmProvider == git",
+                            }
+                        ]
+                    }
+                },
+            }
+            pkg_path = ext_dir / "package.json"
+            pkg_path.write_text(json.dumps(pkg, ensure_ascii=False), encoding="utf-8")
+            _disable_copilot_scm_button(d)
+            updated = json.loads(pkg_path.read_text(encoding="utf-8"))
+            item = updated["contributes"]["menus"]["scm/inputBox"][0]
+            assert item["when"] == "false"
+
+
+# ---------------------------------------------------------------------------
+# code_server.py - _parse_diff_hunks
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# code_server.py - _snapshot_files
+# ---------------------------------------------------------------------------
+class TestSnapshotFiles:
+    def test_skips_nonexistent_files(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "a.txt").write_text("aaa")
+            result = _snapshot_files(d, {"a.txt", "missing.txt"})
+            assert "a.txt" in result
+            assert "missing.txt" not in result
+
+
+# ---------------------------------------------------------------------------
+# browser_ui.py - BaseBrowserPrinter
+# ---------------------------------------------------------------------------
+class TestBaseBrowserPrinter:
+    def test_remove_nonexistent_client(self) -> None:
+        import queue
+
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        q: queue.Queue = queue.Queue()
+        printer.remove_client(q)  # Should not raise
+
+    def test_print_unknown_type_returns_empty(self) -> None:
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        result = printer.print("data", type="totally_unknown")
+        assert result == ""
+
+# ---------------------------------------------------------------------------
+# browser_ui.py - _coalesce_events
+# ---------------------------------------------------------------------------
+class TestCoalesceEvents:
+    def test_non_mergeable_not_changed(self) -> None:
+        from kiss.agents.sorcar.browser_ui import _coalesce_events
+
+        events = [
+            {"type": "tool_call", "name": "Bash"},
+            {"type": "tool_call", "name": "Read"},
+        ]
+        result = _coalesce_events(events)
+        assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# browser_ui.py - find_free_port
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# web_use_tool.py - _number_interactive_elements
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# web_use_tool.py - WebUseTool init/close
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# chatbot_ui.py - _build_html
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# browser_ui.py - _handle_stream_event
+# ---------------------------------------------------------------------------
+class TestHandleStreamEvent:
+    def test_content_block_start_tool_use(self) -> None:
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+
+        class FakeEvent:
+            event = {
+                "type": "content_block_start",
+                "content_block": {"type": "tool_use", "name": "Bash"},
+            }
+
+        printer._handle_stream_event(FakeEvent())
+        assert printer._tool_name == "Bash"
+        assert printer._tool_json_buffer == ""
+
+    def test_content_block_delta_json(self) -> None:
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+
+        class FakeEvent:
+            event = {
+                "type": "content_block_delta",
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": '{"cmd":',
+                },
+            }
+
+        printer._handle_stream_event(FakeEvent())
+        assert printer._tool_json_buffer == '{"cmd":'
+
+    def test_content_block_stop_tool_use(self) -> None:
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        q = printer.add_client()
+        printer._current_block_type = "tool_use"
+        printer._tool_name = "Bash"
+        printer._tool_json_buffer = '{"command": "ls"}'
+
+        class FakeEvent:
+            event = {"type": "content_block_stop"}
+
+        printer._handle_stream_event(FakeEvent())
+        event = q.get_nowait()
+        assert event["type"] == "tool_call"
+        assert event["name"] == "Bash"
+
+        # Should have _raw key for bad json
+
+# ---------------------------------------------------------------------------
+# browser_ui.py - _handle_message
+# ---------------------------------------------------------------------------
+class TestHandleMessage:
+    def test_handle_result_message(self) -> None:
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        q = printer.add_client()
+
+        class FakeMsg:
+            result = "success: true\nsummary: All done"
+
+        printer._handle_message(FakeMsg(), budget_used=0.5, step_count=3, total_tokens_used=100)
+        event = q.get_nowait()
+        assert event["type"] == "result"
+
+# ---------------------------------------------------------------------------
+# browser_ui.py - token_callback
+# ---------------------------------------------------------------------------
+class TestTokenCallback:
+    def test_token_callback_empty_string(self) -> None:
+        import asyncio
+
+        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+
+        printer = BaseBrowserPrinter()
+        q = printer.add_client()
+        asyncio.run(printer.token_callback(""))
+        assert q.empty()
+
+# ---------------------------------------------------------------------------
+# browser_ui.py - _format_tool_call
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# code_server.py - _capture_untracked
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# useful_tools.py - additional branch coverage
+# ---------------------------------------------------------------------------
 class TestTruncateOutputTailZero:
     def test_tail_zero_branch(self) -> None:
         """When remaining=0 after subtracting msg length, tail=0 and line 29 is hit."""
@@ -461,16 +656,19 @@ class TestCodeServerUncoveredBranches:
         """Cover 748-749: OSError when copying untracked file (unreadable)."""
         tmpdir = tempfile.mkdtemp()
         data_dir = tempfile.mkdtemp()
+        noread_path = Path(tmpdir, "noread.py")
         try:
+            if os.name == "nt":
+                return
             _init_git_repo(tmpdir)
-            noread = Path(tmpdir, "noread.py")
-            noread.write_text("content")
-            noread.chmod(0o000)
+            noread_path.write_text("content")
+            noread_path.chmod(0o000)
             _save_untracked_base(tmpdir, data_dir, {"noread.py"})
             base_dir = _untracked_base_dir()
             assert not (base_dir / "noread.py").exists()
         finally:
-            Path(tmpdir, "noread.py").chmod(0o644)
+            if noread_path.exists():
+                noread_path.chmod(0o644)
             shutil.rmtree(tmpdir, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
             base_dir = _untracked_base_dir()
@@ -755,4 +953,3 @@ class TestWebUseToolEdgeCases:
         # _check_for_new_tab should exit early (one page only)
         self.tool._check_for_new_tab()
         # Page should be unchanged
-

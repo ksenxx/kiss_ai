@@ -82,7 +82,10 @@ def server():
 
         yield base_url, work_dir, proc
     finally:
-        proc.send_signal(signal.SIGINT)
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -354,4 +357,3 @@ class TestServerSuggestionsFilesMode:
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
-

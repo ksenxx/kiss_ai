@@ -27,3 +27,9 @@ if [[ -z "${GEMINI_API_KEY}" ]]; then
   echo "KISS Sorcar requires GEMINI_API_KEY in the environment"
   exit 1
 fi
+if [[ -n "${GEMINI_API_KEY}" ]]; then
+  echo "KISS Sorcar requires GEMINI_API_KEY in the environment"
+  exit 1
+fi
+
+uv run sorcar

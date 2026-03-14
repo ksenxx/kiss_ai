@@ -508,8 +508,8 @@ def _disable_copilot_scm_button(data_dir: str) -> None:
         if not pkg_path.exists():
             continue
         try:
-            pkg = json.loads(pkg_path.read_text())
-        except (json.JSONDecodeError, OSError):
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, OSError):
             continue
         scm_items = pkg.get("contributes", {}).get("menus", {}).get("scm/inputBox", [])
         modified = False
@@ -520,7 +520,7 @@ def _disable_copilot_scm_button(data_dir: str) -> None:
                     modified = True
         if modified:
             try:
-                pkg_path.write_text(json.dumps(pkg))
+                pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
             except OSError:
                 logger.debug("Exception caught", exc_info=True)
 
@@ -780,6 +780,21 @@ def _untracked_base_dir() -> Path:
     return artifact_dir.parent / "data_dir" / "untracked-base"
 
 
+def _rmtree_force(path: Path) -> None:
+    """Remove a directory tree, clearing read-only bits when needed."""
+    if not path.exists():
+        return
+
+    def _onexc(func: Any, target: str, _excinfo: BaseException) -> None:
+        try:
+            os.chmod(target, 0o700)
+            func(target)
+        except OSError:
+            logger.debug("Exception caught", exc_info=True)
+
+    shutil.rmtree(path, onexc=_onexc)
+
+
 def _save_untracked_base(
     work_dir: str, data_dir: str, untracked: set[str]
 ) -> None:
@@ -795,7 +810,7 @@ def _save_untracked_base(
     """
     base_dir = _untracked_base_dir()
     if base_dir.exists():
-        shutil.rmtree(base_dir)
+        _rmtree_force(base_dir)
     for fname in untracked:
         fpath = Path(work_dir) / fname
         try:
@@ -819,10 +834,10 @@ def _cleanup_merge_data(data_dir: str) -> None:
     for dirname in ("merge-temp", "merge-current"):
         d = Path(data_dir) / dirname
         if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
+            _rmtree_force(d)
     base_dir = _untracked_base_dir()
     if base_dir.exists():
-        shutil.rmtree(base_dir, ignore_errors=True)
+        _rmtree_force(base_dir)
     manifest = Path(data_dir) / "pending-merge.json"
     if manifest.exists():
         try:
@@ -856,7 +871,7 @@ def _restore_merge_files(data_dir: str, work_dir: str) -> None:
 
 
 def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, int]]:
-    """Compute diff hunks between two files using diff -U0.
+    """Compute diff hunks between two files using git diff --no-index -U0.
 
     Args:
         base_path: Path to the base (pre-task) file.
@@ -866,7 +881,7 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
         List of (base_start, base_count, current_start, current_count) tuples.
     """
     result = subprocess.run(
-        ["diff", "-U0", base_path, current_path],
+        ["git", "diff", "--no-index", "--unified=0", "--no-color", "--", base_path, current_path],
         capture_output=True,
         text=True,
     )
@@ -912,7 +927,8 @@ def _prepare_merge_view(
             ]
         if filtered:
             file_hunks[fname] = filtered
-    new_files = _capture_untracked(work_dir) - pre_untracked
+    current_untracked = _capture_untracked(work_dir)
+    new_files = current_untracked - pre_untracked
     for fname in new_files:
         fpath = Path(work_dir) / fname
         try:

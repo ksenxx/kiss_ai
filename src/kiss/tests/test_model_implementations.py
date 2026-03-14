@@ -179,7 +179,9 @@ class TestCachePricing:
 
     def test_openai_cache_read_pricing_formula(self):
         for name, info in MODEL_INFO.items():
-            if not name.startswith(("gpt-", "o1", "o3", "o4", "codex-", "computer-use")):
+            if not name.startswith(
+                ("chatgpt-", "gpt-", "o1", "o3", "o4", "codex-", "computer-use")
+            ):
                 continue
             if name.startswith(("text-embedding", "openai/")):
                 continue

@@ -29,4 +29,22 @@ except ImportError:
     logger.debug("Exception caught", exc_info=True)
     GeminiModel = None  # type: ignore[assignment,misc]
 
-__all__ = ["Attachment", "Model", "AnthropicModel", "OpenAICompatibleModel", "GeminiModel"]
+try:
+    from kiss.core.models.codex_cli_model import CodexCliModel
+except ImportError:
+    CodexCliModel = None  # type: ignore[assignment,misc]
+
+try:
+    from kiss.core.models.codex_native_model import CodexNativeModel
+except ImportError:
+    CodexNativeModel = None  # type: ignore[assignment,misc]
+
+__all__ = [
+    "Attachment",
+    "Model",
+    "AnthropicModel",
+    "OpenAICompatibleModel",
+    "GeminiModel",
+    "CodexCliModel",
+    "CodexNativeModel",
+]

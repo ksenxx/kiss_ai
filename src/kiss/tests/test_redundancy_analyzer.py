@@ -6,6 +6,7 @@ analyzer correctly identifies redundant tests at the method level.
 
 import os
 import subprocess
+import sys
 import tempfile
 
 from kiss.scripts.redundancy_analyzer import _method_name, analyze_redundancy
@@ -30,7 +31,7 @@ def _create_coverage_db(test_code: str, source_code: str) -> str:
     # Run pytest with coverage and dynamic contexts (only cover source, not tests)
     result = subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "pytest",
             test_file,
@@ -115,5 +116,4 @@ def _verify_coverage_preserved(cov_file: str, redundant: list[str]):
                         kept_arcs.add((src_file, f, t))
 
     assert kept_arcs == all_arcs, f"Lost arcs: {all_arcs - kept_arcs}"
-
 

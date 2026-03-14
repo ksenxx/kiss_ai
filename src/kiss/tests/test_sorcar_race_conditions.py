@@ -30,11 +30,14 @@ from kiss.agents.sorcar.browser_ui import (
 from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
+    _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
+    _save_untracked_base,
     _scan_files,
     _setup_code_server,
     _snapshot_files,
+    _untracked_base_dir,
 )
 from kiss.agents.sorcar.sorcar import (
     _model_vendor_order,
@@ -66,6 +69,25 @@ def _redirect_history(tmpdir: str):
     th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
     th._history_cache = None
     return old_hist, old_model, old_file, old_cache, old_kiss, old_events
+
+
+def _force_rmtree(path: str) -> None:
+    def _onexc(func: Any, target: str, _excinfo: BaseException) -> None:
+        try:
+            os.chmod(target, 0o700)
+            func(target)
+        except OSError:
+            pass
+
+    for _ in range(5):
+        try:
+            shutil.rmtree(path, onexc=_onexc)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(0.2)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _restore_history(saved):
@@ -209,7 +231,10 @@ class TestSorcarServerSubprocess:
         yield
 
         # Shutdown the server
-        self.proc.send_signal(2)  # SIGINT
+        if sys.platform == "win32":
+            self.proc.terminate()
+        else:
+            self.proc.send_signal(2)  # SIGINT
         try:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -634,6 +659,11 @@ class TestBuildHtml:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# prompt_detector.py
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # task_history.py
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -719,7 +749,422 @@ class TestGitDiffAndMerge:
         _make_git_repo(self.tmpdir)
 
     def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir)
+        _force_rmtree(self.tmpdir)
+
+    def test_parse_diff_hunks_no_changes(self) -> None:
+        hunks = _parse_diff_hunks(self.tmpdir)
+        assert hunks == {}
+
+    def test_parse_diff_hunks_with_changes(self) -> None:
+        Path(self.tmpdir, "file.txt").write_text("changed\nline2\nline3\n")
+        hunks = _parse_diff_hunks(self.tmpdir)
+        assert "file.txt" in hunks
+
+    def test_capture_untracked(self) -> None:
+        Path(self.tmpdir, "new.py").write_text("code\n")
+        untracked = _capture_untracked(self.tmpdir)
+        assert "new.py" in untracked
+
+    def test_snapshot_files(self) -> None:
+        hashes = _snapshot_files(self.tmpdir, {"file.txt"})
+        assert "file.txt" in hashes
+
+    def test_snapshot_files_missing(self) -> None:
+        hashes = _snapshot_files(self.tmpdir, {"nonexistent.txt"})
+        assert "nonexistent.txt" not in hashes
+
+    def test_prepare_merge_view_no_changes(self) -> None:
+        pre_hunks = _parse_diff_hunks(self.tmpdir)
+        pre_untracked = _capture_untracked(self.tmpdir)
+        pre_hashes = _snapshot_files(self.tmpdir, set(pre_hunks.keys()))
+        data_dir = tempfile.mkdtemp()
+        try:
+            result = _prepare_merge_view(self.tmpdir, data_dir,
+                                        pre_hunks, pre_untracked, pre_hashes)
+            assert "error" in result
+        finally:
+            shutil.rmtree(data_dir)
+
+    def test_prepare_merge_view_with_changes(self) -> None:
+        pre_hunks = _parse_diff_hunks(self.tmpdir)
+        pre_untracked = _capture_untracked(self.tmpdir)
+        pre_hashes = _snapshot_files(self.tmpdir, set(pre_hunks.keys()) | pre_untracked)
+        # Make changes
+        Path(self.tmpdir, "file.txt").write_text("new content\n")
+        data_dir = tempfile.mkdtemp()
+        try:
+            result = _prepare_merge_view(self.tmpdir, data_dir,
+                                        pre_hunks, pre_untracked, pre_hashes)
+            assert result.get("status") == "opened"
+        finally:
+            shutil.rmtree(data_dir)
+
+    def test_prepare_merge_view_new_file(self) -> None:
+        pre_hunks = _parse_diff_hunks(self.tmpdir)
+        pre_untracked = _capture_untracked(self.tmpdir)
+        pre_hashes = _snapshot_files(self.tmpdir, set(pre_hunks.keys()))
+        Path(self.tmpdir, "newfile.py").write_text("print('hi')\n")
+        data_dir = tempfile.mkdtemp()
+        try:
+            result = _prepare_merge_view(self.tmpdir, data_dir,
+                                        pre_hunks, pre_untracked, pre_hashes)
+            assert result.get("status") == "opened"
+        finally:
+            shutil.rmtree(data_dir)
+
+    def test_prepare_merge_view_modified_untracked(self) -> None:
+        """Pre-existing untracked file modified by agent."""
+        Path(self.tmpdir, "untracked.py").write_text("original\n")
+        pre_hunks = _parse_diff_hunks(self.tmpdir)
+        pre_untracked = _capture_untracked(self.tmpdir)
+        pre_hashes = _snapshot_files(self.tmpdir, set(pre_hunks.keys()) | pre_untracked)
+        # Modify the untracked file
+        Path(self.tmpdir, "untracked.py").write_text("modified\n")
+        data_dir = tempfile.mkdtemp()
+        try:
+            result = _prepare_merge_view(self.tmpdir, data_dir,
+                                        pre_hunks, pre_untracked, pre_hashes)
+            assert result.get("status") == "opened"
+        finally:
+            shutil.rmtree(data_dir)
+
+    def test_prepare_merge_view_hash_unchanged(self) -> None:
+        """File with pre-existing diff but unchanged by agent (hash matches)."""
+        Path(self.tmpdir, "file.txt").write_text("changed\nline2\nline3\n")
+        pre_hunks = _parse_diff_hunks(self.tmpdir)
+        pre_untracked = _capture_untracked(self.tmpdir)
+        pre_hashes = _snapshot_files(self.tmpdir, set(pre_hunks.keys()))
+        data_dir = tempfile.mkdtemp()
+        try:
+            result = _prepare_merge_view(self.tmpdir, data_dir,
+                                        pre_hunks, pre_untracked, pre_hashes)
+            # file.txt hash unchanged, so it should be skipped
+            assert "error" in result  # No changes
+        finally:
+            shutil.rmtree(data_dir)
+
+
+class TestSaveUntrackedBase:
+    def test_save_and_cleanup(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        try:
+            work_dir = os.path.join(tmpdir, "work")
+            os.makedirs(work_dir)
+            Path(work_dir, "file.py").write_text("code")
+            _save_untracked_base(work_dir, tmpdir, {"file.py"})
+            base_dir = _untracked_base_dir()
+            assert (base_dir / "file.py").exists()
+            _cleanup_merge_data(tmpdir)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_save_large_file_skipped(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        try:
+            work_dir = os.path.join(tmpdir, "work")
+            os.makedirs(work_dir)
+            Path(work_dir, "big.bin").write_bytes(b"x" * 3_000_000)
+            _save_untracked_base(work_dir, tmpdir, {"big.bin"})
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestSetupCodeServer:
+    def test_setup_creates_files(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        try:
+            changed = _setup_code_server(tmpdir)
+            assert isinstance(changed, bool)
+            assert (Path(tmpdir) / "User" / "settings.json").exists()
+            assert (Path(tmpdir) / "extensions" / "kiss-init" / "extension.js").exists()
+        finally:
+            _force_rmtree(tmpdir)
+
+    def test_setup_idempotent(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        try:
+            _setup_code_server(tmpdir)
+            changed = _setup_code_server(tmpdir)
+            assert changed is False  # Extension.js unchanged
+        finally:
+            _force_rmtree(tmpdir)
+
+
+class TestCleanupMergeData:
+    def test_cleanup_nonexistent(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        try:
+            _cleanup_merge_data(tmpdir)  # Should not raise
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_cleanup_with_merge_dir(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        try:
+            merge_dir = Path(tmpdir) / "merge-temp"
+            merge_dir.mkdir()
+            (merge_dir / "file.txt").touch()
+            _cleanup_merge_data(tmpdir)
+            assert not merge_dir.exists()
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# sorcar_agent.py
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSorcarAgentArgParser:
+    def test_build_arg_parser(self) -> None:
+        from kiss.agents.sorcar.sorcar_agent import _build_arg_parser
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--model_name", "gpt-4", "--max_steps", "10"])
+        assert args.model_name == "gpt-4"
+        assert args.max_steps == 10
+
+    def test_resolve_task_from_file(self) -> None:
+        import argparse
+
+        from kiss.agents.sorcar.sorcar_agent import _resolve_task
+        tmpdir = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmpdir, "task.txt")
+            Path(p).write_text("do something")
+            args = argparse.Namespace(f=p, task=None)
+            assert _resolve_task(args) == "do something"
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_resolve_task_from_arg(self) -> None:
+        import argparse
+
+        from kiss.agents.sorcar.sorcar_agent import _resolve_task
+        args = argparse.Namespace(f=None, task="my task")
+        assert _resolve_task(args) == "my task"
+
+    def test_resolve_task_default(self) -> None:
+        import argparse
+
+        from kiss.agents.sorcar.sorcar_agent import _DEFAULT_TASK, _resolve_task
+        args = argparse.Namespace(f=None, task=None)
+        assert _resolve_task(args) == _DEFAULT_TASK
+
+    def test_agent_construction(self) -> None:
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+        agent = SorcarAgent("test")
+        assert agent.web_use_tool is None
+
+    def test_agent_get_tools(self) -> None:
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+        agent = SorcarAgent("test")
+        tools = agent._get_tools()
+        assert len(tools) >= 4  # Bash, Read, Edit, Write
+
+    def test_agent_reset(self) -> None:
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+        agent = SorcarAgent("test")
+        agent._reset(
+            model_name=None, max_sub_sessions=None, max_steps=None,
+            max_budget=None, work_dir=None, docker_image=None,
+            printer=None, verbose=None,
+        )
+
+    def test_agent_headless_true(self) -> None:
+        from kiss.agents.sorcar.sorcar_agent import _build_arg_parser
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--headless", "true"])
+        assert args.headless is True
+
+    def test_agent_headless_false(self) -> None:
+        from kiss.agents.sorcar.sorcar_agent import _build_arg_parser
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--headless", "false"])
+        assert args.headless is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Race condition tests (preserved from original file)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestPerThreadStopEvents:
+    def test_old_thread_sees_stop(self) -> None:
+        printer = BaseBrowserPrinter()
+        running = False
+        running_lock = threading.Lock()
+        agent_thread = None
+        current_stop_event = None
+        old_stopped = threading.Event()
+        old_count = [0]
+
+        def run_agent(task, stop_ev):
+            nonlocal running, agent_thread
+            printer._thread_local.stop_event = stop_ev
+            ct = threading.current_thread()
+            count = 0
+            try:
+                for _ in range(100):
+                    count += 1
+                    time.sleep(0.01)
+                    printer._check_stop()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                if "task1" in task:
+                    old_count[0] = count
+                    old_stopped.set()
+                printer._thread_local.stop_event = None
+                with running_lock:
+                    if agent_thread is not ct:
+                        return
+                    running = False
+                    agent_thread = None
+
+        def stop():
+            nonlocal running, agent_thread, current_stop_event
+            with running_lock:
+                t = agent_thread
+                if t is None or not t.is_alive():
+                    return False
+                running = False
+                agent_thread = None
+                ev = current_stop_event
+                current_stop_event = None
+            if ev:
+                ev.set()
+            return True
+
+        def start(task):
+            nonlocal running, agent_thread, current_stop_event
+            ev = threading.Event()
+            t = threading.Thread(target=run_agent, args=(task, ev), daemon=True)
+            with running_lock:
+                if running:
+                    return False
+                current_stop_event = ev
+                running = True
+                agent_thread = t
+            t.start()
+            return True
+
+        assert start("task1")
+        time.sleep(0.05)
+        assert stop()
+        assert start("task2")
+        assert old_stopped.wait(timeout=2)
+        assert old_count[0] < 100
+
+    def test_check_stop_thread_local(self) -> None:
+        printer = BaseBrowserPrinter()
+        results = {}
+
+        def thread_fn(name, event):
+            printer._thread_local.stop_event = event
+            try:
+                printer._check_stop()
+                results[name] = "ok"
+            except KeyboardInterrupt:
+                results[name] = "stopped"
+            finally:
+                printer._thread_local.stop_event = None
+
+        ev_a = threading.Event()
+        ev_a.set()
+        ev_b = threading.Event()
+        t_a = threading.Thread(target=thread_fn, args=("A", ev_a))
+        t_b = threading.Thread(target=thread_fn, args=("B", ev_b))
+        t_a.start()
+        t_b.start()
+        t_a.join(2)
+        t_b.join(2)
+        assert results["A"] == "stopped"
+        assert results["B"] == "ok"
+
+    def test_global_fallback(self) -> None:
+        printer = BaseBrowserPrinter()
+        printer.stop_event.set()
+        with pytest.raises(KeyboardInterrupt):
+            printer._check_stop()
+
+    def test_no_stop(self) -> None:
+        printer = BaseBrowserPrinter()
+        printer._check_stop()  # no raise
+
+
+class TestPerThreadRecording:
+    def test_isolated_recordings(self) -> None:
+        printer = BaseBrowserPrinter()
+        r1: list[list[dict[str, Any]]] = [[]]
+        r2: list[list[dict[str, Any]]] = [[]]
+        barrier = threading.Barrier(2)
+
+        def t1_fn():
+            printer.start_recording()
+            barrier.wait(2)
+            printer.broadcast({"type": "text_delta", "text": "t1"})
+            time.sleep(0.05)
+            r1[0] = printer.stop_recording()
+
+        def t2_fn():
+            printer.start_recording()
+            barrier.wait(2)
+            printer.broadcast({"type": "text_delta", "text": "t2"})
+            time.sleep(0.05)
+            r2[0] = printer.stop_recording()
+
+        t1 = threading.Thread(target=t1_fn, daemon=True)
+        t2 = threading.Thread(target=t2_fn, daemon=True)
+        t1.start()
+        t2.start()
+        t1.join(3)
+        t2.join(3)
+        assert len(r1[0]) > 0
+        assert len(r2[0]) > 0
+
+    def test_stop_without_start(self) -> None:
+        printer = BaseBrowserPrinter()
+        assert printer.stop_recording() == []
+
+
+class TestBroadcastAfterLock:
+    def test_no_broadcast_on_409(self) -> None:
+        printer = BaseBrowserPrinter()
+        running_lock = threading.Lock()
+        running = True
+        cq = printer.add_client()
+        with running_lock:
+            if running:
+                status = 409
+            else:
+                status = 200
+        if status == 200:
+            printer.broadcast({"type": "external_run"})
+        assert status == 409
+        assert cq.empty()
+        printer.remove_client(cq)
+
+
+class TestAtomicShutdown:
+    def test_blocked_by_clients(self) -> None:
+        printer = BaseBrowserPrinter()
+        cq = printer.add_client()
+        running_lock = threading.Lock()
+        shutting_down = threading.Event()
+        with running_lock:
+            if not (False or printer.has_clients()):
+                shutting_down.set()
+        assert not shutting_down.is_set()
+        printer.remove_client(cq)
+
+    def test_proceeds_when_idle(self) -> None:
+        printer = BaseBrowserPrinter()
+        running_lock = threading.Lock()
+        shutting_down = threading.Event()
+        with running_lock:
+            if not (False or printer.has_clients()):
+                shutting_down.set()
+        assert shutting_down.is_set()
 
 class TestMergingFlag:
     def test_merge_blocks_task(self) -> None:
@@ -875,6 +1320,16 @@ class TestCodeServerOSErrors:
 
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+    def test_save_untracked_base_oserror(self) -> None:
+        """OSError copying untracked file (line 757)."""
+        if os.name == "nt":
+            pytest.skip("Symlink creation requires elevated privileges on Windows")
+        work_dir = os.path.join(self.tmpdir, "work")
+        os.makedirs(work_dir)
+        # Create a symlink to a nonexistent target -> OSError on copy
+        broken_link = os.path.join(work_dir, "broken.py")
+        os.symlink("/nonexistent_target_12345", broken_link)
+        _save_untracked_base(work_dir, self.tmpdir, {"broken.py"})
         # Should complete without error
 
     def test_prepare_merge_modified_untracked_oserror(self) -> None:

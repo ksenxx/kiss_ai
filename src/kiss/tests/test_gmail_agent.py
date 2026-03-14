@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import stat
 
 from googleapiclient.discovery import build
@@ -82,8 +83,11 @@ class TestTokenPersistence:
         _save_credentials(creds)
         path = _token_path()
         mode = path.stat().st_mode
-        assert mode & stat.S_IRWXG == 0
-        assert mode & stat.S_IRWXO == 0
+        if os.name == "nt":
+            assert path.exists()
+        else:
+            assert mode & stat.S_IRWXG == 0
+            assert mode & stat.S_IRWXO == 0
 
 # ---------------------------------------------------------------------------
 # Body extraction
