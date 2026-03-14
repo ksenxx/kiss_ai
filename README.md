@@ -47,15 +47,20 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-```bash
-export ANTHROPIC_API_KEY="your-key-here" # used by Sorcar
-export GEMINI_API_KEY="your-key-here" # used for autocomplete support
-export OPENAI_API_KEY="your-key-here" # Optional
-export OPENROUTER_API_KEY="your-key-here" # Optional
-export TOGETHER_API_KEY="your-key-here" # Optional
-```
+You must provide ANTHROPIC_API_KEY and GEMINI_API_KEY in the environment.  Then download 
+[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.35/kiss-offline-installer.pkg) and
+install.
 
-You must provide ANTHROPIC_API_KEY and GEMINI_API_KEY in the shell environment.
+
+# Introduction to KISS Sorcar
+
+**KISS Sorcar** (named after the [Famous Bengali Magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general purpose agent with web browsing capabilities**. It runs **locally** as a VSCode IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
+
+#whatispossible #KISSSorcar
+
+![KISS Sorcar Screenshot](assets/KISSSorcar.png)
+
+A video demo of KISS Sorcar can be found [here](https://youtube.com/watch?v=XWLpNJlUgZo) and an older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
 
 ```bash
 # To install for development
@@ -75,16 +80,6 @@ curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/inst
 cd myproject
 uv run sorcar
 ```
-
-# Introduction to KISS Sorcar
-
-**KISS Sorcar** (named after the [Famous Bengali Magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general purpose agent with web browsing capabilities**. It runs **locally** as a VSCode IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
-
-#whatispossible #KISSSorcar
-
-![KISS Sorcar Screenshot](assets/KISSSorcar.png)
-
-A video demo of KISS Sorcar can be found [here](https://youtube.com/watch?v=XWLpNJlUgZo) and an older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
 
 # Introduction to KISS
 
