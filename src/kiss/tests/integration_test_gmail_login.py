@@ -2,8 +2,11 @@
 
 import re
 import time
+from pathlib import Path
 
-from kiss.agents.sorcar.web_use_tool import KISS_PROFILE_DIR, WebUseTool
+from kiss.agents.sorcar.web_use_tool import WebUseTool
+
+KISS_PROFILE_DIR = str(Path.home() / ".kiss" / "browser_profile")
 
 
 def find_id(tree: str, pattern: str) -> int:
