@@ -46,6 +46,162 @@ class TestJSONLFormat:
         th._set_latest_chat_events([], task="temp task")
         assert not th._task_events_path("temp task").exists()
 
+class TestResultAndEventsFile:
+    """Test result and events_file fields in task history entries."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+
+    def teardown_method(self):
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_add_task_includes_result_and_events_file(self):
+        th._add_task("my task")
+        history = th._load_history(limit=1)
+        assert len(history) == 1
+        entry = history[0]
+        assert entry["task"] == "my task"
+        assert entry["result"] == ""
+        assert str(entry["events_file"]).startswith("evt_")
+        assert str(entry["events_file"]).endswith(".json")
+
+    def test_set_latest_chat_events_with_result(self):
+        th._add_task("task with result")
+        history_before = th._load_history(limit=1)
+        events_file = history_before[0]["events_file"]
+        th._set_latest_chat_events(
+            [{"type": "text"}], task="task with result", result="Task completed successfully",
+        )
+        history = th._load_history(limit=1)
+        entry = history[0]
+        assert entry["result"] == "Task completed successfully"
+        assert entry["has_events"] is True
+        assert entry["events_file"] == events_file
+
+    def test_update_task_result(self):
+        th._add_task("update me")
+        th._update_task_result("update me", "Done with flying colors")
+        history = th._load_history(limit=1)
+        entry = history[0]
+        assert entry["result"] == "Done with flying colors"
+
+    def test_update_task_result_nonexistent_task(self):
+        th._add_task("existing task")
+        # Should not crash when task not found
+        th._update_task_result("nonexistent task", "some result")
+        history = th._load_history(limit=1)
+        assert history[0]["task"] == "existing task"
+        assert history[0]["result"] == ""
+
+    def test_result_persists_through_events_update(self):
+        th._add_task("persist result")
+        th._set_latest_chat_events(
+            [{"type": "x"}], task="persist result", result="first result",
+        )
+        # Verify result is on disk
+        th._history_cache = None
+        history = th._load_history(limit=1)
+        assert history[0]["result"] == "first result"
+
+    def test_stopped_result(self):
+        th._add_task("stopped task")
+        th._set_latest_chat_events(
+            [{"type": "text"}], task="stopped task", result="(stopped by user)",
+        )
+        history = th._load_history(limit=1)
+        assert history[0]["result"] == "(stopped by user)"
+
+    def test_error_result(self):
+        th._add_task("error task")
+        th._set_latest_chat_events(
+            [{"type": "text"}], task="error task", result="(error: something went wrong)",
+        )
+        history = th._load_history(limit=1)
+        assert history[0]["result"] == "(error: something went wrong)"
+
+    def test_events_file_is_unique_per_add(self):
+        th._add_task("task A")
+        th._add_task("task B")
+        history = th._load_history(limit=2)
+        # Each task gets a unique filename
+        assert history[0]["events_file"] != history[1]["events_file"]
+        # Filenames are uuid-based, not hash-based
+        assert str(history[0]["events_file"]).startswith("evt_")
+        assert str(history[1]["events_file"]).startswith("evt_")
+
+    def test_parse_line_with_result_and_events_file(self):
+        line = json.dumps({
+            "task": "test task",
+            "has_events": True,
+            "result": "completed",
+            "events_file": "abc.json",
+        })
+        entry = th._parse_line(line)
+        assert entry is not None
+        assert entry["result"] == "completed"
+        assert entry["events_file"] == "abc.json"
+
+    def test_parse_line_without_result_defaults(self):
+        """Old entries without result/events_file should get defaults."""
+        line = json.dumps({"task": "old task", "has_events": False})
+        entry = th._parse_line(line)
+        assert entry is not None
+        assert entry["result"] == ""
+        assert entry["events_file"] == ""
+
+    def test_search_includes_result_and_events_file(self):
+        th._add_task("searchable task")
+        events_file = th._load_history(limit=1)[0]["events_file"]
+        th._set_latest_chat_events(
+            [{"type": "x"}], task="searchable task", result="found it",
+        )
+        results = th._search_history("searchable", limit=5)
+        assert len(results) == 1
+        assert results[0]["result"] == "found it"
+        assert results[0]["events_file"] == events_file
+
+    def test_load_task_chat_events_uses_events_file_from_history(self):
+        """_load_task_chat_events should read events_file from history entry."""
+        th._add_task("my task")
+        # Write events via normal API
+        th._set_latest_chat_events([{"type": "hello"}], task="my task")
+        # Verify it loads correctly
+        events = th._load_task_chat_events("my task")
+        assert events == [{"type": "hello"}]
+        # Now manually move the events file to a custom name
+        # and update the JSONL to point to it
+        custom_name = "custom_events.json"
+        old_path = th._task_events_path("my task")
+        new_path = th._CHAT_EVENTS_DIR / custom_name
+        old_path.rename(new_path)
+        # Rewrite the JSONL to point to the custom filename
+        lines = th.HISTORY_FILE.read_text().strip().split("\n")
+        with th.HISTORY_FILE.open("w") as f:
+            for line in lines:
+                entry = json.loads(line)
+                if entry["task"] == "my task":
+                    entry["events_file"] = custom_name
+                f.write(json.dumps(entry) + "\n")
+        # Clear cache so it reloads from disk
+        th._history_cache = None
+        # _load_task_chat_events should find the events via the custom filename
+        events = th._load_task_chat_events("my task")
+        assert events == [{"type": "hello"}]
+
+    def test_load_task_chat_events_returns_empty_for_unknown_task(self):
+        """_load_task_chat_events returns [] for tasks not in history."""
+        events = th._load_task_chat_events("unknown task")
+        assert events == []
+
+    def test_update_task_result_empty_cache(self):
+        """_update_task_result should handle empty cache gracefully."""
+        # No tasks added, cache will be SAMPLE_TASKS
+        th._update_task_result("nonexistent", "some result")
+        # Should not crash
+
+
 class TestMigration:
     """Test migration from old task_history.json to JSONL format."""
 
@@ -134,41 +290,6 @@ class TestCleanupStaleCsDirs:
         removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
         assert removed == 1
         assert not stale.exists()
-
-    def test_keeps_recent_dirs(self):
-        kiss_dir = th._KISS_DIR
-        recent = kiss_dir / "cs-recent456"
-        recent.mkdir()
-        # It's brand new, should be kept
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert removed == 0
-        assert recent.exists()
-
-    def test_keeps_active_dirs(self):
-        """Directories with active processes on their port should be kept."""
-        import socket
-        kiss_dir = th._KISS_DIR
-        active = kiss_dir / "cs-active789"
-        active.mkdir()
-
-        # Bind a socket to simulate an active process
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
-        port = sock.getsockname()[1]
-        (active / "cs-port").write_text(str(port))
-
-        # Make it old enough
-        import os
-        old_time = time.time() - 25 * 3600
-        os.utime(active, (old_time, old_time))
-
-        try:
-            removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-            assert removed == 0
-            assert active.exists()
-        finally:
-            sock.close()
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

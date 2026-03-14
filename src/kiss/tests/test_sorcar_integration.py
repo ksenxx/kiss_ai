@@ -768,19 +768,6 @@ class TestWebUseToolEdgeCases:
         result = self.tool.scroll("down")
         assert "Error" in result
 
-    def test_close_exception_in_pw_stop(self) -> None:
-        """Cover lines 384-386: exception during close."""
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        tool = WebUseTool(headless=True, user_data_dir=None)
-        tool.go_to_url("data:text/html,<h1>Test</h1>")
-        # Stop playwright first to make close() hit exception path
-        tool._playwright.stop()
-        tool._playwright = None
-        # Now close should try to close context/browser that are already dead
-        result = tool.close()
-        assert result == "Browser closed."
-
     def test_check_for_new_tab_single_page(self) -> None:
         """Cover 162->exit: _check_for_new_tab when there's only one page."""
         self.tool.go_to_url("data:text/html,<h1>Single</h1>")

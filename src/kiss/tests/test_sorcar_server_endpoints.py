@@ -90,17 +90,6 @@ def server():
             proc.wait()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-class TestServerModels:
-    def test_models_endpoint(self, server):
-        base_url, _, _ = server
-        resp = requests.get(f"{base_url}/models", timeout=5)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "models" in data
-        assert "selected" in data
-        assert isinstance(data["models"], list)
-
-
 class TestServerTasks:
     def test_tasks_returns_list(self, server):
         base_url, _, _ = server

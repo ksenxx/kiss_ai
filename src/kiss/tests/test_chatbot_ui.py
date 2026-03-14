@@ -23,10 +23,10 @@ class TestTextareaAutoResize(unittest.TestCase):
         assert "Math.min(this.scrollHeight,200)" not in CHATBOT_JS
 
     def test_js_sets_height_to_scrollheight(self) -> None:
-        assert "this.style.height=this.scrollHeight+'px'" in CHATBOT_JS
+        assert "inp.style.height=inp.scrollHeight+'px'" in CHATBOT_JS
 
     def test_js_toggles_overflow_on_input(self) -> None:
-        expected = "this.style.overflowY=this.scrollHeight>this.clientHeight?'auto':'hidden'"
+        expected = "inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden'"
         assert expected in CHATBOT_JS
 
     def test_js_resets_overflow_on_submit(self) -> None:

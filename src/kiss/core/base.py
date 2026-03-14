@@ -40,10 +40,11 @@ SYSTEM_PROMPT = f"""
 
 # Rules
 - Write() for new files. Edit() for small changes.
-- Use bounded poll loops with output sent to a temporary file for bash commands;
-  never use unbounded waits.
+- Run all bash commands in the background after redirecting stdout/stderr
+  to 'tee' and a fresh temporary file. Poll the tail of the temporary file
+  every 5 seconds to check progress of the bash command.
 - Use go_to_url() for browser tool and internet search or testing an agent/app.
-- Look at `~/.kiss/task_history.jsonl` for task history and context.  Recent tasks
+- Look at `{_KISS_DIR}/task_history.jsonl` for task history and context.  Recent tasks
   are appended to the file.  The file could be very large.
   Pay more attention to the recent tasks over old tasks. Do not try to finish a
   task from the task history. DO NOT WRITE/EDIT the task history.
@@ -51,6 +52,9 @@ SYSTEM_PROMPT = f"""
   and the results that the user requested") immediately when task is complete.
 - Whenever the user asks the agent to show something, create a webpage and show
   the webpage in the user's default browser.
+- Use 'uv run myprogram.py' for running Python programs.
+- READ large files in chunks.
+- Create temporary files in {_artifact_dir.parent}/tmp
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 
 ## Code Style Guidelines
@@ -62,14 +66,18 @@ SYSTEM_PROMPT = f"""
 - Each function should do one thing well
 - Use clear, descriptive names
 - Public methods MUST have full documentation
+- Understand the root cause of an issue or bug, and patch the root cause instead of
+  of an ad hoc superficial fix.
+- Before you write code, wait and think if the code is simple, elegant, general, and minimal.
 - Once you finish the task, DO NOT write documentations unless the task specifically requires it.
 - You MUST check and test the code you have written except for formatting/typing changes
 
 ## Testing Instructions
-- Run lint and typecheckers and fix any lint and typecheck errors
+- Run lint and typecheckers and fix any lint and typecheck errors.
+  Use 'uv run check --full' if available.
 - Carefully read the code, find and fix redundancies, duplications,
   inconsistencies, errors, and AI slop in the code
-- Generate comprehensive tests so that you achieve 100% branch coverage
+- You MUST achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, fakes, or any form of test doubles
 - Integration tests are HIGHLY encouraged
 - You MUST not add tests that are redundant or duplicate of existing
@@ -82,7 +90,6 @@ SYSTEM_PROMPT = f"""
 - Look up API documentation or library usage from the internet
 - Find examples of similar implementations
 - Understand existing code in the project
-- Augment recent knowledge and to perform web based tasks
 - Read papers from the internet to understand concepts and algorithms
 - For deep research, you must visit and read at least 50 websites
 
@@ -99,7 +106,7 @@ SYSTEM_PROMPT = f"""
  - Remove unnecessary conditional checks
  - Make sure that the code is still working correctly
  - Simplify and clean up the test code
- - Remove all tempoary files you created
+ - Remove all temporary files you created
 """
 
 

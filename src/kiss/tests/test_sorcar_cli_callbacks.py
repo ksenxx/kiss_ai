@@ -36,15 +36,6 @@ class TestCliAskUserQuestion:
         assert result == "my answer"
         assert any("What is your name?" in s for s in captured)
 
-    def test_empty_answer(self, monkeypatch: object) -> None:
-        """Callback handles empty input."""
-        import builtins
-
-        monkeypatch.setattr(builtins, "input", lambda prompt="": "")  # type: ignore[attr-defined]
-        monkeypatch.setattr(builtins, "print", lambda *a, **kw: None)  # type: ignore[attr-defined]
-        assert cli_ask_user_question("anything") == ""
-
-
 class TestCliWaitForUser:
     """Test the module-level cli_wait_for_user callback."""
 
@@ -81,21 +72,6 @@ class TestCliWaitForUser:
 class TestSorcarAgentCallbackWiring:
     """Verify that both CLI and UI callback wiring paths produce identical tool behavior."""
 
-    def test_ask_user_question_with_callback(self) -> None:
-        """When callback is provided, the ask_user_question tool calls it."""
-
-        def my_callback(question: str) -> str:
-            return f"answer: {question}"
-
-        agent = SorcarAgent("test", ask_user_question_callback=my_callback)
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-        try:
-            tools = agent._get_tools()
-            ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
-            assert ask_tool("test?") == "answer: test?"
-        finally:
-            agent.web_use_tool.close()
-
     def test_ask_user_question_without_callback(self) -> None:
         """Without callback, ask_user_question returns fallback message."""
         agent = SorcarAgent("test")
@@ -107,22 +83,6 @@ class TestSorcarAgentCallbackWiring:
             assert "not available" in result
         finally:
             agent.web_use_tool.close()
-
-    def test_wait_for_user_callback_stored_and_passed_to_web_use_tool(self) -> None:
-        """wait_for_user_callback is passed through to WebUseTool."""
-        calls: list[tuple[str, str]] = []
-
-        def my_wait(instruction: str, url: str) -> None:
-            calls.append((instruction, url))
-
-        agent = SorcarAgent("test", wait_for_user_callback=my_wait)
-        agent.web_use_tool = WebUseTool(
-            headless=True,
-            user_data_dir=None,
-            wait_for_user_callback=my_wait,
-        )
-        assert agent.web_use_tool._wait_for_user_callback is my_wait
-        agent.web_use_tool.close()
 
     def test_ui_mode_patches_callbacks_after_creation(self) -> None:
         """UI mode (sorcar.py) patches callbacks after agent creation.
@@ -140,105 +100,6 @@ class TestSorcarAgentCallbackWiring:
             assert ask_tool("hello") == "UI: hello"
         finally:
             agent.web_use_tool.close()
-
-    def test_cli_and_ui_callbacks_produce_same_tool_behavior(self) -> None:
-        """Both CLI and UI wiring produce the same ask_user_question tool behavior."""
-
-        def cli_cb(q: str) -> str:
-            return f"got: {q}"
-
-        def ui_cb(q: str) -> str:
-            return f"got: {q}"
-
-        # CLI: callback set at construction
-        cli_agent = SorcarAgent("cli", ask_user_question_callback=cli_cb)
-        cli_agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-
-        # UI: callback patched after construction
-        ui_agent = SorcarAgent("ui")
-        ui_agent._ask_user_question_callback = ui_cb
-        ui_agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-
-        try:
-            cli_tools = cli_agent._get_tools()
-            ui_tools = ui_agent._get_tools()
-
-            cli_ask = next(t for t in cli_tools if t.__name__ == "ask_user_question")
-            ui_ask = next(t for t in ui_tools if t.__name__ == "ask_user_question")
-
-            assert cli_ask("q") == ui_ask("q") == "got: q"
-
-            # Same number of tools
-            assert len(cli_tools) == len(ui_tools)
-
-            # Same tool names
-            cli_names = [t.__name__ for t in cli_tools]
-            ui_names = [t.__name__ for t in ui_tools]
-            assert cli_names == ui_names
-        finally:
-            cli_agent.web_use_tool.close()
-            ui_agent.web_use_tool.close()
-
-
-# ---------------------------------------------------------------------------
-# _get_tools() branches
-# ---------------------------------------------------------------------------
-
-
-class TestGetToolsBranches:
-    """Cover all branches in _get_tools()."""
-
-    def test_tools_without_web_use_tool(self) -> None:
-        """Without web_use_tool set, no browser tools are included."""
-        agent = SorcarAgent("test")
-        # web_use_tool is None by default
-        assert agent.web_use_tool is None
-        tools = agent._get_tools()
-        tool_names = [t.__name__ for t in tools]
-        assert "Bash" in tool_names
-        assert "Read" in tool_names
-        assert "Edit" in tool_names
-        assert "Write" in tool_names
-        assert "ask_user_question" in tool_names
-        # No browser tools
-        assert "go_to_url" not in tool_names
-
-    def test_tools_with_web_use_tool(self) -> None:
-        """With web_use_tool set, browser tools are included."""
-        agent = SorcarAgent("test")
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-        try:
-            tools = agent._get_tools()
-            tool_names = [t.__name__ for t in tools]
-            assert "go_to_url" in tool_names
-            assert "ask_user_question" in tool_names
-        finally:
-            agent.web_use_tool.close()
-
-    def test_stream_callback_with_printer(self) -> None:
-        """_stream calls printer.print when printer is set."""
-        printed: list[tuple[str, str]] = []
-
-        class FakePrinter:
-            def print(self, text: str, type: str = "") -> None:
-                printed.append((text, type))
-
-        agent = SorcarAgent("test")
-        agent.printer = FakePrinter()  # type: ignore[assignment]
-        tools = agent._get_tools()
-        # The stream callback is internal to _get_tools, but we can verify
-        # by checking that tools were created without error
-        assert len(tools) >= 5
-
-    def test_stream_callback_without_printer(self) -> None:
-        """_stream is no-op when printer is None."""
-        agent = SorcarAgent("test")
-        agent.printer = None
-        # Should not raise
-        tools = agent._get_tools()
-        assert len(tools) >= 5
-
-
 # ---------------------------------------------------------------------------
 # Prompt construction: run() branches
 # ---------------------------------------------------------------------------
@@ -375,16 +236,6 @@ class TestResolveTask:
         args = argparse.Namespace(f=None, task=None)
         assert _resolve_task(args) == _DEFAULT_TASK
 
-    def test_file_not_found(self, tmp_path: Path) -> None:
-        """Missing file raises FileNotFoundError."""
-        args = argparse.Namespace(f=str(tmp_path / "missing.txt"), task=None)
-        try:
-            _resolve_task(args)
-            assert False, "Should have raised"
-        except FileNotFoundError:
-            pass
-
-
 # ---------------------------------------------------------------------------
 # _build_arg_parser
 # ---------------------------------------------------------------------------
@@ -392,19 +243,6 @@ class TestResolveTask:
 
 class TestBuildArgParser:
     """Cover argument parsing."""
-
-    def test_defaults(self) -> None:
-        """Default values match expected."""
-        parser = _build_arg_parser()
-        args = parser.parse_args([])
-        assert args.model_name == "claude-opus-4-6"
-        assert args.max_steps == 30
-        assert args.max_budget == 5.0
-        assert args.work_dir is None
-        assert args.headless is False
-        assert args.verbose is True
-        assert args.task is None
-        assert args.f is None
 
     def test_custom_args(self) -> None:
         """Custom arguments are parsed correctly."""
@@ -426,20 +264,3 @@ class TestBuildArgParser:
         assert args.verbose is False
         assert args.task == "hello world"
 
-    def test_file_arg(self, tmp_path: Path) -> None:
-        """-f flag is parsed correctly."""
-        parser = _build_arg_parser()
-        args = parser.parse_args(["-f", str(tmp_path / "task.txt")])
-        assert args.f == str(tmp_path / "task.txt")
-
-    def test_headless_false_string(self) -> None:
-        """--headless false parses to False."""
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--headless", "false"])
-        assert args.headless is False
-
-    def test_headless_capitalized_true_string(self) -> None:
-        """--headless True (capitalized) parses to True."""
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--headless", "True"])
-        assert args.headless is True

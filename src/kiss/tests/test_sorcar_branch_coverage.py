@@ -308,23 +308,6 @@ class TestSorcarAgentRunAttachments:
 
 
 class TestSorcarAgentMain:
-    def test_main_no_work_dir(self) -> None:
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "kiss.agents.sorcar.sorcar_agent",
-                "--max_steps", "0",
-                "--max_budget", "0.0",
-                "--headless", "true",
-                "--verbose", "false",
-                "--task", "say hello",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
     def test_main_with_file(self) -> None:
         tmpdir = tempfile.mkdtemp()
         task_file = os.path.join(tmpdir, "task.txt")

@@ -4,13 +4,16 @@ Verifies:
 1. Base._class_lock protects agent_counter and global_budget_used
 2. stop_event set/clear happens inside running_lock (no stop→run race)
 3. task_done broadcast happens AFTER running=False (no 409 on immediate re-submit)
-4. _history_cache is protected by _history_lock (no lost updates)
+4. _history_cache is protected by _HISTORY_LOCK (FileLock, cross-process + cross-thread)
 5. shutdown_timer is protected by shutdown_lock
 """
 
 import threading
 import time
 
+from filelock import FileLock
+
+from kiss.agents.sorcar import task_history as _task_history_module
 from kiss.agents.sorcar.task_history import (
     _add_task,
     _load_history,
@@ -104,16 +107,15 @@ class TestTaskDoneAfterRunningFalse:
 
 
 class TestHistoryLock:
-    """Verify _history_lock protects _history_cache from concurrent corruption."""
+    """Verify _HISTORY_LOCK (FileLock) protects _history_cache from concurrent corruption."""
 
     def test_history_lock_exists(self):
-        from kiss.agents.sorcar import task_history
-        assert hasattr(task_history, "_history_lock")
-        assert isinstance(task_history._history_lock, type(threading.Lock()))
+        assert hasattr(_task_history_module, "_HISTORY_LOCK")
+        assert isinstance(_task_history_module._HISTORY_LOCK, FileLock)
 
     def test_concurrent_set_chat_events_and_add_task(self):
         """Concurrent _set_latest_chat_events and _add_task should not corrupt state."""
-        from kiss.agents.sorcar import task_history
+        task_history = _task_history_module
 
         orig_cache = task_history._history_cache
         orig_file_content = None

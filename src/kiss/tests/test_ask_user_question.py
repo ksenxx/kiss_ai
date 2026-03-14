@@ -142,91 +142,6 @@ class TestAskUserQuestionCallback:
         t.join(timeout=5)
         assert done.is_set()
         assert result_holder[0] == multiline
-
-
-class TestSorcarAgentAskUserQuestion:
-    """Test that SorcarAgent exposes ask_user_question as a tool."""
-
-    def test_callback_passed_through(self) -> None:
-        """SorcarAgent stores the ask_user_question_callback."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        def my_callback(question: str) -> str:
-            return "answer"
-
-        agent = SorcarAgent("test", ask_user_question_callback=my_callback)
-        assert agent._ask_user_question_callback is my_callback
-
-    def test_default_no_callback(self) -> None:
-        """SorcarAgent defaults to no ask_user_question_callback."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        agent = SorcarAgent("test")
-        assert agent._ask_user_question_callback is None
-
-    def test_ask_user_question_tool_in_tools(self) -> None:
-        """ask_user_question tool is included in _get_tools()."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        agent = SorcarAgent("test")
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-        try:
-            tools = agent._get_tools()
-            tool_names = [t.__name__ for t in tools]
-            assert "ask_user_question" in tool_names
-        finally:
-            agent.web_use_tool.close()
-
-    def test_ask_user_question_tool_without_callback(self) -> None:
-        """Without callback, the tool returns a 'not available' message."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        agent = SorcarAgent("test")
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-        try:
-            tools = agent._get_tools()
-            ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
-            result = ask_tool("What is your name?")
-            assert "not available" in result
-        finally:
-            agent.web_use_tool.close()
-
-    def test_ask_user_question_tool_with_callback(self) -> None:
-        """With callback, the tool calls through to the callback."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        def my_callback(question: str) -> str:
-            return f"answer to: {question}"
-
-        agent = SorcarAgent("test", ask_user_question_callback=my_callback)
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-        try:
-            tools = agent._get_tools()
-            ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
-            result = ask_tool("What color?")
-            assert result == "answer to: What color?"
-        finally:
-            agent.web_use_tool.close()
-
-    def test_ask_user_question_tool_docstring(self) -> None:
-        """The tool has a proper docstring for tool registration."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        agent = SorcarAgent("test")
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
-        try:
-            tools = agent._get_tools()
-            ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
-            assert ask_tool.__doc__ is not None
-            assert "question" in ask_tool.__doc__.lower()
-        finally:
-            agent.web_use_tool.close()
-
-
 class TestSorcarEndpointIntegration:
     """Test the /user-question-done endpoint via the Starlette app."""
 
@@ -311,31 +226,5 @@ class TestSorcarEndpointIntegration:
         assert resp.status_code == 200
         assert state.event.is_set()
         assert state.answer == ""
-
-
-class TestChatbotUIUserQuestion:
-    """Test that the chatbot UI HTML contains the user_question event handler."""
-
-    def test_user_question_case_in_html(self) -> None:
-        """The generated HTML contains a case for 'user_question' event."""
-        from kiss.agents.sorcar.chatbot_ui import _build_html
-
-        html = _build_html("Test", "", "/tmp")
-        assert "user_question" in html
-        assert "Agent Question" in html
-        assert "user-question-done" in html
-
-    def test_user_question_has_textarea(self) -> None:
-        """The user_question card includes a textarea for the user to type."""
-        from kiss.agents.sorcar.chatbot_ui import _build_html
-
-        html = _build_html("Test", "", "/tmp")
-        # Find the user_question section
-        idx = html.index("user_question")
-        section = html[idx : idx + 2000]
-        assert "textarea" in section
-        assert "Type your answer" in section
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -21,6 +21,8 @@ from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter, find_free_port
 from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
 from kiss.agents.sorcar.code_server import (
@@ -68,6 +70,13 @@ _INTERNAL_MODELS = frozenset({_FAST_MODEL, _COMMIT_MODEL})
 
 class _StopRequested(BaseException):
     pass
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically using a temp file and os.replace()."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def _read_active_file(cs_data_dir: str) -> str:
@@ -209,7 +218,7 @@ def run_chatbot(
             _s.bind(("", 0))
             cs_port = int(_s.getsockname()[1])
         try:
-            cs_port_file.write_text(str(cs_port))
+            _atomic_write_text(cs_port_file, str(cs_port))
         except OSError:  # pragma: no cover – filesystem permission error
             logger.debug("Exception caught", exc_info=True)
     cs_url = f"http://127.0.0.1:{cs_port}"
@@ -298,7 +307,7 @@ def run_chatbot(
                 cs_port = find_free_port()
                 cs_url = f"http://127.0.0.1:{cs_port}"
                 try:
-                    cs_port_file.write_text(str(cs_port))
+                    _atomic_write_text(cs_port_file, str(cs_port))
                 except OSError:
                     logger.debug("Exception caught", exc_info=True)
 
@@ -335,23 +344,7 @@ def run_chatbot(
 
             cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
             cs_proc = subprocess.Popen(
-                [
-                    cs_binary,
-                    "--port",
-                    str(cs_port),
-                    "--auth",
-                    "none",
-                    "--bind-addr",
-                    f"127.0.0.1:{cs_port}",
-                    "--disable-telemetry",
-                    "--user-data-dir",
-                    cs_data_dir,
-                    "--extensions-dir",
-                    str(Path(cs_data_dir) / "extensions"),
-                    "--disable-getting-started-override",
-                    "--disable-workspace-trust",
-                    actual_work_dir,
-                ],
+                _code_server_launch_args(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=cs_env,
@@ -371,7 +364,7 @@ def run_chatbot(
                 printer.print("Warning: code-server failed to start")
         if code_server_url:  # pragma: no branch – always True after successful startup
             try:
-                workdir_file.write_text(actual_work_dir)
+                _atomic_write_text(workdir_file, actual_work_dir)
             except OSError:  # pragma: no cover – filesystem error writing workdir
                 logger.debug("Exception caught", exc_info=True)
 
@@ -549,20 +542,31 @@ def run_chatbot(
             done_event = {"type": "task_done"}
         except (KeyboardInterrupt, _StopRequested):
             logger.debug("Exception caught", exc_info=True)
-            result_text = "(stopped)"
+            result_text = "(stopped by user)"
             done_event = {"type": "task_stopped"}
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             result_text = f"(error: {e})"
             done_event = {"type": "task_error", "text": str(e)}
         finally:
+            # Extract a concise result summary for task history
+            result_summary = result_text
+            try:
+                parsed = yaml.safe_load(result_text)
+                if isinstance(parsed, dict) and "summary" in parsed:
+                    result_summary = str(parsed["summary"])
+            except Exception:
+                pass
+
             printer._thread_local.stop_event = None
             chat_events = printer.stop_recording()
             with running_lock:
                 if agent_thread is not current_thread:
                     # Stopped externally; stop_agent already broadcast
                     # task_stopped which is captured in chat_events.
-                    _set_latest_chat_events(chat_events, task=task)
+                    _set_latest_chat_events(
+                        chat_events, task=task, result=result_summary,
+                    )
                     return
                 running = False
                 agent_thread = None
@@ -575,7 +579,9 @@ def run_chatbot(
                     generate_followup(task, result_text)
                 except Exception:  # pragma: no cover – LLM API failure
                     logger.debug("Exception caught", exc_info=True)
-            _set_latest_chat_events(chat_events, task=task)
+            _set_latest_chat_events(
+                chat_events, task=task, result=result_summary,
+            )
             try:
                 merge_result = _prepare_merge_view(
                     actual_work_dir,
@@ -743,8 +749,29 @@ def run_chatbot(
             },
         )
 
+    def _try_start_agent_thread(
+        t: threading.Thread, stop_ev: threading.Event
+    ) -> JSONResponse | None:
+        """Acquire the lock and start the agent thread if not already running.
+
+        Returns None on success, or a JSONResponse error on conflict.
+        """
+        nonlocal running, agent_thread, current_stop_event
+        with running_lock:
+            if merging:
+                return JSONResponse(
+                    {"error": "Resolve all diffs in the merge view first"},
+                    status_code=409,
+                )
+            if running:
+                return JSONResponse({"error": "Agent is already running"}, status_code=409)
+            current_stop_event = stop_ev
+            running = True
+            agent_thread = t
+        return None
+
     async def run_task(request: Request) -> JSONResponse:
-        nonlocal running, agent_thread, selected_model, current_stop_event
+        nonlocal selected_model
         body = await request.json()
         task = body.get("task", "").strip()
         model = body.get("model", "").strip() or selected_model
@@ -759,17 +786,9 @@ def run_chatbot(
             args=(task, model, stop_ev, attachments),
             daemon=True,
         )
-        with running_lock:
-            if merging:
-                return JSONResponse(
-                    {"error": "Resolve all diffs in the merge view first"},
-                    status_code=409,
-                )
-            if running:
-                return JSONResponse({"error": "Agent is already running"}, status_code=409)
-            current_stop_event = stop_ev
-            running = True
-            agent_thread = t
+        err = _try_start_agent_thread(t, stop_ev)
+        if err is not None:
+            return err
         t.start()
         return JSONResponse({"status": "started"})
 
@@ -780,30 +799,20 @@ def run_chatbot(
         running state and displays the selected text as a user message,
         then starts the agent thread with the selected text as the task.
         """
-        nonlocal running, agent_thread, current_stop_event
         body = await request.json()
         text = body.get("text", "").strip()
         if not text:
             return JSONResponse({"error": "No text selected"}, status_code=400)
-        model = selected_model
-        _record_model_usage(model)
+        _record_model_usage(selected_model)
         stop_ev = threading.Event()
         t = threading.Thread(
             target=run_agent_thread,
-            args=(text, model, stop_ev, None),
+            args=(text, selected_model, stop_ev, None),
             daemon=True,
         )
-        with running_lock:
-            if merging:
-                return JSONResponse(
-                    {"error": "Resolve all diffs in the merge view first"},
-                    status_code=409,
-                )
-            if running:
-                return JSONResponse({"error": "Agent is already running"}, status_code=409)
-            current_stop_event = stop_ev
-            running = True
-            agent_thread = t
+        err = _try_start_agent_thread(t, stop_ev)
+        if err is not None:
+            return err
         # Broadcast AFTER lock confirms task will start, so clients
         # never see external_run for a task that returns 409.
         printer.broadcast({"type": "external_run", "text": text})
@@ -917,7 +926,12 @@ def run_chatbot(
         page = history[offset : offset + limit] if limit > 0 else history[offset:]
         return JSONResponse(
             [
-                {"task": e["task"], "has_events": bool(e.get("has_events"))}
+                {
+                    "task": e["task"],
+                    "has_events": bool(e.get("has_events")),
+                    "result": e.get("result", ""),
+                    "events_file": e.get("events_file", ""),
+                }
                 for e in page
             ]
         )
@@ -1287,7 +1301,7 @@ def run_chatbot(
     port = find_free_port()
     try:
         Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
-        (Path(cs_data_dir) / "assistant-port").write_text(str(port))
+        _atomic_write_text(Path(cs_data_dir) / "assistant-port", str(port))
     except OSError:  # pragma: no cover – filesystem permission error
         logger.debug("Exception caught", exc_info=True)
     url = f"http://127.0.0.1:{port}"
