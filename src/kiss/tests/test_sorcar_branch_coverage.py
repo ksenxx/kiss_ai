@@ -474,11 +474,7 @@ class TestWebUseToolBrowser:
     @pytest.fixture(autouse=True)
     def setup_tool(self, tmp_path: Path) -> None:
         self.tmp_path = tmp_path
-        self.tool = WebUseTool(
-            browser_type="chromium",
-            headless=True,
-            user_data_dir=None,
-        )
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         if hasattr(self, "tool"):
@@ -859,11 +855,7 @@ class TestWebUseToolBrowserExtra:
     @pytest.fixture(autouse=True)
     def setup_tool(self, tmp_path: Path) -> None:
         self.tmp_path = tmp_path
-        self.tool = WebUseTool(
-            browser_type="chromium",
-            headless=True,
-            user_data_dir=None,
-        )
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         if hasattr(self, "tool"):
@@ -876,7 +868,7 @@ class TestWebUseToolBrowserExtra:
 
     def test_screenshot_error(self) -> None:
         """Cover screenshot exception path (line 346-348)."""
-        tool2 = WebUseTool(browser_type="chromium", headless=True, user_data_dir=None)
+        tool2 = WebUseTool(user_data_dir=None)
         url = self._write_html("ss.html", "<html><body>X</body></html>")
         tool2.go_to_url(url)
         tool2._page.close()
@@ -886,7 +878,7 @@ class TestWebUseToolBrowserExtra:
 
     def test_get_page_content_error(self) -> None:
         """Cover get_page_content exception path (line 368-370)."""
-        tool2 = WebUseTool(browser_type="chromium", headless=True, user_data_dir=None)
+        tool2 = WebUseTool(user_data_dir=None)
         url = self._write_html("pc.html", "<html><body>X</body></html>")
         tool2.go_to_url(url)
         tool2._page.close()
@@ -896,7 +888,7 @@ class TestWebUseToolBrowserExtra:
 
     def test_press_key_error(self) -> None:
         """Cover press_key exception path."""
-        tool2 = WebUseTool(browser_type="chromium", headless=True, user_data_dir=None)
+        tool2 = WebUseTool(user_data_dir=None)
         url = self._write_html("k.html", "<html><body>X</body></html>")
         tool2.go_to_url(url)
         tool2._page.close()
@@ -906,7 +898,7 @@ class TestWebUseToolBrowserExtra:
 
     def test_type_text_error(self) -> None:
         """Cover type_text exception path."""
-        tool2 = WebUseTool(browser_type="chromium", headless=True, user_data_dir=None)
+        tool2 = WebUseTool(user_data_dir=None)
         url = self._write_html("t.html", "<html><body>X</body></html>")
         tool2.go_to_url(url)
         tool2._page.close()

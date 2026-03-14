@@ -357,10 +357,7 @@ class TestWebUseToolBrowser:
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
         self.tmpdir = tempfile.mkdtemp()
-        self.tool = WebUseTool(
-            headless=True,
-            user_data_dir=None,  # no persistent context
-        )
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -388,10 +385,7 @@ class TestWebUseToolPersistentContext:
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
         self.tmpdir = tempfile.mkdtemp()
-        self.tool = WebUseTool(
-            headless=True,
-            user_data_dir=os.path.join(self.tmpdir, "profile"),
-        )
+        self.tool = WebUseTool(user_data_dir=os.path.join(self.tmpdir, "profile"))
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -402,7 +396,7 @@ class TestWebUseToolResolveLocator:
 
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -521,7 +515,7 @@ class TestWebUseToolBranches:
 
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -618,7 +612,7 @@ class TestWebUseToolBranchesR2:
 
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -703,7 +697,7 @@ class TestWebUseToolCloseException:
         """Close with corrupted _playwright that raises on stop().
         Covers lines 384-386 (exception handler in close)."""
         from kiss.agents.sorcar.web_use_tool import WebUseTool
-        tool = WebUseTool(headless=True, user_data_dir=None)
+        tool = WebUseTool(user_data_dir=None)
         tool.go_to_url("data:text/html,<p>test</p>")
         # Properly close browser first
         if tool._browser:
@@ -728,7 +722,7 @@ class TestWebUseToolWaitForStable:
 
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -751,7 +745,7 @@ class TestWebUseToolDomContentLoadedTimeout:
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
 
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -822,7 +816,7 @@ class TestWebUseToolAllInvisibleElements:
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
 
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()

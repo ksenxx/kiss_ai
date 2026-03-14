@@ -521,9 +521,9 @@ ______________________________________________________________________
 
 #### `kiss.agents.sorcar.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
 
-##### `class WebUseTool` — Browser automation tool using Playwright with zero JS injection.
+##### `class WebUseTool` — Browser automation tool using headless Playwright + default OS browser.
 
-**Constructor:** `WebUseTool(browser_type: str = 'chromium', headless: bool = False, viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _AUTO_DETECT, wait_for_user_callback: Callable[[str, str], None] | None = None) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -568,7 +568,7 @@ ______________________________________________________________________
 
   - **Returns:** "Browser closed." (always, even if nothing was open).
 
-- **ask_user_browser_action** — Launch browser for user interaction, wait for completion, return page state. Use when the agent needs the human to interact with the browser directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
+- **ask_user_browser_action** — Open URL in user's default browser for interaction, wait for completion. Use when the agent needs the human to interact with a webpage directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. Opens the URL in the user's default OS browser (Chrome, Safari, Firefox, etc.) rather than a Playwright-controlled window.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
 
   - `instruction`: What the user should do (e.g. "Please solve the CAPTCHA").
   - `url`: Optional URL to navigate to before handing control to the user.
@@ -754,7 +754,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `headless`: Whether to run the browser in headless mode. Defaults to config value.
+  - `headless`: Deprecated, ignored. Browser always runs headless.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.

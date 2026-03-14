@@ -10,7 +10,8 @@
 # 3. Commit changes with "Version bumped"
 # 4. Push to origin
 # 5. Push to kiss_ai repo and tag with version
-# 6. Publish to PyPI
+# 6. Build offline .pkg and create GitHub release (with .pkg asset)
+# 7. Publish to PyPI
 
 set -e  # Exit on error
 
@@ -225,7 +226,30 @@ main() {
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
-    # Step 6: Publish to PyPI
+    # Step 6: Build offline .pkg and create GitHub release
+    print_step "Building offline installer package..."
+    OFFLINE_PKG="$PWD/dist/kiss-offline-installer.pkg"
+    bash scripts/build_offline_pkg.sh
+    if [[ -f "$OFFLINE_PKG" ]]; then
+        print_step "Creating GitHub release with offline installer..."
+        gh release create "$TAG_NAME" "$OFFLINE_PKG" \
+            --repo ksenxx/kiss_ai \
+            --title "KISS $VERSION" \
+            --notes "Release $VERSION
+
+## Downloads
+- **kiss-offline-installer.pkg** — macOS offline installer (bundles uv, code-server, Python 3.13, git, and all dependencies)"
+        print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
+    else
+        print_warn "Offline installer .pkg not found at $OFFLINE_PKG — skipping GitHub release asset upload"
+        gh release create "$TAG_NAME" \
+            --repo ksenxx/kiss_ai \
+            --title "KISS $VERSION" \
+            --notes "Release $VERSION"
+        print_info "GitHub release created (without .pkg): https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
+    fi
+
+    # Step 7: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 

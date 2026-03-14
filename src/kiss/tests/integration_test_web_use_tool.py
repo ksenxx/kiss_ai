@@ -12,7 +12,7 @@ def find_id(tree: str, pattern: str) -> int:
 
 
 def main() -> None:
-    web = WebUseTool(browser_type="chromium", headless=True)
+    web = WebUseTool()
 
     try:
         print("=" * 70)
