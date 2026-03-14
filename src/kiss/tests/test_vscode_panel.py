@@ -79,8 +79,8 @@ class TestSetupCodeServer(unittest.TestCase):
         # checkAllDone should handle both success and error cases for saveAll
         idx = js.index("function checkAllDone()")
         snippet = js[idx : idx + 400]
-        assert ".then(function(){" in snippet
-        assert "},function(){" in snippet
+        # saveAll passes notifyDone as both success and error handler
+        assert ".then(notifyDone,notifyDone)" in snippet
 
 class TestBuildHtmlJavaScript(unittest.TestCase):
     html: str

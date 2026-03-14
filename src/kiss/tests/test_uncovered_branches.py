@@ -345,14 +345,14 @@ class TestTypeToJsonSchema:
         from typing import Optional
 
         m = self._make_model()
-        result = m._python_type_to_json_schema(Optional[str])
+        result = m._python_type_to_json_schema(Optional[str])  # noqa: UP045
         assert result == {"type": "string"}
 
     def test_union_type(self) -> None:
         from typing import Union
 
         m = self._make_model()
-        result = m._python_type_to_json_schema(Union[str, int])
+        result = m._python_type_to_json_schema(Union[str, int])  # noqa: UP007
         assert result == {"anyOf": [{"type": "string"}, {"type": "integer"}]}
 
     def test_unknown_type_defaults_to_string(self) -> None:
@@ -369,8 +369,6 @@ class TestTypeToJsonSchema:
 class TestModelCallbackLoop:
     def test_invoke_callback_no_running_loop(self) -> None:
         """When no event loop is running, uses instance _callback_loop."""
-        import asyncio
-
         from kiss.core.models.model import Model
 
         tokens: list[str] = []
@@ -558,7 +556,7 @@ class TestFunctionToOpenaiTool:
         m = self._make_model()
 
         def no_doc(x: str) -> str:
-            pass  # type: ignore[return-value]
+            return ""
 
         schema = m._function_to_openai_tool(no_doc)
         assert schema["function"]["name"] == "no_doc"
@@ -711,7 +709,9 @@ class TestPrintToConsole:
 
         p = ConsolePrinter()
         # result content that parses to non-dict YAML
-        result = p.print("just a string value", type="result", step_count=1, total_tokens=0, cost=0.0)
+        result = p.print(
+            "just a string value", type="result", step_count=1, total_tokens=0, cost=0.0
+        )
         assert isinstance(result, str)
 
     def test_format_result_with_summary(self) -> None:
@@ -1152,7 +1152,12 @@ class TestStreamEventParser:
             Event({"type": "content_block_start", "content_block": {"type": "thinking"}})
         )
         text = p.parse_stream_event(
-            Event({"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}})
+            Event(
+                {
+                    "type": "content_block_delta",
+                    "delta": {"type": "thinking_delta", "thinking": "hmm"},
+                }
+            )
         )
         assert text == "hmm"
         # End thinking block

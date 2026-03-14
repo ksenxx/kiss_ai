@@ -76,7 +76,11 @@ class TestChatbotExternalRunHandler:
     def test_external_run_sets_running_true(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
         block = CHATBOT_JS[idx:idx + 500]
-        assert "running=true" in block
+        assert "enterRunning()" in block
+        # enterRunning sets running=true
+        er_idx = CHATBOT_JS.index("function enterRunning()")
+        er_block = CHATBOT_JS[er_idx:er_idx + 300]
+        assert "running=true" in er_block
 
     def test_external_run_disables_input(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
@@ -84,14 +88,14 @@ class TestChatbotExternalRunHandler:
         assert "inp.disabled=true" in block
 
     def test_external_run_shows_stop_button(self) -> None:
-        idx = CHATBOT_JS.index("case'external_run':")
-        block = CHATBOT_JS[idx:idx + 500]
-        assert "stopBtn.style.display='inline-flex'" in block
+        er_idx = CHATBOT_JS.index("function enterRunning()")
+        er_block = CHATBOT_JS[er_idx:er_idx + 300]
+        assert "stopBtn.style.display='inline-flex'" in er_block
 
     def test_external_run_hides_send_button(self) -> None:
-        idx = CHATBOT_JS.index("case'external_run':")
-        block = CHATBOT_JS[idx:idx + 500]
-        assert "btn.style.display='none'" in block
+        er_idx = CHATBOT_JS.index("function enterRunning()")
+        er_block = CHATBOT_JS[er_idx:er_idx + 300]
+        assert "btn.style.display='none'" in er_block
 
     def test_external_run_sets_pending_user_msg(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
@@ -104,9 +108,9 @@ class TestChatbotExternalRunHandler:
         assert "inp.value=ev.text||''" in block
 
     def test_external_run_starts_timer(self) -> None:
-        idx = CHATBOT_JS.index("case'external_run':")
-        block = CHATBOT_JS[idx:idx + 500]
-        assert "startTimer()" in block
+        er_idx = CHATBOT_JS.index("function enterRunning()")
+        er_block = CHATBOT_JS[er_idx:er_idx + 300]
+        assert "startTimer()" in er_block
 
     def test_external_run_shows_spinner(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
@@ -124,14 +128,14 @@ class TestChatbotExternalRunHandler:
         assert "pendingFiles=[]" in block
 
     def test_external_run_clears_input(self) -> None:
-        idx = CHATBOT_JS.index("case'external_run':")
-        block = CHATBOT_JS[idx:idx + 500]
-        assert "inp.style.height='auto'" in block
+        er_idx = CHATBOT_JS.index("function enterRunning()")
+        er_block = CHATBOT_JS[er_idx:er_idx + 300]
+        assert "inp.style.height='auto'" in er_block
 
     def test_external_run_disables_run_prompt_btn(self) -> None:
-        idx = CHATBOT_JS.index("case'external_run':")
-        block = CHATBOT_JS[idx:idx + 500]
-        assert "runPromptBtn.disabled=true" in block
+        er_idx = CHATBOT_JS.index("function enterRunning()")
+        er_block = CHATBOT_JS[er_idx:er_idx + 300]
+        assert "runPromptBtn.disabled=true" in er_block
 
 
 class TestExtensionJSLogicFlow:
