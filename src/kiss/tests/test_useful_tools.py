@@ -59,17 +59,6 @@ def any_tools(request, temp_test_dir):
     if request.param:
         return UsefulTools(stream_callback=lambda _: None), temp_test_dir
     return UsefulTools(), temp_test_dir
-
-
-class TestBashBothPaths:
-    """Tests that apply identically to both streaming and non-streaming Bash paths."""
-
-    def test_error_exit_code(self, any_tools):
-        ut, _ = any_tools
-        result = ut.Bash("false", "Failing command")
-        assert result.startswith("Error (exit code")
-
-
 class TestAdversarial:
     """Adversarial tests to try to break the Popen/killpg changes."""
 

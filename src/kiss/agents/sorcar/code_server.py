@@ -198,125 +198,80 @@ function activate(ctx){
     if(Object.keys(ms).length>0)vscode.commands.executeCommand('kiss.nextChange');
     else checkAllDone();
   }
-  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptChange',async function(fp,idx){
+  async function getOrOpenEditor(fp){
+    var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
+    if(!ed){
+      var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+      ed=await vscode.window.showTextDocument(doc,{preview:false});
+    }
+    return ed;
+  }
+  async function applyHunkAction(fp,idx,countProp,startProp){
     var s=ms[fp];if(!s)return;
     var h=s.hunks[idx];
-    if(h.oc>0){
-      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
-      if(!ed){
-        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
-        ed=await vscode.window.showTextDocument(doc,{preview:false});
-      }
-      await delLines(ed,h.os,h.oc);
-      var rm=h.oc;
+    if(h[countProp]>0){
+      var ed=await getOrOpenEditor(fp);
+      await delLines(ed,h[startProp],h[countProp]);
+      var rm=h[countProp];
       s.hunks.splice(idx,1);
       for(var i=idx;i<s.hunks.length;i++){s.hunks[i].os-=rm;s.hunks[i].ns-=rm;}
     }else{s.hunks.splice(idx,1);}
     if(!s.hunks.length)delete ms[fp];
     afterHunkAction(fp);
+  }
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptChange',async function(fp,idx){
+    await applyHunkAction(fp,idx,'oc','os');
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectChange',async function(fp,idx){
-    var s=ms[fp];if(!s)return;
-    var h=s.hunks[idx];
-    if(h.nc>0){
-      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
-      if(!ed){
-        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
-        ed=await vscode.window.showTextDocument(doc,{preview:false});
-      }
-      await delLines(ed,h.ns,h.nc);
-      var rm=h.nc;
-      s.hunks.splice(idx,1);
-      for(var i=idx;i<s.hunks.length;i++){s.hunks[i].os-=rm;s.hunks[i].ns-=rm;}
-    }else{s.hunks.splice(idx,1);}
-    if(!s.hunks.length)delete ms[fp];
-    afterHunkAction(fp);
+    await applyHunkAction(fp,idx,'nc','ns');
   }));
-  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.prevChange',function(){
+  function hunkLine(h){return h.nc>0?h.ns:h.os;}
+  function navigateHunk(dir){
     var allH=[];
     for(var fp in ms)ms[fp].hunks.forEach(function(h){allH.push({fp:fp,h:h})});
     if(!allH.length){curHunk=null;return;}
     var ae=vscode.window.activeTextEditor;
-    var cf=ae?ae.document.uri.fsPath:'',cl=ae?ae.selection.active.line:999999;
-    var found=null;
-    for(var j=allH.length-1;j>=0;j--){
-      var ln=allH[j].h.nc>0?allH[j].h.ns:allH[j].h.os;
-      if(allH[j].fp===cf&&ln<cl){found=allH[j];break;}
+    var cf=ae?ae.document.uri.fsPath:'',cl=ae?ae.selection.active.line:(dir<0?999999:-1);
+    var found=null,cmp=dir<0?function(a,b){return a<b}:function(a,b){return a>b};
+    var start=dir<0?allH.length-1:0,end=dir<0?-1:allH.length,step=dir<0?-1:1;
+    for(var j=start;j!==end;j+=step){
+      var ln=hunkLine(allH[j].h);
+      if(allH[j].fp===cf&&cmp(ln,cl)){found=allH[j];break;}
     }
-    if(!found)for(var j=allH.length-1;j>=0;j--){
+    if(!found)for(var j=start;j!==end;j+=step){
       if(allH[j].fp!==cf){found=allH[j];break;}
     }
-    if(!found)found=allH[allH.length-1];
+    if(!found)found=allH[dir<0?allH.length-1:0];
     curHunk={fp:found.fp,idx:ms[found.fp].hunks.indexOf(found.h)};
     vscode.workspace.openTextDocument(vscode.Uri.file(found.fp)).then(function(doc){
       vscode.window.showTextDocument(doc,{preview:false}).then(function(ed){
-        var ln=found.h.nc>0?found.h.ns:found.h.os;
+        var ln=hunkLine(found.h);
         ed.revealRange(new vscode.Range(ln,0,ln,0),vscode.TextEditorRevealType.InCenter);
         ed.selection=new vscode.Selection(ln,0,ln,0);
       });
     });
-  }));
-  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.nextChange',function(){
-    var allH=[];
-    for(var fp in ms)ms[fp].hunks.forEach(function(h){allH.push({fp:fp,h:h})});
-    if(!allH.length){curHunk=null;return;}
-    var ae=vscode.window.activeTextEditor;
-    var cf=ae?ae.document.uri.fsPath:'',cl=ae?ae.selection.active.line:-1;
-    var found=null;
-    for(var j=0;j<allH.length;j++){
-      var ln=allH[j].h.nc>0?allH[j].h.ns:allH[j].h.os;
-      if(allH[j].fp===cf&&ln>cl){found=allH[j];break;}
-    }
-    if(!found)for(var j=0;j<allH.length;j++){
-      if(allH[j].fp!==cf){found=allH[j];break;}
-    }
-    if(!found)found=allH[0];
-    curHunk={fp:found.fp,idx:ms[found.fp].hunks.indexOf(found.h)};
-    vscode.workspace.openTextDocument(vscode.Uri.file(found.fp)).then(function(doc){
-      vscode.window.showTextDocument(doc,{preview:false}).then(function(ed){
-        var ln=found.h.nc>0?found.h.ns:found.h.os;
-        ed.revealRange(new vscode.Range(ln,0,ln,0),vscode.TextEditorRevealType.InCenter);
-        ed.selection=new vscode.Selection(ln,0,ln,0);
-      });
-    });
-  }));
-  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptAll',async function(){
+  }
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.prevChange',function(){navigateHunk(-1)}));
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.nextChange',function(){navigateHunk(1)}));
+  async function applyAll(countProp,startProp,msg){
     for(var fp of Object.keys(ms)){
       var s=ms[fp];
-      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
-      if(!ed){
-        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
-        ed=await vscode.window.showTextDocument(doc,{preview:false});
-      }
+      var ed=await getOrOpenEditor(fp);
       for(var i=s.hunks.length-1;i>=0;i--){
-        if(s.hunks[i].oc>0)await delLines(ed,s.hunks[i].os,s.hunks[i].oc);
+        if(s.hunks[i][countProp]>0)await delLines(ed,s.hunks[i][startProp],s.hunks[i][countProp]);
       }
       ed.setDecorations(redDeco,[]);ed.setDecorations(blueDeco,[]);
     }
     ms={};curHunk=null;
     await vscode.workspace.saveAll(false);
-    try{await vscode.workspace.saveAll(false);}catch(e){}
-    vscode.window.showInformationMessage('All changes accepted.');
+    vscode.window.showInformationMessage(msg);
     firePost('/merge-action',{action:'all-done'});
+  }
+  ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptAll',async function(){
+    await applyAll('oc','os','All changes accepted.');
   }));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.rejectAll',async function(){
-    for(var fp of Object.keys(ms)){
-      var s=ms[fp];
-      var ed=vscode.window.visibleTextEditors.find(function(e){return e.document.uri.fsPath===fp;});
-      if(!ed){
-        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
-        ed=await vscode.window.showTextDocument(doc,{preview:false});
-      }
-      for(var i=s.hunks.length-1;i>=0;i--){
-        if(s.hunks[i].nc>0)await delLines(ed,s.hunks[i].ns,s.hunks[i].nc);
-      }
-      ed.setDecorations(redDeco,[]);ed.setDecorations(blueDeco,[]);
-    }
-    ms={};curHunk=null;
-    await vscode.workspace.saveAll(false);
-    try{await vscode.workspace.saveAll(false);}catch(e){}
-    vscode.window.showInformationMessage('All changes rejected.');
-    firePost('/merge-action',{action:'all-done'});
+    await applyAll('nc','ns','All changes rejected.');
   }));
   function readPort(){
     try{return fs.readFileSync(path.join(dataDir,'assistant-port'),'utf8').trim();}
@@ -395,13 +350,11 @@ function activate(ctx){
   function checkAllDone(){
     if(Object.keys(ms).length>0)return;
     curHunk=null;
-    vscode.workspace.saveAll(false).then(function(){
+    function notifyDone(){
       vscode.window.showInformationMessage('All changes reviewed.');
       firePost('/merge-action',{action:'all-done'});
-    },function(){
-      vscode.window.showInformationMessage('All changes reviewed.');
-      firePost('/merge-action',{action:'all-done'});
-    });
+    }
+    vscode.workspace.saveAll(false).then(notifyDone,notifyDone);
   }
   ctx.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(function(){
     for(var fp in ms)refreshDeco(fp);
@@ -742,6 +695,26 @@ def _scan_files(work_dir: str) -> list[str]:
     return paths
 
 
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _parse_hunk_line(line: str) -> tuple[int, int, int, int] | None:
+    """Parse a unified-diff @@ hunk header line.
+
+    Returns:
+        (old_start, old_count, new_start, new_count) or None if not a hunk header.
+    """
+    hm = _HUNK_RE.match(line)
+    if not hm:
+        return None
+    return (
+        int(hm.group(1)),
+        int(hm.group(2)) if hm.group(2) is not None else 1,
+        int(hm.group(3)),
+        int(hm.group(4)) if hm.group(4) is not None else 1,
+    )
+
+
 def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]]]:
     result = subprocess.run(
         ["git", "diff", "-U0", "HEAD", "--no-color"],
@@ -756,16 +729,9 @@ def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]
         if dm:
             current_file = dm.group(1)
             continue
-        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
-        if hm and current_file:
-            hunks.setdefault(current_file, []).append(
-                (
-                    int(hm.group(1)),
-                    int(hm.group(2)) if hm.group(2) is not None else 1,
-                    int(hm.group(3)),
-                    int(hm.group(4)) if hm.group(4) is not None else 1,
-                )
-            )
+        hunk = _parse_hunk_line(line)
+        if hunk and current_file:
+            hunks.setdefault(current_file, []).append(hunk)
     return hunks
 
 
@@ -904,17 +870,7 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
         capture_output=True,
         text=True,
     )
-    hunks: list[tuple[int, int, int, int]] = []
-    for line in result.stdout.split("\n"):
-        hm = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
-        if hm:
-            hunks.append((
-                int(hm.group(1)),
-                int(hm.group(2)) if hm.group(2) is not None else 1,
-                int(hm.group(3)),
-                int(hm.group(4)) if hm.group(4) is not None else 1,
-            ))
-    return hunks
+    return [h for line in result.stdout.split("\n") if (h := _parse_hunk_line(line))]
 
 
 def _prepare_merge_view(

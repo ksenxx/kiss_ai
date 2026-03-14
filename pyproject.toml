@@ -52,6 +52,7 @@ dependencies = [
     "google-api-python-client>=2.100.0",
     "google-auth-oauthlib>=1.2.0",
     "google-auth-httplib2>=0.2.0",
+    "filelock>=3.25.2",
 ]
 
 [build-system]

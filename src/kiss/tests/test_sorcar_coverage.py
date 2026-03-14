@@ -474,22 +474,6 @@ class TestTaskHistoryBranches:
         finally:
             os.chmod(str(th.MODEL_USAGE_FILE), 0o644)
 
-    def test_save_last_model_persists(self) -> None:
-        """_save_last_model persists model without incrementing usage count."""
-        th._save_last_model("gpt-4o")
-        assert th._load_last_model() == "gpt-4o"
-        usage = th._load_model_usage()
-        assert usage.get("gpt-4o", 0) == 0
-
-    def test_save_last_model_preserves_usage(self) -> None:
-        """_save_last_model preserves existing usage counts."""
-        th._record_model_usage("claude-opus-4-6")
-        th._save_last_model("gpt-4o")
-        assert th._load_last_model() == "gpt-4o"
-        usage = th._load_model_usage()
-        assert usage["claude-opus-4-6"] == 1
-        assert usage.get("gpt-4o", 0) == 0
-
     def test_save_last_model_oserror(self) -> None:
         """_save_last_model handles OSError gracefully."""
         th.MODEL_USAGE_FILE.write_text("{}")

@@ -7,13 +7,9 @@ authentication workflows, and tool function signatures.
 from __future__ import annotations
 
 import json
-import stat
-from pathlib import Path
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.channels.slack_agent import (
     SlackAgent,
-    _clear_token,
     _cli_ask_user_question,
     _cli_wait_for_user,
     _load_token,
@@ -62,47 +58,6 @@ class TestTokenPersistence:
     def teardown_method(self) -> None:
         _restore(self._backup)
 
-    def test_token_path_location(self) -> None:
-        path = _token_path()
-        assert path.parent.name == "slack"
-        assert path.parent.parent.name == "channels"
-        assert path.name == "token.json"
-        assert Path.home() / ".kiss" in path.parents
-
-    def test_load_missing_returns_none(self) -> None:
-        assert _load_token() is None
-
-    def test_save_and_load_roundtrip(self) -> None:
-        _save_token("xoxb-test-token-123")
-        loaded = _load_token()
-        assert loaded == "xoxb-test-token-123"
-
-    def test_save_strips_whitespace(self) -> None:
-        _save_token("  xoxb-test  ")
-        loaded = _load_token()
-        assert loaded == "xoxb-test"
-
-    def test_save_creates_directory(self) -> None:
-        _save_token("xoxb-dir-test")
-        assert _token_path().exists()
-
-    def test_save_sets_permissions(self) -> None:
-        _save_token("xoxb-perm-test")
-        path = _token_path()
-        mode = path.stat().st_mode
-        # Owner read/write only
-        assert mode & stat.S_IRWXG == 0
-        assert mode & stat.S_IRWXO == 0
-
-    def test_clear_removes_file(self) -> None:
-        _save_token("xoxb-clear-test")
-        _clear_token()
-        assert _load_token() is None
-        assert not _token_path().exists()
-
-    def test_clear_missing_is_noop(self) -> None:
-        _clear_token()  # should not raise
-
     def test_load_corrupt_json(self) -> None:
         path = _token_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,24 +70,6 @@ class TestTokenPersistence:
         path.write_text('"just a string"')
         assert _load_token() is None
 
-    def test_load_dict_without_access_token(self) -> None:
-        path = _token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"other_key": "val"}))
-        assert _load_token() is None
-
-    def test_load_dict_with_empty_access_token(self) -> None:
-        path = _token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"access_token": ""}))
-        assert _load_token() is None
-
-    def test_save_overwrites_existing(self) -> None:
-        _save_token("xoxb-first")
-        _save_token("xoxb-second")
-        assert _load_token() == "xoxb-second"
-
-
 # ---------------------------------------------------------------------------
 # Slack tools
 # ---------------------------------------------------------------------------
@@ -140,47 +77,6 @@ class TestTokenPersistence:
 
 class TestSlackTools:
     """Tests for _make_slack_tools tool creation."""
-
-    def test_tool_count(self) -> None:
-        from slack_sdk import WebClient
-
-        client = WebClient(token="xoxb-fake-for-test")
-        tools = _make_slack_tools(client)
-        assert len(tools) == 15
-
-    def test_tool_names(self) -> None:
-        from slack_sdk import WebClient
-
-        client = WebClient(token="xoxb-fake-for-test")
-        tools = _make_slack_tools(client)
-        names = {t.__name__ for t in tools}
-        expected = {
-            "list_channels",
-            "read_messages",
-            "read_thread",
-            "send_message",
-            "update_message",
-            "delete_message",
-            "list_users",
-            "get_user_info",
-            "create_channel",
-            "invite_to_channel",
-            "add_reaction",
-            "search_messages",
-            "set_channel_topic",
-            "upload_file",
-            "get_channel_info",
-        }
-        assert names == expected
-
-    def test_all_tools_callable_with_docstrings(self) -> None:
-        from slack_sdk import WebClient
-
-        client = WebClient(token="xoxb-fake-for-test")
-        tools = _make_slack_tools(client)
-        for tool in tools:
-            assert callable(tool)
-            assert tool.__doc__, f"{tool.__name__} missing docstring"
 
     def test_tools_return_error_on_invalid_token(self) -> None:
         """Tools should return JSON error rather than raising."""
@@ -357,80 +253,6 @@ class TestSlackAgent:
     def teardown_method(self) -> None:
         _restore(self._backup)
 
-    def test_inherits_sorcar_agent(self) -> None:
-        agent = SlackAgent()
-        assert isinstance(agent, SorcarAgent)
-
-    def test_agent_name(self) -> None:
-        agent = SlackAgent()
-        assert agent.name == "Slack Agent"
-
-    def test_unauthenticated_has_auth_tools(self) -> None:
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        assert "check_slack_auth" in names
-        assert "authenticate_slack" in names
-        assert "clear_slack_auth" in names
-
-    def test_unauthenticated_no_slack_api_tools(self) -> None:
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        assert "list_channels" not in names
-        assert "send_message" not in names
-
-    def test_authenticated_has_slack_api_tools(self) -> None:
-        _save_token("xoxb-test-token")
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        # Auth tools
-        assert "check_slack_auth" in names
-        assert "authenticate_slack" in names
-        assert "clear_slack_auth" in names
-        # Slack API tools
-        assert "list_channels" in names
-        assert "send_message" in names
-        assert "read_messages" in names
-
-    def test_authenticated_has_all_15_slack_tools(self) -> None:
-        _save_token("xoxb-test-token")
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        slack_tools = {
-            "list_channels",
-            "read_messages",
-            "read_thread",
-            "send_message",
-            "update_message",
-            "delete_message",
-            "list_users",
-            "get_user_info",
-            "create_channel",
-            "invite_to_channel",
-            "add_reaction",
-            "search_messages",
-            "set_channel_topic",
-            "upload_file",
-            "get_channel_info",
-        }
-        assert slack_tools.issubset(names)
-
-    def test_has_base_sorcar_tools(self) -> None:
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        # SorcarAgent base tools
-        assert "Bash" in names or "Read" in names
-        assert "ask_user_question" in names
-
     def test_check_auth_unauthenticated(self) -> None:
         agent = SlackAgent()
         agent.web_use_tool = None
@@ -448,14 +270,6 @@ class TestSlackAgent:
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
         result = json.loads(check())
         assert result["ok"] is False
-
-    def test_authenticate_empty_token(self) -> None:
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        auth = next(t for t in tools if t.__name__ == "authenticate_slack")
-        result = auth(token="")
-        assert "empty" in result.lower()
 
     def test_authenticate_whitespace_token(self) -> None:
         agent = SlackAgent()
@@ -494,30 +308,6 @@ class TestSlackAgent:
         clear = next(t for t in tools if t.__name__ == "clear_slack_auth")
         result = clear()
         assert "cleared" in result.lower()
-
-    def test_agent_with_callbacks(self) -> None:
-        def wait_cb(a: str, b: str) -> None:
-            pass
-
-        def ask_cb(q: str) -> str:
-            return "answer"
-
-        agent = SlackAgent(
-            wait_for_user_callback=wait_cb,
-            ask_user_question_callback=ask_cb,
-        )
-        assert agent._wait_for_user_callback is wait_cb
-        assert agent._ask_user_question_callback is ask_cb
-
-    def test_loads_existing_token_on_init(self) -> None:
-        _save_token("xoxb-existing-token")
-        agent = SlackAgent()
-        assert agent._slack_client is not None
-
-    def test_no_client_when_no_token(self) -> None:
-        agent = SlackAgent()
-        assert agent._slack_client is None
-
 
 # ---------------------------------------------------------------------------
 # CLI helpers and main

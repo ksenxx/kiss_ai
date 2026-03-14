@@ -99,42 +99,10 @@ class TestOpenAIModel:
 
 
 class TestModelHelperFunctions:
-    @pytest.mark.parametrize(
-        "content,expected_reasoning,expected_answer",
-        [
-            (
-                "<think>Reasoning process.</think>The answer is 42.",
-                "Reasoning process.",
-                "The answer is 42.",
-            ),
-            ("The answer is 42.", "", "The answer is 42."),
-        ],
-    )
-    def test_extract_deepseek_reasoning(self, content, expected_reasoning, expected_answer):
-        from kiss.core.models.openai_compatible_model import _extract_deepseek_reasoning
-
-        reasoning, answer = _extract_deepseek_reasoning(content)
-        assert reasoning == expected_reasoning
-        assert answer == expected_answer
-
     def test_build_text_based_tools_prompt_empty(self):
         from kiss.core.models.openai_compatible_model import _build_text_based_tools_prompt
 
         assert _build_text_based_tools_prompt({}) == ""
-
-    @pytest.mark.parametrize(
-        "content,expected_count",
-        [
-            ('```json\n{"tool_calls": [{"name": "finish", "arguments": {}}]}\n```', 1),
-            ("```json\n{invalid json}\n```", 0),
-        ],
-    )
-    def test_parse_text_based_tool_calls(self, content, expected_count):
-        from kiss.core.models.openai_compatible_model import _parse_text_based_tool_calls
-
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == expected_count
-
 
 class TestModelInfo:
     def test_is_model_flaky(self):

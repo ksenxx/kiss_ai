@@ -36,7 +36,6 @@
     - [`kiss.agents.autoresearch`](#kissagentsautoresearch)
       - [`kiss.agents.autoresearch.autoresearch_agent`](#kissagentsautoresearchautoresearch_agent)
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
-      - [`kiss.agents.sorcar.prompt_detector`](#kissagentssorcarprompt_detector)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
@@ -1050,15 +1049,6 @@ ______________________________________________________________________
 ##### `class AutoresearchAgentConfig(BaseModel)`
 
 ##### `class AutoresearchConfig(BaseModel)`
-
-______________________________________________________________________
-
-#### `kiss.agents.sorcar.prompt_detector` — *Heuristic detector for Markdown files that contain AI prompts or system instructions.*
-
-##### `class PromptDetector` — An intelligent detector that analyzes Markdown content to determine if it
-
-- **analyze** — Analyzes a file to check if it is a prompt.<br/>`analyze(file_path: str) -> tuple[bool, float, list[str]]`
-  - **Returns:** (Is Prompt?, Confidence Score, Reasons)
 
 ______________________________________________________________________
 

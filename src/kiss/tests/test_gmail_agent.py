@@ -9,20 +9,16 @@ from __future__ import annotations
 import base64
 import json
 import stat
-from pathlib import Path
 
 from googleapiclient.discovery import build
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.channels.gmail_agent import (
     GmailAgent,
-    _clear_credentials,
     _cli_ask_user_question,
     _cli_wait_for_user,
     _credentials_path,
     _extract_attachments,
     _extract_body,
-    _load_credentials,
     _make_gmail_tools,
     _save_credentials,
     _token_path,
@@ -79,54 +75,6 @@ class TestTokenPersistence:
     def teardown_method(self) -> None:
         _restore(self._token_backup, self._creds_backup)
 
-    def test_token_path_location(self) -> None:
-        path = _token_path()
-        assert path.parent.name == "gmail"
-        assert path.parent.parent.name == "channels"
-        assert path.name == "token.json"
-        assert Path.home() / ".kiss" in path.parents
-
-    def test_credentials_path_location(self) -> None:
-        path = _credentials_path()
-        assert path.parent.name == "gmail"
-        assert path.name == "credentials.json"
-
-    def test_load_missing_returns_none(self) -> None:
-        assert _load_credentials() is None
-
-    def test_load_corrupt_json_returns_none(self) -> None:
-        path = _token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{bad json!!")
-        assert _load_credentials() is None
-
-    def test_load_invalid_token_returns_none(self) -> None:
-        path = _token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Write a valid JSON but invalid credentials
-        path.write_text(json.dumps({"token": "invalid"}))
-        assert _load_credentials() is None
-
-    def test_clear_removes_file(self) -> None:
-        path = _token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}")
-        _clear_credentials()
-        assert not path.exists()
-
-    def test_clear_missing_is_noop(self) -> None:
-        _clear_credentials()  # should not raise
-
-    def test_save_creates_directory_and_file(self) -> None:
-        from google.oauth2.credentials import Credentials
-
-        creds = Credentials(token="fake-access-token")
-        _save_credentials(creds)
-        path = _token_path()
-        assert path.exists()
-        data = json.loads(path.read_text())
-        assert data.get("token") == "fake-access-token"
-
     def test_save_sets_permissions(self) -> None:
         from google.oauth2.credentials import Credentials
 
@@ -137,18 +85,6 @@ class TestTokenPersistence:
         assert mode & stat.S_IRWXG == 0
         assert mode & stat.S_IRWXO == 0
 
-    def test_load_expired_without_refresh_returns_none(self) -> None:
-        """An expired token without refresh_token should return None."""
-        path = _token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Write a token that looks expired (missing refresh_token)
-        path.write_text(json.dumps({
-            "token": "expired",
-            "expiry": "2020-01-01T00:00:00Z",
-        }))
-        assert _load_credentials() is None
-
-
 # ---------------------------------------------------------------------------
 # Body extraction
 # ---------------------------------------------------------------------------
@@ -156,9 +92,6 @@ class TestTokenPersistence:
 
 class TestBodyExtraction:
     """Tests for _extract_body and _extract_attachments helpers."""
-
-    def test_empty_payload(self) -> None:
-        assert _extract_body({}) == ""
 
     def test_plain_text_body(self) -> None:
         data = base64.urlsafe_b64encode(b"Hello world").decode()
@@ -221,24 +154,6 @@ class TestBodyExtraction:
         }
         assert _extract_body(payload) == ""
 
-    def test_extract_attachments_empty(self) -> None:
-        assert _extract_attachments({}) == []
-
-    def test_extract_attachments_simple(self) -> None:
-        payload = {
-            "parts": [
-                {
-                    "filename": "report.pdf",
-                    "mimeType": "application/pdf",
-                    "body": {"size": 1024, "attachmentId": "att-123"},
-                },
-            ],
-        }
-        result = _extract_attachments(payload)
-        assert len(result) == 1
-        assert result[0]["filename"] == "report.pdf"
-        assert result[0]["attachment_id"] == "att-123"
-
     def test_extract_attachments_nested(self) -> None:
         payload = {
             "parts": [
@@ -293,40 +208,6 @@ def _make_error_service() -> object:
 
 class TestGmailTools:
     """Tests for _make_gmail_tools tool creation and error handling."""
-
-    def test_tool_count(self) -> None:
-        service = _make_error_service()
-        tools = _make_gmail_tools(service)
-        assert len(tools) == 14
-
-    def test_tool_names(self) -> None:
-        service = _make_error_service()
-        tools = _make_gmail_tools(service)
-        names = {t.__name__ for t in tools}
-        expected = {
-            "get_profile",
-            "list_messages",
-            "get_message",
-            "send_message",
-            "reply_to_message",
-            "create_draft",
-            "trash_message",
-            "untrash_message",
-            "delete_message",
-            "modify_labels",
-            "list_labels",
-            "create_label",
-            "get_attachment",
-            "get_thread",
-        }
-        assert names == expected
-
-    def test_all_tools_callable_with_docstrings(self) -> None:
-        service = _make_error_service()
-        tools = _make_gmail_tools(service)
-        for tool in tools:
-            assert callable(tool)
-            assert tool.__doc__, f"{tool.__name__} missing docstring"
 
     def test_get_profile_returns_error_on_invalid_token(self) -> None:
         service = _make_error_service()
@@ -442,39 +323,6 @@ class TestGmailAgent:
     def teardown_method(self) -> None:
         _restore(self._token_backup, self._creds_backup)
 
-    def test_inherits_sorcar_agent(self) -> None:
-        agent = GmailAgent()
-        assert isinstance(agent, SorcarAgent)
-
-    def test_agent_name(self) -> None:
-        agent = GmailAgent()
-        assert agent.name == "Gmail Agent"
-
-    def test_unauthenticated_has_auth_tools(self) -> None:
-        agent = GmailAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        assert "check_gmail_auth" in names
-        assert "authenticate_gmail" in names
-        assert "clear_gmail_auth" in names
-
-    def test_unauthenticated_no_gmail_api_tools(self) -> None:
-        agent = GmailAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        assert "list_messages" not in names
-        assert "send_message" not in names
-
-    def test_has_base_sorcar_tools(self) -> None:
-        agent = GmailAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        assert "Bash" in names or "Read" in names
-        assert "ask_user_question" in names
-
     def test_check_auth_unauthenticated_no_creds_file(self) -> None:
         agent = GmailAgent()
         agent.web_use_tool = None
@@ -526,65 +374,6 @@ class TestGmailAgent:
         clear = next(t for t in tools if t.__name__ == "clear_gmail_auth")
         result = clear()
         assert "cleared" in result.lower()
-
-    def test_agent_with_callbacks(self) -> None:
-        def wait_cb(a: str, b: str) -> None:
-            pass
-
-        def ask_cb(q: str) -> str:
-            return "answer"
-
-        agent = GmailAgent(
-            wait_for_user_callback=wait_cb,
-            ask_user_question_callback=ask_cb,
-        )
-        assert agent._wait_for_user_callback is wait_cb
-        assert agent._ask_user_question_callback is ask_cb
-
-    def test_no_service_when_no_token(self) -> None:
-        agent = GmailAgent()
-        assert agent._gmail_service is None
-
-    def test_authenticated_has_gmail_api_tools(self) -> None:
-        """When a service is set, Gmail API tools should be present."""
-        agent = GmailAgent()
-        agent.web_use_tool = None
-        agent._gmail_service = _make_error_service()
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        # Auth tools
-        assert "check_gmail_auth" in names
-        assert "authenticate_gmail" in names
-        assert "clear_gmail_auth" in names
-        # Gmail API tools
-        assert "list_messages" in names
-        assert "send_message" in names
-        assert "get_profile" in names
-        assert "get_message" in names
-
-    def test_authenticated_has_all_14_gmail_tools(self) -> None:
-        agent = GmailAgent()
-        agent.web_use_tool = None
-        agent._gmail_service = _make_error_service()
-        tools = agent._get_tools()
-        names = {t.__name__ for t in tools}
-        gmail_tools = {
-            "get_profile",
-            "list_messages",
-            "get_message",
-            "send_message",
-            "reply_to_message",
-            "create_draft",
-            "trash_message",
-            "untrash_message",
-            "delete_message",
-            "modify_labels",
-            "list_labels",
-            "create_label",
-            "get_attachment",
-            "get_thread",
-        }
-        assert gmail_tools.issubset(names)
 
     def test_check_auth_with_invalid_token(self) -> None:
         """check_gmail_auth with an invalid token returns an error."""

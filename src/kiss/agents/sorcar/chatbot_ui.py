@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from kiss.agents.sorcar.browser_ui import (
     BASE_CSS,
     EVENT_HANDLER_JS,
@@ -1021,10 +1023,25 @@ function recordFileUsage(path){
   }).catch(function(){});
 }
 function mkS(){return{thinkEl:null,txtEl:null,bashPanel:null}}
+function resizeInput(){
+  inp.style.height='auto';
+  inp.style.height=inp.scrollHeight+'px';
+  inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+}
+function resetOutputState(){
+  state=mkS();llmPanel=null;llmPanelState=mkS();
+  lastToolName='';pendingPanel=false;_scrollLock=false;
+}
+function enterRunning(){
+  running=true;inp.disabled=true;
+  runPromptBtn.disabled=true;
+  btn.style.display='none';
+  stopBtn.style.display='inline-flex';
+  D.classList.add('running');hideAC();startTimer();
+  inp.style.height='auto';inp.style.overflowY='hidden';
+}
 inp.addEventListener('input',function(){
-  this.style.height='auto';
-  this.style.height=this.scrollHeight+'px';
-  this.style.overflowY=this.scrollHeight>this.clientHeight?'auto':'hidden';
+  resizeInput();
   histIdx=-1;
   clearGhost();
   if(getAtCtx()){
@@ -1127,6 +1144,26 @@ function connectSSE(){
     _sseReconnTimer=setTimeout(connectSSE,delay);
   };
 }
+function processOutputEvent(ev){
+  var t=ev.type;
+  if(t==='tool_call'){
+    lastToolName=ev.name||'';
+    llmPanel=null;llmPanelState=mkS();pendingPanel=false;
+  }
+  if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
+  if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
+    llmPanel=mkEl('div','llm-panel');
+    O.appendChild(llmPanel);
+    llmPanelState=mkS();pendingPanel=false;
+  }
+  var target=O,tState=state;
+  if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
+    ||t==='text_delta'||t==='text_end')){
+    target=llmPanel;tState=llmPanelState;
+  }
+  handleOutputEvent(ev,target,tState);
+  if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+}
 function handleEvent(ev){
   var t=ev.type;
   if(t==='thinking_start'||t==='thinking_delta'||t==='text_delta'
@@ -1139,12 +1176,7 @@ function handleEvent(ev){
   case'theme_changed':applyTheme(ev);break;
   case'focus_chatbox':window.focus();inp.focus();break;
   case'external_run':
-    running=true;inp.disabled=true;
-    runPromptBtn.disabled=true;
-    btn.style.display='none';
-    stopBtn.style.display='inline-flex';
-    D.classList.add('running');hideAC();startTimer();
-    inp.style.height='auto';inp.style.overflowY='hidden';
+    enterRunning();
     inp.value=ev.text||'';
     pendingUserMsg={text:ev.text,images:[]};
     pendingFiles=[];renderFileChips();
@@ -1161,8 +1193,7 @@ function handleEvent(ev){
     document.getElementById('merge-toolbar').style.display='none';
     merging=false;inp.disabled=false;
     btn.disabled=false;uploadBtn.disabled=false;
-    inp.placeholder='Ask anything\u2026 (@ files'
- +'\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)';
+    inp.placeholder=_inputPlaceholder;
     document.getElementById('input-text-wrap').style.cursor='';
     inp.focus();break;
   case'code_server_restarted':{
@@ -1172,8 +1203,7 @@ function handleEvent(ev){
     }
     break};
   case'clear':
-    O.innerHTML='';state=mkS();
-    _scrollLock=false;
+    O.innerHTML='';resetOutputState();
     showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
   case'user_browser_action':{
@@ -1244,23 +1274,7 @@ function handleEvent(ev){
     O.appendChild(stEl);
     setReady('Stopped');loadTasks();break}
   default:{
-    if(t==='tool_call'){
-      lastToolName=ev.name||'';
-      llmPanel=null;llmPanelState=mkS();pendingPanel=false;
-    }
-    if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
-    if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
-      llmPanel=mkEl('div','llm-panel');
-      O.appendChild(llmPanel);
-      llmPanelState=mkS();pendingPanel=false;
-    }
-    var target=O,tState=state;
-    if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
-      ||t==='text_delta'||t==='text_end')){
-      target=llmPanel;tState=llmPanelState;
-    }
-    handleOutputEvent(ev,target,tState);
-    if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+    processOutputEvent(ev);
     if(running)showSpinner();
   }}
   sb();
@@ -1378,12 +1392,7 @@ function looksLikeFilePath(s){
   return false;
 }
 function doSubmitTask(task){
-  running=true;inp.disabled=true;
-  runPromptBtn.disabled=true;
-  btn.style.display='none';
-  stopBtn.style.display='inline-flex';
-  D.classList.add('running');hideAC();startTimer();
-  inp.style.height='auto';inp.style.overflowY='hidden';
+  enterRunning();
   pendingUserMsg={text:task,images:pendingFiles.filter(function(f){
     return f.mime_type.startsWith('image/');
   }).map(function(f){return f.url})};
@@ -1423,9 +1432,7 @@ clearBtn.addEventListener('click',function(){
     +'<p>Describe a task and the agent will work on it</p>'
     +'<div id="suggestions"></div></div>';
   suggestionsEl=document.getElementById('suggestions');
-  state=mkS();
-  llmPanel=null;llmPanelState=mkS();
-  lastToolName='';pendingPanel=false;_scrollLock=false;
+  resetOutputState();
   pendingFiles=[];renderFileChips();
   loadWelcome();inp.value='';inp.focus();
 });
@@ -1610,9 +1617,7 @@ function selectAC(item){
     var np=before.length+item.text.length+sep.length;
     inp.setSelectionRange(np,np);
     recordFileUsage(item.text);
-    inp.style.height='auto';
-    inp.style.height=inp.scrollHeight+'px';
-    inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+    resizeInput();
   }
   hideAC();inp.focus();
 }
@@ -1644,9 +1649,7 @@ function updateGhost(){
 }
 function acceptGhost(){
   inp.value+=ghostSuggest;
-  inp.style.height='auto';
-  inp.style.height=inp.scrollHeight+'px';
-  inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+  resizeInput();
   clearGhost();inp.focus();
 }
 function fetchGhost(){
@@ -1693,8 +1696,7 @@ function loadTasks(){
 function replayTaskEvents(idx,txt){
   inp.value=txt;inp.focus();
   if(sidebar.classList.contains('open')){toggleSidebar();}
-  O.innerHTML='';state=mkS();llmPanel=null;llmPanelState=mkS();
-  lastToolName='';pendingPanel=false;_scrollLock=false;
+  O.innerHTML='';resetOutputState();
   suggestionsEl=null;
   showUserMsg({text:txt,images:[]});
   fetch('/task-events?idx='+idx).then(function(r){return r.json()})
@@ -1707,23 +1709,7 @@ function replayTaskEvents(idx,txt){
         ||t==='followup_suggestion'){
         handleEvent(ev);return;
       }
-      if(t==='tool_call'){
-        lastToolName=ev.name||'';
-        llmPanel=null;llmPanelState=mkS();pendingPanel=false;
-      }
-      if(t==='tool_result'&&lastToolName!=='finish'){pendingPanel=true;}
-      if(pendingPanel&&(t==='thinking_start'||t==='text_delta')){
-        llmPanel=mkEl('div','llm-panel');
-        O.appendChild(llmPanel);
-        llmPanelState=mkS();pendingPanel=false;
-      }
-      var target=O,tState=state;
-      if(llmPanel&&(t==='thinking_start'||t==='thinking_delta'||t==='thinking_end'
-        ||t==='text_delta'||t==='text_end')){
-        target=llmPanel;tState=llmPanelState;
-      }
-      handleOutputEvent(ev,target,tState);
-      if(target===llmPanel)llmPanel.scrollTop=llmPanel.scrollHeight;
+      processOutputEvent(ev);
     });
     inp.value=txt;
     sb();
@@ -1899,8 +1885,7 @@ runPromptBtn.addEventListener('click',function(){
     .then(function(r){return r.json()}).then(function(d){
     if(d.content){
       inp.value=d.content;
-      inp.style.height='auto';
-      inp.style.height=inp.scrollHeight+'px';
+      resizeInput();
       submitTask();
     }
   }).catch(function(){});
@@ -1971,11 +1956,6 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
         ' stroke-width="2.5" stroke-linecap="round"'
         ' stroke-linejoin="round"'
     )
-    _s20 = (
-        ' viewBox="0 0 24 24" fill="none" stroke="currentColor"'
-        ' stroke-width="2" stroke-linecap="round"'
-        ' stroke-linejoin="round"'
-    )
     _svg_accept = f'<svg{_s25}><polyline points="20 6 9 17 4 12"/></svg>'
     _svg_reject = (
         f'<svg{_s25}><line x1="18" y1="6" x2="6" y2="18"/>'
@@ -1995,6 +1975,11 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
     )
 
     _sep = '<span class="mt-sep"></span>'
+    _textarea_placeholder = (
+        "Ask anything\u2026 (@ files, \u2318/ctrl-k toggle to editor,"
+        " \u2318/ctrl-l to run selected text from the editor)"
+    )
+    json_placeholder = json.dumps(_textarea_placeholder)
 
     return (
         HTML_HEAD.format(title=title, css=css)
@@ -2047,7 +2032,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" rows="3"
-              placeholder="Ask anything\u2026 (@ files,\u2318/ctrl-k toggle to editor, \u2318/ctrl-l to run selected text from the editor)"
+              placeholder="{_textarea_placeholder}"
               autocomplete="off"></textarea>
             <div id="merge-warning">Resolve all diffs before proceeding</div>
           </div>
@@ -2108,6 +2093,7 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
   </div>
 </div>
 <script>
+var _inputPlaceholder={json_placeholder};
 {EVENT_HANDLER_JS}
 {CHATBOT_JS}
 </script>
