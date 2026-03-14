@@ -48,6 +48,8 @@ SYSTEM_PROMPT = f"""
   are appended to the file.  The file could be very large.
   Pay more attention to the recent tasks over old tasks. Do not try to finish a
   task from the task history. DO NOT WRITE/EDIT the task history.
+- If you don't know the context of a vague task, look at the latest tasks in the 
+  task history from latest to oldest to get the context.
 - Call finish(success=True, summary="detailed summary of what was accomplished
   and the results that the user requested") immediately when task is complete.
 - Whenever the user asks the agent to show something, create a webpage and show
