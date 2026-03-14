@@ -176,7 +176,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 ### Key Features
 
 - **KISSAgent with ReAct Loop**: The core agent runs a generate-execute-observe loop with native function calling, automatic tool schema generation from Python function signatures and docstrings, trajectory saving, and per-step budget tracking.
-- **RelentlessAgent for Long-Running Tasks**: Extends `KISSAgent` with auto-continuation across multiple sub-sessions (up to 10000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
+- **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
 - **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, plus full browser automation via Playwright with accessibility-tree-based element selection.
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
 - **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (300+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
@@ -503,6 +503,7 @@ kiss/
 │   │       ├── anthropic_model.py # Anthropic model implementation
 │   │       └── model_info.py      # Model info: pricing, context, capabilities
 │   ├── channels/        # Communication channel integrations
+│   │   ├── gmail_agent.py          # Gmail agent with OAuth2 authentication
 │   │   └── slack_agent.py          # Slack bot agent
 │   ├── docker/          # Docker integration
 │   │   └── docker_manager.py
@@ -518,15 +519,19 @@ kiss/
 │   │   ├── conftest.py
 │   │   ├── run_all_models_test.py          # Run tests across all models
 │   │   ├── test_a_model.py
+│   │   ├── test_ask_user_browser_action.py
+│   │   ├── test_ask_user_browser_multistep.py
+│   │   ├── test_ask_user_question.py
 │   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
 │   │   ├── test_autoresearch.py
 │   │   ├── test_browser_close_shutdown.py
 │   │   ├── test_chat_history_events.py
-│   │   ├── test_chatbot_tasks.py
 │   │   ├── test_chatbot_ui_spinner.py
 │   │   ├── test_chatbot_ui.py
+│   │   ├── test_clear_btn_welcome.py
 │   │   ├── test_cli_options.py
+│   │   ├── test_code_review_fixes.py
 │   │   ├── test_code_server_keybinding.py
 │   │   ├── test_code_server_watchdog.py
 │   │   ├── test_commit_push.py
@@ -542,7 +547,8 @@ kiss/
 │   │   ├── test_generate_api_docs.py
 │   │   ├── test_gepa_batched.py
 │   │   ├── test_gepa_progress_callback.py
-│   │   ├── test_increment_usage.py
+│   │   ├── test_gepa_sanitize.py
+│   │   ├── test_gmail_agent.py
 │   │   ├── test_integration_branch_coverage.py
 │   │   ├── test_internal.py
 │   │   ├── test_kiss_agent_agentic.py
@@ -563,6 +569,7 @@ kiss/
 │   │   ├── test_slack_agent.py
 │   │   ├── test_sorcar_bash_streaming.py
 │   │   ├── test_sorcar_branch_coverage.py
+│   │   ├── test_sorcar_cli_callbacks.py
 │   │   ├── test_sorcar_coverage.py
 │   │   ├── test_sorcar_cs_integ.py
 │   │   ├── test_sorcar_instance_isolation.py
@@ -577,10 +584,11 @@ kiss/
 │   │   ├── test_stop_agent_thread.py
 │   │   ├── test_stream_event_parser.py
 │   │   ├── test_task_history_jsonl.py
+│   │   ├── test_task_history_scale.py
 │   │   ├── test_token_callback.py
 │   │   ├── test_tool_exception_handling.py
+│   │   ├── test_uncovered_branches.py
 │   │   ├── test_update_models_preview.py
-│   │   ├── test_usage_info_string.py
 │   │   ├── test_useful_tools.py
 │   │   ├── test_vscode_panel.py
 │   │   ├── test_web_use_tool.py

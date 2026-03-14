@@ -53,4 +53,4 @@ For the app, called gmail, create an {app}\_agent.py in src/kiss/channels/, an e
 
 Can you add the task results and the events file name as fields to each json object in task_history.jsonl. The file must update the result field once the sorcar agent finishes its task. If the task fails or is interruped by the user, then also update the result field with a suitable message. If the task is incomplete add the progress summary as result to the task.
 
-Can you look at install.sh and installlib.sh and create a standalone macos x package for the project containing all dependencies such as code server, uv, git, brew if needed, Xcode develoeprs tools.  The package MUST be installable without internet. 
+Can you look at install.sh and installlib.sh and create a standalone macos x package for the project containing all dependencies such as code server, uv, git, brew if needed, Xcode develoeprs tools. The package MUST be installable without internet.
