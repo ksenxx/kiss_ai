@@ -1317,15 +1317,22 @@ def run_chatbot(
                 logger.warning("webbrowser.open() returned False for %s", url)
         except Exception:
             logger.warning("Failed to open browser", exc_info=True)
+            cmd: list[str] = []
             if sys.platform == "darwin":
+                cmd = ["open", url]
+            elif sys.platform.startswith("linux"):
+                cmd = ["xdg-open", url]
+            elif sys.platform == "win32":
+                cmd = ["cmd", "/c", "start", "", url]
+            if cmd:
                 try:
                     subprocess.Popen(
-                        ["open", url],
+                        cmd,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
                 except Exception:
-                    logger.warning("Fallback 'open' command also failed", exc_info=True)
+                    logger.warning("Fallback command %s also failed", cmd, exc_info=True)
 
     async def _on_startup() -> None:  # pragma: no cover – browser launch
         asyncio.create_task(_open_browser_async())

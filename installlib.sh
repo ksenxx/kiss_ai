@@ -8,7 +8,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 mkdir -p myproject
 cd myproject
 uv init --python 3.13
-uv add kiss-agent-framework
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 uv add kiss-agent-framework
 echo "Installed kiss-agent-framework in a fresh environment in the folder myproject."
 
 if [[ -z "${ANTHROPIC_API_KEY}" ]]; then

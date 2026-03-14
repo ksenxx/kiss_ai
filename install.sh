@@ -17,7 +17,7 @@ cd kiss_ai
 
 uv venv --python 3.13
 source .venv/bin/activate
-uv sync
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 uv sync
 
 if [[ -z "${ANTHROPIC_API_KEY}" ]]; then
   echo "KISS Sorcar requires ANTHROPIC_API_KEY in the environment" 

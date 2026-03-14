@@ -652,10 +652,7 @@ class TestWebUseToolHeadless:
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
 
-        self.tool = WebUseTool(
-            headless=True,
-            user_data_dir=None,  # Don't use persistent profile
-        )
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -698,23 +695,6 @@ class TestWebUseToolHeadless:
         assert "Hello World" in result
 
 
-class TestWebUseToolContextArgs:
-    def test_launch_kwargs_non_chromium(self) -> None:
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        tool = WebUseTool(headless=True, browser_type="firefox", user_data_dir=None)
-        kwargs = tool._launch_kwargs()
-        assert kwargs["headless"] is True
-        assert "args" not in kwargs
-
-    def test_launch_kwargs_non_headless_chromium(self) -> None:
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        tool = WebUseTool(headless=False, browser_type="chromium", user_data_dir=None)
-        kwargs = tool._launch_kwargs()
-        assert kwargs["headless"] is False
-        assert "channel" in kwargs
-
 class TestWebUseToolPersistentContext:
     """Test WebUseTool with persistent context (user_data_dir set)."""
 
@@ -722,7 +702,7 @@ class TestWebUseToolPersistentContext:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
 
         with tempfile.TemporaryDirectory() as d:
-            tool = WebUseTool(headless=True, user_data_dir=d)
+            tool = WebUseTool(user_data_dir=d)
             try:
                 result = tool.go_to_url("data:text/html,<h1>Persistent</h1>")
                 assert "Persistent" in result or isinstance(result, str)
@@ -736,7 +716,7 @@ class TestWebUseToolResolveLocator:
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
 
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()
@@ -747,7 +727,7 @@ class TestWebUseToolEdgeCases:
     def setup_method(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
 
-        self.tool = WebUseTool(headless=True, user_data_dir=None)
+        self.tool = WebUseTool(user_data_dir=None)
 
     def teardown_method(self) -> None:
         self.tool.close()

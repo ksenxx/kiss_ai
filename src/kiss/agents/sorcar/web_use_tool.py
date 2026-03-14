@@ -1,22 +1,22 @@
 """Browser automation tool for LLM agents using Playwright.
 
-Uses Playwright's native APIs (aria_snapshot, locators, keyboard/mouse)
-with zero JavaScript injection to avoid bot detection.
+Uses headless Playwright for page analysis and automation (accessibility tree,
+clicking, typing, screenshots). Opens URLs in the user's default OS browser
+when user interaction is needed (ask_user_browser_action).
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import subprocess
 import sys
+import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-_AUTO_DETECT = "auto"
-KISS_PROFILE_DIR = str(Path.home() / ".kiss" / "browser_profile")
 
 INTERACTIVE_ROLES = {
     "link",
@@ -63,24 +63,22 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
 
 
 class WebUseTool:
-    """Browser automation tool using Playwright with zero JS injection."""
+    """Browser automation tool using headless Playwright + default OS browser.
+
+    Uses headless Playwright (chromium) for all page analysis and automation.
+    Opens URLs in the user's default OS browser only when user interaction
+    is needed (ask_user_browser_action).
+    """
 
     def __init__(
         self,
-        browser_type: str = "chromium",
-        headless: bool = False,
         viewport: tuple[int, int] = (1280, 900),
-        user_data_dir: str | None = _AUTO_DETECT,
+        user_data_dir: str | None = None,
         wait_for_user_callback: Callable[[str, str], None] | None = None,
+        **_kwargs: Any,
     ) -> None:
-        self.browser_type = browser_type
-        self.headless = headless
         self.viewport = viewport
-        self.user_data_dir: str | None
-        if user_data_dir == _AUTO_DETECT:
-            self.user_data_dir = KISS_PROFILE_DIR
-        else:
-            self.user_data_dir = user_data_dir
+        self.user_data_dir = user_data_dir
         self._wait_for_user_callback = wait_for_user_callback
         self._playwright: Any = None
         self._browser: Any = None
@@ -99,28 +97,24 @@ class WebUseTool:
             "device_scale_factor": 2,
         }
 
-    def _launch_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"headless": self.headless}
-        if self.browser_type == "chromium":
-            kwargs["args"] = [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-infobars",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ]
-            if not self.headless:
-                kwargs["channel"] = "chrome"
-        return kwargs
-
     def _ensure_browser(self) -> None:
         if self._page is not None:
             return
         from playwright.sync_api import sync_playwright
 
         self._playwright = sync_playwright().start()
-        launcher = getattr(self._playwright, self.browser_type)
-        kwargs = self._launch_kwargs()
+        launcher = self._playwright.chromium
+        kwargs: dict[str, Any] = {
+            "headless": True,
+            "channel": "chrome",
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-infobars",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        }
 
         if self.user_data_dir:
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
@@ -393,12 +387,38 @@ class WebUseTool:
         self._elements = []
         return "Browser closed."
 
-    def ask_user_browser_action(self, instruction: str, url: str = "") -> str:
-        """Launch browser for user interaction, wait for completion, return page state.
+    @staticmethod
+    def _open_in_default_browser(url: str) -> None:
+        """Open a URL in the user's default OS browser."""
+        try:
+            if not webbrowser.open(url):
+                logger.warning("webbrowser.open() returned False for %s", url)
+        except Exception:
+            logger.warning("Failed to open default browser", exc_info=True)
+            cmd: list[str] = []
+            if sys.platform == "darwin":
+                cmd = ["open", url]
+            elif sys.platform.startswith("linux"):
+                cmd = ["xdg-open", url]
+            elif sys.platform == "win32":
+                cmd = ["cmd", "/c", "start", "", url]
+            if cmd:
+                try:
+                    subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    logger.warning("Fallback command %s also failed", cmd, exc_info=True)
 
-        Use when the agent needs the human to interact with the browser directly —
+    def ask_user_browser_action(self, instruction: str, url: str = "") -> str:
+        """Open URL in user's default browser for interaction, wait for completion.
+
+        Use when the agent needs the human to interact with a webpage directly —
         CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction
-        the agent cannot automate.
+        the agent cannot automate. Opens the URL in the user's default OS browser
+        (Chrome, Safari, Firefox, etc.) rather than a Playwright-controlled window.
 
         Args:
             instruction: What the user should do (e.g. "Please solve the CAPTCHA").
@@ -408,11 +428,13 @@ class WebUseTool:
             Updated accessibility tree after the user signals they are done.
         """
         self._ensure_browser()
+        target_url = url or self._page.url
         if url:
             self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             self._wait_for_stable()
+        self._open_in_default_browser(target_url)
         if self._wait_for_user_callback:
-            self._wait_for_user_callback(instruction, self._page.url)
+            self._wait_for_user_callback(instruction, target_url)
         return self._get_ax_tree()
 
     def get_tools(self) -> list[Callable[..., str]]:

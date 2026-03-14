@@ -124,7 +124,7 @@ class SorcarAgent(RelentlessAgent):
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
-            headless: Whether to run the browser in headless mode. Defaults to config value.
+            headless: Deprecated, ignored. Browser always runs headless.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
@@ -132,10 +132,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
-        actual_headless = headless if headless is not None else cfg.headless
         self.web_use_tool = WebUseTool(
-            headless=actual_headless,
             wait_for_user_callback=self._wait_for_user_callback,
         )
 
