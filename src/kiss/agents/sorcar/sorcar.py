@@ -223,6 +223,15 @@ def run_chatbot(
             logger.debug("Exception caught", exc_info=True)
     cs_url = f"http://127.0.0.1:{cs_port}"
     cs_binary = shutil.which("code-server")
+    if not cs_binary:
+        # Fallback: check the offline installer's well-known paths
+        for _cs_path in (
+            Path.home() / ".kiss-install" / "bin" / "code-server",
+            Path.home() / ".kiss-install" / "code-server" / "bin" / "code-server",
+        ):
+            if _cs_path.is_file():
+                cs_binary = str(_cs_path)
+                break
 
     def _code_server_launch_args() -> list[str]:  # pragma: no cover – requires code-server binary
         assert cs_binary is not None

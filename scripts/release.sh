@@ -106,34 +106,25 @@ publish_to_pypi() {
     local version="$1"
     
     print_step "Building package for PyPI..."
-    rm -rf dist/ build/
+    rm -rf dist/*.tar.gz dist/*.whl
+    uv build
     
-    if ! uv run python -c "import build" &>/dev/null; then
-        print_info "Installing build package..."
-        uv pip install build twine
-    fi
-    
-    uv run python -m build
-    
-    if [[ ! -d "dist" ]] || [[ -z "$(ls -A dist/)" ]]; then
-        print_error "Build failed - no files in dist/"
+    if [[ -z "$(ls dist/*.tar.gz dist/*.whl 2>/dev/null)" ]]; then
+        print_error "Build failed - no .tar.gz or .whl files in dist/"
         return 1
     fi
     
     print_info "Built packages:"
-    ls -la dist/
-    
-    print_step "Checking package..."
-    uv run python -m twine check dist/*
+    ls -la dist/*.tar.gz dist/*.whl
     
     print_step "Uploading to PyPI..."
-    if [[ -z "$UV_PUBLISH_TOKEN" ]]; then
+    if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
         print_error "UV_PUBLISH_TOKEN environment variable is not set"
         print_info "Please set it with: export UV_PUBLISH_TOKEN='pypi-your-token-here'"
         return 1
     fi
     
-    uv run python -m twine upload dist/* -u __token__ -p "$UV_PUBLISH_TOKEN"
+    uv publish
     
     print_info "Successfully published version $version to PyPI"
     print_info "View at: https://pypi.org/project/${PYPI_PACKAGE_NAME}/${version}/"
@@ -238,7 +229,29 @@ main() {
             --notes "Release $VERSION
 
 ## Downloads
-- **kiss-offline-installer.pkg** — macOS offline installer (bundles uv, code-server, Python 3.13, git, and all dependencies)"
+- **kiss-offline-installer.pkg** — macOS offline installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
+
+## macOS Installation
+
+The installer package is not signed with an Apple Developer certificate. macOS Gatekeeper will block it by default. To install, use **one** of these methods:
+
+### Method 1: System Settings (recommended)
+1. Double-click \`kiss-offline-installer.pkg\` — you'll see a warning dialog
+2. Open **System Settings → Privacy & Security**
+3. Scroll down to find *\"kiss-offline-installer.pkg\" was blocked*
+4. Click **Open Anyway** and confirm
+
+### Method 2: Remove quarantine attribute
+\`\`\`bash
+xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
+open ~/Downloads/kiss-offline-installer.pkg
+\`\`\`
+
+### Method 3: Command-line install
+\`\`\`bash
+xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
+sudo installer -pkg ~/Downloads/kiss-offline-installer.pkg -target /
+\`\`\`"
         print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
     else
         print_warn "Offline installer .pkg not found at $OFFLINE_PKG — skipping GitHub release asset upload"
