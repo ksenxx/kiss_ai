@@ -106,34 +106,25 @@ publish_to_pypi() {
     local version="$1"
     
     print_step "Building package for PyPI..."
-    rm -rf dist/ build/
+    rm -rf dist/*.tar.gz dist/*.whl
+    uv build
     
-    if ! uv run python -c "import build" &>/dev/null; then
-        print_info "Installing build package..."
-        uv pip install build twine
-    fi
-    
-    uv run python -m build
-    
-    if [[ ! -d "dist" ]] || [[ -z "$(ls -A dist/)" ]]; then
-        print_error "Build failed - no files in dist/"
+    if [[ -z "$(ls dist/*.tar.gz dist/*.whl 2>/dev/null)" ]]; then
+        print_error "Build failed - no .tar.gz or .whl files in dist/"
         return 1
     fi
     
     print_info "Built packages:"
-    ls -la dist/
-    
-    print_step "Checking package..."
-    uv run python -m twine check dist/*
+    ls -la dist/*.tar.gz dist/*.whl
     
     print_step "Uploading to PyPI..."
-    if [[ -z "$UV_PUBLISH_TOKEN" ]]; then
+    if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
         print_error "UV_PUBLISH_TOKEN environment variable is not set"
         print_info "Please set it with: export UV_PUBLISH_TOKEN='pypi-your-token-here'"
         return 1
     fi
     
-    uv run python -m twine upload dist/* -u __token__ -p "$UV_PUBLISH_TOKEN"
+    uv publish
     
     print_info "Successfully published version $version to PyPI"
     print_info "View at: https://pypi.org/project/${PYPI_PACKAGE_NAME}/${version}/"
