@@ -75,7 +75,7 @@ class TestSorcarAgentCallbackWiring:
     def test_ask_user_question_without_callback(self) -> None:
         """Without callback, ask_user_question returns fallback message."""
         agent = SorcarAgent("test")
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
+        agent.web_use_tool = WebUseTool(user_data_dir=None)
         try:
             tools = agent._get_tools()
             ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
@@ -93,7 +93,7 @@ class TestSorcarAgentCallbackWiring:
         agent = SorcarAgent("test")
         # Simulate what sorcar.py does: patch callback after creation
         agent._ask_user_question_callback = lambda q: f"UI: {q}"
-        agent.web_use_tool = WebUseTool(headless=True, user_data_dir=None)
+        agent.web_use_tool = WebUseTool(user_data_dir=None)
         try:
             tools = agent._get_tools()
             ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")

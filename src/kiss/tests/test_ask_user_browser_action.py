@@ -49,7 +49,7 @@ def http_server():
 class TestAskUserBrowserAction:
     def test_with_url_navigates_first(self, http_server: str) -> None:
         """When url is provided, it navigates to that URL before returning."""
-        tool = WebUseTool(headless=True, user_data_dir=None, wait_for_user_callback=None)
+        tool = WebUseTool(user_data_dir=None, wait_for_user_callback=None)
         try:
             tool.go_to_url(http_server)
             result = tool.ask_user_browser_action(

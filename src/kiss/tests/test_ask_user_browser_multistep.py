@@ -145,7 +145,7 @@ def http_server():
 
 @pytest.fixture()
 def tool():
-    t = WebUseTool(headless=True, user_data_dir=None, wait_for_user_callback=None)
+    t = WebUseTool(user_data_dir=None, wait_for_user_callback=None)
     yield t
     t.close()
 class TestPageElementInteraction:
@@ -158,7 +158,7 @@ class TestPageElementInteraction:
         def callback(instruction: str, url: str) -> None:
             interactions.append((instruction, url))
 
-        t = WebUseTool(headless=True, user_data_dir=None, wait_for_user_callback=callback)
+        t = WebUseTool(user_data_dir=None, wait_for_user_callback=callback)
         try:
             # Navigate to settings page
             result = t.go_to_url(f"{http_server}/settings")
@@ -259,7 +259,7 @@ class TestConcurrentMultiStepCallbacks:
             call_log.append(f"end:{instruction}")
 
         t = WebUseTool(
-            headless=True, user_data_dir=None, wait_for_user_callback=fast_callback
+            user_data_dir=None, wait_for_user_callback=fast_callback
         )
 
         all_done = threading.Event()

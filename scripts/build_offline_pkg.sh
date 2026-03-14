@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Build a standalone macOS offline installer package (.pkg) for the KISS project.
-# Bundles: uv, code-server (with node), Python 3.13, git, Playwright Chromium,
+# Bundles: uv, code-server (with node), Python 3.13, git,
 # all Python wheels, and the project source.
 #
 # Usage: ./scripts/build_offline_pkg.sh
@@ -15,7 +15,7 @@ STAGE="$PROJECT_ROOT/.kiss.artifacts/tmp/offline-pkg"
 PAYLOAD="$STAGE/payload"
 SCRIPTS="$STAGE/scripts"
 PKG_ID="com.kiss.offline-installer"
-PKG_VERSION="1.0.0"
+PKG_VERSION=$(grep '__version__' "$PROJECT_ROOT/src/kiss/_version.py" | sed 's/.*"\(.*\)".*/\1/')
 OUTPUT="$PROJECT_ROOT/dist/kiss-offline-installer.pkg"
 ARCH="$(uname -m)"  # arm64 or x86_64
 
@@ -126,22 +126,7 @@ uv build --wheel --out-dir "$BUNDLE/wheels"
 echo "   wheels: $(du -sh "$BUNDLE/wheels" | cut -f1) ($(ls "$BUNDLE/wheels" | wc -l | tr -d ' ') files)"
 
 # ---------------------------------------------------------------------------
-# 6. Playwright Chromium browser
-# ---------------------------------------------------------------------------
-echo ">>> Bundling Playwright Chromium..."
-PW_CACHE="$HOME/Library/Caches/ms-playwright"
-mkdir -p "$BUNDLE/playwright"
-for browser_dir in "$PW_CACHE"/chromium-* "$PW_CACHE"/chromium_headless_shell-* "$PW_CACHE"/ffmpeg-*; do
-    if [ -d "$browser_dir" ]; then
-        bname="$(basename "$browser_dir")"
-        echo "   Copying $bname..."
-        cp -R "$browser_dir" "$BUNDLE/playwright/$bname"
-    fi
-done
-echo "   playwright: $(du -sh "$BUNDLE/playwright" | cut -f1)"
-
-# ---------------------------------------------------------------------------
-# 7. Project source
+# 6. Project source
 # ---------------------------------------------------------------------------
 echo ">>> Bundling project source..."
 mkdir -p "$BUNDLE/project"
@@ -154,7 +139,7 @@ rsync -a --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
 echo "   project: $(du -sh "$BUNDLE/project" | cut -f1)"
 
 # ---------------------------------------------------------------------------
-# 8. Create the offline install script (runs as postinstall in .pkg)
+# 7. Create the offline install script (runs as postinstall in .pkg)
 # ---------------------------------------------------------------------------
 echo ">>> Creating install script..."
 cat > "$BUNDLE/install-offline.sh" << 'INSTALL_SCRIPT'
@@ -217,19 +202,7 @@ if [ -d "$KISS_BUNDLE_DIR/git" ]; then
     export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
 fi
 
-# 5. Install Playwright browsers
-echo ">>> Installing Playwright browsers..."
-PW_DEST="$HOME/Library/Caches/ms-playwright"
-mkdir -p "$PW_DEST"
-for browser_dir in "$KISS_BUNDLE_DIR/playwright/"*/; do
-    browser_name="$(basename "$browser_dir")"
-    if [ ! -d "$PW_DEST/$browser_name" ]; then
-        echo "   Installing $browser_name..."
-        cp -R "$browser_dir" "$PW_DEST/$browser_name"
-    fi
-done
-
-# 6. Set up the project
+# 5. Set up the project
 echo ">>> Setting up project..."
 export PATH="$INSTALL_BASE/bin:$HOME/.local/bin:$PATH"
 if [ -d "$KISS_BUNDLE_DIR/project" ]; then
@@ -242,10 +215,10 @@ if [ -d "$KISS_BUNDLE_DIR/project" ]; then
     
     # Install from local wheels (fully offline, including pre-built project wheel)
     # Explicitly target the project venv to avoid uv resolving a different workspace
-    "$INSTALL_BASE/bin/uv" pip install --python "$PROJECT_DIR/.venv" --no-index --find-links "$KISS_BUNDLE_DIR/wheels" kiss-agent-framework
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "$INSTALL_BASE/bin/uv" pip install --python "$PROJECT_DIR/.venv" --no-index --find-links "$KISS_BUNDLE_DIR/wheels" kiss-agent-framework
 fi
 
-# 7. Create shell profile additions
+# 6. Create shell profile additions
 PROFILE_SNIPPET="$INSTALL_BASE/env.sh"
 cat > "$PROFILE_SNIPPET" << EOF
 # KISS Agent Framework - added by offline installer
@@ -260,18 +233,60 @@ echo "To use KISS, add the following to your shell profile (~/.zshrc or ~/.bashr
 echo ""
 echo "  source $PROFILE_SNIPPET"
 echo ""
-echo "Then set your API keys:"
-echo "  export ANTHROPIC_API_KEY=your_key_here"
-echo "  export GEMINI_API_KEY=your_key_here"
-echo ""
 echo "Project installed at: $PROJECT_DIR"
-echo "Run: cd $PROJECT_DIR && source .venv/bin/activate && sorcar"
+
+# 7. Prompt for API keys and launch sorcar (only in interactive terminal)
+if [ -t 0 ]; then
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        echo ""
+        echo "ANTHROPIC_API_KEY is not set."
+        printf "Enter your Anthropic API key: "
+        read -r ANTHROPIC_API_KEY
+        export ANTHROPIC_API_KEY
+    fi
+
+    if [ -z "${GEMINI_API_KEY:-}" ]; then
+        echo ""
+        echo "GEMINI_API_KEY is not set."
+        printf "Enter your Gemini API key: "
+        read -r GEMINI_API_KEY
+        export GEMINI_API_KEY
+    fi
+
+    # Persist the keys in env.sh so future shells have them
+    cat >> "$PROFILE_SNIPPET" << EOF
+export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+export GEMINI_API_KEY="$GEMINI_API_KEY"
+EOF
+
+    # 8. Launch sorcar
+    echo ""
+    echo "Launching sorcar..."
+    cd "$PROJECT_DIR"
+    exec "$PROJECT_DIR/.venv/bin/sorcar" "$PROJECT_DIR"
+else
+    echo ""
+    echo "To set API keys, add to your shell profile (~/.zshrc or ~/.bashrc):"
+    echo "  export ANTHROPIC_API_KEY=your_key"
+    echo "  export GEMINI_API_KEY=your_key"
+
+    # Launch sorcar in a new Terminal window via a .command file
+    LAUNCH_SCRIPT="$INSTALL_BASE/launch-sorcar.command"
+    cat > "$LAUNCH_SCRIPT" << EOF
+#!/bin/bash
+source "$PROFILE_SNIPPET" 2>/dev/null
+cd "$PROJECT_DIR"
+exec "$PROJECT_DIR/.venv/bin/sorcar" "$PROJECT_DIR"
+EOF
+    chmod +x "$LAUNCH_SCRIPT"
+    open "$LAUNCH_SCRIPT" 2>/dev/null || true
+fi
 INSTALL_SCRIPT
 
 chmod +x "$BUNDLE/install-offline.sh"
 
 # ---------------------------------------------------------------------------
-# 9. Create the .pkg postinstall script
+# 8. Create the .pkg postinstall script
 # ---------------------------------------------------------------------------
 echo ">>> Creating package scripts..."
 cat > "$SCRIPTS/postinstall" << 'POSTINSTALL'
@@ -313,7 +328,7 @@ POSTINSTALL
 chmod +x "$SCRIPTS/postinstall"
 
 # ---------------------------------------------------------------------------
-# 10. Build the .pkg
+# 9. Build the .pkg
 # ---------------------------------------------------------------------------
 echo ">>> Building .pkg..."
 mkdir -p "$(dirname "$OUTPUT")"
@@ -346,7 +361,6 @@ without an internet connection:
   • code-server (VS Code in the browser)
   • Python 3.13
   • Git
-  • Playwright Chromium browser
   • All Python dependencies
   • KISS project source
 

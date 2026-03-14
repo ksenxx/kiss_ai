@@ -27,15 +27,17 @@ The human wakes up to a log of ~100 experiments and (hopefully) a better model.
 
 ```
 AutoresearchAgent (autoresearch_agent.py)
-    └── RelentlessAgent (core/relentless_agent.py)
-            └── KISSAgent (core/kiss_agent.py)
-                    └── LLM API (Claude, GPT-4, Gemini, etc.)
+    └── extends RelentlessAgent (core/relentless_agent.py)
+            └── extends Base (core/base.py)
+        uses KISSAgent (core/kiss_agent.py) for each sub-session
+            └── LLM API (Claude, GPT-4, Gemini, etc.)
 ```
 
 The `AutoresearchAgent` extends `RelentlessAgent`, which provides automatic
-sub-session continuation for long-running tasks. When the agent approaches its
-step limit, it summarizes progress and continues in a new sub-session — enabling
-indefinite autonomous operation.
+sub-session continuation for long-running tasks. Each sub-session creates a
+fresh `KISSAgent` instance. When the agent approaches its step limit, it
+summarizes progress and continues in a new sub-session — enabling indefinite
+autonomous operation.
 
 ### Key Files
 
