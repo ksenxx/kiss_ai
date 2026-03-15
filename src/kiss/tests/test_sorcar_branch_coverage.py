@@ -321,6 +321,7 @@ class TestSorcarAgentMain:
                     "kiss.agents.sorcar.sorcar_agent",
                     "--max_steps", "0",
                     "--max_budget", "0.0",
+                    "--max_sub_sessions", "1",
                     "--work_dir", tmpdir,
                     "--headless", "true",
                     "-f", task_file,

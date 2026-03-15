@@ -28,6 +28,7 @@ from kiss.agents.sorcar.sorcar import (
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
 )
+from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import RelentlessAgent
 
 
@@ -49,19 +50,20 @@ class TestSorcarAgentDirect:
         agent = SorcarAgent("test_agent")
         tmpdir = tempfile.mkdtemp()
         try:
-            result = agent.run(
-                prompt_template="analyze",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                attachments=[
-                    Attachment(data=b"fake_img", mime_type="image/png"),
-                    Attachment(data=b"fake_pdf", mime_type="application/pdf"),
-                ],
-            )
-            assert isinstance(result, str)
+            with pytest.raises(KISSError):
+                agent.run(
+                    prompt_template="analyze",
+                    work_dir=tmpdir,
+                    max_steps=1,
+                    max_budget=0.001,
+                    max_sub_sessions=1,
+                    headless=True,
+                    verbose=False,
+                    attachments=[
+                        Attachment(data=b"fake_img", mime_type="image/png"),
+                        Attachment(data=b"fake_pdf", mime_type="application/pdf"),
+                    ],
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -72,16 +74,17 @@ class TestSorcarAgentDirect:
         editor_file = os.path.join(tmpdir, "test.py")
         Path(editor_file).write_text("print('hello')")
         try:
-            result = agent.run(
-                prompt_template="fix this file",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                current_editor_file=editor_file,
-            )
-            assert isinstance(result, str)
+            with pytest.raises(KISSError):
+                agent.run(
+                    prompt_template="fix this file",
+                    work_dir=tmpdir,
+                    max_steps=1,
+                    max_budget=0.001,
+                    max_sub_sessions=1,
+                    headless=True,
+                    verbose=False,
+                    current_editor_file=editor_file,
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -92,16 +95,17 @@ class TestSorcarAgentDirect:
         agent = SorcarAgent("test_agent")
         tmpdir = tempfile.mkdtemp()
         try:
-            result = agent.run(
-                prompt_template="analyze",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                attachments=[Attachment(data=b"text data", mime_type="text/plain")],
-            )
-            assert isinstance(result, str)
+            with pytest.raises(KISSError):
+                agent.run(
+                    prompt_template="analyze",
+                    work_dir=tmpdir,
+                    max_steps=1,
+                    max_budget=0.001,
+                    max_sub_sessions=1,
+                    headless=True,
+                    verbose=False,
+                    attachments=[Attachment(data=b"text data", mime_type="text/plain")],
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -124,15 +128,17 @@ class TestSorcarAgentDirect:
             agent = SorcarAgent("test_persist")
             tmpdir = tempfile.mkdtemp()
             try:
-                agent.run(
-                    prompt_template="echo done",
-                    work_dir=tmpdir,
-                    max_steps=1,
-                    max_budget=0.001,
-                    headless=True,
-                    verbose=False,
-                    model_name="claude-opus-4-6",
-                )
+                with pytest.raises(KISSError):
+                    agent.run(
+                        prompt_template="echo done",
+                        work_dir=tmpdir,
+                        max_steps=1,
+                        max_budget=0.001,
+                        max_sub_sessions=1,
+                        headless=True,
+                        verbose=False,
+                        model_name="claude-opus-4-6",
+                    )
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
