@@ -278,7 +278,7 @@ class TestDisableCopilotScmButton:
 
     def test_bad_package_json(self) -> None:
         with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "extensions" / "github.copilot-chat-1.0.0"
+            ext_dir = Path(d) / "github.copilot-chat-1.0.0"
             ext_dir.mkdir(parents=True)
             (ext_dir / "package.json").write_text("not json")
             _disable_copilot_scm_button(d)  # Should not raise
@@ -362,7 +362,7 @@ class TestInstallCopilotExtension:
         from kiss.agents.sorcar.code_server import _install_copilot_extension
 
         with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "extensions" / "github.copilot-1.0.0"
+            ext_dir = Path(d) / "github.copilot-1.0.0"
             ext_dir.mkdir(parents=True)
             _install_copilot_extension(d)  # Should return early
 
@@ -373,7 +373,7 @@ class TestDisableCopilotScmButtonEdgeCases:
     def test_copilot_chat_without_package_json(self) -> None:
         """Directory exists but no package.json."""
         with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "extensions" / "github.copilot-chat-1.0.0"
+            ext_dir = Path(d) / "github.copilot-chat-1.0.0"
             ext_dir.mkdir(parents=True)
             _disable_copilot_scm_button(d)  # Should not raise
 
@@ -433,7 +433,7 @@ class TestCodeServerUncoveredBranches:
     def test_disable_copilot_write_oserror(self) -> None:
         """Cover 487-488: OSError when writing back package.json."""
         with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "extensions" / "github.copilot-chat-1.0.0"
+            ext_dir = Path(d) / "github.copilot-chat-1.0.0"
             ext_dir.mkdir(parents=True)
             pkg = {
                 "contributes": {
@@ -460,19 +460,17 @@ class TestCodeServerUncoveredBranches:
     def test_save_untracked_base_oserror_on_copy(self) -> None:
         """Cover 748-749: OSError when copying untracked file (unreadable)."""
         tmpdir = tempfile.mkdtemp()
-        data_dir = tempfile.mkdtemp()
         try:
             _init_git_repo(tmpdir)
             noread = Path(tmpdir, "noread.py")
             noread.write_text("content")
             noread.chmod(0o000)
-            _save_untracked_base(tmpdir, data_dir, {"noread.py"})
+            _save_untracked_base(tmpdir, {"noread.py"})
             base_dir = _untracked_base_dir()
             assert not (base_dir / "noread.py").exists()
         finally:
             Path(tmpdir, "noread.py").chmod(0o644)
             shutil.rmtree(tmpdir, ignore_errors=True)
-            shutil.rmtree(data_dir, ignore_errors=True)
             base_dir = _untracked_base_dir()
             if base_dir.exists():
                 shutil.rmtree(base_dir, ignore_errors=True)

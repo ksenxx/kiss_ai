@@ -210,7 +210,8 @@ class TestSetupCodeServer:
         ws_dir = Path(self.tmpdir) / "User" / "workspaceStorage" / "ws1" / "chatSessions"
         ws_dir.mkdir(parents=True)
         (ws_dir / "session.json").write_text("{}")
-        _setup_code_server(self.tmpdir)
+        ext_dir = os.path.join(self.tmpdir, "extensions")
+        _setup_code_server(self.tmpdir, ext_dir)
         assert not ws_dir.exists()
 
 
@@ -934,7 +935,7 @@ class TestCodeServerFinalEdgeCases:
         Path(work_dir, "ut.txt").write_text("original\n")
         pre_untracked = _capture_untracked(work_dir)
         pre_hashes = _snapshot_files(work_dir, pre_untracked | {"f.txt"})
-        _save_untracked_base(work_dir, os.path.join(self.tmpdir, "data"), pre_untracked)
+        _save_untracked_base(work_dir, pre_untracked)
 
         # Agent modifies tracked file and untracked file
         Path(work_dir, "f.txt").write_text("a\nX\n")

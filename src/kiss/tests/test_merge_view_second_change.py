@@ -45,7 +45,7 @@ class TestMergeViewExcludesPreExistingDiffs:
                 repo, set(pre_hunks_1.keys()) | pre_untracked_1
             )
             _save_untracked_base(
-                repo, data_dir, pre_untracked_1 | set(pre_hunks_1.keys())
+                repo, pre_untracked_1 | set(pre_hunks_1.keys())
             )
             Path(repo, "example.md").write_text("line 1\nMODIFIED line 2\nline 3\n")
             result1 = _prepare_merge_view(
@@ -62,7 +62,7 @@ class TestMergeViewExcludesPreExistingDiffs:
                 repo, set(pre_hunks_2.keys()) | pre_untracked_2
             )
             _save_untracked_base(
-                repo, data_dir, pre_untracked_2 | set(pre_hunks_2.keys())
+                repo, pre_untracked_2 | set(pre_hunks_2.keys())
             )
             # Agent adds a new line but doesn't touch line 2
             Path(repo, "example.md").write_text(
@@ -102,7 +102,7 @@ class TestMergeViewExcludesPreExistingDiffs:
                 repo, set(pre_hunks.keys()) | pre_untracked
             )
             _save_untracked_base(
-                repo, data_dir, pre_untracked | set(pre_hunks.keys())
+                repo, pre_untracked | set(pre_hunks.keys())
             )
             assert len(pre_hunks) > 0  # There are pre-existing diffs
 

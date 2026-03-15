@@ -838,15 +838,17 @@ class TestCodeServerEdgeCases:
     def test_setup_code_server_corrupt_settings(self) -> None:
         """Test _setup_code_server with corrupt settings.json."""
         data_dir = tempfile.mkdtemp()
+        ext_dir = tempfile.mkdtemp()
         try:
             user_dir = Path(data_dir) / "User"
             user_dir.mkdir(parents=True)
             (user_dir / "settings.json").write_text("not json!")
-            _setup_code_server(data_dir)
+            _setup_code_server(data_dir, ext_dir)
             result = json.loads((user_dir / "settings.json").read_text())
             assert "workbench.colorTheme" in result
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
+            shutil.rmtree(ext_dir, ignore_errors=True)
 
 
 class TestTaskHistoryRemaining:

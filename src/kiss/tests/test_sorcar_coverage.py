@@ -498,15 +498,14 @@ class TestCodeServerBranches:
     def test_install_copilot_no_binary(self) -> None:
         """code-server binary not found.
         Covers line 496 (cs_binary not found -> return)."""
-        data_dir = self.tmpdir
-        ext_dir = Path(data_dir) / "extensions"
+        ext_dir = Path(self.tmpdir) / "extensions"
         ext_dir.mkdir(parents=True)
         # No copilot extension dirs
         # Override PATH to ensure code-server isn't found
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = ""
         try:
-            _install_copilot_extension(data_dir)
+            _install_copilot_extension(str(ext_dir))
         finally:
             os.environ["PATH"] = old_path
 
@@ -537,8 +536,8 @@ class TestCodeServerBranchesR2:
     def test_disable_copilot_non_matching_items(self) -> None:
         """scm_items with items that DON'T match copilot command.
         Covers branch 476->475 (the False path of the if at 476)."""
-        data_dir = self.tmpdir
-        ext_dir = Path(data_dir) / "extensions" / "github.copilot-chat-0.1"
+        extensions_base = Path(self.tmpdir) / "extensions"
+        ext_dir = extensions_base / "github.copilot-chat-0.1"
         ext_dir.mkdir(parents=True)
         pkg = {
             "contributes": {
@@ -554,7 +553,7 @@ class TestCodeServerBranchesR2:
             }
         }
         (ext_dir / "package.json").write_text(json.dumps(pkg))
-        _disable_copilot_scm_button(data_dir)
+        _disable_copilot_scm_button(str(extensions_base))
         result = json.loads((ext_dir / "package.json").read_text())
         items = result["contributes"]["menus"]["scm/inputBox"]
         # Non-matching item should be unchanged
@@ -672,8 +671,7 @@ class TestInstallCopilotOSError:
     def test_install_copilot_subprocess_oserror(self) -> None:
         """Fake code-server binary (garbage bytes) causes OSError.
         Covers lines 505-507."""
-        data_dir = self.tmpdir
-        ext_dir = Path(data_dir) / "extensions"
+        ext_dir = Path(self.tmpdir) / "extensions"
         ext_dir.mkdir(parents=True)
         fake_bin_dir = os.path.join(self.tmpdir, "bin")
         os.makedirs(fake_bin_dir)
@@ -685,7 +683,7 @@ class TestInstallCopilotOSError:
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = fake_bin_dir + ":" + old_path
         try:
-            _install_copilot_extension(data_dir)
+            _install_copilot_extension(str(ext_dir))
         finally:
             os.environ["PATH"] = old_path
 
