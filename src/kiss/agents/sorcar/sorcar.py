@@ -1399,9 +1399,63 @@ def run_chatbot(
     _cleanup()
 
 
+def _auto_update() -> None:  # pragma: no cover – CLI helper
+    """Pull latest commits and uv sync, then re-exec if updated."""
+    if os.environ.get("_SORCAR_UPDATED"):
+        return
+    project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+    git_dir = project_root / ".git"
+    if not git_dir.is_dir():
+        return
+    print("Sorcar: checking for updates…")
+    try:
+        pull = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        print(pull.stdout.strip() if pull.stdout.strip() else "(no output from git pull)")
+        pull_out = pull.stdout.strip()
+        print(pull_out if pull_out else "(no output from git pull)")
+        if pull.returncode != 0:
+            print(f"git pull failed: {pull.stderr.strip()}", file=sys.stderr)
+            return
+    except Exception as exc:
+        print(f"git pull error: {exc}", file=sys.stderr)
+        return
+    if pull_out == "Already up to date.":
+        print("Sorcar: already up to date.")
+        return
+    try:
+        sync = subprocess.run(
+            ["uv", "sync"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if sync.returncode != 0:
+            print(f"uv sync failed: {sync.stderr.strip()}", file=sys.stderr)
+            return
+        print("Sorcar: updated. Relaunching…")
+    except Exception as exc:
+        print(f"uv sync error: {exc}", file=sys.stderr)
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    env = os.environ.copy()
+    env["_SORCAR_UPDATED"] = "1"
+    sorcar_bin = str(project_root / ".venv" / "bin" / "sorcar")
+    os.execve(sorcar_bin, [sorcar_bin, *sys.argv[1:]], env)
+
+
 def main() -> None:  # pragma: no cover – CLI entry point
     """Launch the KISS Sorcar chatbot UI."""
     import argparse
+
+    _auto_update()
 
     missing = [k for k in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY") if not os.environ.get(k)]
     if missing:
