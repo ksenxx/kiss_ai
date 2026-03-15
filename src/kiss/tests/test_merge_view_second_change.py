@@ -1,5 +1,6 @@
 """Tests for merge view showing up on second file change after accepting first."""
 
+import json
 import os
 import subprocess
 import tempfile
@@ -74,7 +75,6 @@ class TestMergeViewExcludesPreExistingDiffs:
             assert result2.get("status") == "opened"
             # Only the line 4 addition should show, not the line 2 change
             merge_file = Path(data_dir) / "pending-merge.json"
-            import json
             manifest = json.loads(merge_file.read_text())
             hunks = manifest["files"][0]["hunks"]
             # Should have exactly 1 hunk for the added line 4
@@ -115,10 +115,66 @@ class TestMergeViewExcludesPreExistingDiffs:
             )
             # Should not include example.md (unchanged by agent)
             if result.get("status") == "opened":
-                import json
                 manifest = json.loads(
                     (Path(data_dir) / "pending-merge.json").read_text()
                 )
                 file_names = [f["name"] for f in manifest["files"]]
                 assert "example.md" not in file_names
+
+
+class TestHunkCount:
+    """Verify _prepare_merge_view returns hunk_count in the result."""
+
+    def test_hunk_count_single_file_single_hunk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(
+                repo, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(repo, pre_untracked | set(pre_hunks.keys()))
+
+            # Modify one line → one hunk
+            Path(repo, "example.md").write_text("line 1\nMODIFIED\nline 3\n")
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result["status"] == "opened"
+            assert result["hunk_count"] == 1
+
+    def test_hunk_count_multiple_hunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # Commit a longer file so we get two separate hunks
+            Path(repo, "example.md").write_text(
+                "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n"
+            )
+            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "longer"], cwd=repo, capture_output=True
+            )
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(
+                repo, set(pre_hunks.keys()) | pre_untracked
+            )
+            _save_untracked_base(repo, pre_untracked | set(pre_hunks.keys()))
+
+            # Modify lines 1 and 10 (far apart → two hunks)
+            Path(repo, "example.md").write_text(
+                "A\nb\nc\nd\ne\nf\ng\nh\ni\nJ\n"
+            )
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            assert result["status"] == "opened"
+            assert result["hunk_count"] >= 2
 
