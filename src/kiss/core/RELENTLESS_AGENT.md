@@ -225,7 +225,7 @@ There is a pattern in engineering where the most sophisticated solution is also 
 
 1. **The finish function is the schema.** Python function signatures and docstrings define the structured output. The LLM reads them through native function calling. No separate output parsers needed.
 
-1. **Error recovery reuses the same pattern.** A crashed session is summarized by a non-agentic LLM call, and the summary feeds into the next session identically to a normal handoff. There is no separate error recovery codepath.
+1. **Error recovery reuses the same pattern.** A crashed session is summarized by an agentic LLM call (with `Read` and `Bash` tools to handle large trajectory files), and the summary feeds into the next session identically to a normal handoff. There is no separate error recovery codepath.
 
 1. **The agent evolves itself.** The README notes that the RelentlessAgent "was self-evolved over time to reduce cost and running time." The KISS Sorcar agent — itself powered by RelentlessAgent — was used to iteratively simplify and improve the RelentlessAgent's own code, prompts, and parameters.
 
@@ -261,7 +261,7 @@ def _get_tools(self) -> list:
 
 ### What SorcarAgent Does Not Do
 
-SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 80 lines of logic (excluding the CLI `main()`), and its entire `run()` method ends with:
+SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 220 lines of logic (excluding the CLI `main()`), and its entire `run()` method ends with:
 
 ```python
 return super().run(

@@ -31,8 +31,11 @@ class TestSetupCodeServer(unittest.TestCase):
         code_server._setup_code_server(self.tmpdir, ext_dir)
         code_server._setup_code_server(self.tmpdir, ext_dir)
         db_path = Path(self.tmpdir) / "User" / "globalStorage" / "state.vscdb"
-        with sqlite3.connect(str(db_path)) as conn:
+        conn = sqlite3.connect(str(db_path))
+        try:
             keys = [r[0] for r in conn.execute("SELECT key FROM ItemTable").fetchall()]
+        finally:
+            conn.close()
         assert len(keys) == len(set(keys))
 
     def test_constants_well_formed(self) -> None:

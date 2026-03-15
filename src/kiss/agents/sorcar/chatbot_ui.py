@@ -1977,7 +1977,8 @@ def _build_html(title: str, code_server_url: str = "", work_dir: str = "") -> st
     _sep = '<span class="mt-sep"></span>'
     _textarea_placeholder = (
         "Ask anything\u2026 (@ files, \u2318/ctrl-k toggle to editor,"
-        " \u2318/ctrl-l to run selected text from the editor)"
+        " \u2318/ctrl-l to run selected text from the editor, "
+        "Shift-enter to add newline)"
     )
     json_placeholder = json.dumps(_textarea_placeholder)
 
