@@ -103,6 +103,7 @@ class WebUseTool:
         }
 
     def _ensure_browser(self) -> None:
+        """Ensure a Playwright browser page is ready, installing Chromium if needed."""
         if self._page is not None:
             return
         from playwright.sync_api import sync_playwright
@@ -111,7 +112,6 @@ class WebUseTool:
         launcher = self._playwright.chromium
         kwargs: dict[str, Any] = {
             "headless": True,
-            "channel": "chrome",
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
@@ -121,6 +121,19 @@ class WebUseTool:
             ],
         }
 
+        try:
+            self._launch_browser(launcher, kwargs)
+        except Exception:
+            # Chromium not installed yet — install it and retry
+            logger.info("Playwright Chromium not found, installing...")
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True,
+                capture_output=True,
+            )
+            self._launch_browser(launcher, kwargs)
+
+    def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self.user_data_dir:
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
             self._context = launcher.launch_persistent_context(
