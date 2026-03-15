@@ -48,12 +48,12 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 ## Installation and Launching KISS Sorcar
 
 You must set the ANTHROPIC_API_KEY and GEMINI_API_KEY in the environment. Then download
-[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.35/kiss-offline-installer.pkg) and
+[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.38/kiss-offline-installer.pkg) and
 install.
 
 # Introduction to KISS Sorcar
 
-**KISS Sorcar** (named after the [Famous Bengali Magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and a **a general purpose agent with web browsing capabilities**. It runs **locally** as a VSCode IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged vscode**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
+**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general-purpose agent with web browsing capabilities**. It runs **locally** as a VS Code IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
 #whatispossible #KISSSorcar
 
@@ -448,7 +448,6 @@ kiss/
 │   │   │   ├── browser_ui.py           # Browser UI base components and BaseBrowserPrinter
 │   │   │   ├── chatbot_ui.py           # Chatbot UI templates: CSS, JavaScript, HTML
 │   │   │   ├── code_server.py          # Code-server setup and git diff/merge utilities
-│   │   │   ├── prompt_detector.py      # Prompt detection utilities
 │   │   │   ├── task_history.py         # Task history, proposals, and file usage persistence
 │   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit
 │   │   │   ├── web_use_tool.py         # WebUseTool with Playwright-based browser automation
@@ -511,6 +510,7 @@ kiss/
 │   │   ├── redundancy_analyzer.py      # Code redundancy analyzer
 │   │   └── update_models.py            # Model info updater script
 │   ├── tests/           # Test suite
+│   │   ├── _sorcar_merge_test_server.py
 │   │   ├── _sorcar_test_server.py
 │   │   ├── _sorcar_test_server_with_cov.py
 │   │   ├── conftest.py
@@ -533,6 +533,7 @@ kiss/
 │   │   ├── test_code_server_watchdog.py
 │   │   ├── test_commit_push.py
 │   │   ├── test_core_branch_coverage.py
+│   │   ├── test_coverage_integration.py
 │   │   ├── test_cs_data_dir_isolation.py
 │   │   ├── test_current_editor_file.py
 │   │   ├── test_disable_copilot_scm.py
@@ -545,12 +546,14 @@ kiss/
 │   │   ├── test_gepa_batched.py
 │   │   ├── test_gepa_progress_callback.py
 │   │   ├── test_gepa_sanitize.py
+│   │   ├── test_github_copilot_token.py
 │   │   ├── test_gmail_agent.py
 │   │   ├── test_integration_branch_coverage.py
 │   │   ├── test_internal.py
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_coverage.py
 │   │   ├── test_kiss_agent_non_agentic.py
+│   │   ├── test_merge_individual_accept.py
 │   │   ├── test_merge_restore_on_close.py
 │   │   ├── test_merge_view_second_change.py
 │   │   ├── test_model_base_class.py
@@ -561,6 +564,7 @@ kiss/
 │   │   ├── test_printer_parity.py
 │   │   ├── test_race_conditions.py
 │   │   ├── test_redundancy_analyzer.py
+│   │   ├── test_relentless_agent.py
 │   │   ├── test_run_prompt_button.py
 │   │   ├── test_scm_commit_message.py
 │   │   ├── test_slack_agent.py
@@ -601,6 +605,7 @@ kiss/
 │       └── templates/
 │           └── index.html
 ├── scripts/             # Repository-level scripts
+│   ├── build_offline_pkg.sh        # Offline macOS package builder
 │   ├── release.sh                  # Release script
 │   ├── test_fresh_lib_install.sh   # Fresh library install test
 │   └── test_fresh_repo_install.sh  # Fresh repo install test
