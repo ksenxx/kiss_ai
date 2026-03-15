@@ -1,6 +1,6 @@
 """Browser automation tool for LLM agents using Playwright.
 
-Uses headless Playwright for page analysis and automation (accessibility tree,
+Uses Playwright for page analysis and automation (accessibility tree,
 clicking, typing, screenshots). Opens URLs in the user's default OS browser
 when user interaction is needed (ask_user_browser_action).
 """
@@ -68,11 +68,11 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
 
 
 class WebUseTool:
-    """Browser automation tool using headless Playwright + default OS browser.
+    """Browser automation tool using Playwright + default OS browser.
 
-    Uses headless Playwright (chromium) for all page analysis and automation.
-    Opens URLs in the user's default OS browser only when user interaction
-    is needed (ask_user_browser_action).
+    Uses non-headless Playwright (chromium) for page analysis and automation,
+    so the user can see the browser window. Opens URLs in the user's default
+    OS browser when user interaction is needed (ask_user_browser_action).
     """
 
     def __init__(
@@ -111,7 +111,7 @@ class WebUseTool:
         self._playwright = sync_playwright().start()
         launcher = self._playwright.chromium
         kwargs: dict[str, Any] = {
-            "headless": True,
+            "headless": False,
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
