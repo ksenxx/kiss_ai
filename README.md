@@ -47,15 +47,14 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-You must set the ANTHROPIC_API_KEY and GEMINI_API_KEY in the environment. Then download
+You must set the `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` in the environment. Then download
 [KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.39/kiss-offline-installer.pkg) and
 install using
 
 ```
 # To install
-open /Users/ksen/work/kiss/dist/kiss-offline-installer.pkg
-# or
-sudo installer -pkg /Users/ksen/work/kiss/dist/kiss-offline-installer.pkg -target /
+xattr -d com.apple.quarantine /path/to/kiss-offline-installer.pkg
+open /path/to/kiss-offline-installer.pkg
 ```
 
 # Introduction to KISS Sorcar
