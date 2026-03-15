@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
@@ -48,10 +50,12 @@ CONTINUATION_PROMPT = """
 SUMMARIZER_PROMPT = """
 # Summarizer
 
-{trajectory}
+The trajectory of the agent is stored in the file: {trajectory_file}
 
 # Instructions
-- Analyze and return a detailed summary of the work done so far as 'result'.
+- Read the trajectory file and analyze it.  The trajectory file could be large.
+- Return a precise chronologically-ordered list of things the agent did
+  with the reason for doing that along with relevant code snippets
 """
 
 
@@ -163,14 +167,20 @@ class RelentlessAgent(Base):
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
+                trajectory_path: Path | None = None
                 try:
+                    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="trajectory_")
+                    os.close(fd)
+                    trajectory_path = Path(tmp)
+                    trajectory_path.write_text(executor.get_trajectory())
+                    shell_tools = UsefulTools()
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")
                     summarizer_result = summarizer_agent.run(
                         model_name=self.model_name,
                         prompt_template=SUMMARIZER_PROMPT,
-                        is_agentic=False,
+                        tools=[shell_tools.Read, shell_tools.Bash],
                         arguments={
-                            "trajectory": executor.get_trajectory(),
+                            "trajectory_file": str(trajectory_path),
                         },
                     )
                     try:
@@ -180,14 +190,17 @@ class RelentlessAgent(Base):
                             if isinstance(parsed, dict)
                             else summarizer_result
                         )
-                    except Exception:
+                    except Exception:  # pragma: no cover
                         logger.debug("Exception caught", exc_info=True)
                         summary_text = summarizer_result
                 except Exception:
                     logger.debug("Exception caught", exc_info=True)
                     summary_text = f"Agent failed: {exc}"
+                finally:
+                    if trajectory_path and trajectory_path.exists():  # pragma: no branch
+                        trajectory_path.unlink()
                 result = yaml.dump(
-                    {"success": False, "summary": summary_text},
+                    {"success": False, "is_continue": True, "summary": summary_text},
                     sort_keys=False,
                 )
 
@@ -196,18 +209,18 @@ class RelentlessAgent(Base):
 
             try:
                 payload = yaml.safe_load(result)
-            except Exception:
+            except Exception:  # pragma: no cover
                 logger.debug("Exception caught", exc_info=True)
                 payload = {}
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict):  # pragma: no cover
                 payload = {}
 
             success = payload.get("success", False)
-            if isinstance(success, str):
+            if isinstance(success, str):  # pragma: no cover
                 success = success.lower() in ("true", "1", "yes")
 
             is_continue = payload.get("is_continue", False)
-            if isinstance(is_continue, str):
+            if isinstance(is_continue, str):  # pragma: no cover
                 is_continue = is_continue.lower() in ("true", "1", "yes")
 
             if not is_continue or success:

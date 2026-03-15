@@ -169,6 +169,7 @@ def run_chatbot(
     running_lock = threading.Lock()
     shutting_down = threading.Event()
     merging = False
+    remaining_hunks = 0
     actual_work_dir = work_dir or os.getcwd()
     file_cache: list[str] = _scan_files(actual_work_dir)
     agent_thread: threading.Thread | None = None
@@ -190,8 +191,13 @@ def run_chatbot(
     # other extensions are installed once and reused across work dirs.
     _shared_extensions_dir = str(_KISS_DIR / "cs-extensions")
 
-    # Restore files from any stale merge state (e.g., previous crash during merge)
-    _restore_merge_files(cs_data_dir, actual_work_dir)
+    # Restore files from any stale merge state (e.g., previous crash during merge).
+    # If hunks were recovered, the merge view will re-open automatically via
+    # pending-merge.json when the extension starts.
+    recovered = _restore_merge_files(cs_data_dir, actual_work_dir)
+    if recovered:
+        merging = True
+        remaining_hunks = recovered
 
     # Read or assign a code-server port for this work directory.
     # The port is stored in a persistent file OUTSIDE the cs data dir so it
@@ -514,7 +520,7 @@ def run_chatbot(
         stop_ev: threading.Event,
         attachments: list | None = None,
     ) -> None:
-        nonlocal running, agent_thread, merging
+        nonlocal running, agent_thread, merging, remaining_hunks
         from kiss.core.models.model import Attachment
 
         # Install per-thread stop event so _check_stop() uses this
@@ -619,6 +625,7 @@ def run_chatbot(
                 if merge_result.get("status") == "opened":
                     with running_lock:
                         merging = True
+                        remaining_hunks = merge_result.get("hunk_count", 0)
                     printer.broadcast({"type": "merge_started"})
             except Exception:  # pragma: no cover – merge view error
                 _log_exc()
@@ -656,10 +663,11 @@ def run_chatbot(
         return True
 
     def _cleanup() -> None:
-        nonlocal merging
+        nonlocal merging, remaining_hunks
         with running_lock:
             was_merging = merging
             merging = False
+            remaining_hunks = 0
         if was_merging:  # pragma: no cover – cleanup during active merge
             _restore_merge_files(cs_data_dir, actual_work_dir)
         stop_agent()
@@ -741,6 +749,8 @@ def run_chatbot(
 
     async def events(request: Request) -> StreamingResponse:
         cq = printer.add_client()
+        if merging:
+            cq.put({"type": "merge_started"})
         _cancel_shutdown()
 
         async def generate() -> AsyncGenerator[str]:
@@ -1156,12 +1166,13 @@ def run_chatbot(
         return JSONResponse({"status": "ok"})
 
     async def merge_action(request: Request) -> JSONResponse:
-        nonlocal merging
+        nonlocal merging, remaining_hunks
         body = await request.json()
         action = body.get("action", "")
         if action == "all-done":
             with running_lock:
                 merging = False
+                remaining_hunks = 0
             printer.broadcast({"type": "merge_ended"})
             _cleanup_merge_data(cs_data_dir)
             return JSONResponse({"status": "ok"})
@@ -1170,6 +1181,22 @@ def run_chatbot(
         pending = os.path.join(cs_data_dir, "pending-action.json")
         with open(pending, "w") as f:
             json.dump({"action": action}, f)
+        if action in ("accept-all", "reject-all"):
+            with running_lock:
+                merging = False
+                remaining_hunks = 0
+            printer.broadcast({"type": "merge_ended"})
+            _cleanup_merge_data(cs_data_dir)
+        elif action in ("accept", "reject"):
+            merge_done = False
+            with running_lock:
+                remaining_hunks = max(0, remaining_hunks - 1)
+                if remaining_hunks == 0:
+                    merging = False
+                    merge_done = True
+            if merge_done:
+                printer.broadcast({"type": "merge_ended"})
+                _cleanup_merge_data(cs_data_dir)
         return JSONResponse({"status": "ok"})
 
     async def _thread_json_response(

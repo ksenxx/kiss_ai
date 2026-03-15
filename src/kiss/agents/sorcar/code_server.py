@@ -189,18 +189,21 @@ function activate(ctx){
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.prevChange',function(){navigateHunk(-1)}));
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.nextChange',function(){navigateHunk(1)}));
   async function applyAll(countProp,startProp,msg){
-    for(var fp of Object.keys(ms)){
-      var s=ms[fp];
-      var ed=await getOrOpenEditor(fp);
-      for(var i=s.hunks.length-1;i>=0;i--){
-        if(s.hunks[i][countProp]>0)await delLines(ed,s.hunks[i][startProp],s.hunks[i][countProp]);
+    try{
+      for(var fp of Object.keys(ms)){
+        var s=ms[fp];
+        var ed=await getOrOpenEditor(fp);
+        for(var i=s.hunks.length-1;i>=0;i--){
+          if(s.hunks[i][countProp]>0)await delLines(ed,s.hunks[i][startProp],s.hunks[i][countProp]);
+        }
+        ed.setDecorations(redDeco,[]);ed.setDecorations(blueDeco,[]);
       }
-      ed.setDecorations(redDeco,[]);ed.setDecorations(blueDeco,[]);
+    }finally{
+      ms={};curHunk=null;
+      await vscode.workspace.saveAll(false);
+      vscode.window.showInformationMessage(msg);
+      firePost('/merge-action',{action:'all-done'});
     }
-    ms={};curHunk=null;
-    await vscode.workspace.saveAll(false);
-    vscode.window.showInformationMessage(msg);
-    firePost('/merge-action',{action:'all-done'});
   }
   ctx.subscriptions.push(vscode.commands.registerCommand('kiss.acceptAll',async function(){
     await applyAll('oc','os','All changes accepted.');
@@ -855,20 +858,26 @@ def _cleanup_merge_data(data_dir: str) -> None:
             _log_exc()
 
 
-def _restore_merge_files(data_dir: str, work_dir: str) -> None:
-    """Restore files to their new-lines-only state and cleanup all merge data.
+def _restore_merge_files(data_dir: str, work_dir: str) -> int:
+    """Restore files and regenerate pending-merge.json for crash recovery.
 
-    Called when Sorcar closes while hunks remain unreviewed. Copies the
+    Called when Sorcar closes while hunks remain unreviewed.  Copies the
     pre-merge-view file versions (containing only the agent's new lines)
-    back to the work directory, then removes all temporary merge data.
+    back to the work directory, then regenerates ``pending-merge.json`` so
+    the merge view automatically re-opens on restart.
 
     Args:
         data_dir: Code-server data directory.
         work_dir: Repository root.
+
+    Returns:
+        Number of recovered hunks (0 if nothing to restore).
     """
     current_dir = Path(data_dir) / "merge-current"
     if not current_dir.is_dir():
-        return
+        return 0
+    merge_temp = Path(data_dir) / "merge-temp"
+    manifest_files: list[dict[str, Any]] = []
     for src in current_dir.rglob("*"):
         if not src.is_file():
             continue
@@ -876,7 +885,37 @@ def _restore_merge_files(data_dir: str, work_dir: str) -> None:
         dest = Path(work_dir) / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
-    _cleanup_merge_data(data_dir)
+        # Compute hunks between base and restored current file
+        base_path = merge_temp / rel
+        if base_path.is_file():
+            hunks = [_hunk_to_dict(*h) for h in _diff_files(str(base_path), str(dest))]
+        else:
+            hunks = _file_as_new_hunks(dest)
+        if hunks:
+            if not base_path.is_file():
+                base_path.parent.mkdir(parents=True, exist_ok=True)
+                base_path.write_text("")
+            manifest_files.append({
+                "name": str(rel),
+                "base": str(base_path),
+                "current": str(dest),
+                "hunks": hunks,
+            })
+    # Clean up merge-current (files already restored) and untracked-base
+    shutil.rmtree(current_dir, ignore_errors=True)
+    ub = _untracked_base_dir()
+    if ub.exists():
+        shutil.rmtree(ub, ignore_errors=True)
+    total_hunks = sum(len(f["hunks"]) for f in manifest_files)
+    if manifest_files:
+        # Regenerate pending-merge.json so the extension re-opens the merge view
+        Path(data_dir, "pending-merge.json").write_text(
+            json.dumps({"branch": "HEAD", "files": manifest_files})
+        )
+    else:
+        # No hunks remain — clean up everything
+        _cleanup_merge_data(data_dir)
+    return total_hunks
 
 
 def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, int]]:
@@ -1061,4 +1100,5 @@ def _prepare_merge_view(
             }
         )
     )
-    return {"status": "opened", "count": len(manifest_files)}
+    total_hunks = sum(len(f["hunks"]) for f in manifest_files)
+    return {"status": "opened", "count": len(manifest_files), "hunk_count": total_hunks}
