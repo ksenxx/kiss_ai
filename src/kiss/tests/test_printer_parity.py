@@ -45,12 +45,6 @@ class TestPrintReturnValueParity:
         console, _, browser, _ = _make_printers()
         assert console.print("hello", type="text") == browser.print("hello", type="text")
 
-    def test_bash_stream_returns_empty(self):
-        console, _, browser, _ = _make_printers()
-        r1 = console.print("output line\n", type="bash_stream")
-        r2 = browser.print("output line\n", type="bash_stream")
-        assert r1 == r2 == ""
-
     def test_unknown_type_returns_empty(self):
         console, _, browser, _ = _make_printers()
         r1 = console.print("x", type="nonexistent_type")

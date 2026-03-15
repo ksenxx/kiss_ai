@@ -2,7 +2,7 @@
 
 # RelentlessAgent: The Elegant Engine Behind Multi-Hour Agentic Tasks in KISS Sorcar IDE
 
-*How ~286 lines of Python solve the hardest problem in agentic coding — and why it deliberately ignores the patterns everyone else uses.*
+*How ~300 lines of Python solve the hardest problem in agentic coding — and why it deliberately ignores the patterns everyone else uses.*
 
 ______________________________________________________________________
 
@@ -68,19 +68,19 @@ The simplicity is intentional. The progress text is the agent's own words — a 
 
 ### Error Recovery with Trajectory Summarization
 
-When a sub-session crashes (API failure, tool exception, unexpected error), the RelentlessAgent does not simply fail. It spawns a separate summarizer agent that reads the crashed session's trajectory and produces a summary:
+When a sub-session crashes (API failure, tool exception, unexpected error), the RelentlessAgent does not simply fail. It spawns a separate summarizer agent that reads the crashed session's trajectory file and produces a summary:
 
 ```python
 summarizer_agent = KISSAgent(f"{self.name} Summarizer")
 summarizer_result = summarizer_agent.run(
     model_name=self.model_name,
     prompt_template=SUMMARIZER_PROMPT,
-    is_agentic=False,
-    arguments={"trajectory": executor.get_trajectory()},
+    tools=[shell_tools.Read, shell_tools.Bash],
+    arguments={"trajectory_file": str(trajectory_path)},
 )
 ```
 
-This non-agentic call (single generation, no tool loop) distills whatever work was done before the crash. The next sub-session then receives this summary as progress context, allowing it to continue from the last known good state rather than restarting from scratch. The error recovery is itself just another application of the same summarize-and-continue pattern.
+This agentic call uses `Read` and `Bash` tools to read the (potentially large) trajectory file and distill whatever work was done before the crash. The next sub-session then receives this summary as progress context, allowing it to continue from the last known good state rather than restarting from scratch. The error recovery is itself just another application of the same summarize-and-continue pattern.
 
 ### The `finish` Function as Structured Output
 
@@ -165,9 +165,9 @@ The RelentlessAgent's summary is written by the working agent itself, in the mom
 
 The default `max_sub_sessions` is 10,000. With 100 steps per session, that is 1,000,000 potential steps (each step can include multiple tool calls). No context window management is needed to reach this scale because each session is independent. Cursor and Claude Code can theoretically run indefinitely with compaction, but their effective capacity degrades with each cycle. The RelentlessAgent's capacity is flat — session 9,999 has exactly the same working memory as session 1.
 
-### 4. Total Cost: ~286 Lines
+### 4. Total Cost: ~300 Lines
 
-The entire [`relentless_agent.py`](relentless_agent.py) is approximately 286 lines of Python, including imports, docstrings, and the prompt templates. For comparison:
+The entire [`relentless_agent.py`](relentless_agent.py) is approximately 300 lines of Python, including imports, docstrings, and the prompt templates. For comparison:
 
 - Cursor's context management involves dynamic context discovery, summarization systems, sub-agent orchestration, and a custom-trained MoE model.
 - Claude Code's context management involves the compaction API, session memory systems, CLAUDE.md file management, and manual intervention workflows.

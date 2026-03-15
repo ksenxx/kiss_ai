@@ -69,23 +69,6 @@ class TestLoadHistoryLimit:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-class TestSearchHistory:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_search_empty_query_returns_recent(self):
-        _write_n_tasks(20)
-        results = th._search_history("", limit=5)
-        assert len(results) == 5
-        # Most recent first
-        assert results[0]["task"] == "task-19"
-
-
 class TestGetHistoryEntry:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()

@@ -13,6 +13,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _log_exc() -> None:
+    logger.debug("Exception caught", exc_info=True)
+
+
 def _truncate_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
         return output
@@ -46,7 +50,7 @@ def _extract_leading_command_name(part: str) -> str | None:
     try:
         tokens = shlex.split(part)
     except ValueError:
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
         return None
     if not tokens:
         return None
@@ -198,7 +202,7 @@ class UsefulTools:
                 )
             return text
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error: {e}"
 
     def Write(  # noqa: N802
@@ -218,7 +222,7 @@ class UsefulTools:
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error: {e}"
 
     def Edit(  # noqa: N802
@@ -262,7 +266,7 @@ class UsefulTools:
             replaced = count if replace_all else 1
             return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error: {e}"
 
     def Bash(  # noqa: N802
@@ -319,7 +323,7 @@ class UsefulTools:
                 raise
             return _format_bash_result(process.returncode, stdout, max_output_chars)
         except Exception as e:  # pragma: no cover
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error: {e}"
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:

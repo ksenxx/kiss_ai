@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 from kiss.agents.sorcar.sorcar_agent import (
-    _DEFAULT_TASK,
     SorcarAgent,
     _build_arg_parser,
-    _resolve_task,
     cli_ask_user_question,
     cli_wait_for_user,
 )
@@ -215,26 +210,6 @@ class TestPromptConstruction:
 # _resolve_task
 # ---------------------------------------------------------------------------
 
-
-class TestResolveTask:
-    """Cover all three branches of _resolve_task."""
-
-    def test_from_file(self, tmp_path: Path) -> None:
-        """Priority 1: -f flag reads from file."""
-        task_file = tmp_path / "task.txt"
-        task_file.write_text("task from file")
-        args = argparse.Namespace(f=str(task_file), task="ignored")
-        assert _resolve_task(args) == "task from file"
-
-    def test_from_task_arg(self) -> None:
-        """Priority 2: --task flag."""
-        args = argparse.Namespace(f=None, task="task from arg")
-        assert _resolve_task(args) == "task from arg"
-
-    def test_default_task(self) -> None:
-        """Priority 3: default task."""
-        args = argparse.Namespace(f=None, task=None)
-        assert _resolve_task(args) == _DEFAULT_TASK
 
 # ---------------------------------------------------------------------------
 # _build_arg_parser

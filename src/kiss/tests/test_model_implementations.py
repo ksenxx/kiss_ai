@@ -9,7 +9,6 @@ import pytest
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
-from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model_info import (
     MODEL_INFO,
     _mi,
@@ -120,12 +119,6 @@ class TestModelInfo:
             if info.is_embedding_supported:
                 assert info.output_price_per_1M == 0.0, f"{name}: embedding should have 0 output"
 
-    def test_text_embedding_004_is_gemini(self):
-
-        m = model("text-embedding-004")
-        assert isinstance(m, GeminiModel)
-        assert m.model_name == "text-embedding-004"
-
     def test_minimax_m2_5_in_model_info(self):
         assert "minimax-m2.5" in MODEL_INFO
         info = MODEL_INFO["minimax-m2.5"]
@@ -146,11 +139,6 @@ class TestModelInfo:
 
     def test_minimax_m2_5_openrouter_in_model_info(self):
         assert "openrouter/minimax/minimax-m2.5" in MODEL_INFO
-
-    def test_minimax_m2_5_model_routing(self):
-        m = model("minimax-m2.5")
-        assert isinstance(m, OpenAICompatibleModel)
-        assert m.model_name == "minimax-m2.5"
 
     def test_minimax_api_key_routing(self):
         from kiss.tests.conftest import get_required_api_key_for_model

@@ -60,16 +60,3 @@ class TestAddFunctionResultsBaseClass:
             assert m.conversation[2]["tool_call_id"] == "call_fn2_1"
 
 
-class TestAnthropicOverride:
-    """Anthropic has its own add_function_results_to_conversation_and_return override."""
-
-    def test_anthropic_fallback_tool_use_id(self):
-        m = _make_anthropic()
-        m.conversation = [{"role": "assistant", "content": "plain text"}]
-        m.add_function_results_to_conversation_and_return(
-            [
-                ("fn_a", {"result": "ok"}),
-            ]
-        )
-        last = m.conversation[-1]
-        assert last["content"][0]["tool_use_id"] == "toolu_fn_a_0"

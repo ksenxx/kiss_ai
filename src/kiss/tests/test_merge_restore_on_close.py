@@ -1,5 +1,6 @@
 """Tests for restoring files to new-lines-only state when Sorcar closes during merge."""
 
+import json
 import os
 import subprocess
 import tempfile
@@ -51,9 +52,23 @@ class TestRestoreMergeFiles:
 
             _prepare_merge_view(repo, data_dir, pre_hunks, pre_untracked, pre_hashes)
 
-            # Simulate interleaved content
+            # Simulate interleaved content (as if extension inserted old lines)
             Path(repo, "sub", "file.txt").write_text("original\nmodified\n")
 
-            _restore_merge_files(data_dir, repo)
+            hunk_count = _restore_merge_files(data_dir, repo)
 
+            # File restored to agent's version
             assert Path(repo, "sub", "file.txt").read_text() == agent_content
+            # Returns hunk count and regenerates pending-merge.json
+            assert hunk_count >= 1
+            manifest = Path(data_dir) / "pending-merge.json"
+            assert manifest.exists()
+            data = json.loads(manifest.read_text())
+            assert len(data["files"]) == 1
+            assert data["files"][0]["name"] == str(Path("sub", "file.txt"))
+
+    def test_restore_no_merge_current_returns_zero(self) -> None:
+        """No merge-current dir means nothing to restore."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assert _restore_merge_files(tmpdir, tmpdir) == 0
+

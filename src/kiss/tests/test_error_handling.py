@@ -6,7 +6,7 @@ import httpx
 from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
 
-from kiss.core.kiss_agent import KISSAgent, _is_retryable_error
+from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 
 _DUMMY_REQUEST = httpx.Request("GET", "https://api.example.com/")
@@ -26,12 +26,6 @@ def _anthropic_auth_error(msg: str = "invalid x-api-key") -> AnthropicAuthError:
         response=httpx.Response(401, request=_DUMMY_REQUEST),
         body=None,
     )
-
-
-class TestIsRetryableError(unittest.TestCase):
-
-    def test_generic_error_with_unauthorized_message_not_retryable(self) -> None:
-        self.assertFalse(_is_retryable_error(Exception("401 Unauthorized")))
 
 
 class TestAgenticLoopAuthError(unittest.TestCase):

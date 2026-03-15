@@ -521,7 +521,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.sorcar.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
 
-##### `class WebUseTool` — Browser automation tool using headless Playwright + default OS browser.
+##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
 
 **Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
 

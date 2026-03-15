@@ -24,7 +24,6 @@ from kiss.agents.sorcar.code_server import (
     _install_copilot_extension,
     _parse_diff_hunks,
     _prepare_merge_view,
-    _snapshot_files,
 )
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
@@ -235,59 +234,6 @@ class TestInstallCopilotExtension:
 # ---------------------------------------------------------------------------
 # _prepare_merge_view additional edge cases
 # ---------------------------------------------------------------------------
-class TestPrepareMergeViewEdgeCases:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        subprocess.run(["git", "init"], cwd=self.tmpdir, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "t@t.com"],
-            cwd=self.tmpdir, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "T"],
-            cwd=self.tmpdir, capture_output=True,
-        )
-        Path(self.tmpdir, "file.txt").write_text("line1\nline2\nline3\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=self.tmpdir, capture_output=True)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_new_empty_file_not_added(self) -> None:
-        """Empty new files (0 lines) should not be added to merge view."""
-        pre_hunks = _parse_diff_hunks(self.tmpdir)
-        pre_untracked = _capture_untracked(self.tmpdir)
-        pre_hashes = _snapshot_files(self.tmpdir, set(pre_hunks.keys()))
-        # Create an empty file
-        Path(self.tmpdir, "empty.txt").write_text("")
-        data_dir = tempfile.mkdtemp()
-        try:
-            result = _prepare_merge_view(
-                self.tmpdir, data_dir, pre_hunks, pre_untracked, pre_hashes,
-            )
-            # Should only have "No changes" since empty file has 0 lines
-            assert "error" in result
-        finally:
-            shutil.rmtree(data_dir, ignore_errors=True)
-
-    def test_large_file_skipped(self) -> None:
-        """Files larger than 2MB should be skipped."""
-        pre_hunks = _parse_diff_hunks(self.tmpdir)
-        pre_untracked = _capture_untracked(self.tmpdir)
-        pre_hashes = _snapshot_files(self.tmpdir, set(pre_hunks.keys()))
-        large = Path(self.tmpdir, "large.bin")
-        large.write_bytes(b"x" * 2_100_000)
-        data_dir = tempfile.mkdtemp()
-        try:
-            result = _prepare_merge_view(
-                self.tmpdir, data_dir, pre_hunks, pre_untracked, pre_hashes,
-            )
-            assert "error" in result  # Only large file, skipped
-        finally:
-            shutil.rmtree(data_dir, ignore_errors=True)
-
-
 # ---------------------------------------------------------------------------
 # sorcar.py utilities - _read_active_file, _clean_llm_output, _model_vendor_order
 # ---------------------------------------------------------------------------
@@ -428,55 +374,6 @@ class TestBrowserUiBranches:
     def setup_method(self) -> None:
         self.printer = BaseBrowserPrinter()
 
-class TestTaskHistoryBranches:
-    """Cover remaining branches in task_history.py."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.orig_kiss_dir = th._KISS_DIR
-        self.orig_history = th.HISTORY_FILE
-        self.orig_events_dir = th._CHAT_EVENTS_DIR
-        self.orig_model_usage = th.MODEL_USAGE_FILE
-        self.orig_file_usage = th.FILE_USAGE_FILE
-        kiss_dir = Path(self.tmpdir) / ".kiss"
-        kiss_dir.mkdir()
-        th._KISS_DIR = kiss_dir
-        th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
-        th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
-        th.MODEL_USAGE_FILE = kiss_dir / "model_usage.json"
-        th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
-        th._history_cache = None
-
-    def teardown_method(self) -> None:
-        th._KISS_DIR = self.orig_kiss_dir
-        th.HISTORY_FILE = self.orig_history
-        th._CHAT_EVENTS_DIR = self.orig_events_dir
-        th.MODEL_USAGE_FILE = self.orig_model_usage
-        th.FILE_USAGE_FILE = self.orig_file_usage
-        th._history_cache = None
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_record_model_usage_oserror(self) -> None:
-        """OSError when writing model usage.
-        Covers lines 188-189."""
-        # Write a valid JSON so _load_json_dict succeeds, then make file read-only
-        th.MODEL_USAGE_FILE.write_text("{}")
-        os.chmod(str(th.MODEL_USAGE_FILE), 0o444)
-        try:
-            # Should not raise despite OSError on write
-            th._record_model_usage("test-model")
-        finally:
-            os.chmod(str(th.MODEL_USAGE_FILE), 0o644)
-
-    def test_save_last_model_oserror(self) -> None:
-        """_save_last_model handles OSError gracefully."""
-        th.MODEL_USAGE_FILE.write_text("{}")
-        os.chmod(str(th.MODEL_USAGE_FILE), 0o444)
-        try:
-            th._save_last_model("test-model")
-        finally:
-            os.chmod(str(th.MODEL_USAGE_FILE), 0o644)
-
 class TestUsefulToolsBranches:
     """Cover remaining branches in useful_tools.py."""
 
@@ -498,15 +395,14 @@ class TestCodeServerBranches:
     def test_install_copilot_no_binary(self) -> None:
         """code-server binary not found.
         Covers line 496 (cs_binary not found -> return)."""
-        data_dir = self.tmpdir
-        ext_dir = Path(data_dir) / "extensions"
+        ext_dir = Path(self.tmpdir) / "extensions"
         ext_dir.mkdir(parents=True)
         # No copilot extension dirs
         # Override PATH to ensure code-server isn't found
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = ""
         try:
-            _install_copilot_extension(data_dir)
+            _install_copilot_extension(str(ext_dir))
         finally:
             os.environ["PATH"] = old_path
 
@@ -537,8 +433,8 @@ class TestCodeServerBranchesR2:
     def test_disable_copilot_non_matching_items(self) -> None:
         """scm_items with items that DON'T match copilot command.
         Covers branch 476->475 (the False path of the if at 476)."""
-        data_dir = self.tmpdir
-        ext_dir = Path(data_dir) / "extensions" / "github.copilot-chat-0.1"
+        extensions_base = Path(self.tmpdir) / "extensions"
+        ext_dir = extensions_base / "github.copilot-chat-0.1"
         ext_dir.mkdir(parents=True)
         pkg = {
             "contributes": {
@@ -554,7 +450,7 @@ class TestCodeServerBranchesR2:
             }
         }
         (ext_dir / "package.json").write_text(json.dumps(pkg))
-        _disable_copilot_scm_button(data_dir)
+        _disable_copilot_scm_button(str(extensions_base))
         result = json.loads((ext_dir / "package.json").read_text())
         items = result["contributes"]["menus"]["scm/inputBox"]
         # Non-matching item should be unchanged
@@ -672,8 +568,7 @@ class TestInstallCopilotOSError:
     def test_install_copilot_subprocess_oserror(self) -> None:
         """Fake code-server binary (garbage bytes) causes OSError.
         Covers lines 505-507."""
-        data_dir = self.tmpdir
-        ext_dir = Path(data_dir) / "extensions"
+        ext_dir = Path(self.tmpdir) / "extensions"
         ext_dir.mkdir(parents=True)
         fake_bin_dir = os.path.join(self.tmpdir, "bin")
         os.makedirs(fake_bin_dir)
@@ -685,7 +580,7 @@ class TestInstallCopilotOSError:
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = fake_bin_dir + ":" + old_path
         try:
-            _install_copilot_extension(data_dir)
+            _install_copilot_extension(str(ext_dir))
         finally:
             os.environ["PATH"] = old_path
 

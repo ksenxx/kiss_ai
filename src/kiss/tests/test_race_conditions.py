@@ -16,7 +16,6 @@ from pathlib import Path
 
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.core.base import Base
-from kiss.core.models.model import _get_callback_loop
 
 
 def _subscribe(printer: BaseBrowserPrinter) -> queue.Queue:
@@ -58,32 +57,6 @@ class TestGlobalBudgetThreadSafety:
 
         expected = initial + num_threads * increment
         assert abs(Base.global_budget_used - expected) < 1e-9
-
-
-class TestCallbackLoopThreadSafety:
-    """Verify _get_callback_loop returns same loop from concurrent callers."""
-
-    def test_concurrent_get_callback_loop_same_instance(self):
-        """Multiple threads calling _get_callback_loop get the same loop."""
-        num_threads = 10
-        loops: list = []
-        lock = threading.Lock()
-        barrier = threading.Barrier(num_threads)
-
-        def get_loop():
-            barrier.wait()
-            loop = _get_callback_loop()
-            with lock:
-                loops.append(loop)
-
-        threads = [threading.Thread(target=get_loop) for _ in range(num_threads)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert len(loops) == num_threads
-        assert all(loop is loops[0] for loop in loops), "Got different loop instances"
 
 
 def _worker_increment_usage(usage_file: str, key: str, n: int) -> None:
