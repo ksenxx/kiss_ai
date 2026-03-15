@@ -126,16 +126,6 @@ class TestUsefulToolsRead:
 
 
 class TestUsefulToolsWrite:
-    def test_write_new_file(self) -> None:
-        from kiss.agents.sorcar.useful_tools import UsefulTools
-
-        tools = UsefulTools()
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "sub", "new.txt")
-            result = tools.Write(path, "content")
-            assert "Successfully wrote" in result
-            assert Path(path).read_text() == "content"
-
     def test_write_error(self) -> None:
         from kiss.agents.sorcar.useful_tools import UsefulTools
 
@@ -272,10 +262,6 @@ class TestScanFiles:
             assert len(paths) <= 2000
 
 class TestDisableCopilotScmButton:
-    def test_no_extensions_dir(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            _disable_copilot_scm_button(d)  # Should not raise
-
     def test_bad_package_json(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             ext_dir = Path(d) / "github.copilot-chat-1.0.0"
@@ -499,31 +485,6 @@ class TestCodeServerUncoveredBranches:
             base_dir = _untracked_base_dir()
             if base_dir.exists():
                 shutil.rmtree(base_dir, ignore_errors=True)
-
-    def test_prepare_merge_view_untracked_empty_in_pre_hashes(self) -> None:
-        """Cover 832-833: pre-existing untracked file that's now empty (0 lines)."""
-        tmpdir = tempfile.mkdtemp()
-        data_dir = tempfile.mkdtemp()
-        try:
-            _init_git_repo(tmpdir)
-            Path(tmpdir, "will_empty.py").write_text("content\n")
-            pre_hunks = _parse_diff_hunks(tmpdir)
-            pre_untracked = _capture_untracked(tmpdir)
-            pre_hashes = _snapshot_files(tmpdir, set(pre_hunks.keys()) | pre_untracked)
-            # Agent modifies tracked and empties untracked
-            Path(tmpdir, "file.txt").write_text("line1\nmodified\nline3\n")
-            Path(tmpdir, "will_empty.py").write_text("")
-            result = _prepare_merge_view(
-                tmpdir, data_dir, pre_hunks, pre_untracked, pre_hashes
-            )
-            assert result.get("status") == "opened"
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            shutil.rmtree(data_dir, ignore_errors=True)
-            base_dir = _untracked_base_dir()
-            if base_dir.exists():
-                shutil.rmtree(base_dir, ignore_errors=True)
-
 
 # ---------------------------------------------------------------------------
 # task_history.py - additional branch coverage

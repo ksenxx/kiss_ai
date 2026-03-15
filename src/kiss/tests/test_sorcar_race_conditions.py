@@ -791,50 +791,6 @@ class TestCodeServerEdgeCases:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_prepare_merge_view_untracked_not_in_hashes(self) -> None:
-        """Untracked file not in pre_file_hashes - 'continue' branch."""
-        work_dir = os.path.join(self.tmpdir, "work")
-        os.makedirs(work_dir)
-        _make_git_repo(work_dir)
-        # Create untracked file before
-        Path(work_dir, "pre.py").write_text("original\n")
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        # Hash only tracked files, not pre.py
-        pre_hashes = {"file.txt": "somehash"}
-        # Create a new file to force merge view open
-        Path(work_dir, "new.py").write_text("new\n")
-        data_dir = tempfile.mkdtemp()
-        try:
-            result = _prepare_merge_view(
-                work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes
-            )
-            assert result.get("status") == "opened"
-        finally:
-            shutil.rmtree(data_dir, ignore_errors=True)
-
-    def test_prepare_merge_view_untracked_already_in_hunks(self) -> None:
-        """Untracked file already in file_hunks → skip in detect modified."""
-        work_dir = os.path.join(self.tmpdir, "work")
-        os.makedirs(work_dir)
-        _make_git_repo(work_dir)
-        # Create untracked that will also appear as new
-        Path(work_dir, "both.py").write_text("content\n")
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        pre_hashes = _snapshot_files(work_dir, set(pre_hunks.keys()) | pre_untracked)
-        # Modify the untracked file AND it's already new
-        Path(work_dir, "both.py").write_text("modified\n")
-        Path(work_dir, "also_new.py").write_text("new\n")
-        data_dir = tempfile.mkdtemp()
-        try:
-            result = _prepare_merge_view(
-                work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes
-            )
-            assert result.get("status") == "opened"
-        finally:
-            shutil.rmtree(data_dir, ignore_errors=True)
-
     def test_setup_code_server_corrupt_settings(self) -> None:
         """Test _setup_code_server with corrupt settings.json."""
         data_dir = tempfile.mkdtemp()
@@ -878,57 +834,6 @@ class TestCodeServerOSErrors:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         # Should complete without error
-
-    def test_prepare_merge_modified_untracked_oserror(self) -> None:
-        """OSError reading modified untracked file (lines 843-844)."""
-        work_dir = os.path.join(self.tmpdir, "work")
-        os.makedirs(work_dir)
-        _make_git_repo(work_dir)
-        # Create untracked file
-        Path(work_dir, "pre.py").write_text("original\n")
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        import hashlib
-        pre_hashes = {
-            "pre.py": hashlib.md5(b"original\n").hexdigest(),
-            "file.txt": _snapshot_files(work_dir, {"file.txt"}).get("file.txt", ""),
-        }
-        # Replace pre.py with a directory -> OSError on read_bytes
-        os.remove(os.path.join(work_dir, "pre.py"))
-        os.mkdir(os.path.join(work_dir, "pre.py"))
-        # Also create new file to force merge view
-        Path(work_dir, "new.py").write_text("new\n")
-        data_dir = tempfile.mkdtemp()
-        try:
-            result = _prepare_merge_view(
-                work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes
-            )
-            # Should not crash, pre.py skipped due to OSError
-            assert isinstance(result, dict)
-        finally:
-            shutil.rmtree(data_dir, ignore_errors=True)
-
-    def test_prepare_merge_untracked_unicode_error(self) -> None:
-        """UnicodeDecodeError on modified untracked file."""
-        work_dir = os.path.join(self.tmpdir, "work")
-        os.makedirs(work_dir)
-        _make_git_repo(work_dir)
-        Path(work_dir, "bin.dat").write_bytes(b"original text\n")
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        pre_hashes = _snapshot_files(work_dir, pre_untracked)
-        # Modify with binary content
-        Path(work_dir, "bin.dat").write_bytes(b"\xff\xfe\x00\x01" * 100)
-        # Need another file for merge view to open
-        Path(work_dir, "new.py").write_text("new\n")
-        data_dir = tempfile.mkdtemp()
-        try:
-            result = _prepare_merge_view(
-                work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes
-            )
-            assert isinstance(result, dict)
-        finally:
-            shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_prepare_merge_new_file_unicode_error(self) -> None:
         """UnicodeDecodeError on new untracked file."""

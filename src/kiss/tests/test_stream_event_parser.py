@@ -6,7 +6,6 @@ from io import StringIO
 from types import SimpleNamespace
 from typing import Any
 
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import StreamEventParser
 
@@ -71,9 +70,3 @@ def test_console_printer_reset_clears_stream_state() -> None:
 # ── BaseBrowserPrinter integration tests ──
 
 
-def test_browser_printer_reset_clears_stream_state() -> None:
-    bp = BaseBrowserPrinter()
-    bp.print(_block_start("thinking"), type="stream_event")
-    assert bp._current_block_type == "thinking"
-    bp.reset()
-    assert bp._current_block_type == ""

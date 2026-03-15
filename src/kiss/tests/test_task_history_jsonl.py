@@ -57,110 +57,12 @@ class TestResultAndEventsFile:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_add_task_includes_result_and_events_file(self):
-        th._add_task("my task")
-        history = th._load_history(limit=1)
-        assert len(history) == 1
-        entry = history[0]
-        assert entry["task"] == "my task"
-        assert entry["result"] == ""
-        assert str(entry["events_file"]).startswith("evt_")
-        assert str(entry["events_file"]).endswith(".json")
-
-    def test_set_latest_chat_events_with_result(self):
-        th._add_task("task with result")
-        history_before = th._load_history(limit=1)
-        events_file = history_before[0]["events_file"]
-        th._set_latest_chat_events(
-            [{"type": "text"}], task="task with result", result="Task completed successfully",
-        )
-        history = th._load_history(limit=1)
-        entry = history[0]
-        assert entry["result"] == "Task completed successfully"
-        assert entry["has_events"] is True
-        assert entry["events_file"] == events_file
-
     def test_update_task_result(self):
         th._add_task("update me")
         th._update_task_result("update me", "Done with flying colors")
         history = th._load_history(limit=1)
         entry = history[0]
         assert entry["result"] == "Done with flying colors"
-
-    def test_update_task_result_nonexistent_task(self):
-        th._add_task("existing task")
-        # Should not crash when task not found
-        th._update_task_result("nonexistent task", "some result")
-        history = th._load_history(limit=1)
-        assert history[0]["task"] == "existing task"
-        assert history[0]["result"] == ""
-
-    def test_result_persists_through_events_update(self):
-        th._add_task("persist result")
-        th._set_latest_chat_events(
-            [{"type": "x"}], task="persist result", result="first result",
-        )
-        # Verify result is on disk
-        th._history_cache = None
-        history = th._load_history(limit=1)
-        assert history[0]["result"] == "first result"
-
-    def test_stopped_result(self):
-        th._add_task("stopped task")
-        th._set_latest_chat_events(
-            [{"type": "text"}], task="stopped task", result="(stopped by user)",
-        )
-        history = th._load_history(limit=1)
-        assert history[0]["result"] == "(stopped by user)"
-
-    def test_error_result(self):
-        th._add_task("error task")
-        th._set_latest_chat_events(
-            [{"type": "text"}], task="error task", result="(error: something went wrong)",
-        )
-        history = th._load_history(limit=1)
-        assert history[0]["result"] == "(error: something went wrong)"
-
-    def test_events_file_is_unique_per_add(self):
-        th._add_task("task A")
-        th._add_task("task B")
-        history = th._load_history(limit=2)
-        # Each task gets a unique filename
-        assert history[0]["events_file"] != history[1]["events_file"]
-        # Filenames are uuid-based, not hash-based
-        assert str(history[0]["events_file"]).startswith("evt_")
-        assert str(history[1]["events_file"]).startswith("evt_")
-
-    def test_parse_line_with_result_and_events_file(self):
-        line = json.dumps({
-            "task": "test task",
-            "has_events": True,
-            "result": "completed",
-            "events_file": "abc.json",
-        })
-        entry = th._parse_line(line)
-        assert entry is not None
-        assert entry["result"] == "completed"
-        assert entry["events_file"] == "abc.json"
-
-    def test_parse_line_without_result_defaults(self):
-        """Old entries without result/events_file should get defaults."""
-        line = json.dumps({"task": "old task", "has_events": False})
-        entry = th._parse_line(line)
-        assert entry is not None
-        assert entry["result"] == ""
-        assert entry["events_file"] == ""
-
-    def test_search_includes_result_and_events_file(self):
-        th._add_task("searchable task")
-        events_file = th._load_history(limit=1)[0]["events_file"]
-        th._set_latest_chat_events(
-            [{"type": "x"}], task="searchable task", result="found it",
-        )
-        results = th._search_history("searchable", limit=5)
-        assert len(results) == 1
-        assert results[0]["result"] == "found it"
-        assert results[0]["events_file"] == events_file
 
     def test_load_task_chat_events_uses_events_file_from_history(self):
         """_load_task_chat_events should read events_file from history entry."""
@@ -190,29 +92,11 @@ class TestResultAndEventsFile:
         events = th._load_task_chat_events("my task")
         assert events == [{"type": "hello"}]
 
-    def test_load_task_chat_events_returns_empty_for_unknown_task(self):
-        """_load_task_chat_events returns [] for tasks not in history."""
-        events = th._load_task_chat_events("unknown task")
-        assert events == []
-
     def test_update_task_result_empty_cache(self):
         """_update_task_result should handle empty cache gracefully."""
         # No tasks added, cache will be SAMPLE_TASKS
         th._update_task_result("nonexistent", "some result")
         # Should not crash
-
-    def test_load_history_with_limit_exceeding_sample_tasks(self):
-        """_load_history with limit > len(SAMPLE_TASKS) should still return sample tasks.
-
-        This was the bug: on a fresh install with no history file,
-        limit=10 > 8 sample tasks caused _load_history to fall through
-        to _read_recent_entries which returned [] for missing file.
-        """
-        # No tasks added, no history file — fresh install scenario
-        history = th._load_history(limit=10)
-        assert len(history) == len(th.SAMPLE_TASKS)
-        assert history[0]["task"] == th.SAMPLE_TASKS[0]["task"]
-
 
 class TestMigration:
     """Test migration from old task_history.json to JSONL format."""

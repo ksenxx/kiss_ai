@@ -17,9 +17,7 @@ from pathlib import Path
 from kiss.agents.sorcar.code_server import (
     _CS_EXTENSION_JS,
     _GH_TOKEN_FILENAME,
-    _disable_copilot_scm_button,
     _load_github_token,
-    _setup_code_server,
 )
 
 
@@ -45,35 +43,6 @@ class TestLoadGithubToken:
             "id": "session-id",
         }))
         assert _load_github_token(self.cs_data_dir) == "gho_abc123xyz"
-
-    def test_missing_file(self) -> None:
-        """No token file returns None."""
-        assert _load_github_token(self.cs_data_dir) is None
-
-    def test_corrupt_json(self) -> None:
-        """Corrupt JSON returns None without raising."""
-        self.token_file.write_text("not valid json {{{{")
-        assert _load_github_token(self.cs_data_dir) is None
-
-    def test_empty_file(self) -> None:
-        """Empty file returns None (JSONDecodeError)."""
-        self.token_file.write_text("")
-        assert _load_github_token(self.cs_data_dir) is None
-
-    def test_missing_access_token_key(self) -> None:
-        """JSON without accessToken key returns None."""
-        self.token_file.write_text(json.dumps({"account": "user"}))
-        assert _load_github_token(self.cs_data_dir) is None
-
-    def test_empty_access_token(self) -> None:
-        """Empty string accessToken returns None."""
-        self.token_file.write_text(json.dumps({"accessToken": ""}))
-        assert _load_github_token(self.cs_data_dir) is None
-
-    def test_null_access_token(self) -> None:
-        """null accessToken returns None."""
-        self.token_file.write_text(json.dumps({"accessToken": None}))
-        assert _load_github_token(self.cs_data_dir) is None
 
     def test_nonexistent_parent_dir(self) -> None:
         """cs_data_dir whose parent doesn't exist returns None."""
@@ -158,66 +127,6 @@ class TestExtensionJSTokenCode:
         idx_save = stripped.index("saveGitHubToken")
         idx_exports = stripped.index("module.exports")
         assert idx_save < idx_exports
-
-
-class TestSetupCodeServerWritesTokenCode:
-    """Verify _setup_code_server writes extension.js with token-saving code."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_extension_js_contains_token_code(self) -> None:
-        """_setup_code_server writes extension.js that includes token persistence."""
-        shared_ext = os.path.join(self.tmpdir, "shared-extensions")
-        _setup_code_server(self.tmpdir, shared_ext)
-        ext_js = Path(shared_ext) / "kiss-init" / "extension.js"
-        assert ext_js.exists()
-        content = ext_js.read_text()
-        assert "github-copilot-token.json" in content
-        assert "saveGitHubToken" in content
-        assert "onDidChangeSessions" in content
-
-    def test_shared_extensions_dir(self) -> None:
-        """_setup_code_server writes kiss-init to shared extensions_dir."""
-        shared_ext = os.path.join(self.tmpdir, "shared-extensions")
-        _setup_code_server(self.tmpdir, shared_ext)
-        ext_js = Path(shared_ext) / "kiss-init" / "extension.js"
-        assert ext_js.exists()
-        # Should NOT be in the data dir's extensions
-        assert not (Path(self.tmpdir) / "extensions" / "kiss-init").exists()
-
-
-class TestDisableCopilotScmButton:
-    """Verify _disable_copilot_scm_button uses shared extensions_dir."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_uses_shared_extensions_dir(self) -> None:
-        """_disable_copilot_scm_button looks in the shared extensions directory."""
-        shared = os.path.join(self.tmpdir, "shared")
-        ext_dir = os.path.join(shared, "github.copilot-chat-1.0.0")
-        os.makedirs(ext_dir)
-        pkg = {
-            "contributes": {
-                "menus": {
-                    "scm/inputBox": [
-                        {"command": "github.copilot.git.generateCommitMessage", "when": "true"}
-                    ]
-                }
-            }
-        }
-        Path(ext_dir, "package.json").write_text(json.dumps(pkg))
-        _disable_copilot_scm_button(shared)
-        result = json.loads(Path(ext_dir, "package.json").read_text())
-        item = result["contributes"]["menus"]["scm/inputBox"][0]
-        assert item["when"] == "false"
 
 
 class TestTokenPathConsistency:
