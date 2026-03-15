@@ -2,7 +2,7 @@
 #
 # Build a standalone macOS offline installer package (.pkg) for the KISS project.
 # Bundles: uv, code-server (with node), Python 3.13, git,
-# all Python wheels, and the project source.
+# Playwright Chromium, all Python wheels, and the project source.
 #
 # Usage: ./scripts/build_offline_pkg.sh
 # Output: dist/kiss-offline-installer.pkg
@@ -150,9 +150,35 @@ uv build --wheel --out-dir "$BUNDLE/wheels"
 echo "   wheels: $(du -sh "$BUNDLE/wheels" | cut -f1) ($(ls "$BUNDLE/wheels" | wc -l | tr -d ' ') files)"
 
 # ---------------------------------------------------------------------------
-# 6. Project source
+# 6. Playwright Chromium browser
+# ---------------------------------------------------------------------------
+echo ">>> Bundling Playwright Chromium..."
+PW_BROWSERS="$HOME/Library/Caches/ms-playwright"
+if [ -d "$PW_BROWSERS" ]; then
+    mkdir -p "$BUNDLE/playwright-browsers"
+    # Copy chromium, chromium_headless_shell, ffmpeg, and .links
+    for item in "$PW_BROWSERS"/chromium-* "$PW_BROWSERS"/chromium_headless_shell-* "$PW_BROWSERS"/ffmpeg-*; do
+        if [ -d "$item" ]; then
+            cp -R "$item" "$BUNDLE/playwright-browsers/"
+            echo "   $(basename "$item"): $(du -sh "$item" | cut -f1)"
+        fi
+    done
+    # Copy the .links directory
+    if [ -d "$PW_BROWSERS/.links" ]; then
+        cp -R "$PW_BROWSERS/.links" "$BUNDLE/playwright-browsers/.links"
+    fi
+    # Create marker files (INSTALLATION_COMPLETE, DEPENDENCIES_VALIDATED already inside dirs)
+    echo "   playwright-browsers: $(du -sh "$BUNDLE/playwright-browsers" | cut -f1)"
+else
+    echo "   WARNING: Playwright browsers not found at $PW_BROWSERS"
+    echo "   Run 'playwright install chromium' first, then re-run this script."
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Project source
 # ---------------------------------------------------------------------------
 echo ">>> Bundling project source..."
+# Note: Section numbering continues: 8=install script, 9=pkg postinstall, 10=build .pkg
 mkdir -p "$BUNDLE/project"
 # Copy essential project files (excluding .git, venv, artifacts, etc.)
 rsync -a --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
@@ -240,7 +266,34 @@ if [ -d "$KISS_BUNDLE_DIR/git" ]; then
     export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
 fi
 
-# 5. Set up the project
+# 5. Install Playwright Chromium browsers
+echo ">>> Installing Playwright Chromium..."
+PW_DEST="$HOME/Library/Caches/ms-playwright"
+if [ -d "$KISS_BUNDLE_DIR/playwright-browsers" ]; then
+    mkdir -p "$PW_DEST"
+    for item in "$KISS_BUNDLE_DIR/playwright-browsers"/chromium-* \
+                "$KISS_BUNDLE_DIR/playwright-browsers"/chromium_headless_shell-* \
+                "$KISS_BUNDLE_DIR/playwright-browsers"/ffmpeg-*; do
+        if [ -d "$item" ]; then
+            dirname="$(basename "$item")"
+            if [ ! -d "$PW_DEST/$dirname" ]; then
+                cp -R "$item" "$PW_DEST/$dirname"
+            fi
+            echo "   Installed $dirname"
+        fi
+    done
+    # Restore .links (update path to point to the new project venv)
+    if [ -d "$KISS_BUNDLE_DIR/playwright-browsers/.links" ]; then
+        mkdir -p "$PW_DEST/.links"
+        for lf in "$KISS_BUNDLE_DIR/playwright-browsers/.links/"*; do
+            [ -f "$lf" ] && cp "$lf" "$PW_DEST/.links/$(basename "$lf")"
+        done
+    fi
+    # Strip quarantine from Chromium binaries
+    find "$PW_DEST" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
+fi
+
+# 6. Set up the project
 echo ">>> Setting up project..."
 export PATH="$INSTALL_BASE/bin:$HOME/.local/bin:$PATH"
 if [ -d "$KISS_BUNDLE_DIR/project" ]; then
@@ -399,6 +452,7 @@ without an internet connection:
   • code-server (VS Code in the browser)
   • Python 3.13
   • Git
+  • Playwright Chromium (browser automation)
   • All Python dependencies
   • KISS project source
 
