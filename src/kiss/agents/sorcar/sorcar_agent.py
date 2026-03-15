@@ -191,6 +191,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
     parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
+    parser.add_argument(
+        "--max_sub_sessions", type=int, default=None,
+        help="Maximum sub-sessions for auto-continuation",
+    )
     parser.add_argument("--work_dir", type=str, default=None, help="Working directory")
     parser.add_argument(
         "--headless",
@@ -292,6 +296,7 @@ def main() -> None:
             model_name=args.model_name,
             max_steps=args.max_steps,
             max_budget=args.max_budget,
+            max_sub_sessions=args.max_sub_sessions,
             work_dir=work_dir,
             headless=args.headless,
             verbose=args.verbose,

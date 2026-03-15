@@ -182,6 +182,8 @@ class RelentlessAgent(Base):
                         arguments={
                             "trajectory_file": str(trajectory_path),
                         },
+                        max_steps=self.max_steps,
+                        max_budget=self.max_budget,
                     )
                     try:
                         parsed = yaml.safe_load(summarizer_result)
