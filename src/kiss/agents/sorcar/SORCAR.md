@@ -21,7 +21,7 @@ Browser UI (HTML/JS)
      |
      | SSE / REST
      v
-sorcar.py  (Starlette server, ~1400 lines)
+sorcar.py  (Starlette server, ~1500 lines)
      |
      | agent_factory(name) -> RelentlessAgent
      v
@@ -58,7 +58,7 @@ ______________________________________________________________________
 
 ## What Sorcar Gets Right
 
-**Simplicity as a feature, not a limitation.** The entire agent stack (`KISSAgent` + `RelentlessAgent` + `SorcarAgent`) is around 1,000 lines of Python. The server is another ~1,400 lines. The UI is a single HTML page with embedded CSS and JavaScript. A developer who wants to understand how their AI coding assistant works can read the entire system in a few hours. This is not true of Cursor (proprietary, closed-source, multi-service architecture) or Claude Code (open-source but complex, with Bun compilation, React Ink rendering, and elaborate permission systems).
+**Simplicity as a feature, not a limitation.** The entire agent stack (`KISSAgent` + `RelentlessAgent` + `SorcarAgent`) is around 1,000 lines of Python. The server is another ~1,500 lines. The UI is a single HTML page with embedded CSS and JavaScript. A developer who wants to understand how their AI coding assistant works can read the entire system in a few hours. This is not true of Cursor (proprietary, closed-source, multi-service architecture) or Claude Code (open-source but complex, with Bun compilation, React Ink rendering, and elaborate permission systems).
 
 **Transparent execution.** Every step of the agent's reasoning is streamed to the UI in real time: thinking blocks, tool calls with full arguments, tool results, usage stats (tokens, cost, session count). There is no hidden planning phase. The user is always in the loop.
 

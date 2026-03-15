@@ -11,28 +11,28 @@ tests pass. Run `uv run check --full` to ensure lint and type checks pass.
 
 [`sorcar.py`](src/kiss/agents/sorcar/sorcar.py) creates the following concurrent entities:
 
-### Daemon Threads (4 total at runtime)
+### Daemon Threads (3 total at runtime)
 
 | # | Target function | Purpose | Line |
 |---|------------------------|----------------------------------------------------------|-------|
-| 1 | `_watch_code_server` | Polling loop (5s): restart code-server if it crashes | ~378 |
-| 2 | `_watch_periodic` | Polling loop (1s): detect VS Code theme changes + (every 5s) schedule shutdown when no clients | ~454 |
-| 3 | `run_agent_thread` | Per-task: runs the agent (created in `run_task` and `run_selection`) | ~756, ~790 |
+| 1 | `_watch_code_server` | Polling loop (5s): restart code-server if it crashes | ~259 |
+| 2 | `_watch_periodic` | Polling loop (1s): detect VS Code theme changes + (every 5s) schedule shutdown when no clients | ~443 |
+| 3 | `run_agent_thread` | Per-task: runs the agent (created in `run_task` and `run_selection`) | ~828, ~852 |
 
 ### `asyncio.to_thread` (offloads blocking work from the event loop — 2 call sites)
 
 | # | Endpoint | Purpose | Line |
 |---|----------------------------|---------------------------------|-------|
-| 1 | `/complete` | LLM autocomplete generation | ~1014 |
-| 2 | `_thread_json_response` | Used by `/commit` and `/generate-commit-message` for blocking git/LLM calls | ~1132 |
+| 1 | `/complete` | LLM autocomplete generation | ~1070 |
+| 2 | `_thread_json_response` | Used by `/commit` and `/generate-commit-message` for blocking git/LLM calls | ~1202 |
 
 ### asyncio Tasks and Timers
 
 | # | Function | Purpose | Line |
 |---|-------------------------------|----------------------------------------------|-------|
-| 1 | `_open_browser_async` | One-shot `asyncio.create_task`: sleep 2s then open browser | ~1319 |
-| 2 | `_schedule_shutdown_on_loop` | `loop.call_later(1.0, _do_shutdown)` stored as `asyncio.TimerHandle` | ~680 |
-| 3 | `loop.call_soon_threadsafe` | Cross-thread dispatch to schedule shutdown from non-async threads | ~697 |
+| 1 | `_open_browser_async` | One-shot `asyncio.create_task`: sleep 2s then open browser | ~1351 |
+| 2 | `_schedule_shutdown_on_loop` | `loop.call_later(1.0, _do_shutdown)` stored as `asyncio.TimerHandle` | ~716 |
+| 3 | `loop.call_soon_threadsafe` | Cross-thread dispatch to schedule shutdown from non-async threads | ~743 |
 
 ### Locks and Events (6 primitives)
 
@@ -77,7 +77,7 @@ same 5-tick counter pattern. Merging them eliminates one daemon thread.
    condition that already gates the client-count check.
 1. Remove the `_watch_code_server` function entirely.
 1. Remove the `threading.Thread(target=_watch_code_server, ...).start()` call
-   at line ~378.
+   at line ~404.
 1. Pass `cs_proc`/`code_server_url` access into `_watch_periodic` via the
    existing closure (both functions already close over the same `nonlocal`
    variables in `run_chatbot`).
@@ -129,14 +129,14 @@ These concurrency mechanisms are genuinely needed and should NOT be removed:
 
 1. Run `uv run pytest -v` (timeout 900s) to verify no test breakage.
 1. Run `uv run check --full` to verify lint/type checks.
-1. Verify the daemon thread count decreased from 4 to 3 (at runtime with
+1. Verify the daemon thread count decreased from 3 to 2 (at runtime with
    code-server enabled).
 
 ## Expected Result
 
 | Metric | Before | After |
 |-----------------------|--------|-------|
-| Daemon threads | 4 | 3 (`_watch_periodic` + `run_agent_thread` + code-server `Popen`) |
+| Daemon threads | 3 (2 watchers + per-task) | 2 (`_watch_periodic` + `run_agent_thread`) |
 | Functions | `_watch_code_server` + `_watch_periodic` | `_watch_periodic` (merged) |
-| Thread launches | 4 (2 daemon + per-task + code-server Popen) | 3 (1 daemon + per-task + code-server Popen) |
+| Thread launches | 3 (2 daemon watchers + per-task) | 2 (1 daemon watcher + per-task) |
 | Everything else | unchanged | unchanged |
