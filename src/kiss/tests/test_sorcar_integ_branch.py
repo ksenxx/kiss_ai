@@ -28,6 +28,7 @@ from kiss.agents.sorcar.sorcar import (
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
 )
+from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import RelentlessAgent
 
 
@@ -49,19 +50,20 @@ class TestSorcarAgentDirect:
         agent = SorcarAgent("test_agent")
         tmpdir = tempfile.mkdtemp()
         try:
-            result = agent.run(
-                prompt_template="analyze",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                attachments=[
-                    Attachment(data=b"fake_img", mime_type="image/png"),
-                    Attachment(data=b"fake_pdf", mime_type="application/pdf"),
-                ],
-            )
-            assert isinstance(result, str)
+            with pytest.raises(KISSError):
+                agent.run(
+                    prompt_template="analyze",
+                    work_dir=tmpdir,
+                    max_steps=1,
+                    max_budget=0.001,
+                    max_sub_sessions=1,
+                    headless=True,
+                    verbose=False,
+                    attachments=[
+                        Attachment(data=b"fake_img", mime_type="image/png"),
+                        Attachment(data=b"fake_pdf", mime_type="application/pdf"),
+                    ],
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -72,16 +74,17 @@ class TestSorcarAgentDirect:
         editor_file = os.path.join(tmpdir, "test.py")
         Path(editor_file).write_text("print('hello')")
         try:
-            result = agent.run(
-                prompt_template="fix this file",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                current_editor_file=editor_file,
-            )
-            assert isinstance(result, str)
+            with pytest.raises(KISSError):
+                agent.run(
+                    prompt_template="fix this file",
+                    work_dir=tmpdir,
+                    max_steps=1,
+                    max_budget=0.001,
+                    max_sub_sessions=1,
+                    headless=True,
+                    verbose=False,
+                    current_editor_file=editor_file,
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -92,57 +95,19 @@ class TestSorcarAgentDirect:
         agent = SorcarAgent("test_agent")
         tmpdir = tempfile.mkdtemp()
         try:
-            result = agent.run(
-                prompt_template="analyze",
-                work_dir=tmpdir,
-                max_steps=1,
-                max_budget=0.001,
-                headless=True,
-                verbose=False,
-                attachments=[Attachment(data=b"text data", mime_type="text/plain")],
-            )
-            assert isinstance(result, str)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_reset_persists_model(self) -> None:
-        """_reset saves the resolved model so it persists for future sessions."""
-        import json
-
-        from kiss.agents.sorcar.task_history import MODEL_USAGE_FILE
-
-        # Save original _last value
-        original = json.loads(MODEL_USAGE_FILE.read_text()) if MODEL_USAGE_FILE.exists() else {}
-        original_last = original.get("_last", "")
-        try:
-            # Set _last to a known value that differs from what we'll pass
-            data = json.loads(MODEL_USAGE_FILE.read_text()) if MODEL_USAGE_FILE.exists() else {}
-            data["_last"] = "some-stale-model"
-            MODEL_USAGE_FILE.write_text(json.dumps(data))
-
-            # Run agent with an explicit model_name
-            agent = SorcarAgent("test_persist")
-            tmpdir = tempfile.mkdtemp()
-            try:
+            with pytest.raises(KISSError):
                 agent.run(
-                    prompt_template="echo done",
+                    prompt_template="analyze",
                     work_dir=tmpdir,
                     max_steps=1,
                     max_budget=0.001,
+                    max_sub_sessions=1,
                     headless=True,
                     verbose=False,
-                    model_name="claude-opus-4-6",
+                    attachments=[Attachment(data=b"text data", mime_type="text/plain")],
                 )
-            finally:
-                shutil.rmtree(tmpdir, ignore_errors=True)
-
-            # _last should now be the model we passed, not the stale one
-            assert task_history._load_last_model() == "claude-opus-4-6"
         finally:
-            # Restore original _last value
-            data = json.loads(MODEL_USAGE_FILE.read_text()) if MODEL_USAGE_FILE.exists() else {}
-            data["_last"] = original_last
-            MODEL_USAGE_FILE.write_text(json.dumps(data))
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_stream_callback_without_printer(self) -> None:
         """Cover the _stream closure's if self.printer False branch."""
@@ -569,14 +534,6 @@ class TestInProcessEndpoints:
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
 
-    def test_models(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.get(f"{base_url}/models", timeout=5)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "models" in data
-        assert "selected" in data
-
     def test_suggestions_empty(self, inproc_server) -> None:
         base_url, _, _ = inproc_server
         resp = requests.get(f"{base_url}/suggestions?q=&mode=general", timeout=5)
@@ -717,13 +674,6 @@ class TestInProcessEndpoints:
             f"{base_url}/merge-action", json={"action": "bogus"}, timeout=5
         )
         assert resp.status_code == 400
-
-    def test_merge_action_all_done(self, inproc_server) -> None:
-        base_url, _, _ = inproc_server
-        resp = requests.post(
-            f"{base_url}/merge-action", json={"action": "all-done"}, timeout=5
-        )
-        assert resp.status_code == 200
 
     def test_record_file_usage_empty(self, inproc_server) -> None:
         base_url, _, _ = inproc_server

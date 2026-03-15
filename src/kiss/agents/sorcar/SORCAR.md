@@ -8,7 +8,7 @@
 
 KISS Sorcar is an open-source, browser-based AI coding IDE built on a single, elegant premise: an AI coding agent should be a tight loop between a human, an LLM, and a handful of tools -- nothing more. While commercial tools like Cursor and Claude Code have grown into multi-layered architectures with subagents, virtual file systems, and elaborate coordination protocols, Sorcar achieves comparable capability through a transparent, self-contained design that a single developer can read and understand in an afternoon.
 
-The entire IDE ships as a Python package. Run `sorcar` on any directory, and a browser tab opens with a VS Code editor on the left and a chat panel on the right. Behind the scenes, the system is powered by [`RelentlessAgent`](../../core/RELENTLESS_AGENT.md) -- a ~284-line class that implements the only orchestration pattern you actually need for long-running agentic tasks.
+The entire IDE ships as a Python package. Run `sorcar` on any directory, and a browser tab opens with a VS Code editor on the left and a chat panel on the right. Behind the scenes, the system is powered by [`RelentlessAgent`](../../core/RELENTLESS_AGENT.md) -- a ~300-line class that implements the only orchestration pattern you actually need for long-running agentic tasks.
 
 ______________________________________________________________________
 
@@ -25,7 +25,7 @@ sorcar.py  (Starlette server, ~1400 lines)
      |
      | agent_factory(name) -> RelentlessAgent
      v
-RelentlessAgent.perform_task()   (~286 lines total)
+RelentlessAgent.perform_task()   (~300 lines total)
      |
      | for session in range(max_sub_sessions):
      |     KISSAgent(tools).run()
@@ -145,9 +145,9 @@ In Sorcar, every tool call, every LLM response, and every token count is streame
 
 ______________________________________________________________________
 
-## The Tool Surface: Four Tools and a set of Browser tools
+## The Tool Surface: Five Tools and a set of Browser tools
 
-SorcarAgent provides five core tools:
+SorcarAgent provides six core tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -155,6 +155,7 @@ SorcarAgent provides five core tools:
 | `Read` | Read file contents with optional line ranges |
 | `Edit` | Apply targeted edits to existing files |
 | `Write` | Create new files |
+| `ask_user_question` | Ask the user a question and wait for their typed response |
 | `WebUseTool` | Playwright-based browser automation (go_to_url, click, type, screenshot, etc.) |
 
 That's it. There is no separate "search" tool, no "grep" tool, no "find" tool, no "list directory" tool. The agent uses `Bash` with `grep`, `find`, `rg`, `ls`, or any other Unix command it needs. This is not laziness -- it is a deliberate design choice that keeps the tool surface minimal while giving the agent access to the full power of the operating system.

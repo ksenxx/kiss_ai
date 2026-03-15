@@ -1,6 +1,6 @@
 """Browser automation tool for LLM agents using Playwright.
 
-Uses headless Playwright for page analysis and automation (accessibility tree,
+Uses Playwright for page analysis and automation (accessibility tree,
 clicking, typing, screenshots). Opens URLs in the user's default OS browser
 when user interaction is needed (ask_user_browser_action).
 """
@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _log_exc() -> None:
+    logger.debug("Exception caught", exc_info=True)
+
 
 INTERACTIVE_ROLES = {
     "link",
@@ -63,11 +68,11 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
 
 
 class WebUseTool:
-    """Browser automation tool using headless Playwright + default OS browser.
+    """Browser automation tool using Playwright + default OS browser.
 
-    Uses headless Playwright (chromium) for all page analysis and automation.
-    Opens URLs in the user's default OS browser only when user interaction
-    is needed (ask_user_browser_action).
+    Uses non-headless Playwright (chromium) for page analysis and automation,
+    so the user can see the browser window. Opens URLs in the user's default
+    OS browser when user interaction is needed (ask_user_browser_action).
     """
 
     def __init__(
@@ -98,6 +103,7 @@ class WebUseTool:
         }
 
     def _ensure_browser(self) -> None:
+        """Ensure a Playwright browser page is ready, installing Chromium if needed."""
         if self._page is not None:
             return
         from playwright.sync_api import sync_playwright
@@ -105,8 +111,7 @@ class WebUseTool:
         self._playwright = sync_playwright().start()
         launcher = self._playwright.chromium
         kwargs: dict[str, Any] = {
-            "headless": True,
-            "channel": "chrome",
+            "headless": False,
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
@@ -116,6 +121,19 @@ class WebUseTool:
             ],
         }
 
+        try:
+            self._launch_browser(launcher, kwargs)
+        except Exception:
+            # Chromium not installed yet — install it and retry
+            logger.info("Playwright Chromium not found, installing...")
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True,
+                capture_output=True,
+            )
+            self._launch_browser(launcher, kwargs)
+
+    def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self.user_data_dir:
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
             self._context = launcher.launch_persistent_context(
@@ -143,12 +161,12 @@ class WebUseTool:
         try:
             self._page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             pass
         try:
             self._page.wait_for_load_state("networkidle", timeout=3000)
         except Exception:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             pass
 
     def _check_for_new_tab(self) -> None:
@@ -182,7 +200,7 @@ class WebUseTool:
                 if locator.nth(i).is_visible():
                     return locator.nth(i)
             except Exception:  # pragma: no cover — Playwright is_visible rarely throws
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
                 continue
         return locator.first
 
@@ -217,7 +235,7 @@ class WebUseTool:
             self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error navigating to {url}: {e}"
 
     def click(self, element_id: int, action: str = "click") -> str:
@@ -249,7 +267,7 @@ class WebUseTool:
                 self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error clicking element {element_id}: {e}"
 
     def type_text(self, element_id: int, text: str, press_enter: bool = False) -> str:
@@ -277,7 +295,7 @@ class WebUseTool:
                 self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error typing into element {element_id}: {e}"
 
     def press_key(self, key: str) -> str:
@@ -295,7 +313,7 @@ class WebUseTool:
             self._page.wait_for_timeout(300)
             return self._get_ax_tree()
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error pressing key '{key}': {e}"
 
     def scroll(self, direction: str = "down", amount: int = 3) -> str:
@@ -319,7 +337,7 @@ class WebUseTool:
             self._page.wait_for_timeout(300)
             return self._get_ax_tree()
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error scrolling {direction}: {e}"
 
     def screenshot(self, file_path: str = "screenshot.png") -> str:
@@ -340,7 +358,7 @@ class WebUseTool:
             self._page.screenshot(path=str(path), full_page=False)
             return f"Screenshot saved to {path}"
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error taking screenshot: {e}"
 
     def get_page_content(self, text_only: bool = False) -> str:
@@ -362,7 +380,7 @@ class WebUseTool:
                 return f"Page: {title}\nURL: {url}\n\n{body}"
             return self._get_ax_tree()
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return f"Error getting page content: {e}"
 
     def close(self) -> str:
@@ -371,14 +389,14 @@ class WebUseTool:
         Returns:
             "Browser closed." (always, even if nothing was open)."""
         try:
-            if self.user_data_dir and self._context:
+            if self._context:
                 self._context.close()
-            elif self._browser:
+            if self._browser:
                 self._browser.close()
             if self._playwright:
                 self._playwright.stop()
         except Exception:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             pass
         self._page = None
         self._context = None

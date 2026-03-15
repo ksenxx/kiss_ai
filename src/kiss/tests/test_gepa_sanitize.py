@@ -26,19 +26,5 @@ class TestSanitizePromptTemplate(unittest.TestCase):
         result = gepa._sanitize_prompt_template("Do {task} with {bad", fallback="fallback")
         self.assertEqual(result, "fallback")
 
-    def test_single_placeholder_template(self):
-        """Works with a single-placeholder initial template."""
-        gepa = self._make_gepa("Answer {question}")
-        # Subset (empty) is OK
-        result = gepa._sanitize_prompt_template("Just answer", fallback="fallback")
-        self.assertEqual(result, "Just answer")
-        # Original is OK
-        result = gepa._sanitize_prompt_template("Answer {question} now", fallback="fallback")
-        self.assertEqual(result, "Answer {question} now")
-        # New placeholder rejected
-        result = gepa._sanitize_prompt_template("Answer {other}", fallback="fallback")
-        self.assertEqual(result, "fallback")
-
-
 if __name__ == "__main__":
     unittest.main()

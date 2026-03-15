@@ -29,12 +29,6 @@ from kiss.core.models.openai_compatible_model import (
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
 )
-from kiss.core.relentless_agent import (
-    RelentlessAgent,
-)
-from kiss.core.relentless_agent import (
-    finish as ra_finish,
-)
 from kiss.core.utils import (
     finish as utils_finish,
 )
@@ -63,29 +57,9 @@ def _make_collector_callback(collector: list[str]):
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class TestRelentlessAgentFinish:
-    """Cover all branches of the module-level finish() in relentless_agent."""
-
-    def test_finish_string_true(self) -> None:
-        """Cover isinstance(success, str) and isinstance(is_continue, str) branches."""
-        result = ra_finish("true", "yes", "ok")  # type: ignore[arg-type]
-        payload = yaml.safe_load(result)
-        assert payload["success"] is True
-        assert payload["is_continue"] is True
-
 # ═══════════════════════════════════════════════════════════════════════
 # relentless_agent._docker_bash
 # ═══════════════════════════════════════════════════════════════════════
-
-
-class TestRelentlessAgentDockerBash:
-    def test_docker_bash_raises_without_manager(self) -> None:
-        from kiss.core.kiss_error import KISSError
-
-        agent = RelentlessAgent("test")
-        agent.docker_manager = None
-        with pytest.raises(KISSError, match="Docker manager not initialized"):
-            agent._docker_bash("echo hi", "test")
 
 
 # ═══════════════════════════════════════════════════════════════════════

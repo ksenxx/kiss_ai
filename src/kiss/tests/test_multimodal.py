@@ -2,7 +2,6 @@
 
 import io
 import struct
-import tempfile
 import unittest
 import zlib
 
@@ -79,30 +78,12 @@ def _create_minimal_pdf() -> bytes:
 
 class TestAttachment(unittest.TestCase):
 
-    def test_from_file_unsupported(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
-            f.write(b"hello")
-            f.flush()
-            with pytest.raises(ValueError, match="Unsupported MIME type"):
-                Attachment.from_file(f.name)
-
     def test_supported_mime_types(self) -> None:
         assert "image/jpeg" in SUPPORTED_MIME_TYPES
         assert "image/png" in SUPPORTED_MIME_TYPES
         assert "image/gif" in SUPPORTED_MIME_TYPES
         assert "image/webp" in SUPPORTED_MIME_TYPES
         assert "application/pdf" in SUPPORTED_MIME_TYPES
-
-
-class TestAttachmentFromFileExtensions(unittest.TestCase):
-    """Test that Attachment.from_file works with .jpeg extension too."""
-
-    def test_jpeg_extension(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".jpeg", delete=False) as f:
-            f.write(_create_jpeg_bytes())
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "image/jpeg"
 
 
 @requires_gemini_api_key

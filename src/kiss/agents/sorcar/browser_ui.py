@@ -19,6 +19,11 @@ from kiss.core.printer import (
 
 logger = logging.getLogger(__name__)
 
+
+def _log_exc() -> None:
+    logger.debug("Exception caught", exc_info=True)
+
+
 def find_free_port() -> int:
     """Find and return an available TCP port on localhost.
 
@@ -480,7 +485,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         try:
             data = yaml.safe_load(raw)
         except Exception:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return None
         if isinstance(data, dict) and "summary" in data:
             return data
@@ -545,7 +550,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             try:
                 self._clients.remove(cq)
             except ValueError:
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
                 pass
 
     def has_clients(self) -> bool:

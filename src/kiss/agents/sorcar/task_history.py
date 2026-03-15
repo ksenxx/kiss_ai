@@ -20,12 +20,16 @@ import shutil
 import socket
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from filelock import FileLock
 
 logger = logging.getLogger(__name__)
+
+
+def _log_exc() -> None:
+    logger.debug("Exception caught", exc_info=True)
 
 _KISS_DIR = Path.home() / ".kiss"
 HISTORY_FILE = _KISS_DIR / "task_history.jsonl"
@@ -198,7 +202,7 @@ def _migrate_old_format() -> None:
         )
         old_file.unlink(missing_ok=True)
     except (json.JSONDecodeError, OSError):
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
 
 
 def _parse_line(line: str) -> _HistoryEntry | None:
@@ -283,7 +287,7 @@ def _read_recent_entries(
             if len(result) >= limit:
                 break
     except OSError:
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     return result
 
 
@@ -314,7 +318,7 @@ def _read_file_entries(
                 entries.pop(key, None)
                 entries[key] = entry
     except OSError:
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     # Most-recent-first: reverse chronological order
     all_entries = list(reversed(entries.values()))
     return all_entries[:cap]
@@ -349,7 +353,7 @@ def _count_lines() -> int:
                 if line.strip():
                     count += 1
     except OSError:
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     return count
 
 
@@ -376,7 +380,8 @@ def _load_history(limit: int = 0) -> list[_HistoryEntry]:
         if limit <= len(_history_cache):
             return _history_cache[:limit]
         # Need more than cache has — read from tail
-        return _read_recent_entries(limit)
+        entries = _read_recent_entries(limit)
+        return entries if entries else list(_history_cache)
 
 
 
@@ -419,7 +424,7 @@ def _search_history(
                 if len(results) >= limit:
                     break
     except OSError:
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     return results
 
 
@@ -456,7 +461,7 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
                 return entry
             count += 1
     except OSError:
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     return None
 
 
@@ -493,7 +498,7 @@ def _load_task_chat_events(
             if isinstance(data, list):
                 return data
         except (json.JSONDecodeError, OSError):
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
     return []
 
 
@@ -556,12 +561,12 @@ def _set_latest_chat_events(
             _CHAT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
             _atomic_write_json(path, events)
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
     else:
         try:
             path.unlink(missing_ok=True)
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
 
 
 def _update_task_result(task: str, result: str) -> None:
@@ -601,7 +606,7 @@ def _load_json_dict(path: Path) -> dict:
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, OSError):
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
     return {}
 
 
@@ -634,8 +639,25 @@ def _atomic_write_json(path: Path, data: object) -> None:
         tmp.write_text(json.dumps(data))
         os.replace(tmp, path)
     except OSError:
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
         tmp.unlink(missing_ok=True)
+
+
+def _update_json_locked(path: Path, fn: Callable[[dict[str, object]], None]) -> None:
+    """Read-modify-write a JSON dict file under a cross-process file lock.
+
+    Args:
+        path: Path to the JSON file.
+        fn: Mutator that receives the loaded dict and modifies it in-place.
+    """
+    try:
+        _ensure_kiss_dir()
+        with FileLock(path.with_suffix(".lock")):
+            data = _load_json_dict(path)
+            fn(data)
+            _atomic_write_json(path, data)
+    except OSError:
+        _log_exc()
 
 
 def _increment_usage(
@@ -645,44 +667,26 @@ def _increment_usage(
 ) -> None:
     """Increment a usage counter in a JSON file and optionally set extra keys.
 
-    Uses a cross-process file lock to prevent read-modify-write races when
-    multiple sorcar instances run concurrently.
-
     Args:
         file_path: Path to the JSON usage file.
         key: The key whose integer count to increment.
         extra: Optional extra key-value pairs to merge into the file.
     """
-    lock_path = file_path.with_suffix(".lock")
-    try:
-        _ensure_kiss_dir()
-        with FileLock(lock_path):
-            usage = _load_json_dict(file_path)
-            usage[key] = int(usage.get(key, 0)) + 1
-            if extra:
-                usage.update(extra)
-            _atomic_write_json(file_path, usage)
-    except OSError:
-        logger.debug("Exception caught", exc_info=True)
+    def _update(data: dict[str, object]) -> None:
+        data[key] = int(data.get(key, 0)) + 1  # type: ignore[call-overload]
+        if extra:
+            data.update(extra)
+
+    _update_json_locked(file_path, _update)
 
 
 def _save_last_model(model: str) -> None:
     """Persist the selected model name without incrementing usage count.
 
-    Uses a cross-process file lock to avoid racing with _increment_usage.
-
     Args:
         model: The model name to save as the last-selected model.
     """
-    lock_path = MODEL_USAGE_FILE.with_suffix(".lock")
-    try:
-        _ensure_kiss_dir()
-        with FileLock(lock_path):
-            usage = _load_json_dict(MODEL_USAGE_FILE)
-            usage["_last"] = model
-            _atomic_write_json(MODEL_USAGE_FILE, usage)
-    except OSError:
-        logger.debug("Exception caught", exc_info=True)
+    _update_json_locked(MODEL_USAGE_FILE, lambda d: d.update({"_last": model}))
 
 
 def _record_model_usage(model: str) -> None:
@@ -756,28 +760,35 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
     threshold = time.time() - max_age_hours * 3600
     removed = 0
     for d in sorted(_KISS_DIR.glob("cs-*")):
-        if not d.is_dir():
+        if not d.is_dir() or d.name == "cs-extensions":
             continue
         try:
             if d.stat().st_mtime > threshold:
                 continue
-            # Check if a process is still listening on the port
-            port_file = d / "cs-port"
-            if port_file.exists():
-                try:
-                    port = int(port_file.read_text().strip())
-                    with socket.create_connection(
-                        ("127.0.0.1", port), timeout=0.3
+            # Check if a process is still listening on the port.
+            # Try persistent port file first, then in-directory port file.
+            _dir_hash = d.name.split("-", 1)[1] if "-" in d.name else ""
+            _port_candidates = [_KISS_DIR / f"cs-port-{_dir_hash}", d / "cs-port"]
+            _still_in_use = False
+            for _pf in _port_candidates:
+                if _pf.exists():
+                    try:
+                        port = int(_pf.read_text().strip())
+                        with socket.create_connection(
+                            ("127.0.0.1", port), timeout=0.3
+                        ):
+                            _still_in_use = True
+                            break
+                    except (
+                        ConnectionRefusedError,
+                        OSError,
+                        ValueError,
                     ):
-                        continue  # Still in use
-                except (
-                    ConnectionRefusedError,
-                    OSError,
-                    ValueError,
-                ):
-                    pass
+                        pass
+            if _still_in_use:
+                continue
             shutil.rmtree(d, ignore_errors=True)
             removed += 1
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
     return removed

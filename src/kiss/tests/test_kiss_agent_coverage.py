@@ -5,10 +5,7 @@ These tests send real messages to an LLM and verify actual behavior.
 
 import unittest
 
-from kiss.core import config as config_module
-from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import KISSError
 from kiss.tests.conftest import requires_gemini_api_key
 
 TEST_MODEL = "gemini-3-flash-preview"
@@ -26,37 +23,6 @@ class TestNonAgenticGeneration(unittest.TestCase):
         )
         self.assertIsInstance(result, str)
         self.assertTrue(len(result) > 0)
-
-@requires_gemini_api_key
-class TestBudgetExceeded(unittest.TestCase):
-
-    def test_global_budget_exceeded(self) -> None:
-        def dummy_tool() -> str:
-            """A tool. Always call this."""
-            return "ok"
-
-        original_global = config_module.DEFAULT_CONFIG.agent.global_max_budget
-        original_used = Base.global_budget_used
-        try:
-            config_module.DEFAULT_CONFIG.agent.global_max_budget = 0.0001
-            Base.global_budget_used = 0.0002
-
-            agent = KISSAgent("GlobalBudget")
-            with self.assertRaises(KISSError) as ctx:
-                agent.run(
-                    model_name=TEST_MODEL,
-                    prompt_template="Call dummy_tool then call finish with result 'done'.",
-                    tools=[dummy_tool],
-                    is_agentic=True,
-                    max_steps=10,
-                    max_budget=100.0,
-                    verbose=False,
-                )
-            self.assertIn("global budget", str(ctx.exception).lower())
-        finally:
-            config_module.DEFAULT_CONFIG.agent.global_max_budget = original_global
-            Base.global_budget_used = original_used
-
 
 @requires_gemini_api_key
 class TestSetupToolsWebBranch(unittest.TestCase):

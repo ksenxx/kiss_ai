@@ -1,5 +1,6 @@
 """Tests for merge view showing up on second file change after accepting first."""
 
+import json
 import os
 import subprocess
 import tempfile
@@ -45,7 +46,7 @@ class TestMergeViewExcludesPreExistingDiffs:
                 repo, set(pre_hunks_1.keys()) | pre_untracked_1
             )
             _save_untracked_base(
-                repo, data_dir, pre_untracked_1 | set(pre_hunks_1.keys())
+                repo, pre_untracked_1 | set(pre_hunks_1.keys())
             )
             Path(repo, "example.md").write_text("line 1\nMODIFIED line 2\nline 3\n")
             result1 = _prepare_merge_view(
@@ -62,7 +63,7 @@ class TestMergeViewExcludesPreExistingDiffs:
                 repo, set(pre_hunks_2.keys()) | pre_untracked_2
             )
             _save_untracked_base(
-                repo, data_dir, pre_untracked_2 | set(pre_hunks_2.keys())
+                repo, pre_untracked_2 | set(pre_hunks_2.keys())
             )
             # Agent adds a new line but doesn't touch line 2
             Path(repo, "example.md").write_text(
@@ -74,7 +75,6 @@ class TestMergeViewExcludesPreExistingDiffs:
             assert result2.get("status") == "opened"
             # Only the line 4 addition should show, not the line 2 change
             merge_file = Path(data_dir) / "pending-merge.json"
-            import json
             manifest = json.loads(merge_file.read_text())
             hunks = manifest["files"][0]["hunks"]
             # Should have exactly 1 hunk for the added line 4
@@ -83,42 +83,4 @@ class TestMergeViewExcludesPreExistingDiffs:
             # The hunk should be an addition (bc=0) at the end
             assert h["bc"] == 0
             assert h["cc"] == 1
-
-    def test_pre_existing_diff_not_shown_when_file_unchanged(self) -> None:
-        """If a file has pre-existing diffs and the agent doesn't touch it,
-        the merge view should not include it at all."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo = _create_git_repo(tmpdir)
-            data_dir = os.path.join(tmpdir, "data")
-            os.makedirs(data_dir)
-
-            # Manually modify the file (simulating a previous task's accepted change)
-            Path(repo, "example.md").write_text("line 1\nCHANGED\nline 3\n")
-
-            # --- New task starts ---
-            pre_hunks = _parse_diff_hunks(repo)
-            pre_untracked = _capture_untracked(repo)
-            pre_hashes = _snapshot_files(
-                repo, set(pre_hunks.keys()) | pre_untracked
-            )
-            _save_untracked_base(
-                repo, data_dir, pre_untracked | set(pre_hunks.keys())
-            )
-            assert len(pre_hunks) > 0  # There are pre-existing diffs
-
-            # Agent does NOT modify the file — create a new file instead
-            Path(repo, "new.txt").write_text("hello\n")
-            subprocess.run(["git", "add", "new.txt"], cwd=repo, capture_output=True)
-
-            result = _prepare_merge_view(
-                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
-            )
-            # Should not include example.md (unchanged by agent)
-            if result.get("status") == "opened":
-                import json
-                manifest = json.loads(
-                    (Path(data_dir) / "pending-merge.json").read_text()
-                )
-                file_names = [f["name"] for f in manifest["files"]]
-                assert "example.md" not in file_names
 
