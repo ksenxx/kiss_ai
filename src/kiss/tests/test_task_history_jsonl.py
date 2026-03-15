@@ -201,6 +201,18 @@ class TestResultAndEventsFile:
         th._update_task_result("nonexistent", "some result")
         # Should not crash
 
+    def test_load_history_with_limit_exceeding_sample_tasks(self):
+        """_load_history with limit > len(SAMPLE_TASKS) should still return sample tasks.
+
+        This was the bug: on a fresh install with no history file,
+        limit=10 > 8 sample tasks caused _load_history to fall through
+        to _read_recent_entries which returned [] for missing file.
+        """
+        # No tasks added, no history file — fresh install scenario
+        history = th._load_history(limit=10)
+        assert len(history) == len(th.SAMPLE_TASKS)
+        assert history[0]["task"] == th.SAMPLE_TASKS[0]["task"]
+
 
 class TestMigration:
     """Test migration from old task_history.json to JSONL format."""

@@ -18,6 +18,10 @@ from kiss.core import config as config_module
 
 logger = logging.getLogger(__name__)
 
+
+def _log_exc() -> None:
+    logger.debug("Exception caught", exc_info=True)
+
 _CS_SETTINGS = {
     "workbench.startupEditor": "none",
     "workbench.tips.enabled": False,
@@ -76,75 +80,6 @@ function activate(ctx){
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
   var dataDir=path.resolve(ctx.globalStorageUri.fsPath,'..','..','..');
-  var editorStateFile=path.join(dataDir,'editor-state.json');
-  function saveEditorState(){
-    try{
-      var tabs=[];
-      for(var g of vscode.window.tabGroups.all){
-        for(var t of g.tabs){
-          if(t.input&&t.input.uri&&t.input.uri.scheme==='file'){
-            tabs.push({path:t.input.uri.fsPath,viewColumn:g.viewColumn,isActive:t.isActive});
-          }
-        }
-      }
-      var ae=vscode.window.activeTextEditor;
-      var cursors={};
-      for(var ed of vscode.window.visibleTextEditors){
-        if(ed.document.uri.scheme==='file'){
-          cursors[ed.document.uri.fsPath]={
-            line:ed.selection.active.line,
-            character:ed.selection.active.character
-          };
-        }
-      }
-      var st={tabs:tabs,activeFile:ae&&ae.document?ae.document.uri.fsPath:'',cursors:cursors};
-      if(!fs.existsSync(dataDir))fs.mkdirSync(dataDir,{recursive:true});
-      fs.writeFileSync(editorStateFile,JSON.stringify(st));
-    }catch(e){}
-  }
-  async function restoreEditorState(){
-    try{
-      if(!fs.existsSync(editorStateFile))return;
-      var st=JSON.parse(fs.readFileSync(editorStateFile,'utf8'));
-      if(!st.tabs||!st.tabs.length)return;
-      var currentPaths=new Set();
-      for(var g of vscode.window.tabGroups.all){
-        for(var t of g.tabs){
-          if(t.input&&t.input.uri)currentPaths.add(t.input.uri.fsPath);
-        }
-      }
-      for(var tab of st.tabs){
-        if(!currentPaths.has(tab.path)&&fs.existsSync(tab.path)){
-          try{
-            var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(tab.path));
-            var opts={preview:false,viewColumn:tab.viewColumn||1,preserveFocus:true};
-            await vscode.window.showTextDocument(doc,opts);
-          }catch(e){}
-        }
-      }
-      if(st.activeFile&&fs.existsSync(st.activeFile)){
-        try{
-          var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(st.activeFile));
-          var ed=await vscode.window.showTextDocument(doc,{preview:false});
-          var c=st.cursors&&st.cursors[st.activeFile];
-          if(c){
-            var pos=new vscode.Position(c.line,c.character);
-            ed.selection=new vscode.Selection(pos,pos);
-            ed.revealRange(new vscode.Range(pos,pos),vscode.TextEditorRevealType.InCenter);
-          }
-        }catch(e){}
-      }
-    }catch(e){}
-  }
-  setTimeout(function(){restoreEditorState();},3000);
-  var saveTimer=null;
-  function debouncedSaveState(){
-    if(saveTimer)clearTimeout(saveTimer);
-    saveTimer=setTimeout(saveEditorState,500);
-  }
-  ctx.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(function(){debouncedSaveState();}));
-  var saveStateInterval=setInterval(saveEditorState,30000);
-  ctx.subscriptions.push({dispose:function(){clearInterval(saveStateInterval);}});
   function writeTheme(){
     var k=vscode.window.activeColorTheme.kind;
     var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
@@ -368,7 +303,7 @@ function activate(ctx){
     }catch(e){}
   }
   writeActiveFile();
-  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile();debouncedSaveState();}));
+  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(function(){writeActiveFile();}));
   var mp=path.join(dataDir,'pending-merge.json');
   var op=path.join(dataDir,'pending-open.json');
   var ap=path.join(dataDir,'pending-action.json');
@@ -480,9 +415,63 @@ function activate(ctx){
       'Reviewing '+data.files.length+' file(s). '
       +'Red = old, Blue = new. Use Accept / Reject on toolbar.');
   }
+  // --- GitHub Copilot auth token persistence ---
+  var ghTokenFile=path.join(dataDir,'..','github-copilot-token.json');
+  async function saveGitHubToken(){
+    try{
+      var scopes=['user:email','repo'];
+      var opts={createIfNone:false};
+      var s=await vscode.authentication.getSession(
+        'github',scopes,opts);
+      if(s&&s.accessToken){
+        var d=JSON.stringify({
+          accessToken:s.accessToken,
+          account:s.account,id:s.id});
+        fs.writeFileSync(ghTokenFile,d,{mode:0o600});
+      }
+    }catch(e){}
+  }
+  // Check periodically and on auth change
+  saveGitHubToken();
+  var ghInterval=setInterval(saveGitHubToken,30000);
+  ctx.subscriptions.push({dispose:function(){clearInterval(ghInterval);}});
+  try{
+    vscode.authentication.onDidChangeSessions(function(e){
+      if(e.provider&&e.provider.id==='github') saveGitHubToken();
+    });
+  }catch(e){}
 }
 module.exports={activate};
 """
+
+
+_GH_TOKEN_FILENAME = "github-copilot-token.json"
+
+
+def _load_github_token(cs_data_dir: str) -> str | None:
+    """Load saved GitHub Copilot auth token from disk.
+
+    Reads ``github-copilot-token.json`` from the parent of *cs_data_dir*
+    (i.e. ``~/.kiss/github-copilot-token.json``) and returns the
+    ``accessToken`` value, or ``None`` if the file is missing, corrupt,
+    or lacks a truthy ``accessToken``.
+
+    Args:
+        cs_data_dir: Code-server data directory path.
+
+    Returns:
+        The access token string, or None.
+    """
+    token_file = Path(cs_data_dir).parent / _GH_TOKEN_FILENAME
+    if not token_file.exists():
+        return None
+    try:
+        data = json.loads(token_file.read_text())
+        token = data.get("accessToken")
+        return token if token else None
+    except (json.JSONDecodeError, OSError):
+        _log_exc()
+        return None
 
 
 _MS_GALLERY = (
@@ -491,14 +480,17 @@ _MS_GALLERY = (
 )
 
 
-def _disable_copilot_scm_button(data_dir: str) -> None:
+def _disable_copilot_scm_button(extensions_dir: str) -> None:
     """Remove Copilot's 'generate commit message' button from the SCM input box.
 
     Modifies the Copilot Chat extension's package.json to set the scm/inputBox
     menu entry's ``when`` clause to ``"false"``, preventing it from appearing.
     This ensures only the KISSAgent's generate button is visible.
+
+    Args:
+        extensions_dir: Shared extensions directory.
     """
-    ext_base = Path(data_dir) / "extensions"
+    ext_base = Path(extensions_dir)
     if not ext_base.is_dir():
         return
     for ext_dir in ext_base.iterdir():
@@ -522,12 +514,16 @@ def _disable_copilot_scm_button(data_dir: str) -> None:
             try:
                 pkg_path.write_text(json.dumps(pkg))
             except OSError:
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
 
 
-def _install_copilot_extension(data_dir: str) -> None:
-    """Install GitHub Copilot extension if not already present."""
-    ext_base = Path(data_dir) / "extensions"
+def _install_copilot_extension(extensions_dir: str) -> None:
+    """Install GitHub Copilot extension if not already present.
+
+    Args:
+        extensions_dir: Shared extensions directory.
+    """
+    ext_base = Path(extensions_dir)
     if ext_base.is_dir() and any(
         d.name.startswith("github.copilot-") for d in ext_base.iterdir() if d.is_dir()
     ):
@@ -545,14 +541,20 @@ def _install_copilot_extension(data_dir: str) -> None:
         )
     except (subprocess.TimeoutExpired, OSError):
         logger.debug("Exception caught", exc_info=True)
+        _log_exc()
         pass
-    _disable_copilot_scm_button(data_dir)
+    _disable_copilot_scm_button(extensions_dir)
 
 
-def _setup_code_server(data_dir: str) -> bool:
+def _setup_code_server(data_dir: str, extensions_dir: str) -> bool:
     """Pre-configure code-server user data: settings, state DB, and cleanup extension.
 
-    Returns True if the extension.js was updated (code-server needs restart).
+    Args:
+        data_dir: Code-server user-data directory.
+        extensions_dir: Shared extensions directory.
+
+    Returns:
+        True if the extension.js was updated (code-server needs restart).
     """
     user_dir = Path(data_dir) / "User"
     user_dir.mkdir(parents=True, exist_ok=True)
@@ -562,6 +564,7 @@ def _setup_code_server(data_dir: str) -> bool:
         existing = json.loads(settings_file.read_text()) if settings_file.exists() else {}
     except (json.JSONDecodeError, OSError):
         logger.debug("Exception caught", exc_info=True)
+        _log_exc()
         existing = {}
     if "workbench.colorTheme" not in existing:
         existing["workbench.colorTheme"] = "Default Dark Modern"
@@ -599,7 +602,8 @@ def _setup_code_server(data_dir: str) -> bool:
                 if chat_dir.exists():
                     shutil.rmtree(chat_dir, ignore_errors=True)
 
-    ext_dir = Path(data_dir) / "extensions" / "kiss-init"
+    ext_root = Path(extensions_dir)
+    ext_dir = ext_root / "kiss-init"
     ext_dir.mkdir(parents=True, exist_ok=True)
     (ext_dir / "package.json").write_text(
         json.dumps(
@@ -657,8 +661,10 @@ def _setup_code_server(data_dir: str) -> bool:
     old_content = ext_file.read_text() if ext_file.exists() else ""
     ext_file.write_text(_CS_EXTENSION_JS)
 
-    _disable_copilot_scm_button(data_dir)
-    threading.Thread(target=_install_copilot_extension, args=(data_dir,), daemon=True).start()
+    _disable_copilot_scm_button(extensions_dir)
+    threading.Thread(
+        target=_install_copilot_extension, args=(extensions_dir,), daemon=True,
+    ).start()
 
     return old_content != _CS_EXTENSION_JS
 
@@ -691,8 +697,22 @@ def _scan_files(work_dir: str) -> list[str]:
                 paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
     except OSError:  # pragma: no cover — os.walk swallows all OSErrors internally
         logger.debug("Exception caught", exc_info=True)
+        _log_exc()
         pass
     return paths
+
+
+def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command with captured text output.
+
+    Args:
+        cwd: Working directory for the git command.
+        *args: Git sub-command and arguments.
+
+    Returns:
+        CompletedProcess with stdout/stderr as strings.
+    """
+    return subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
 
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -722,6 +742,7 @@ def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]
         text=True,
         cwd=work_dir,
     )
+    result = _git(work_dir, "diff", "-U0", "HEAD", "--no-color")
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
     for line in result.stdout.split("\n"):
@@ -742,6 +763,7 @@ def _capture_untracked(work_dir: str) -> set[str]:
         text=True,
         cwd=work_dir,
     )
+    result = _git(work_dir, "ls-files", "--others", "--exclude-standard")
     return {line.strip() for line in result.stdout.split("\n") if line.strip()}
 
 
@@ -762,6 +784,7 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
             result[fname] = hashlib.md5(fpath.read_bytes()).hexdigest()
         except OSError:
             logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             pass
     return result
 
@@ -781,7 +804,7 @@ def _untracked_base_dir() -> Path:
 
 
 def _save_untracked_base(
-    work_dir: str, data_dir: str, untracked: set[str]
+    work_dir: str, untracked: set[str]
 ) -> None:
     """Save copies of untracked files before a task runs.
 
@@ -790,7 +813,6 @@ def _save_untracked_base(
 
     Args:
         work_dir: Repository root.
-        data_dir: Code-server data directory (unused, kept for API compat).
         untracked: Set of untracked file paths (relative to work_dir).
     """
     base_dir = _untracked_base_dir()
@@ -806,6 +828,7 @@ def _save_untracked_base(
             shutil.copy2(fpath, dest)
         except OSError:
             logger.debug("Exception caught", exc_info=True)
+            _log_exc()
 
 
 def _cleanup_merge_data(data_dir: str) -> None:
@@ -829,6 +852,7 @@ def _cleanup_merge_data(data_dir: str) -> None:
             manifest.unlink()
         except OSError:
             logger.debug("Exception caught", exc_info=True)
+            _log_exc()
 
 
 def _restore_merge_files(data_dir: str, work_dir: str) -> None:
@@ -873,6 +897,80 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
     return [h for line in result.stdout.split("\n") if (h := _parse_hunk_line(line))]
 
 
+def _hunk_to_dict(bs: int, bc: int, cs: int, cc: int) -> dict[str, int]:
+    """Convert a raw diff hunk tuple to the merge-view dict format.
+
+    Adjusts 1-based line numbers to 0-based for the editor.
+
+    Args:
+        bs: Base start line (1-based).
+        bc: Base line count.
+        cs: Current start line (1-based).
+        cc: Current line count.
+
+    Returns:
+        Dict with keys bs, bc, cs, cc (0-based start lines).
+    """
+    return {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
+
+
+def _file_as_new_hunks(fpath: Path) -> list[dict[str, int]]:
+    """Return a single hunk treating the entire file as newly added.
+
+    Returns an empty list if the file doesn't exist, is too large (>2MB),
+    is empty, or can't be read.
+
+    Args:
+        fpath: Absolute path to the file.
+
+    Returns:
+        List with zero or one hunk dict.
+    """
+    try:
+        if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
+            return []
+        line_count = len(fpath.read_text().splitlines())
+        return [{"bs": 0, "bc": 0, "cs": 0, "cc": line_count}] if line_count else []
+    except (OSError, UnicodeDecodeError):
+        _log_exc()
+        return []
+
+
+def _agent_file_hunks(
+    work_dir: str,
+    fname: str,
+    ub_dir: Path,
+    pre_hunks: dict[str, list[tuple[int, int, int, int]]],
+    post_file_hunks: list[tuple[int, int, int, int]] | None = None,
+) -> list[dict[str, int]]:
+    """Compute filtered merge-view hunk dicts for a single file.
+
+    If a saved pre-task base copy exists in *ub_dir*, diffs against it
+    to isolate the agent's changes.  Otherwise filters *post_file_hunks*
+    against *pre_hunks* to exclude pre-existing changes.  If neither
+    is available, treats the whole file as new.
+
+    Args:
+        work_dir: Repository root directory.
+        fname: File path relative to work_dir.
+        ub_dir: Directory containing saved pre-task file copies.
+        pre_hunks: Pre-task diff hunks keyed by filename.
+        post_file_hunks: Post-task diff hunks for this file (from git diff).
+            None when the file is untracked with no git diff hunks.
+
+    Returns:
+        List of hunk dicts for the merge view.
+    """
+    fpath = Path(work_dir) / fname
+    saved_base = ub_dir / fname
+    if saved_base.is_file():
+        return [_hunk_to_dict(*h) for h in _diff_files(str(saved_base), str(fpath))]
+    if post_file_hunks is not None:
+        pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
+        return [_hunk_to_dict(*h) for h in post_file_hunks if (h[0], h[1]) not in pre]
+    return _file_as_new_hunks(fpath)
+
+
 def _prepare_merge_view(
     work_dir: str,
     data_dir: str,
@@ -883,81 +981,39 @@ def _prepare_merge_view(
     post_hunks = _parse_diff_hunks(work_dir)
     ub_dir = _untracked_base_dir()
     file_hunks: dict[str, list[dict[str, int]]] = {}
+
+    def _file_changed(fname: str) -> bool:
+        """Return True if the agent actually modified this file."""
+        if pre_file_hashes is None or fname not in pre_file_hashes:
+            return True
+        try:
+            cur = hashlib.md5((Path(work_dir) / fname).read_bytes()).hexdigest()
+        except OSError:
+            _log_exc()
+            return False
+        return cur != pre_file_hashes[fname]
+
     for fname, hunks in post_hunks.items():
-        if pre_file_hashes is not None and fname in pre_file_hashes:
-            # File had pre-existing changes — check if agent actually modified it
-            fpath = Path(work_dir) / fname
-            try:
-                current_hash = hashlib.md5(fpath.read_bytes()).hexdigest()
-            except OSError:
-                logger.debug("Exception caught", exc_info=True)
-                continue
-            if current_hash == pre_file_hashes[fname]:
-                # Content unchanged by agent — skip this file
-                continue
-        saved_base = ub_dir / fname
-        if saved_base.is_file():
-            # Diff the saved pre-task copy against current to get only agent's changes
-            agent_hunks = _diff_files(str(saved_base), str(Path(work_dir) / fname))
-            filtered = [
-                {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
-                for bs, bc, cs, cc in agent_hunks
-            ]
-        else:
-            pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
-            filtered = [
-                {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
-                for bs, bc, cs, cc in hunks
-                if (bs, bc) not in pre
-            ]
+        if not _file_changed(fname):
+            continue
+        filtered = _agent_file_hunks(work_dir, fname, ub_dir, pre_hunks, hunks)
         if filtered:
             file_hunks[fname] = filtered
     new_files = _capture_untracked(work_dir) - pre_untracked
     for fname in new_files:
-        fpath = Path(work_dir) / fname
-        try:
-            if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
-                continue
-            line_count = len(fpath.read_text().splitlines())
-            if line_count:
-                file_hunks[fname] = [{"bs": 0, "bc": 0, "cs": 0, "cc": line_count}]
-        except (OSError, UnicodeDecodeError):
-            logger.debug("Exception caught", exc_info=True)
-            pass
+        filtered = _file_as_new_hunks(Path(work_dir) / fname)
+        if filtered:
+            file_hunks[fname] = filtered
     # Detect modified pre-existing untracked files
     if pre_file_hashes:
         for fname in pre_untracked:
-            if fname in file_hunks:
+            if fname in file_hunks or fname not in pre_file_hashes:
                 continue
-            if fname not in pre_file_hashes:
+            if not _file_changed(fname):
                 continue
-            fpath = Path(work_dir) / fname
-            try:
-                current_hash = hashlib.md5(fpath.read_bytes()).hexdigest()
-            except OSError:
-                continue
-            if current_hash == pre_file_hashes[fname]:
-                continue
-            saved_base = ub_dir / fname
-            if saved_base.is_file():
-                agent_hunks = _diff_files(str(saved_base), str(fpath))
-                filtered = [
-                    {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
-                    for bs, bc, cs, cc in agent_hunks
-                ]
-                if filtered:
-                    file_hunks[fname] = filtered
-            else:
-                try:
-                    if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
-                        continue
-                    line_count = len(fpath.read_text().splitlines())
-                    if line_count:
-                        file_hunks[fname] = [
-                            {"bs": 0, "bc": 0, "cs": 0, "cc": line_count}
-                        ]
-                except (OSError, UnicodeDecodeError):
-                    logger.debug("Exception caught", exc_info=True)
+            filtered = _agent_file_hunks(work_dir, fname, ub_dir, pre_hunks)
+            if filtered:
+                file_hunks[fname] = filtered
     if not file_hunks:
         return {"error": "No changes"}
     merge_dir = Path(data_dir) / "merge-temp"
@@ -973,12 +1029,7 @@ def _prepare_merge_view(
         if saved_base.is_file():
             shutil.copy2(saved_base, base_path)
         else:
-            base_result = subprocess.run(
-                ["git", "show", f"HEAD:{fname}"],
-                capture_output=True,
-                text=True,
-                cwd=work_dir,
-            )
+            base_result = _git(work_dir, "show", f"HEAD:{fname}")
             base_path.write_text(
                 base_result.stdout if base_result.returncode == 0 else ""
             )

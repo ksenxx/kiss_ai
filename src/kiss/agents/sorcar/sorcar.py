@@ -28,6 +28,7 @@ from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _cleanup_merge_data,
+    _git,
     _parse_diff_hunks,
     _prepare_merge_view,
     _restore_merge_files,
@@ -63,6 +64,10 @@ from kiss.core.relentless_agent import RelentlessAgent
 
 logger = logging.getLogger(__name__)
 
+
+def _log_exc() -> None:
+    logger.debug("Exception caught", exc_info=True)
+
 _FAST_MODEL = "gemini-2.0-flash"
 _COMMIT_MODEL = "gemini-2.0-flash"
 _INTERNAL_MODELS = frozenset({_FAST_MODEL, _COMMIT_MODEL})
@@ -87,7 +92,7 @@ def _read_active_file(cs_data_dir: str) -> str:
         if path and os.path.isfile(path):
             return path
     except (OSError, json.JSONDecodeError):
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     return ""
 
 
@@ -119,7 +124,7 @@ def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
         )
         return _clean_llm_output(raw)
     except Exception:  # pragma: no cover – LLM API failure
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
         return ""
 
 
@@ -181,46 +186,38 @@ def run_chatbot(
     code_server_url = ""
     wd_hash = hashlib.md5(actual_work_dir.encode()).hexdigest()[:8]
     cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
-
-    # If another sorcar instance is already running with this data dir,
-    # use a unique data dir for this instance to avoid collisions
-    # (e.g., assistant-port overwrite, shared IPC files).
-    _existing_port_file = Path(cs_data_dir) / "assistant-port"
-    if _existing_port_file.exists():  # pragma: no cover – requires concurrent instance
-        try:
-            _existing_port = int(_existing_port_file.read_text().strip())
-            with socket.create_connection(
-                ("127.0.0.1", _existing_port), timeout=0.5
-            ):
-                # Another instance is reachable; isolate this instance.
-                cs_data_dir = str(
-                    _KISS_DIR / f"cs-{wd_hash}-{os.getpid()}"
-                )
-        except (ConnectionRefusedError, OSError, ValueError):
-            pass  # Port not reachable; safe to reuse this data dir.
+    # All instances share a single extensions directory so Copilot and
+    # other extensions are installed once and reused across work dirs.
+    _shared_extensions_dir = str(_KISS_DIR / "cs-extensions")
 
     # Restore files from any stale merge state (e.g., previous crash during merge)
     _restore_merge_files(cs_data_dir, actual_work_dir)
 
     # Read or assign a code-server port for this work directory.
-    # Use socket.bind directly (not find_free_port) so test patches
-    # that override find_free_port for the Starlette port don't collide.
+    # The port is stored in a persistent file OUTSIDE the cs data dir so it
+    # survives _cleanup_stale_cs_dirs.  Keeping the same port keeps the
+    # browser origin stable, which preserves localStorage-based secrets
+    # (e.g. GitHub Copilot auth tokens) across Sorcar relaunches.
+    _persistent_port_file = _KISS_DIR / f"cs-port-{wd_hash}"
     cs_port_file = Path(cs_data_dir) / "cs-port"
     cs_port_file.parent.mkdir(parents=True, exist_ok=True)
     cs_port = 0
-    if cs_port_file.exists():  # pragma: no cover – only on restart with existing data dir
-        try:
-            cs_port = int(cs_port_file.read_text().strip())
-        except (ValueError, OSError):
-            logger.debug("Exception caught", exc_info=True)
+    for _pf in (_persistent_port_file, cs_port_file):
+        if _pf.exists():
+            try:
+                cs_port = int(_pf.read_text().strip())
+                break
+            except (ValueError, OSError):
+                _log_exc()
     if not cs_port:  # pragma: no branch – cs_port always 0 on fresh start
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
             _s.bind(("", 0))
             cs_port = int(_s.getsockname()[1])
-        try:
-            _atomic_write_text(cs_port_file, str(cs_port))
-        except OSError:  # pragma: no cover – filesystem permission error
-            logger.debug("Exception caught", exc_info=True)
+    try:
+        _atomic_write_text(_persistent_port_file, str(cs_port))
+        _atomic_write_text(cs_port_file, str(cs_port))
+    except OSError:  # pragma: no cover – filesystem permission error
+        _log_exc()
     cs_url = f"http://127.0.0.1:{cs_port}"
     cs_binary = shutil.which("code-server")
     if not cs_binary:
@@ -247,31 +244,47 @@ def run_chatbot(
             "--user-data-dir",
             cs_data_dir,
             "--extensions-dir",
-            str(Path(cs_data_dir) / "extensions"),
+            _shared_extensions_dir,
             "--disable-getting-started-override",
             "--disable-workspace-trust",
             actual_work_dir,
         ]
 
     def _watch_code_server() -> None:  # pragma: no cover – requires code-server binary
-        """Monitor code-server subprocess and restart it if it crashes."""
+        """Monitor code-server and restart it if it crashes.
+
+        Works whether we started code-server (cs_proc set) or are reusing
+        an existing instance (cs_proc is None).
+        """
         nonlocal cs_proc, code_server_url
         while not shutting_down.is_set():
             shutting_down.wait(5.0)
             if shutting_down.is_set():
                 break
-            if cs_proc is None:
-                continue
-            ret = cs_proc.poll()
-            if ret is None:
-                continue
-            logger.warning(
-                "code-server exited with code %d, restarting...", ret
-            )
+            # Check if code-server is still alive
+            if cs_proc is not None:
+                ret = cs_proc.poll()
+                if ret is None:
+                    continue  # Still running
+                logger.warning("code-server exited with code %d", ret)
+            else:
+                # We didn't start it; check if port is reachable
+                try:
+                    with socket.create_connection(
+                        ("127.0.0.1", cs_port), timeout=0.5
+                    ):
+                        continue  # Still running
+                except (ConnectionRefusedError, OSError):
+                    pass
+                logger.warning("code-server on port %d unreachable", cs_port)
+            logger.info("Restarting code-server...")
             try:
-                from kiss.agents.sorcar.code_server import _MS_GALLERY
+                from kiss.agents.sorcar.code_server import _MS_GALLERY, _load_github_token
 
                 cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
+                _gh_token = _load_github_token(cs_data_dir)
+                if _gh_token:
+                    cs_env["GITHUB_TOKEN"] = _gh_token
                 cs_proc = subprocess.Popen(
                     _code_server_launch_args(),
                     stdout=subprocess.DEVNULL,
@@ -289,7 +302,7 @@ def run_chatbot(
                             restarted = True
                             break
                     except (ConnectionRefusedError, OSError):
-                        logger.debug("Exception caught", exc_info=True)
+                        _log_exc()
                         time.sleep(0.5)
                 if restarted:
                     logger.info("code-server restarted at %s", code_server_url)
@@ -297,15 +310,15 @@ def run_chatbot(
                 else:
                     logger.warning("code-server failed to restart")
             except Exception:
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
     if cs_binary:
-        ext_changed = _setup_code_server(cs_data_dir)
+        ext_changed = _setup_code_server(cs_data_dir, extensions_dir=_shared_extensions_dir)
         port_in_use = False
         try:
             with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
                 port_in_use = True  # pragma: no cover – requires pre-existing code-server on port
         except (ConnectionRefusedError, OSError):
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
         # If our stored port is not in use, verify it's still bindable;
         # if another process grabbed it, pick a fresh port.
         if not port_in_use:  # pragma: no branch – port_in_use always False on fresh start
@@ -318,14 +331,14 @@ def run_chatbot(
                 try:
                     _atomic_write_text(cs_port_file, str(cs_port))
                 except OSError:
-                    logger.debug("Exception caught", exc_info=True)
+                    _log_exc()
 
         workdir_file = Path(cs_data_dir) / "workdir"
         prev_workdir = ""
         try:
             prev_workdir = workdir_file.read_text().strip() if workdir_file.exists() else ""
         except OSError:  # pragma: no cover – filesystem error reading workdir file
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
         workdir_changed = prev_workdir != actual_work_dir
 
         need_restart = port_in_use and (ext_changed or workdir_changed)
@@ -343,15 +356,19 @@ def run_chatbot(
                         os.kill(int(pid_str.strip()), 15)
                 time.sleep(1.5)
             except Exception:
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
             port_in_use = False
         if port_in_use:  # pragma: no cover – requires pre-existing code-server
             code_server_url = cs_url
             printer.print(f"Reusing existing code-server at {code_server_url}")
         else:
-            from kiss.agents.sorcar.code_server import _MS_GALLERY
+            from kiss.agents.sorcar.code_server import _MS_GALLERY, _load_github_token
 
             cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
+            _gh_token = _load_github_token(cs_data_dir)
+            if _gh_token:
+                cs_env["GITHUB_TOKEN"] = _gh_token
+                logger.info("Restored GitHub Copilot auth token")
             cs_proc = subprocess.Popen(
                 _code_server_launch_args(),
                 stdout=subprocess.DEVNULL,
@@ -365,7 +382,7 @@ def run_chatbot(
                         code_server_url = cs_url
                         break
                 except (ConnectionRefusedError, OSError):
-                    logger.debug("Exception caught", exc_info=True)
+                    _log_exc()
                     time.sleep(0.5)
             if code_server_url:
                 printer.print(f"code-server running at {code_server_url}")
@@ -375,7 +392,7 @@ def run_chatbot(
             try:
                 _atomic_write_text(workdir_file, actual_work_dir)
             except OSError:  # pragma: no cover – filesystem error writing workdir
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
 
     if cs_binary and code_server_url:
         threading.Thread(target=_watch_code_server, daemon=True).start()
@@ -415,7 +432,7 @@ def run_chatbot(
                     }
                 )
         except Exception:  # pragma: no cover – LLM API failure
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
 
     def _watch_periodic() -> None:
         """Combined watcher: check theme file every 1s and client count every 5s."""
@@ -425,7 +442,7 @@ def run_chatbot(
             if theme_file.exists():  # pragma: no branch – depends on system state
                 last_mtime = theme_file.stat().st_mtime
         except OSError:  # pragma: no cover – filesystem error
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
         no_client_since: float | None = None
         tick = 0
         while not shutting_down.is_set():  # pragma: no branch – daemon thread exit
@@ -440,7 +457,7 @@ def run_chatbot(
                         colors = _THEME_PRESETS.get(kind, _THEME_PRESETS["dark"])
                         printer.broadcast({"type": "theme_changed", **colors})
             except (OSError, json.JSONDecodeError):  # pragma: no cover – filesystem/JSON error
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
             # Client check every 5s (every 5th tick)
             tick += 1
             if tick >= 5:
@@ -526,7 +543,7 @@ def run_chatbot(
                 actual_work_dir, set(pre_hunks.keys()) | pre_untracked
             )
             _save_untracked_base(
-                actual_work_dir, cs_data_dir, pre_untracked | set(pre_hunks.keys())
+                actual_work_dir, pre_untracked | set(pre_hunks.keys())
             )
             active_file = _read_active_file(cs_data_dir)
             printer.start_recording()
@@ -550,11 +567,11 @@ def run_chatbot(
             result_text = result or ""
             done_event = {"type": "task_done"}
         except (KeyboardInterrupt, _StopRequested):
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             result_text = "(stopped by user)"
             done_event = {"type": "task_stopped"}
         except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             result_text = f"(error: {e})"
             done_event = {"type": "task_error", "text": str(e)}
         finally:
@@ -587,7 +604,7 @@ def run_chatbot(
                 try:
                     generate_followup(task, result_text)
                 except Exception:  # pragma: no cover – LLM API failure
-                    logger.debug("Exception caught", exc_info=True)
+                    _log_exc()
             _set_latest_chat_events(
                 chat_events, task=task, result=result_summary,
             )
@@ -604,7 +621,7 @@ def run_chatbot(
                         merging = True
                     printer.broadcast({"type": "merge_started"})
             except Exception:  # pragma: no cover – merge view error
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
             refresh_file_cache()
 
     def stop_agent() -> bool:
@@ -638,9 +655,6 @@ def run_chatbot(
         printer.broadcast({"type": "task_stopped"})
         return True
 
-    # True when this instance created a PID-specific data dir for isolation.
-    _is_isolated = cs_data_dir.endswith(f"-{os.getpid()}")
-
     def _cleanup() -> None:
         nonlocal merging
         with running_lock:
@@ -650,24 +664,32 @@ def run_chatbot(
             _restore_merge_files(cs_data_dir, actual_work_dir)
         stop_agent()
         if cs_proc and cs_proc.poll() is None:  # pragma: no cover – cleanup timing
+            # Don't kill code-server if another Sorcar instance is using it.
+            _kill_cs = True
             try:
-                os.killpg(cs_proc.pid, 15)  # SIGTERM to process group
-            except OSError:
-                cs_proc.terminate()
-            try:
-                cs_proc.wait(timeout=5)
-            except Exception:
-                logger.debug("Exception caught", exc_info=True)
+                _cur_port = int(
+                    Path(cs_data_dir, "assistant-port").read_text().strip()
+                )
+                if _cur_port != port:
+                    with socket.create_connection(
+                        ("127.0.0.1", _cur_port), timeout=0.5
+                    ):
+                        _kill_cs = False  # Another live instance exists
+            except (ConnectionRefusedError, OSError, ValueError):
+                pass
+            if _kill_cs:
                 try:
-                    os.killpg(cs_proc.pid, 9)  # SIGKILL to process group
+                    os.killpg(cs_proc.pid, 15)  # SIGTERM to process group
                 except OSError:
-                    cs_proc.kill()
-        # Remove PID-specific data dir created for instance isolation.
-        if _is_isolated:  # pragma: no cover – requires concurrent instance
-            try:
-                shutil.rmtree(cs_data_dir, ignore_errors=True)
-            except Exception:
-                logger.debug("Exception caught", exc_info=True)
+                    cs_proc.terminate()
+                try:
+                    cs_proc.wait(timeout=5)
+                except Exception:
+                    _log_exc()
+                    try:
+                        os.killpg(cs_proc.pid, 9)  # SIGKILL
+                    except OSError:
+                        cs_proc.kill()
 
     def _do_shutdown() -> None:  # pragma: no cover – timer-triggered shutdown
         with running_lock:
@@ -743,7 +765,7 @@ def run_chatbot(
                     yield f"data: {json.dumps(event)}\n\n"
                     last_heartbeat = time.monotonic()
             except asyncio.CancelledError:
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
             finally:
                 printer.remove_client(cq)
                 _schedule_shutdown()
@@ -1032,7 +1054,7 @@ def run_chatbot(
                     s = s[len(query) :]  # pragma: no cover
                 return s
             except Exception:  # pragma: no cover – LLM API failure
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
                 return ""
 
         suggestion = await asyncio.to_thread(_generate)  # pragma: no branch
@@ -1079,7 +1101,7 @@ def run_chatbot(
                 with open(ui_state_file) as f:
                     return JSONResponse(json.load(f))
         except (OSError, json.JSONDecodeError):
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
         return JSONResponse({})
 
     async def save_ui_state(request: Request) -> JSONResponse:
@@ -1091,7 +1113,7 @@ def run_chatbot(
             with open(ui_state_file, "w") as f:
                 json.dump(body, f)
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
         return JSONResponse({"status": "ok"})
 
     async def closing(request: Request) -> JSONResponse:
@@ -1117,7 +1139,7 @@ def run_chatbot(
                 data = json.loads(theme_file.read_text())
                 kind = data.get("kind", "dark")
             except (json.JSONDecodeError, OSError):
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
         return JSONResponse(_THEME_PRESETS.get(kind, _THEME_PRESETS["dark"]))
 
     async def open_file(request: Request) -> JSONResponse:
@@ -1162,20 +1184,10 @@ def run_chatbot(
         def _do_commit() -> dict[str, str]:
             try:
                 subprocess.run(["git", "add", "-A"], cwd=actual_work_dir)
-                diff_stat = subprocess.run(
-                    ["git", "diff", "--cached", "--stat"],
-                    capture_output=True,
-                    text=True,
-                    cwd=actual_work_dir,
-                )
+                diff_stat = _git(actual_work_dir, "diff", "--cached", "--stat")
                 if not diff_stat.stdout.strip():
                     return {"error": "No changes to commit"}
-                diff_detail = subprocess.run(
-                    ["git", "diff", "--cached"],
-                    capture_output=True,
-                    text=True,
-                    cwd=actual_work_dir,
-                )
+                diff_detail = _git(actual_work_dir, "diff", "--cached")
                 message = _generate_commit_msg(diff_detail.stdout)
                 commit_env = {
                     **os.environ,
@@ -1193,7 +1205,7 @@ def run_chatbot(
                     return {"error": result.stderr.strip()}
                 return {"status": "ok", "message": message}
             except Exception as e:  # pragma: no cover – git/LLM error
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
                 return {"error": str(e)}
 
         return await _thread_json_response(_do_commit)
@@ -1212,18 +1224,8 @@ def run_chatbot(
 
         def _generate() -> dict[str, str]:
             try:
-                diff_result = subprocess.run(
-                    ["git", "diff"],
-                    capture_output=True,
-                    text=True,
-                    cwd=actual_work_dir,
-                )
-                cached_result = subprocess.run(
-                    ["git", "diff", "--cached"],
-                    capture_output=True,
-                    text=True,
-                    cwd=actual_work_dir,
-                )
+                diff_result = _git(actual_work_dir, "diff")
+                cached_result = _git(actual_work_dir, "diff", "--cached")
                 diff_text = (diff_result.stdout + cached_result.stdout).strip()
                 untracked_files = "\n".join(sorted(_capture_untracked(actual_work_dir)))
                 if not diff_text and not untracked_files:
@@ -1239,7 +1241,7 @@ def run_chatbot(
                     json.dump({"message": msg}, f)
                 return {"message": msg}
             except Exception as e:  # pragma: no cover – git/LLM error
-                logger.debug("Exception caught", exc_info=True)
+                _log_exc()
                 return {"error": str(e)}
 
         return await _thread_json_response(_generate)
@@ -1267,7 +1269,7 @@ def run_chatbot(
                 content = f.read()
             return JSONResponse({"content": content})
         except Exception as e:  # pragma: no cover – encoding error
-            logger.debug("Exception caught", exc_info=True)
+            _log_exc()
             return JSONResponse({"error": str(e)}, status_code=500)
 
     app = Starlette(
@@ -1312,7 +1314,7 @@ def run_chatbot(
         Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
         _atomic_write_text(Path(cs_data_dir) / "assistant-port", str(port))
     except OSError:  # pragma: no cover – filesystem permission error
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     url = f"http://127.0.0.1:{port}"
     print(f"{title} running at {url}", flush=True)
     print(f"Work directory: {actual_work_dir}", flush=True)
@@ -1366,13 +1368,23 @@ def run_chatbot(
     try:
         server.run()
     except KeyboardInterrupt:  # pragma: no cover – server shutdown signal
-        logger.debug("Exception caught", exc_info=True)
+        _log_exc()
     _cleanup()
 
 
 def main() -> None:  # pragma: no cover – CLI entry point
     """Launch the KISS Sorcar chatbot UI."""
     import argparse
+
+    missing = [k for k in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY") if not os.environ.get(k)]
+    if missing:
+        print(
+            f"Error: Sorcar requires the following environment variable(s): "
+            f"{', '.join(missing)}\n"
+            f"Please set them before launching Sorcar.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     from kiss._version import __version__
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent

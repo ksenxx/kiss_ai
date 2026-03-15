@@ -6,6 +6,7 @@ No mocks — uses real files, real git repos, and real sockets.
 """
 
 import json
+import os
 import shutil
 import socket
 import sqlite3
@@ -26,8 +27,9 @@ class TestSetupCodeServer(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_state_db_idempotent(self) -> None:
-        code_server._setup_code_server(self.tmpdir)
-        code_server._setup_code_server(self.tmpdir)
+        ext_dir = os.path.join(self.tmpdir, "extensions")
+        code_server._setup_code_server(self.tmpdir, ext_dir)
+        code_server._setup_code_server(self.tmpdir, ext_dir)
         db_path = Path(self.tmpdir) / "User" / "globalStorage" / "state.vscdb"
         with sqlite3.connect(str(db_path)) as conn:
             keys = [r[0] for r in conn.execute("SELECT key FROM ItemTable").fetchall()]
