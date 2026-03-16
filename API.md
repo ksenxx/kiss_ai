@@ -1073,8 +1073,10 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-### `kiss.env` — *Ensure offline-installer paths are on PATH.*
+### `kiss.env` — *Ensure offline-installer paths and env vars are configured.*
 
-**`ensure_path`** — Prepend offline-installer bin dirs to PATH if they exist and are missing.<br/>`def ensure_path() -> None`
+**`get_install_dir`** — Return the KISS offline-installer directory. Resolution order: 1. `KISS_INSTALL_DIR` environment variable 2. `~/.kiss/install_dir` marker file (written by the installer) 3. `~/kiss_ai` (default, backward-compatible)<br/>`def get_install_dir() -> Path`
+
+**`ensure_path`** — Prepend offline-installer bin dirs to PATH and set env vars if needed.<br/>`def ensure_path() -> None`
 
 ______________________________________________________________________
