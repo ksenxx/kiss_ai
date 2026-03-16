@@ -307,6 +307,13 @@ if [ -d "$KISS_BUNDLE_DIR/project" ]; then
     # Install from local wheels (fully offline, including pre-built project wheel)
     # Explicitly target the project venv to avoid uv resolving a different workspace
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "$INSTALL_BASE/bin/uv" pip install --python "$PROJECT_DIR/.venv" --no-index --find-links "$KISS_BUNDLE_DIR/wheels" kiss-agent-framework
+
+    # Symlink project entry-point scripts into $INSTALL_BASE/bin so they are on PATH
+    for script in sorcar check generate-api-docs; do
+        if [ -f "$PROJECT_DIR/.venv/bin/$script" ]; then
+            ln -sf "$PROJECT_DIR/.venv/bin/$script" "$INSTALL_BASE/bin/$script"
+        fi
+    done
 fi
 
 # 6. Create shell profile additions
@@ -317,12 +324,33 @@ export PATH="$INSTALL_BASE/bin:\$HOME/.local/bin:\$PATH"
 export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
 EOF
 
+# Add source line to user's shell rc file
+_add_to_shell_rc() {
+    local rc_file="$1"
+    local source_line="source \"$PROFILE_SNIPPET\""
+    if [ -f "$rc_file" ]; then
+        if ! grep -qF "$source_line" "$rc_file"; then
+            printf '\n%s\n' "$source_line" >> "$rc_file"
+            echo "   Added to $rc_file"
+        else
+            echo "   Already in $rc_file"
+        fi
+    else
+        echo "$source_line" > "$rc_file"
+        echo "   Created $rc_file with source line"
+    fi
+}
+
+echo ">>> Configuring shell profile..."
+case "${SHELL:-/bin/zsh}" in
+    */zsh)  _add_to_shell_rc "$HOME/.zshrc" ;;
+    */bash) _add_to_shell_rc "$HOME/.bashrc" ;;
+    *)      _add_to_shell_rc "$HOME/.zshrc"
+            _add_to_shell_rc "$HOME/.bashrc" ;;
+esac
+
 echo ""
 echo "=== Installation Complete ==="
-echo ""
-echo "To use KISS, add the following to your shell profile (~/.zshrc or ~/.bashrc):"
-echo ""
-echo "  source $PROFILE_SNIPPET"
 echo ""
 echo "Project installed at: $PROJECT_DIR"
 
@@ -357,7 +385,7 @@ EOF
     exec "$PROJECT_DIR/.venv/bin/sorcar" "$PROJECT_DIR"
 else
     echo ""
-    echo "To set API keys, add to your shell profile (~/.zshrc or ~/.bashrc):"
+    echo "Set your API keys in a new terminal:"
     echo "  export ANTHROPIC_API_KEY=your_key"
     echo "  export GEMINI_API_KEY=your_key"
 
@@ -456,8 +484,9 @@ without an internet connection:
   • All Python dependencies
   • KISS project source
 
-After installation, add to your shell profile:
-  source ~/.kiss-install/env.sh
+Your shell profile (~/.zshrc or ~/.bashrc) will be
+automatically configured. Open a new terminal after
+installation to use KISS.
 
 Then set your API keys:
   export ANTHROPIC_API_KEY=your_key
