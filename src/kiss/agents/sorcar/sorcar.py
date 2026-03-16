@@ -1455,6 +1455,8 @@ def main() -> None:  # pragma: no cover – CLI entry point
     """Launch the KISS Sorcar chatbot UI."""
     import argparse
 
+    import kiss.env  # noqa: F401 – ensure offline-installer bins are on PATH
+
     _auto_update()
 
     missing = [k for k in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY") if not os.environ.get(k)]
