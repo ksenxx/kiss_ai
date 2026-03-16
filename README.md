@@ -55,6 +55,8 @@ install using
 # To install
 xattr -d com.apple.quarantine /path/to/kiss-offline-installer.pkg
 open /path/to/kiss-offline-installer.pkg
+# To launch sorcar
+sorcar
 ```
 
 # Introduction to KISS Sorcar

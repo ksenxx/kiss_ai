@@ -49,30 +49,7 @@ to the problems in any possible way.
 1. Do NOT change the agent's interface or streaming mechanism
 2. The agent MUST still work correctly on the task above
 3. Do NOT use: caching, multiprocessing, async/await, docker
-
-## Strategies
-- IMPORTANT: Optimizations must be GENERAL across the task, not task-specific
-- Shorter system prompts preserving meaning
-- Remove redundant instructions
-- Minimize conversation turns
-
-## Time Reduction
-- Run short-running commands in bash
-- Batch operations where possible
-- Use early termination when goals are achieved
-- Optimize loops and data structures
-- Search the web for time reduction techniques
-
-## Agentic Patterns
-- deeply search the web for information about various latest agentic patterns
-- patterns that solve long-horizon tasks scalably, efficiently and accurately
-- patterns that makes Python code faster
-- patterns that make bash commands faster
-- patterns that make the agent faster
-- patterns that make the agent more reliable
-- patterns that make the agent more cost-effective
-- deeply invent and implement new agent architectures that are more efficient and reliable
-- try some of these patterns in the agent's source code based on your needs
+4. You can ONLY MODIFY the agent code
 
 """
 
