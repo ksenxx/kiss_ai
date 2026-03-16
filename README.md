@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.41-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.42-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -55,6 +55,8 @@ install using
 # To install
 xattr -d com.apple.quarantine /path/to/kiss-offline-installer.pkg
 open /path/to/kiss-offline-installer.pkg
+# To launch sorcar
+sorcar
 ```
 
 # Introduction to KISS Sorcar
