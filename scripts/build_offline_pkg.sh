@@ -209,8 +209,19 @@ _strip_quarantine() {
 }
 
 KISS_BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_BASE="${KISS_INSTALL_DIR:-$HOME/.kiss-install}"
-PROJECT_DIR="${KISS_PROJECT_DIR:-$HOME/kiss_ai}"
+
+# Determine install location: env var > interactive prompt > default
+_DEFAULT_DIR="$HOME/kiss_ai"
+if [ -n "${KISS_INSTALL_DIR:-}" ]; then
+    INSTALL_BASE="$KISS_INSTALL_DIR"
+elif [ -t 0 ]; then
+    printf "Install location [%s]: " "$_DEFAULT_DIR"
+    read -r _USER_DIR
+    INSTALL_BASE="${_USER_DIR:-$_DEFAULT_DIR}"
+else
+    INSTALL_BASE="$_DEFAULT_DIR"
+fi
+PROJECT_DIR="${KISS_PROJECT_DIR:-$INSTALL_BASE}"
 
 echo "=== KISS Offline Installer ==="
 echo "Bundle: $KISS_BUNDLE_DIR"
@@ -218,6 +229,10 @@ echo "Install base: $INSTALL_BASE"
 echo "Project dir: $PROJECT_DIR"
 
 mkdir -p "$INSTALL_BASE/bin"
+
+# Write install location marker so the Python env module can find it
+mkdir -p "$HOME/.kiss"
+printf '%s\n' "$INSTALL_BASE" > "$HOME/.kiss/install_dir"
 
 # 1. Install uv
 echo ">>> Installing uv..."
@@ -229,12 +244,6 @@ if [ -f "$KISS_BUNDLE_DIR/bin/uvx" ]; then
     chmod +x "$INSTALL_BASE/bin/uvx"
     _strip_quarantine "$INSTALL_BASE/bin/uvx"
 fi
-# Also install to ~/.local/bin for standard uv location
-mkdir -p "$HOME/.local/bin"
-cp "$INSTALL_BASE/bin/uv" "$HOME/.local/bin/uv"
-[ -f "$INSTALL_BASE/bin/uvx" ] && cp "$INSTALL_BASE/bin/uvx" "$HOME/.local/bin/uvx"
-ln -sf "$INSTALL_BASE/code-server/bin/code-server" "$HOME/.local/bin/code-server"
-
 # 2. Install code-server
 echo ">>> Installing code-server..."
 mkdir -p "$INSTALL_BASE/code-server"
@@ -244,10 +253,10 @@ find "$INSTALL_BASE/code-server" -type f -perm +111 -exec sh -c 'xattr -d com.ap
 # Symlink to bin
 ln -sf "$INSTALL_BASE/code-server/bin/code-server" "$INSTALL_BASE/bin/code-server"
 
-# 3. Install Python 3.13 standalone
+# 3. Install Python 3.13 standalone (inside $INSTALL_BASE/python/)
 echo ">>> Installing Python 3.13..."
 PYTHON_DIRNAME="$(cat "$KISS_BUNDLE_DIR/python-dirname.txt")"
-PYTHON_DEST="$HOME/.local/share/uv/python/$PYTHON_DIRNAME"
+PYTHON_DEST="$INSTALL_BASE/python/$PYTHON_DIRNAME"
 mkdir -p "$(dirname "$PYTHON_DEST")"
 if [ ! -d "$PYTHON_DEST" ]; then
     cp -R "$KISS_BUNDLE_DIR/python" "$PYTHON_DEST"
@@ -266,9 +275,9 @@ if [ -d "$KISS_BUNDLE_DIR/git" ]; then
     export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
 fi
 
-# 5. Install Playwright Chromium browsers
+# 5. Install Playwright Chromium browsers (inside $INSTALL_BASE/playwright-browsers/)
 echo ">>> Installing Playwright Chromium..."
-PW_DEST="$HOME/Library/Caches/ms-playwright"
+PW_DEST="$INSTALL_BASE/playwright-browsers"
 if [ -d "$KISS_BUNDLE_DIR/playwright-browsers" ]; then
     mkdir -p "$PW_DEST"
     for item in "$KISS_BUNDLE_DIR/playwright-browsers"/chromium-* \
@@ -295,7 +304,9 @@ fi
 
 # 6. Set up the project
 echo ">>> Setting up project..."
-export PATH="$INSTALL_BASE/bin:$HOME/.local/bin:$PATH"
+export PATH="$INSTALL_BASE/bin:$PATH"
+export UV_PYTHON_INSTALL_DIR="$INSTALL_BASE/python"
+export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_BASE/playwright-browsers"
 if [ -d "$KISS_BUNDLE_DIR/project" ]; then
     mkdir -p "$PROJECT_DIR"
     cp -R "$KISS_BUNDLE_DIR/project/"* "$PROJECT_DIR/"
@@ -316,12 +327,47 @@ if [ -d "$KISS_BUNDLE_DIR/project" ]; then
     done
 fi
 
-# 6. Create shell profile additions
+# 7. Clean up unnecessary files to save disk space (~200MB)
+echo ">>> Cleaning up unnecessary files..."
+_SAVED=0
+
+# code-server: remove .map source maps (~174MB), .d.ts type declarations (~16MB), metadata
+if [ -d "$INSTALL_BASE/code-server" ]; then
+    for pattern in '*.map' '*.d.ts'; do
+        _bytes=$(find "$INSTALL_BASE/code-server" -name "$pattern" -type f -exec stat -f%z {} + 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+        find "$INSTALL_BASE/code-server" -name "$pattern" -type f -delete
+        _SAVED=$((_SAVED + _bytes))
+    done
+    for f in ThirdPartyNotices.txt README.md npm-shrinkwrap.json postinstall.sh; do
+        find "$INSTALL_BASE/code-server" -name "$f" -type f -delete
+    done
+fi
+
+# Python standalone: remove headers, Tk/Tcl, IDLE, ensurepip, pydoc, turtle, man pages
+if [ -d "$PYTHON_DEST" ]; then
+    for d in include lib/tcl8.6 lib/tk8.6 share; do
+        rm -rf "$PYTHON_DEST/$d"
+    done
+    PYLIB="$PYTHON_DEST/lib/python3.13"
+    if [ -d "$PYLIB" ]; then
+        for d in idlelib ensurepip pydoc_data turtledemo tkinter; do
+            rm -rf "$PYLIB/$d"
+        done
+        rm -f "$PYLIB/turtle.py"
+    fi
+    rm -f "$PYTHON_DEST/BUILD"
+fi
+
+echo "   Cleaned up ~$((_SAVED / 1048576))MB of unnecessary files"
+
+# 8. Create shell profile additions
 PROFILE_SNIPPET="$INSTALL_BASE/env.sh"
 cat > "$PROFILE_SNIPPET" << EOF
 # KISS Agent Framework - added by offline installer
-export PATH="$INSTALL_BASE/bin:\$HOME/.local/bin:\$PATH"
+export PATH="$INSTALL_BASE/bin:\$PATH"
 export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
+export UV_PYTHON_INSTALL_DIR="$INSTALL_BASE/python"
+export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_BASE/playwright-browsers"
 EOF
 
 # Add source line to user's shell rc file
@@ -354,7 +400,7 @@ echo "=== Installation Complete ==="
 echo ""
 echo "Project installed at: $PROJECT_DIR"
 
-# 7. Prompt for API keys and launch sorcar (only in interactive terminal)
+# 9. Prompt for API keys and launch sorcar (only in interactive terminal)
 if [ -t 0 ]; then
     if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
         echo ""
@@ -378,7 +424,7 @@ export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 export GEMINI_API_KEY="$GEMINI_API_KEY"
 EOF
 
-    # 8. Launch sorcar
+    # 10. Launch sorcar
     echo ""
     echo "Launching sorcar..."
     cd "$PROJECT_DIR"
@@ -389,16 +435,10 @@ else
     echo "  export ANTHROPIC_API_KEY=your_key"
     echo "  export GEMINI_API_KEY=your_key"
 
-    # Launch sorcar in a new Terminal window via a .command file
-    LAUNCH_SCRIPT="$INSTALL_BASE/launch-sorcar.command"
-    cat > "$LAUNCH_SCRIPT" << EOF
-#!/bin/bash
-source "$PROFILE_SNIPPET" 2>/dev/null
-cd "$PROJECT_DIR"
-exec "$PROJECT_DIR/.venv/bin/sorcar" "$PROJECT_DIR"
-EOF
-    chmod +x "$LAUNCH_SCRIPT"
-    open "$LAUNCH_SCRIPT" 2>/dev/null || true
+    # Launch sorcar directly
+    echo ""
+    echo "To launch sorcar, open a new terminal and run:"
+    echo "  sorcar $PROJECT_DIR"
 fi
 INSTALL_SCRIPT
 
@@ -427,9 +467,16 @@ TARGET_HOME=$(eval echo "~$TARGET_USER")
 
 echo "Installing KISS for user: $TARGET_USER (home: $TARGET_HOME)"
 
+# Resolve install dir: marker file > default
+_MARKER="$TARGET_HOME/.kiss/install_dir"
+if [ -f "$_MARKER" ]; then
+    _SAVED_DIR="$(cat "$_MARKER" 2>/dev/null)"
+fi
+_INSTALL_DIR="${_SAVED_DIR:-$TARGET_HOME/kiss_ai}"
+
 # Run the install script as the target user
-export KISS_INSTALL_DIR="$TARGET_HOME/.kiss-install"
-export KISS_PROJECT_DIR="$TARGET_HOME/kiss_ai"
+export KISS_INSTALL_DIR="$_INSTALL_DIR"
+export KISS_PROJECT_DIR="$_INSTALL_DIR"
 export HOME="$TARGET_HOME"
 
 if [ "$(id -u)" = "0" ]; then
@@ -441,6 +488,10 @@ if [ "$(id -u)" = "0" ]; then
 else
     bash "$BUNDLE/install-offline.sh"
 fi
+
+# Clean up the bundle payload — everything has been copied to user directories
+rm -rf "$BUNDLE"
+echo "Cleaned up $BUNDLE"
 
 echo "KISS offline installation complete!"
 POSTINSTALL

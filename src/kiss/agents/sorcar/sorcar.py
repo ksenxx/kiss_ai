@@ -228,9 +228,12 @@ def run_chatbot(
     cs_binary = shutil.which("code-server")
     if not cs_binary:
         # Fallback: check the offline installer's well-known paths
+        from kiss.env import get_install_dir
+
+        _install_dir = get_install_dir()
         for _cs_path in (
-            Path.home() / ".kiss-install" / "bin" / "code-server",
-            Path.home() / ".kiss-install" / "code-server" / "bin" / "code-server",
+            _install_dir / "bin" / "code-server",
+            _install_dir / "code-server" / "bin" / "code-server",
         ):
             if _cs_path.is_file():
                 cs_binary = str(_cs_path)

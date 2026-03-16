@@ -50,6 +50,7 @@ to the problems in any possible way.
 2. The agent MUST still work correctly on the task above
 3. Do NOT use: caching, multiprocessing, async/await, docker
 4. You can ONLY MODIFY the agent code
+5. Do NOT change the model
 
 """
 
