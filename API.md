@@ -39,6 +39,7 @@
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
+  - [`kiss.env`](#kissenv)
 
 </details>
 
@@ -1069,5 +1070,11 @@ ______________________________________________________________________
 ##### `class SlackAgent(SorcarAgent)` — SorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+
+______________________________________________________________________
+
+### `kiss.env` — *Ensure offline-installer paths are on PATH.*
+
+**`ensure_path`** — Prepend offline-installer bin dirs to PATH if they exist and are missing.<br/>`def ensure_path() -> None`
 
 ______________________________________________________________________
