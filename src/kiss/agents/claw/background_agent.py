@@ -20,13 +20,18 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from filelock import FileLock, Timeout
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.task_history import _add_task, _set_latest_chat_events
 from kiss.channels.slack_agent import _load_token
 
 logger = logging.getLogger(__name__)
+
+_LOCK_FILE = Path.home() / ".kiss" / "claw_background_agent.lock"
 
 _POLL_INTERVAL = 3.0  # seconds between polling for new messages
 _REPLY_POLL_INTERVAL = 2.0  # seconds between polling for user replies
@@ -175,6 +180,10 @@ def _run_task(
         thread_ts=thread_ts,
     )
 
+    _add_task(task_text)
+    printer = BaseBrowserPrinter()
+    printer.start_recording()
+
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     try:
@@ -182,6 +191,7 @@ def _run_task(
             prompt_template=task_text,
             work_dir=work_dir,
             verbose=True,
+            printer=printer,
         )
     except Exception as e:
         logger.error("Agent error", exc_info=True)
@@ -192,6 +202,10 @@ def _run_task(
     result_data = yaml.safe_load(result)
     success = result_data.get("success", False)
     summary = result_data.get("summary", "No summary available.")
+
+    chat_events = printer.stop_recording()
+    chat_events.append({"type": "task_done" if success else "task_error"})
+    _set_latest_chat_events(chat_events, task=task_text, result=summary)
     emoji = "✅" if success else "❌"
     msg = f"{emoji} *Task {'completed' if success else 'failed'}*\n\n{summary}"
     # Slack message limit is 40000 chars; truncate if needed
@@ -211,9 +225,30 @@ def _run_task(
 def run_background_agent(work_dir: str | None = None) -> None:
     """Main loop: poll #sorcar for tasks from ksen, run them, post results.
 
+    Only one instance can run at a time. If another instance is already
+    running, this function prints a message and returns immediately.
+
     Args:
         work_dir: Working directory for agent tasks. Defaults to a temp dir.
     """
+    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(_LOCK_FILE, timeout=0)
+    try:
+        lock.acquire()
+    except Timeout:
+        print(
+            "Another background agent instance is already running. "
+            "Only one instance is allowed at a time."
+        )
+        return
+
+    try:
+        _run_background_agent_locked(work_dir)
+    finally:
+        lock.release()
+
+
+def _run_background_agent_locked(work_dir: str | None = None) -> None:
     token = _load_token()
     if not token:
         print(

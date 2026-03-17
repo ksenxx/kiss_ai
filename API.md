@@ -36,6 +36,8 @@
     - [`kiss.agents.autoresearch`](#kissagentsautoresearch)
       - [`kiss.agents.autoresearch.autoresearch_agent`](#kissagentsautoresearchautoresearch_agent)
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
+    - [`kiss.agents.claw`](#kissagentsclaw)
+      - [`kiss.agents.claw.background_agent`](#kissagentsclawbackground_agent)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
@@ -1057,6 +1059,18 @@ ______________________________________________________________________
 ##### `class AutoresearchAgentConfig(BaseModel)`
 
 ##### `class AutoresearchConfig(BaseModel)`
+
+______________________________________________________________________
+
+#### `kiss.agents.claw`
+
+______________________________________________________________________
+
+#### `kiss.agents.claw.background_agent` — *Background agent that listens for tasks on Slack #sorcar channel.*
+
+**`run_background_agent`** — Main loop: poll #sorcar for tasks from ksen, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
+
+- `work_dir`: Working directory for agent tasks. Defaults to a temp dir.
 
 ______________________________________________________________________
 
