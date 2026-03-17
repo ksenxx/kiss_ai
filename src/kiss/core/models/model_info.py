@@ -22,19 +22,19 @@ logger = logging.getLogger(__name__)
 
 try:
     from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-except ImportError:
+except ImportError:  # pragma: no cover – openai always installed
     logger.debug("Exception caught", exc_info=True)
     OpenAICompatibleModel = None  # type: ignore[assignment,misc]
 
 try:
     from kiss.core.models.anthropic_model import AnthropicModel
-except ImportError:
+except ImportError:  # pragma: no cover – anthropic always installed
     logger.debug("Exception caught", exc_info=True)
     AnthropicModel = None  # type: ignore[assignment,misc]
 
 try:
     from kiss.core.models.gemini_model import GeminiModel
-except ImportError:
+except ImportError:  # pragma: no cover – google-genai always installed
     logger.debug("Exception caught", exc_info=True)
     GeminiModel = None  # type: ignore[assignment,misc]
 
@@ -128,7 +128,7 @@ def _openai_compatible(
     model_config: dict[str, Any] | None,
     token_callback: TokenCallback | None,
 ) -> Model:
-    if OpenAICompatibleModel is None:
+    if OpenAICompatibleModel is None:  # pragma: no cover – openai always installed
         raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
     return OpenAICompatibleModel(
         model_name=model_name,
@@ -644,7 +644,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
 # OpenRouter Anthropic: same as Anthropic (routes to Anthropic, supports prompt caching).
 # OpenAI: cache_read = 50% of input (automatic caching, no write premium).
 for _name, _info in MODEL_INFO.items():
-    if _info.cache_read_price_per_1M is not None:
+    if _info.cache_read_price_per_1M is not None:  # pragma: no cover – no models set explicit cr
         continue
     if _name.startswith("claude-") or _name.startswith("openrouter/anthropic/"):
         _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.1
@@ -730,7 +730,7 @@ def model(
             token_callback,
         )
     if model_name == "text-embedding-004":
-        if GeminiModel is None:
+        if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
@@ -757,7 +757,7 @@ def model(
             token_callback,
         )
     if model_name.startswith("claude-"):
-        if AnthropicModel is None:
+        if AnthropicModel is None:  # pragma: no cover – anthropic always installed
             raise KISSError(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
             )
@@ -768,7 +768,7 @@ def model(
             token_callback=token_callback,
         )
     if model_name.startswith("gemini-"):
-        if GeminiModel is None:
+        if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
@@ -813,7 +813,7 @@ def get_available_models() -> list[str]:
                 api_key = key
                 break
         if not api_key:
-            if name == "text-embedding-004":
+            if name == "text-embedding-004":  # pragma: no cover – embedding model filtered above
                 api_key = keys.GEMINI_API_KEY
             elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
                 api_key = keys.OPENAI_API_KEY

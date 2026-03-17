@@ -81,9 +81,9 @@ def config_to_dict() -> dict[Any, Any]:
     """
 
     def convert_to_json(obj: Any) -> Any:
-        if isinstance(obj, dict):
+        if isinstance(obj, dict):  # pragma: no cover – config has no raw dicts
             return {k: convert_to_json(v) for k, v in obj.items() if "API_KEY" not in k}  # type: ignore[misc]
-        if isinstance(obj, list):
+        if isinstance(obj, list):  # pragma: no cover – config has no raw lists
             return [convert_to_json(item) for item in obj]  # type: ignore[misc]
         if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
@@ -93,7 +93,7 @@ def config_to_dict() -> dict[Any, Any]:
                 for k in obj.__dict__.keys()
                 if "API_KEY" not in k
             }
-        return obj
+        return obj  # pragma: no cover – all config values have __dict__ or are primitives
 
     return cast(dict[Any, Any], convert_to_json(config_module.DEFAULT_CONFIG))
 

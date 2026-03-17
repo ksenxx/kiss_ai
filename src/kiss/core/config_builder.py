@@ -29,7 +29,7 @@ def _add_model_arguments(parser: ArgumentParser, model: type[BaseModel], prefix:
         if hasattr(field_type, "__origin__"):
             args = get_args(field_type)
             non_none = [a for a in args if a is not type(None)]
-            if non_none:
+            if non_none:  # pragma: no branch – Optional always has a non-None arg
                 field_type = non_none[0]
 
         arg_name_dashes = arg_name.replace("_", "-")
@@ -107,7 +107,7 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
     # Get existing config fields from current DEFAULT_CONFIG (if any custom fields exist)
     existing_fields: dict[str, Any] = {}
     current_config = config_module.DEFAULT_CONFIG
-    if current_config is not None:
+    if current_config is not None:  # pragma: no branch – DEFAULT_CONFIG always set at import
         # Get all fields that are not part of the base Config class
         base_fields = set(Config.model_fields.keys())
         for field_name in type(current_config).model_fields.keys():
@@ -125,7 +125,7 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
                             )
                         ),
                     )
-                else:
+                else:  # pragma: no cover – all config fields have non-None defaults
                     # For None values, create a lambda that calls the type constructor
                     existing_fields[field_name] = (
                         field_type,

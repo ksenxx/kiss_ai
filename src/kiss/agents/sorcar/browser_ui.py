@@ -499,7 +499,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         """
         tid = threading.current_thread().ident
         with self._lock:
-            if tid is not None:
+            if tid is not None:  # pragma: no branch – always set for alive threads
                 self._recordings[tid] = []
 
     def stop_recording(self) -> list[dict[str, Any]]:
