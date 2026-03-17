@@ -42,7 +42,7 @@ SYSTEM_PROMPT = f"""
 - Write() for new files. Edit() for small changes.
 - Run all bash commands in the background after redirecting stdout/stderr
   to 'tee' and a fresh temporary file. Poll the tail of the temporary file
-  every 5 seconds to check progress of the bash command.
+  every 10 seconds to check progress of the bash command.
 - Use go_to_url() for browser tool and internet search or testing an agent/app.
 - Look at `{_KISS_DIR}/task_history.jsonl` for task history and context.  Recent tasks
   are appended to the file.  The file could be very large.
@@ -62,11 +62,10 @@ SYSTEM_PROMPT = f"""
 ## Code Style Guidelines
 - Write simple, clean, and readable code with minimal indirection
 - Avoid unnecessary object attributes, local variables, and config variables
-- Avoid tight coupling between files and modules.
+- Avoid tight coupling among files and modules.
 - Avoid object/struct attribute redirections
 - No redundant abstractions or duplicate code
 - Each function should do one thing well
-- Use clear, descriptive names
 - Public methods MUST have full documentation
 - Understand the root cause of an issue or bug, and patch the root cause instead of
   of an ad hoc superficial fix.
@@ -98,10 +97,11 @@ SYSTEM_PROMPT = f"""
 ## Self-Improvement Loop
 - Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
   with instructions and rules and intelligence for yourself ONLY IF you have learned any
-  major lessons or intelligence about the project or in general during the task execution.
-  Lessons that save running time and number of tokens used by the agent would be invaluable.
-  Also compact the lessons you have learned into concise instructions and rules for you to follow.
-  Get rid of the lessons that are no longer applicable given the updated codebase,
+  major lessons (from mistakes) or intelligence about the project or in general during 
+  the task execution.  Lessons that save running time and number of tokens used by the 
+  agent would be invaluable.  You MUST get rid of the lessons that are no longer 
+  applicable to the current state of the project. Also compact the lessons you have learned 
+  into concise instructions if the list of lessons get too long. 
 - The lessons MUST NOT be specific to a task, but about agent behavior.
 - Review lessons when the agent starts
 

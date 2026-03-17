@@ -34,7 +34,7 @@ KISSAgent._run_agentic_loop()   (~465 lines total)
      |
      | model.generate_and_process_with_tools()
      v
-Any LLM  (Claude, GPT, Gemini, OpenRouter, Together AI)
+Any LLM  (Claude, GPT, Gemini, MiniMax, Novita, OpenRouter, Together AI)
 ```
 
 There are no subagent hierarchies. No shadow file systems. No planner/worker/judge roles. No MCP servers. The class hierarchy is `SorcarAgent` → `RelentlessAgent` → `Base`, where `RelentlessAgent` creates fresh `KISSAgent` instances for each sub-session.
@@ -74,7 +74,7 @@ ______________________________________________________________________
 
 ## Model Freedom
 
-I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
+I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, Novita, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
 
 This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.3 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
 
@@ -100,7 +100,7 @@ This design has several concrete advantages over compaction-based approaches:
 - **Predictable cost.** Budget is tracked per sub-session and globally. The agent cannot run away -- it hits a hard wall at `max_budget` and `max_steps`, then either continues with a summary or fails gracefully.
 - **Model-agnostic.** Because continuation is prompt-based, it works identically across Claude, GPT, Gemini, and any other model. There is no dependence on provider-specific context management APIs.
 
-The entire mechanism fits in ~60 lines inside `perform_task()`:
+The core loop inside `perform_task()` can be distilled to this simplified sketch:
 
 ```python
 for session in range(self.max_sub_sessions):
