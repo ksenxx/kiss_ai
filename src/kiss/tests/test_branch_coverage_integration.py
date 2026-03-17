@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -142,7 +141,6 @@ class TestCloseCallbackLoopNoop(TestCase):
         assert m._callback_loop is None
 
     def test_close_callback_loop_with_active_loop(self) -> None:
-        import asyncio
 
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
@@ -407,7 +405,7 @@ class TestTaskHistoryEdgeCases(TestCase):
         import kiss.agents.sorcar.task_history as th
 
         th._add_task("my task")
-        events = [{"type": "text", "data": "hello"}]
+        events: list[dict[str, object]] = [{"type": "text", "data": "hello"}]
         th._set_latest_chat_events(events, task="my task")
         loaded = th._load_task_chat_events("my task")
         assert loaded == events
@@ -416,7 +414,7 @@ class TestTaskHistoryEdgeCases(TestCase):
         import kiss.agents.sorcar.task_history as th
 
         th._add_task("my task")
-        events = [{"type": "text", "data": "hello"}]
+        events: list[dict[str, object]] = [{"type": "text", "data": "hello"}]
         th._set_latest_chat_events(events, task="my task")
         th._set_latest_chat_events([], task="my task")
         loaded = th._load_task_chat_events("my task")
@@ -594,10 +592,10 @@ class TestTaskHistoryEdgeCases(TestCase):
 # ===========================================================================
 class TestKISSAgentRetryableErrors(TestCase):
     def test_retryable_errors(self) -> None:
-        from kiss.core.kiss_agent import _is_retryable_error
-
         # Connection errors are retryable
         import httpx
+
+        from kiss.core.kiss_agent import _is_retryable_error
         assert _is_retryable_error(httpx.ConnectError("test"))
         # Auth errors are NOT retryable
         assert not _is_retryable_error(Exception("invalid api key provided"))
@@ -1084,7 +1082,7 @@ class TestGeminiPartsFromResponseEmpty(TestCase):
         from kiss.core.models.gemini_model import GeminiModel
 
         class FakeResp:
-            candidates = []
+            candidates: list[object] = []
 
         assert GeminiModel._parts_from_response(FakeResp()) == []
 
@@ -1093,7 +1091,7 @@ class TestGeminiPartsFromResponseEmpty(TestCase):
         from kiss.core.models.gemini_model import GeminiModel
 
         class Content:
-            parts = []
+            parts: list[object] = []
 
         class Candidate:
             content = Content()

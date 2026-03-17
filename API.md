@@ -39,6 +39,7 @@
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
+      - [`kiss.core.models.novita_model`](#kisscoremodelsnovita_model)
   - [`kiss.env`](#kissenv)
 
 </details>
@@ -119,7 +120,7 @@ ______________________________________________________________________
 #### `kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
+from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel, NovitaModel
 ```
 
 ##### `class Attachment` — A file attachment (image or document) to include in a prompt.
@@ -596,6 +597,12 @@ ______________________________________________________________________
 - `text`: The text containing template field placeholders.
 - **Returns:** list\[str\]: A list of field names found in the text.
 
+**`escape_invalid_template_field_names`** — Escape invalid field names from the text.<br/>`def escape_invalid_template_field_names(text: str, valid_field_names: set[str]) -> str`
+
+- `text`: The text containing template field placeholders.
+- `valid_field_names`: A list of valid field names.
+- **Returns:** An escaped string with invalid field placeholders escaped
+
 **`add_prefix_to_each_line`** — Adds a prefix to each line of the text.<br/>`def add_prefix_to_each_line(text: str, prefix: str) -> str`
 
 - `text`: The text to add prefix to.
@@ -1070,6 +1077,19 @@ ______________________________________________________________________
 ##### `class SlackAgent(SorcarAgent)` — SorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+
+______________________________________________________________________
+
+#### `kiss.core.models.novita_model` — *Novita model implementation using OpenAI-compatible API.*
+
+##### `class NovitaModel(OpenAICompatibleModel)` — A model that uses Novita's OpenAI-compatible API.
+
+**Constructor:** `NovitaModel(model_name: str, api_key: str, model_config: dict | None = None, token_callback: TokenCallback | None = None)`
+
+- `model_name`: The name of the Novita model to use.
+- `api_key`: The Novita API key for authentication.
+- `model_config`: Optional dictionary of model configuration parameters.
+- `token_callback`: Optional async callback invoked with each streamed text token.
 
 ______________________________________________________________________
 

@@ -325,7 +325,9 @@ class GeminiModel(Model):
             return prompt_tokens - cached_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
-    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:  # pragma: no cover – API call
+    def get_embedding(  # pragma: no cover – API call
+        self, text: str, embedding_model: str | None = None,
+    ) -> list[float]:
         """Generates an embedding vector for the given text.
 
         Args:
