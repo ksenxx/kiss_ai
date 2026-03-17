@@ -273,7 +273,7 @@ def cli_ask_user_question(question: str) -> str:
     return input("Your answer: ")
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover – CLI entry point requires API
     """Run a demo of the SorcarAgent with a sample Gmail task."""
     import time as time_mod
 

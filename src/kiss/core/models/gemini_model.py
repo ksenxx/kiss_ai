@@ -203,7 +203,7 @@ class GeminiModel(Model):
             if part.text:
                 self._invoke_token_callback(part.text)
 
-    def generate(self) -> tuple[str, Any]:
+    def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from prompt without tools.
 
         Returns:
@@ -236,7 +236,7 @@ class GeminiModel(Model):
         self.conversation.append({"role": "assistant", "content": content})
         return content, response
 
-    def generate_and_process_with_tools(
+    def generate_and_process_with_tools(  # pragma: no cover – API call
         self, function_map: dict[str, Callable[..., Any]]
     ) -> tuple[list[dict[str, Any]], str, Any]:
         """Generates content with tools, processes the response, and adds it to conversation.
@@ -325,7 +325,7 @@ class GeminiModel(Model):
             return prompt_tokens - cached_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
-    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
+    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:  # pragma: no cover – API call
         """Generates an embedding vector for the given text.
 
         Args:

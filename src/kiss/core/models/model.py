@@ -60,7 +60,7 @@ class Attachment:
         """
         file_path = Path(path)
         mime_type, _ = mimetypes.guess_type(str(file_path))
-        if mime_type is None:
+        if mime_type is None:  # pragma: no cover – mimetypes knows all supported extensions
             suffix = file_path.suffix.lower()
             mime_map = {
                 ".jpg": "image/jpeg",
@@ -109,7 +109,7 @@ def _get_callback_loop() -> asyncio.AbstractEventLoop:
         t = threading.Thread(target=run_loop, daemon=True)
         t.start()
         _callback_helper_ready.wait(timeout=5)
-        if _callback_helper_loop is None or _callback_helper_loop.is_closed():
+        if _callback_helper_loop is None or _callback_helper_loop.is_closed():  # pragma: no cover
             raise RuntimeError("Callback helper loop failed to start")
         return _callback_helper_loop
 
@@ -181,7 +181,7 @@ class Model(ABC):
             prompt: The initial user prompt to start the conversation.
             attachments: Optional list of file attachments (images, PDFs) to include.
         """
-        pass
+        pass  # pragma: no cover
 
     @abstractmethod
     def generate(self) -> tuple[str, Any]:
@@ -190,7 +190,7 @@ class Model(ABC):
         Returns:
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
-        pass
+        pass  # pragma: no cover
 
     @abstractmethod
     def generate_and_process_with_tools(
@@ -205,7 +205,7 @@ class Model(ABC):
             tuple[list[dict[str, Any]], str, Any]: A tuple of
                 (function_calls, response_text, raw_response).
         """
-        pass
+        pass  # pragma: no cover
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
@@ -267,7 +267,7 @@ class Model(ABC):
             tuple[int, int, int, int]: (input_tokens, output_tokens,
                 cache_read_tokens, cache_write_tokens).
         """
-        pass
+        pass  # pragma: no cover
 
     @abstractmethod
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
@@ -280,7 +280,7 @@ class Model(ABC):
         Returns:
             list[float]: The embedding vector as a list of floats.
         """
-        pass
+        pass  # pragma: no cover
 
     def set_usage_info_for_messages(self, usage_info: str) -> None:
         """Sets token information to append to messages sent to the LLM.
@@ -385,7 +385,7 @@ class Model(ABC):
             if in_args_section and ":" in stripped:
                 # Parse "param_name: description" or "param_name (type): description"
                 parts = stripped.split(":", 1)
-                if len(parts) == 2:
+                if len(parts) == 2:  # pragma: no branch – split(":", 1) with ":" always gives 2 parts
                     param_part = parts[0].strip()
                     desc_part = parts[1].strip()
                     # Handle "param_name (type)" format

@@ -375,7 +375,7 @@ class OpenAICompatibleModel(Model):
             return last_chunk
         raise KISSError("Streaming response was empty.")
 
-    def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:
+    def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:  # pragma: no cover – API streaming
         """Stream a chat completion, invoking the token callback for each text delta.
 
         When no callback is set, falls back to a normal (non-streaming) call.
@@ -467,7 +467,7 @@ class OpenAICompatibleModel(Model):
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
-        if self.token_callback is not None:
+        if self.token_callback is not None:  # pragma: no cover – API streaming
             # Streaming path: accumulate text and tool-call deltas.
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
