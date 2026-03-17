@@ -61,7 +61,8 @@ class SorcarAgent(RelentlessAgent):
                 return ask_callback(question)
             return "(ask_user_question not available in this environment)"
 
-        useful_tools = UsefulTools(stream_callback=_stream)
+        stop_event = getattr(self, "_stop_event", None)
+        useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
         bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
         tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool:
@@ -135,6 +136,10 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool = WebUseTool(
             wait_for_user_callback=self._wait_for_user_callback,
         )
+        # Extract the per-thread stop event from the printer so UsefulTools
+        # can monitor it and kill child processes when the agent is stopped.
+        tl = getattr(printer, "_thread_local", None) if printer else None
+        self._stop_event = getattr(tl, "stop_event", None) if tl else None
 
         try:
             system_instructions = SYSTEM_PROMPT + f"\nTask History File: {HISTORY_FILE}\n"

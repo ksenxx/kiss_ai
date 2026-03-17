@@ -171,14 +171,32 @@ def _kill_process_group(process: subprocess.Popen) -> None:
         pass
 
 
+def _stop_monitor(
+    stop_event: threading.Event,
+    process: subprocess.Popen,
+    done: threading.Event,
+) -> None:
+    """Wait for *stop_event* to fire, then kill *process* group.
+
+    Exits when *done* is set (process finished normally) or *stop_event*
+    fires (agent was stopped).
+    """
+    while not done.wait(timeout=0.2):
+        if stop_event.is_set():
+            _kill_process_group(process)
+            return
+
+
 class UsefulTools:
     """A hardened collection of useful tools with improved security."""
 
     def __init__(
         self,
         stream_callback: Callable[[str], None] | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.stream_callback = stream_callback
+        self.stop_event = stop_event
 
     def Read(  # noqa: N802
         self,
@@ -305,6 +323,15 @@ class UsefulTools:
                 text=True,
                 start_new_session=True,
             )
+            done = threading.Event()
+            monitor = None
+            if self.stop_event:
+                monitor = threading.Thread(
+                    target=_stop_monitor,
+                    args=(self.stop_event, process, done),
+                    daemon=True,
+                )
+                monitor.start()
             try:
                 stdout, _ = process.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
@@ -321,6 +348,8 @@ class UsefulTools:
                 except Exception:  # pragma: no cover — unreachable after SIGKILL + reap
                     pass
                 raise
+            finally:
+                done.set()
             return _format_bash_result(process.returncode, stdout, max_output_chars)
         except Exception as e:  # pragma: no cover
             _log_exc()
@@ -337,6 +366,7 @@ class UsefulTools:
             start_new_session=True,
         )
         timed_out = False
+        done = threading.Event()
 
         def _kill() -> None:
             nonlocal timed_out
@@ -345,6 +375,14 @@ class UsefulTools:
 
         timer = threading.Timer(timeout_seconds, _kill)
         timer.start()
+        monitor = None
+        if self.stop_event:
+            monitor = threading.Thread(
+                target=_stop_monitor,
+                args=(self.stop_event, process, done),
+                daemon=True,
+            )
+            monitor.start()
         try:
             chunks: list[str] = []
             assert process.stdout is not None
@@ -359,6 +397,7 @@ class UsefulTools:
             _kill_process_group(process)
             raise
         finally:
+            done.set()
             timer.cancel()
             process.stdout.close()  # type: ignore[union-attr]
 
