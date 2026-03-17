@@ -29,4 +29,17 @@ except ImportError:
     logger.debug("Exception caught", exc_info=True)
     GeminiModel = None  # type: ignore[assignment,misc]
 
-__all__ = ["Attachment", "Model", "AnthropicModel", "OpenAICompatibleModel", "GeminiModel"]
+try:
+    from kiss.core.models.novita_model import NovitaModel
+except ImportError:
+    logger.debug("Exception caught", exc_info=True)
+    NovitaModel = None  # type: ignore[assignment,misc]
+
+__all__ = [
+    "Attachment",
+    "Model",
+    "AnthropicModel",
+    "OpenAICompatibleModel",
+    "GeminiModel",
+    "NovitaModel",
+]
