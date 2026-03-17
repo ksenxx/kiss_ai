@@ -504,6 +504,18 @@ echo ">>> Building .pkg..."
 mkdir -p "$(dirname "$OUTPUT")"
 
 # Build component package
+# Create an empty component plist so pkgbuild does NOT auto-detect .app bundles
+# in the payload (e.g. Playwright's "Google Chrome for Testing.app").  Without
+# this, macOS Installer treats the embedded Chrome as a separate app to install,
+# opening a second installation wizard.
+cat > "$STAGE/component.plist" << 'CPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array/>
+</plist>
+CPLIST
+
 COMPONENT_PKG="$STAGE/kiss-component.pkg"
 pkgbuild \
     --root "$PAYLOAD" \
@@ -511,6 +523,7 @@ pkgbuild \
     --version "$PKG_VERSION" \
     --install-location "/usr/local" \
     --scripts "$SCRIPTS" \
+    --component-plist "$STAGE/component.plist" \
     "$COMPONENT_PKG"
 
 # Create distribution XML for productbuild
