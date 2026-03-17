@@ -7,13 +7,12 @@ import threading
 import time
 from typing import Any
 
-import yaml
-
 from kiss.core.printer import (
     Printer,
     StreamEventParser,
     extract_extras,
     extract_path_and_lang,
+    parse_result_yaml,
     truncate_result,
 )
 
@@ -480,17 +479,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         if text:
             self.broadcast({"type": "system_output", "text": text})
 
-    @staticmethod
-    def _parse_result_yaml(raw: str) -> dict[str, Any] | None:
-        try:
-            data = yaml.safe_load(raw)
-        except Exception:
-            _log_exc()
-            return None
-        if isinstance(data, dict) and "summary" in data:
-            return data
-        return None
-
     def start_recording(self) -> None:
         """Start recording broadcast events for the calling thread.
 
@@ -571,7 +559,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             "total_tokens": total_tokens,
             "cost": cost,
         }
-        parsed = self._parse_result_yaml(text) if text else None
+        parsed = parse_result_yaml(text) if text else None
         if parsed:
             event["success"] = parsed.get("success")
             event["summary"] = str(parsed["summary"])
@@ -614,7 +602,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             self.broadcast({"type": "prompt", "text": str(content)})
             return ""
         if type == "stream_event":
-            return self._handle_stream_event(content)
+            return self.parse_stream_event(content)
         if type == "message":
             self._handle_message(content, **kwargs)
             return ""
@@ -697,9 +685,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         if extras:
             event["extras"] = extras
         self.broadcast(event)
-
-    def _handle_stream_event(self, event: Any) -> str:
-        return self.parse_stream_event(event)
 
     def _on_thinking_start(self) -> None:
         self.broadcast({"type": "thinking_start"})

@@ -401,10 +401,15 @@ ______________________________________________________________________
   - `token`: The text token to forward.
 
 - **reset** — Reset streaming state on all child printers.<br/>`reset() -> None`
-  **`lang_for_path`** — Map a file path to its syntax-highlighting language name.<br/>`def lang_for_path(path: str) -> str`
+  **`parse_result_yaml`** — Parse a YAML result string and return the dict if it has a 'summary' key. Used by both console and browser printers to extract structured result data from agent finish() output.<br/>`def parse_result_yaml(raw: str) -> dict[str, Any] | None`
+
+- `raw`: Raw result string, potentially YAML-formatted.
+
+- **Returns:** The parsed dict if valid YAML with a 'summary' key, else None.
+
+**`lang_for_path`** — Map a file path to its syntax-highlighting language name.<br/>`def lang_for_path(path: str) -> str`
 
 - `path`: File path whose extension determines the language.
-
 - **Returns:** str: Language name (e.g. "python", "javascript"), or the raw extension, or "text" if no extension is present.
 
 **`truncate_result`** — Truncate long content to MAX_RESULT_LEN, keeping the first and last halves.<br/>`def truncate_result(content: str) -> str`

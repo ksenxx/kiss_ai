@@ -296,6 +296,36 @@ class OpenAICompatibleModel(Model):
         kwargs.setdefault("extra_body", {})["cache_control"] = {"type": "ephemeral"}
 
     @staticmethod
+    def _build_tool_call_lists(
+        entries: list[tuple[str, str, str]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Build function_calls and raw_tool_calls from (id, name, arguments_json) triples.
+
+        Args:
+            entries: List of (call_id, function_name, arguments_json_string) tuples.
+
+        Returns:
+            A tuple of (function_calls, raw_tool_calls) for conversation storage.
+        """
+        function_calls: list[dict[str, Any]] = []
+        raw_tool_calls: list[dict[str, Any]] = []
+        for call_id, name, args_json in entries:
+            try:
+                arguments = json.loads(args_json)
+            except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
+                arguments = {}
+            function_calls.append({"id": call_id, "name": name, "arguments": arguments})
+            raw_tool_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": args_json},
+                }
+            )
+        return function_calls, raw_tool_calls
+
+    @staticmethod
     def _parse_tool_call_accum(
         accum: dict[int, dict[str, str]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -307,24 +337,11 @@ class OpenAICompatibleModel(Model):
         Returns:
             A tuple of (function_calls, raw_tool_calls) for conversation storage.
         """
-        function_calls: list[dict[str, Any]] = []
-        raw_tool_calls: list[dict[str, Any]] = []
-        for idx in sorted(accum):
-            tc = accum[idx]
-            try:
-                arguments = json.loads(tc["arguments"])
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                arguments = {}
-            function_calls.append({"id": tc["id"], "name": tc["name"], "arguments": arguments})
-            raw_tool_calls.append(
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                }
-            )
-        return function_calls, raw_tool_calls
+        entries = [
+            (accum[idx]["id"], accum[idx]["name"], accum[idx]["arguments"])
+            for idx in sorted(accum)
+        ]
+        return OpenAICompatibleModel._build_tool_call_lists(entries)
 
     @staticmethod
     def _parse_tool_calls_from_message(
@@ -340,23 +357,11 @@ class OpenAICompatibleModel(Model):
         """
         if not message.tool_calls:
             return [], []
-        function_calls: list[dict[str, Any]] = []
-        raw_tool_calls: list[dict[str, Any]] = []
-        for tc in message.tool_calls:
-            try:
-                arguments = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                arguments = {}
-            function_calls.append({"id": tc.id, "name": tc.function.name, "arguments": arguments})
-            raw_tool_calls.append(
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-            )
-        return function_calls, raw_tool_calls
+        entries = [
+            (tc.id, tc.function.name, tc.function.arguments)
+            for tc in message.tool_calls
+        ]
+        return OpenAICompatibleModel._build_tool_call_lists(entries)
 
     @staticmethod
     def _finalize_stream_response(response: Any | None, last_chunk: Any | None) -> Any:
