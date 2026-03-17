@@ -48,5 +48,36 @@ def test_input_actions_no_shrink():
     assert "flex-shrink:0" in block
 
 
+class TestGhostCursorPosition(unittest.TestCase):
+    """Ghost completion must work at cursor position, not just end of text."""
+
+    def test_fetch_ghost_uses_cursor_position(self) -> None:
+        """fetchGhost should send only text up to cursor, not full value."""
+        fn = CHATBOT_JS.split("function fetchGhost")[1].split("\nfunction ")[0]
+        assert "inp.selectionStart" in fn
+        assert "inp.value.substring(0,pos)" in fn
+
+    def test_update_ghost_renders_at_cursor(self) -> None:
+        """updateGhost should split text at cursor and insert ghost between."""
+        fn = CHATBOT_JS.split("function updateGhost")[1].split("\nfunction ")[0]
+        assert "inp.value.substring(0,pos)" in fn
+        assert "inp.value.substring(pos)" in fn
+
+    def test_accept_ghost_inserts_at_cursor(self) -> None:
+        """acceptGhost should insert suggestion at cursor, not append to end."""
+        fn = CHATBOT_JS.split("function acceptGhost")[1].split("\nfunction ")[0]
+        assert "inp.value.substring(0,pos)" in fn
+        assert "before+ghostSuggest+after" in fn
+        assert "inp.setSelectionRange(newPos,newPos)" in fn
+
+    def test_clear_ghost_resets_cursor_pos(self) -> None:
+        """clearGhost must reset ghostCursorPos."""
+        assert "ghostCursorPos=-1" in CHATBOT_JS
+
+    def test_ghost_cursor_pos_variable_declared(self) -> None:
+        """ghostCursorPos variable must be declared."""
+        assert "var ghostCursorPos=-1" in CHATBOT_JS
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

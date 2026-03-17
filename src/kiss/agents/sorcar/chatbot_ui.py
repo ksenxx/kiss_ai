@@ -970,6 +970,7 @@ var llmPanelState=mkS();
 var ghostEl=document.getElementById('ghost-overlay');
 var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
 var ghostCache={q:'',s:''};
+var ghostCursorPos=-1;
 var fileInput=document.getElementById('file-input');
 var uploadBtn=document.getElementById('upload-btn');
 var fileChips=document.getElementById('file-chips');
@@ -1501,7 +1502,7 @@ inp.addEventListener('keydown',function(e){
   }
   if(ghostSuggest){
     if(e.key==='Tab'){e.preventDefault();acceptGhost();return}
-    if(e.key==='ArrowRight'&&inp.selectionStart===inp.value.length){e.preventDefault();acceptGhost();return}
+    if(e.key==='ArrowRight'&&(ghostCursorPos<0?inp.selectionStart===inp.value.length:inp.selectionStart===ghostCursorPos)){e.preventDefault();acceptGhost();return}
     if(e.key==='Escape'){clearGhost();return}
   }
   if(e.key==='ArrowUp'&&ac.style.display!=='block'&&(!inp.value.trim()||histIdx>=0)){
@@ -1634,6 +1635,7 @@ function updateACSel(items){
     if(atCtx&&items[acIdx].dataset.text){
       var fullPath=items[acIdx].dataset.text;
       var query=atCtx.query;
+      ghostCursorPos=inp.selectionStart||0;
       if(fullPath.toLowerCase().startsWith(query.toLowerCase())){
         ghostSuggest=fullPath.substring(query.length);
       }else{
@@ -1645,24 +1647,36 @@ function updateACSel(items){
     clearGhost();
   }
 }
-function clearGhost(){ghostSuggest='';ghostEl.innerHTML=''}
+function clearGhost(){ghostSuggest='';ghostCursorPos=-1;ghostEl.innerHTML=''}
 function updateGhost(){
   if(running||!ghostSuggest){ghostEl.innerHTML='';return}
-  ghostEl.innerHTML='<span class="gm">'+esc(inp.value)+'</span>'
-    +'<span class="gs">'+esc(ghostSuggest)+'</span>';
+  var pos=ghostCursorPos>=0?ghostCursorPos:(inp.selectionStart||0);
+  var before=inp.value.substring(0,pos);
+  var after=inp.value.substring(pos);
+  ghostEl.innerHTML='<span class="gm">'+esc(before)+'</span>'
+    +'<span class="gs">'+esc(ghostSuggest)+'</span>'
+    +'<span class="gm">'+esc(after)+'</span>';
 }
 function acceptGhost(){
-  inp.value+=ghostSuggest;
+  var pos=ghostCursorPos>=0?ghostCursorPos:(inp.selectionStart||0);
+  var before=inp.value.substring(0,pos);
+  var after=inp.value.substring(pos);
+  inp.value=before+ghostSuggest+after;
+  var newPos=pos+ghostSuggest.length;
+  inp.setSelectionRange(newPos,newPos);
   resizeInput();
   clearGhost();inp.focus();
 }
 function fetchGhost(){
   if(running){clearGhost();return}
-  var q=inp.value;  if(!q.trim()||q.trim().length<2){clearGhost();return}
+  var pos=inp.selectionStart||0;
+  var q=inp.value.substring(0,pos);
+  if(!q.trim()||q.trim().length<2){clearGhost();return}
   if(ghostCache.q&&q.startsWith(ghostCache.q)&&ghostCache.s){
     var extra=q.substring(ghostCache.q.length);
     if(ghostCache.s.startsWith(extra)){
       ghostSuggest=ghostCache.s.substring(extra.length);
+      ghostCursorPos=pos;
       if(ghostSuggest){updateGhost();return}
     }
   }
@@ -1671,8 +1685,10 @@ function fetchGhost(){
   fetch('/complete?q='+encodeURIComponent(q),{signal:ghostAbort.signal})
     .then(function(r){return r.json()})
     .then(function(d){
-      if(d.suggestion&&inp.value===q){
+      var curPos=inp.selectionStart||0;
+      if(d.suggestion&&inp.value.substring(0,curPos)===q){
         ghostSuggest=d.suggestion;
+        ghostCursorPos=curPos;
         ghostCache={q:q,s:d.suggestion};
         updateGhost();
       }
