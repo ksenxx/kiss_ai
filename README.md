@@ -47,15 +47,17 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-You must set the `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` in the environment. Then download
-[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.39/kiss-offline-installer.pkg) and
+You must set the **`ANTHROPIC_API_KEY`** and **`GEMINI_API_KEY`** in the environment. Then download
+[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.46/kiss-offline-installer.pkg) and
 install using
 
 ```
 # To install
-xattr -d com.apple.quarantine /path/to/kiss-offline-installer.pkg
-open /path/to/kiss-offline-installer.pkg
-# To launch sorcar
+xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
+open ~/Downloads/kiss-offline-installer.pkg
+
+# To launch sorcar 
+source ~/.zshrc
 sorcar
 ```
 
@@ -68,28 +70,6 @@ sorcar
 ![KISS Sorcar Screenshot](assets/KISSSorcar.png)
 
 A video demo of KISS Sorcar can be found [here](https://youtube.com/watch?v=XWLpNJlUgZo) and an older video showing how I used KISS Sorcar to develop KISS Sorcar can be found [here](https://youtu.be/2cNQJFu0Mnk).
-
-```bash
-export ANTHROPIC_API_KEY="your key here"
-export GEMINI_API_KEY="your key here"
-
-# To install for development
-curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/install.sh | sh
-cd kiss_ai
-# To launch sorcar
-./sorcar
-# To use sorcar CLI
-./sorcar --task "Multiply 45278*2983"
-# or
-./sorcar --f example_prompt.md
-
-
-# To install as a library
-curl -LsSf https://raw.githubusercontent.com/ksenxx/kiss_ai/refs/heads/main/installlib.sh | sh
-# To launch sorcar
-cd myproject
-uv run sorcar
-```
 
 # Introduction to KISS
 
