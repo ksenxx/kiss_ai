@@ -41,6 +41,7 @@
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
+    - [`kiss.channels.whatsapp_agent`](#kisschannelswhatsapp_agent)
       - [`kiss.core.models.novita_model`](#kisscoremodelsnovita_model)
   - [`kiss.env`](#kissenv)
 
@@ -1066,9 +1067,9 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.claw.background_agent` — *Background agent that listens for tasks on Slack #sorcar channel.*
+#### `kiss.agents.claw.background_agent` — *Background agent that listens for tasks on a messaging channel.*
 
-**`run_background_agent`** — Main loop: poll #sorcar for tasks from ksen, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
+**`run_background_agent`** — Main loop: poll channel for tasks from user, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
 
 - `work_dir`: Working directory for agent tasks. Defaults to a temp dir.
 
@@ -1088,9 +1089,71 @@ ______________________________________________________________________
 
 #### `kiss.channels.slack_agent` — *Slack Agent — SorcarAgent extension with Slack API tools.*
 
+##### `class SlackChannelBackend` — ChannelBackend implementation for Slack.
+
+**Constructor:** `SlackChannelBackend() -> None`
+
+- **connect** — Authenticate with Slack using the stored bot token.<br/>`connect() -> bool`
+
+  - **Returns:** True on success, False on failure.
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a Slack channel ID by name.<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name without '#'.
+  - **Returns:** Channel ID string, or None if not found.
+
+- **find_user** — Find a Slack user ID by display name or username.<br/>`find_user(username: str) -> str | None`
+
+  - `username`: Slack username (without @).
+  - **Returns:** User ID string, or None if not found.
+
+- **join_channel** — Join a Slack channel (bot needs to be a member to read/post).<br/>`join_channel(channel_id: str) -> None`
+
+  - `channel_id`: Channel ID to join.
+
+- **poll_messages** — Poll a Slack channel for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Channel ID to poll.
+  - `oldest`: Only return messages newer than this timestamp.
+  - `limit`: Maximum number of messages to return.
+  - **Returns:** Tuple of (messages sorted oldest-first, updated oldest timestamp).
+
+- **send_message** — Send a message to a Slack channel, optionally in a thread.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+  - `channel_id`: Channel ID to post to.
+  - `text`: Message text (supports Slack mrkdwn formatting).
+  - `thread_ts`: If non-empty, reply in this thread.
+
+- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+  - `channel_id`: Channel ID containing the thread.
+  - `thread_ts`: Timestamp of the parent message (thread root).
+  - `user_id`: User ID to wait for a reply from.
+  - **Returns:** The text of the user's reply message.
+
+- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+  - `msg`: Message dict from poll_messages.
+  - **Returns:** True if the message is from the bot.
+
+- **strip_bot_mention** — Remove bot mention markers from message text.<br/>`strip_bot_mention(text: str) -> str`
+
+  - `text`: Raw message text.
+  - **Returns:** Cleaned text with bot mentions removed.
+
 ##### `class SlackAgent(SorcarAgent)` — SorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.*
+
+##### `class WhatsAppAgent(SorcarAgent)` — SorcarAgent extended with WhatsApp Business Cloud API tools.
+
+**Constructor:** `WhatsAppAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
 
 ______________________________________________________________________
 

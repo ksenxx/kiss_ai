@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -535,6 +536,230 @@ def _make_slack_tools(client: WebClient) -> list:
 
 
 # ---------------------------------------------------------------------------
+# SlackChannelBackend — used by background_agent.py
+# ---------------------------------------------------------------------------
+
+_REPLY_POLL_INTERVAL = 2.0
+
+
+class SlackChannelBackend:
+    """ChannelBackend implementation for Slack.
+
+    Provides channel monitoring, message sending, and reply waiting for
+    the background agent. Implements the ``ChannelBackend`` protocol
+    defined in ``kiss.channels``.
+    """
+
+    def __init__(self) -> None:
+        self._client: WebClient | None = None
+        self._bot_user_id: str = ""
+        self._connection_info: str = ""
+
+    def connect(self) -> bool:
+        """Authenticate with Slack using the stored bot token.
+
+        Returns:
+            True on success, False on failure.
+        """
+        token = _load_token()
+        if not token:
+            self._connection_info = (
+                "No Slack token found. Please store a bot token first.\n"
+                "Run: uv run python -m kiss.channels.slack_agent --task 'check auth'\n"
+                "Or manually save token to ~/.kiss/channels/slack/token.json"
+            )
+            return False
+        # Disable default ConnectionErrorRetryHandler: it retries ALL
+        # requests (including chat.postMessage) on connection errors,
+        # creating duplicate messages since POST is not idempotent.
+        self._client = WebClient(token=token, retry_handlers=[])
+        try:
+            auth = self._client.auth_test()
+            self._bot_user_id = auth.get("user_id", "")
+            self._connection_info = (
+                f"Authenticated as {auth.get('user', '')} in {auth.get('team', '')}"
+            )
+            return True
+        except SlackApiError as e:
+            self._connection_info = f"Slack auth failed: {e}"
+            return False
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Find a Slack channel ID by name.
+
+        Args:
+            name: Channel name without '#'.
+
+        Returns:
+            Channel ID string, or None if not found.
+        """
+        assert self._client is not None
+        cursor = ""
+        while True:
+            kwargs: dict[str, Any] = {"types": "public_channel", "limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._client.conversations_list(**kwargs)
+            channels: list[dict[str, Any]] = resp.get("channels", [])
+            for ch in channels:
+                if ch.get("name") == name:
+                    return str(ch["id"])
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
+            if not cursor:
+                return None
+
+    def find_user(self, username: str) -> str | None:
+        """Find a Slack user ID by display name or username.
+
+        Args:
+            username: Slack username (without @).
+
+        Returns:
+            User ID string, or None if not found.
+        """
+        assert self._client is not None
+        cursor = ""
+        while True:
+            kwargs: dict[str, Any] = {"limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._client.users_list(**kwargs)
+            members: list[dict[str, Any]] = resp.get("members", [])
+            for u in members:
+                name_match = u.get("name") == username
+                real_match = (
+                    str(u.get("real_name", "")).lower() == username.lower()
+                )
+                if name_match or real_match:
+                    return str(u["id"])
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
+            if not cursor:
+                return None
+
+    def join_channel(self, channel_id: str) -> None:
+        """Join a Slack channel (bot needs to be a member to read/post).
+
+        Args:
+            channel_id: Channel ID to join.
+        """
+        assert self._client is not None
+        try:
+            self._client.conversations_join(channel=channel_id)
+        except SlackApiError:
+            pass  # Already a member or can't join
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll a Slack channel for new messages.
+
+        Args:
+            channel_id: Channel ID to poll.
+            oldest: Only return messages newer than this timestamp.
+            limit: Maximum number of messages to return.
+
+        Returns:
+            Tuple of (messages sorted oldest-first, updated oldest timestamp).
+        """
+        assert self._client is not None
+        resp = self._client.conversations_history(
+            channel=channel_id, oldest=oldest, limit=limit
+        )
+        messages: list[dict[str, Any]] = resp.get("messages", [])
+        messages.sort(key=lambda m: float(m.get("ts", "0")))
+        new_oldest = oldest
+        for msg in messages:
+            ts = float(msg.get("ts", "0"))
+            if ts >= float(new_oldest):
+                new_oldest = f"{ts + 0.000001:.6f}"
+        return messages, new_oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a message to a Slack channel, optionally in a thread.
+
+        Args:
+            channel_id: Channel ID to post to.
+            text: Message text (supports Slack mrkdwn formatting).
+            thread_ts: If non-empty, reply in this thread.
+        """
+        assert self._client is not None
+        kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        self._client.chat_postMessage(**kwargs)
+
+    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+        """Poll a Slack thread for a reply from a specific user.
+
+        Args:
+            channel_id: Channel ID containing the thread.
+            thread_ts: Timestamp of the parent message (thread root).
+            user_id: User ID to wait for a reply from.
+
+        Returns:
+            The text of the user's reply message.
+        """
+        assert self._client is not None
+        seen_ts: set[str] = set()
+        # Mark all existing thread messages as seen
+        try:
+            resp = self._client.conversations_replies(
+                channel=channel_id, ts=thread_ts, limit=100
+            )
+            existing: list[dict[str, Any]] = resp.get("messages", [])
+            for msg in existing:
+                seen_ts.add(str(msg["ts"]))
+        except SlackApiError:
+            pass
+
+        while True:
+            time.sleep(_REPLY_POLL_INTERVAL)
+            try:
+                resp = self._client.conversations_replies(
+                    channel=channel_id, ts=thread_ts, limit=100
+                )
+                replies: list[dict[str, Any]] = resp.get("messages", [])
+                for reply in replies:
+                    ts = str(reply["ts"])
+                    if ts in seen_ts:
+                        continue
+                    seen_ts.add(ts)
+                    if reply.get("user") == user_id:
+                        return str(reply.get("text", ""))
+            except SlackApiError:
+                logger.debug("Error polling thread replies", exc_info=True)
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if a message was sent by the bot itself.
+
+        Args:
+            msg: Message dict from poll_messages.
+
+        Returns:
+            True if the message is from the bot.
+        """
+        return bool(msg.get("bot_id")) or msg.get("user", "") == self._bot_user_id
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Remove bot mention markers from message text.
+
+        Args:
+            text: Raw message text.
+
+        Returns:
+            Cleaned text with bot mentions removed.
+        """
+        if self._bot_user_id:
+            return text.replace(f"<@{self._bot_user_id}>", "").strip()
+        return text
+
+
+# ---------------------------------------------------------------------------
 # SlackAgent
 # ---------------------------------------------------------------------------
 
@@ -599,7 +824,7 @@ class SlackAgent(SorcarAgent):
         self._slack_client: WebClient | None = None
         token = _load_token()
         if token:
-            self._slack_client = WebClient(token=token)
+            self._slack_client = WebClient(token=token, retry_handlers=[])
 
     def _get_tools(self) -> list:
         """Return SorcarAgent tools + Slack auth tools + Slack API tools."""
@@ -652,7 +877,7 @@ class SlackAgent(SorcarAgent):
             token = token.strip()
             if not token:
                 return "Token cannot be empty."
-            agent._slack_client = WebClient(token=token)
+            agent._slack_client = WebClient(token=token, retry_handlers=[])
             try:
                 resp = agent._slack_client.auth_test()
                 _save_token(token)
