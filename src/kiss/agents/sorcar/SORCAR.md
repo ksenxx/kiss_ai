@@ -37,7 +37,7 @@ KISSAgent._run_agentic_loop()   (~465 lines total)
 Any LLM  (Claude, GPT, Gemini, OpenRouter, Together AI)
 ```
 
-There are no subagent hierarchies. No shadow file systems. No planner/worker/judge roles. No lock files. No MCP servers. The class hierarchy is `SorcarAgent` → `RelentlessAgent` → `Base`, where `RelentlessAgent` creates fresh `KISSAgent` instances for each sub-session.
+There are no subagent hierarchies. No shadow file systems. No planner/worker/judge roles. No MCP servers. The class hierarchy is `SorcarAgent` → `RelentlessAgent` → `Base`, where `RelentlessAgent` creates fresh `KISSAgent` instances for each sub-session.
 
 ______________________________________________________________________
 
@@ -145,7 +145,7 @@ In Sorcar, every tool call, every LLM response, and every token count is streame
 
 ______________________________________________________________________
 
-## The Tool Surface: Five Tools and a set of Browser tools
+## The Tool Surface: Six Tools and Browser Automation
 
 SorcarAgent provides six core tools:
 
