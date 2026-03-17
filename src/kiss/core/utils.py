@@ -60,6 +60,44 @@ def get_template_field_names(text: str) -> list[str]:
     ]
 
 
+def escape_invalid_template_field_names(text : str, valid_field_names : set[str]) -> str:
+    """Escape invalid field names from the text.
+
+    Args:
+        text (str): The text containing template field placeholders.
+        valid_field_names (set[str]): A list of valid field names.
+
+    Returns:
+        An escaped string with invalid field placeholders escaped
+    """
+
+    def _escape_fragment(fragment: str) -> str:
+        template_result = []
+        for literal_text, field_name, format_spec, conversion in StringFormatter().parse(fragment):
+            literal_text = literal_text.replace("{", "{{").replace("}", "}}")
+            template_result.append(literal_text)
+
+            if field_name is None:
+                continue
+
+            sanitized_spec = _escape_fragment(format_spec) if format_spec else ""
+
+            placeholder = "{" + field_name
+            if conversion:
+                placeholder += f"!{conversion}"
+            if format_spec:
+                placeholder += f":{sanitized_spec}"
+            placeholder += "}"
+
+            if field_name not in valid_field_names:
+                placeholder = placeholder.replace("{", "{{").replace("}", "}}")
+            template_result.append(placeholder)
+
+        return "".join(template_result)
+
+    return _escape_fragment(text)
+
+
 def add_prefix_to_each_line(text: str, prefix: str) -> str:
     """Adds a prefix to each line of the text.
 
