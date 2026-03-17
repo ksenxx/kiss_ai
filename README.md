@@ -164,7 +164,6 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
 - **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, `ask_user_question` for human-in-the-loop interaction, plus full browser automation via Playwright with accessibility-tree-based element selection.
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
-- **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (300+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
 - **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
 - **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
 - **RepoOptimizer for Iterative Code Improvement**: Wraps `SorcarAgent` to run a command, monitor output in real time, fix errors, and iteratively optimize code for specified metrics — tracking tried ideas to avoid repeating failed approaches.
@@ -439,7 +438,7 @@ kiss/
 │   │   │   ├── task_history.py         # Task history, proposals, and file usage persistence
 │   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit
 │   │   │   ├── web_use_tool.py         # WebUseTool with Playwright-based browser automation
-│   │   │   ├── config.py               # Sorcar agent configuration
+o│   │   │   ├── config.py               # Sorcar agent configuration
 │   │   │   └── SORCAR.md               # Sorcar design document
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── repo_optimizer.py          # Iterative code optimizer using SorcarAgent
@@ -471,6 +470,8 @@ kiss/
 │   │   │   ├── config.py
 │   │   │   ├── program.md              # Agent instructions for experimentation loop
 │   │   │   └── README.md
+│   │   ├── claw/                    # Background agent for Slack-based task execution
+│   │   │   └── background_agent.py     # Slack-driven background agent
 │   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   ├── core/            # Core framework components
 │   │   ├── base.py            # Base class with common functionality
@@ -488,10 +489,12 @@ kiss/
 │   │       ├── gemini_model.py    # Gemini model implementation
 │   │       ├── openai_compatible_model.py # OpenAI-compatible API model
 │   │       ├── anthropic_model.py # Anthropic model implementation
+│   │       ├── novita_model.py    # Novita model implementation
 │   │       └── model_info.py      # Model info: pricing, context, capabilities
 │   ├── channels/        # Communication channel integrations
 │   │   ├── gmail_agent.py          # Gmail agent with OAuth2 authentication
-│   │   └── slack_agent.py          # Slack bot agent
+│   │   ├── slack_agent.py          # Slack bot agent
+│   │   └── whatsapp_agent.py       # WhatsApp agent
 │   ├── docker/          # Docker integration
 │   │   └── docker_manager.py
 │   ├── scripts/         # Utility scripts
@@ -513,6 +516,8 @@ kiss/
 │   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
 │   │   ├── test_autoresearch.py
+│   │   ├── test_background_agent.py
+│   │   ├── test_branch_coverage_integration.py
 │   │   ├── test_browser_close_shutdown.py
 │   │   ├── test_chat_history_events.py
 │   │   ├── test_chatbot_ui_spinner.py
@@ -545,6 +550,7 @@ kiss/
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_coverage.py
 │   │   ├── test_kiss_agent_non_agentic.py
+│   │   ├── test_kiss_agent_retry.py
 │   │   ├── test_merge_individual_accept.py
 │   │   ├── test_merge_restore_on_close.py
 │   │   ├── test_merge_view_second_change.py
@@ -556,10 +562,12 @@ kiss/
 │   │   ├── test_printer_parity.py
 │   │   ├── test_race_conditions.py
 │   │   ├── test_redundancy_analyzer.py
+│   │   ├── test_refactor_dedup.py
 │   │   ├── test_relentless_agent.py
 │   │   ├── test_run_prompt_button.py
 │   │   ├── test_scm_commit_message.py
 │   │   ├── test_slack_agent.py
+│   │   ├── test_slack_channel_backend.py
 │   │   ├── test_sorcar_bash_streaming.py
 │   │   ├── test_sorcar_branch_coverage.py
 │   │   ├── test_sorcar_cli_callbacks.py
@@ -585,11 +593,13 @@ kiss/
 │   │   ├── test_useful_tools.py
 │   │   ├── test_vscode_panel.py
 │   │   ├── test_web_use_tool.py
+│   │   ├── test_whatsapp_agent.py
 │   │   ├── integration_test_assistant_agent.py
 │   │   ├── integration_test_gmail_login.py
 │   │   ├── integration_test_google_search.py
 │   │   └── integration_test_web_use_tool.py
 │   ├── _version.py       # Single source of truth for package version
+│   ├── env.py            # Offline-installer environment setup (paths, env vars)
 │   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
@@ -635,7 +645,7 @@ __version__ = "0.2.0"  # Update to new version
 
 Configuration is managed through environment variables and the `DEFAULT_CONFIG` object:
 
-- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, and/or `MINIMAX_API_KEY` environment variables
+- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, `MINIMAX_API_KEY`, and/or `NOVITA_API_KEY` environment variables
 - **Agent Settings**: Modify `DEFAULT_CONFIG.agent` in [`src/kiss/core/config.py`](src/kiss/core/config.py):
   - `max_steps`: Maximum iterations in the ReAct loop (default: 100)
   - `verbose`: Enable verbose output (default: True)
@@ -769,6 +779,7 @@ find . -type f -name "*.pyc" -delete
   - Baidu ERNIE (ernie-4.5 series including VL and thinking variants)
   - Aurora (openrouter/aurora-alpha — free cloaked reasoning model)
   - And 30+ more providers (ai21, aion-labs, alfredpros, alpindale, anthracite-org, arcee-ai, bytedance, deepcogito, essentialai, ibm-granite, inception, inflection, kwaipilot, liquid, meituan, morph, nex-agi, opengvlab, prime-intellect, relace, sao10k, stepfun-ai, tencent, thedrummer, tngtech, upstage, writer, xiaomi, etc.)
+- **Novita**: deepseek/deepseek-v3.2, zai-org/glm-5, minimax/minimax-m2.5
 
 **Embedding Models** (for RAG and semantic search):
 
@@ -799,7 +810,7 @@ The framework provides embedding generation capabilities through the `get_embedd
 - **Gemini Models**: Full embedding support via Google's embedding API
   - Default model: `text-embedding-004` (can be customized; `gemini-embedding-001` also available)
   - Usage: `model.get_embedding(text, embedding_model="text-embedding-004")`
-- **Anthropic Models**: Embeddings not supported (raises `NotImplementedError`)
+- **Anthropic Models**: Embeddings not supported (raises `KISSError`)
 
 Embeddings are primarily used by the `SimpleRAG` system ([`src/kiss/agents/kiss_evolve/simple_rag.py`](src/kiss/agents/kiss_evolve/simple_rag.py)) for document retrieval. When using `SimpleRAG`, ensure you use an OpenAI, Together AI, or Gemini model that supports embeddings.
 
