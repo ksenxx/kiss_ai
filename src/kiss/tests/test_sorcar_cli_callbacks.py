@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+
+from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _build_arg_parser,
@@ -9,7 +13,9 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import Attachment
+from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
 # ---------------------------------------------------------------------------
 # CLI callbacks (module-level, importable)
@@ -82,7 +88,8 @@ class TestSorcarAgentCallbackWiring:
     def test_run_sets_callbacks_temporarily(self) -> None:
         """run() should wire callbacks for tool execution and clear them afterward."""
         agent = SorcarAgent("test")
-        original_run = agent.__class__.__mro__[1].run
+        parent_class = cast(Any, agent.__class__.__mro__[1])
+        original_run = parent_class.run
         captured: dict[str, object] = {}
 
         def wait_callback(instruction: str, url: str) -> None:
@@ -91,16 +98,20 @@ class TestSorcarAgentCallbackWiring:
         def ask_callback(question: str) -> str:
             return f"UI: {question}"
 
-        def fake_run(*args: object, **kwargs: object) -> str:
+        def fake_run(
+            self: object, *args: object, **kwargs: object
+        ) -> str:
+            del self, args
             captured["wait"] = getattr(agent, "_wait_for_user_callback", None)
             captured["ask"] = getattr(agent, "_ask_user_question_callback", None)
-            tools = kwargs["tools"]
+            tools_obj = kwargs["tools"]
+            assert isinstance(tools_obj, list)
+            tools = [t for t in tools_obj if callable(t)]
             ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
             captured["answer"] = ask_tool("hello")
             return "success: true\nsummary: ok\n"
 
-        parent_class = agent.__class__.__mro__[1]
-        parent_class.run = fake_run  # type: ignore[assignment]
+        parent_class.run = fake_run  # type: ignore[method-assign]
         try:
             result = agent.run(
                 prompt_template="task",
@@ -108,7 +119,7 @@ class TestSorcarAgentCallbackWiring:
                 ask_user_question_callback=ask_callback,
             )
         finally:
-            parent_class.run = original_run  # type: ignore[assignment]
+            parent_class.run = original_run  # type: ignore[method-assign]
 
         assert "success: true" in result
         assert captured["wait"] is wait_callback
@@ -236,6 +247,59 @@ class TestPromptConstruction:
 # ---------------------------------------------------------------------------
 # _build_arg_parser
 # ---------------------------------------------------------------------------
+
+
+class TestThinkingTokens:
+    """Verify OpenAI reasoning tokens are counted and shown in Sorcar usage output."""
+
+    def test_openai_reasoning_tokens_are_counted_in_usage(self) -> None:
+        """Reasoning tokens from completion_tokens_details should count as output tokens."""
+        model = OpenAICompatibleModel("gpt-5.4", base_url="http://localhost", api_key="test")
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=11,
+                completion_tokens=7,
+                prompt_tokens_details=None,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=13),
+            )
+        )
+
+        input_tokens, output_tokens, cache_read, cache_write = (
+            model.extract_input_output_token_counts_from_response(response)
+        )
+
+        assert (input_tokens, output_tokens, cache_read, cache_write) == (11, 20, 0, 0)
+
+    def test_browser_printer_displays_usage_with_reasoning_tokens(self) -> None:
+        """Sorcar UI usage text should reflect reasoning-token-inclusive totals."""
+        model = OpenAICompatibleModel("gpt-5.4", base_url="http://localhost", api_key="test")
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=50,
+                prompt_tokens_details=None,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=25),
+            )
+        )
+        agent = KISSAgent("test")
+        agent.model = model  # type: ignore[assignment]
+        agent.total_tokens_used = 0
+        agent.step_count = 1
+        agent.max_steps = 30
+        agent.budget_used = 0.0
+        agent.max_budget = 5.0
+        agent.session_info = ""
+        agent._update_tokens_and_budget_from_response(response)
+        usage = agent._get_usage_info_string()
+
+        printer = BaseBrowserPrinter()
+        client = printer.add_client()
+        printer.print(usage, type="usage_info")
+        event = client.get(timeout=1)
+
+        assert agent.total_tokens_used == 175
+        assert "Tokens: 175/1050000" in usage
+        assert event == {"type": "usage_info", "text": usage}
 
 
 class TestBuildArgParser:

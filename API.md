@@ -266,7 +266,7 @@ ______________________________________________________________________
 
 - **extract_input_output_token_counts_from_response** — Extract token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
-  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly. OpenRouter returns cache_write_tokens in prompt_tokens_details.
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly. OpenRouter returns cache_write_tokens in prompt_tokens_details. OpenAI reasoning models may report reasoning tokens in completion_tokens_details.reasoning_tokens; those are counted as output tokens so Sorcar shows thinking-token usage.
 
 - **get_embedding** — Generate an embedding vector for the given text.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
@@ -755,7 +755,7 @@ ______________________________________________________________________
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: callable | None = None, ask_user_question_callback: callable | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.

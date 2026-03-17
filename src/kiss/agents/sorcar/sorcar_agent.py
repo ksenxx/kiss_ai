@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -49,7 +50,7 @@ class SorcarAgent(RelentlessAgent):
             """
             ask_callback = getattr(self, "_ask_user_question_callback", None)
             if ask_callback:
-                return ask_callback(question)
+                return str(ask_callback(question))
             return "(ask_user_question not available in this environment)"
 
         stop_event = getattr(self, "_stop_event", None)
@@ -103,8 +104,8 @@ class SorcarAgent(RelentlessAgent):
         verbose: bool | None = None,
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
-        wait_for_user_callback: callable | None = None,
-        ask_user_question_callback: callable | None = None,
+        wait_for_user_callback: Callable[[str, str], None] | None = None,
+        ask_user_question_callback: Callable[[str], str] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 

@@ -608,11 +608,17 @@ class OpenAICompatibleModel(Model):
             For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens
             is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
             OpenRouter returns cache_write_tokens in prompt_tokens_details.
+            OpenAI reasoning models may report reasoning tokens in
+            completion_tokens_details.reasoning_tokens; those are counted as output
+            tokens so Sorcar shows thinking-token usage.
         """
         if hasattr(response, "usage") and response.usage:
             usage = response.usage
             prompt_tokens = getattr(usage, "prompt_tokens", None) or 0
             completion_tokens = getattr(usage, "completion_tokens", None) or 0
+            completion_details = getattr(usage, "completion_tokens_details", None)
+            if completion_details is not None:
+                completion_tokens += getattr(completion_details, "reasoning_tokens", 0) or 0
             cached_tokens = 0
             cache_write_tokens = 0
             details = getattr(usage, "prompt_tokens_details", None)
