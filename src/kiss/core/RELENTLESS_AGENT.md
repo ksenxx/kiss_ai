@@ -243,15 +243,17 @@ The `SorcarAgent` ([`src/kiss/agents/sorcar/sorcar_agent.py`](../agents/sorcar/s
 
 SorcarAgent's job is to supply **tools**, **system instructions**, and **prompt enrichment** — the three things the RelentlessAgent is deliberately agnostic about.
 
-**Tools.** The `_get_tools()` method assembles the tool list that each sub-session receives: `Bash`, `Read`, `Edit`, and `Write` for coding work, plus a full set of browser automation tools (`go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`) from `WebUseTool`. If a Docker image is configured, the Bash tool is swapped for a Docker-isolated variant. This tool set is passed to `super().run(tools=self._get_tools())`, and from that point the RelentlessAgent's sub-session loop takes over — each fresh `KISSAgent` session receives these tools unchanged.
+**Tools.** The `_get_tools()` method assembles the tool list that each sub-session receives: `Bash`, `Read`, `Edit`, `Write`, and `ask_user_question` for coding work and human-in-the-loop interaction, plus a full set of browser automation tools (`go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`) from `WebUseTool`. If a Docker image is configured, the Bash tool is swapped for a Docker-isolated variant. This tool set is passed to `super().run(tools=self._get_tools())`, and from that point the RelentlessAgent's sub-session loop takes over — each fresh `KISSAgent` session receives these tools unchanged.
 
 ```python
 def _get_tools(self) -> list:
-    useful_tools = UsefulTools(stream_callback=_stream)
+    stop_event = getattr(self, "_stop_event", None)
+    useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
     bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
     tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
     if self.web_use_tool:
         tools.extend(self.web_use_tool.get_tools())
+    tools.append(ask_user_question)
     return tools
 ```
 

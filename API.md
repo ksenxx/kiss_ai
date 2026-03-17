@@ -490,7 +490,7 @@ ______________________________________________________________________
 
 ##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
-**Constructor:** `UsefulTools(stream_callback: Callable[[str], None] | None = None) -> None`
+**Constructor:** `UsefulTools(stream_callback: Callable[[str], None] | None = None, stop_event: threading.Event | None = None) -> None`
 
 - **Read** — Read file contents.<br/>`Read(file_path: str, max_lines: int = 2000) -> str`
 

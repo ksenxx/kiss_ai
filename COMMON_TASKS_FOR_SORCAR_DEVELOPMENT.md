@@ -8,7 +8,7 @@ can you write integration tests with no mocks or test doubles to achieve 100% br
 
 ## code review
 
-find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and fix them. Make sure that you test every change by writing and running integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not change any functionality or UI. Make sure that existing tests pass. Tests must be run 
+find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and fix them. Make sure that you test every change by writing and running integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not change any functionality or UI. Make sure that existing tests pass. Tests must be run
 with a timeout of 900 seconds.
 
 ## documentation update
@@ -47,11 +47,11 @@ can you check if src/kiss/core/print_to_console.py and src/kiss/agents/sorcar/ch
 
 Can you read src/kiss/agents/sorcar/sorcar.py and carefully find all threads, timers, processes, and other forms of concurrency introduced by src/kiss/agents/sorcar/sorcar.py? Then can you write a task in PLAN.md which when given to the agent will reduce the amount of concurrency present in sorcar.
 
-When I run sorcar on a task for very long time, the mac os x runs out of resources. Can you investigate the code for resource and memory hogs. For example, task_history.json could be very large. You may want to convert it into jsonl
+When I run sorcar on a task for a very long time, the macOS runs out of resources. Can you investigate the code for resource and memory hogs. For example, task_history.json could be very large. You may want to convert it into jsonl
 format and read tasks on demand by sorcar. Find other memory and resource hogging issues in the project.
 
 For the app, called gmail, create an {app}\_agent.py in src/kiss/channels/, an extension of SorcarAgent with a set of tools, which will help the user to get authenticated to the app via the browser if not authenticated yet, store the authentication token safely in the Path.home() / ".kiss/channels/{app}" dir, and use it along with tools to perform an app related task given to the app agent. Investigate the web for the app to identify a small set of tools which will be given the agent total control over the app, implement them, and provide them as tools to the agent so that the agent can perform a given task on the app using the tools. write a main method in src/kiss/channels/{app}\_agent.py, so that it takes --task argument and executes the task using the agent.
 
-Can you add the task results and the events file name as fields to each json object in task_history.jsonl. The file must update the result field once the sorcar agent finishes its task. If the task fails or is interruped by the user, then also update the result field with a suitable message. If the task is incomplete add the progress summary as result to the task.
+Can you add the task results and the events file name as fields to each json object in task_history.jsonl. The file must update the result field once the sorcar agent finishes its task. If the task fails or is interrupted by the user, then also update the result field with a suitable message. If the task is incomplete add the progress summary as result to the task.
 
-Can you look at install.sh and installlib.sh and create a standalone macos x package for the project containing all dependencies such as code server, uv, git, brew if needed, Xcode developers tools. The package MUST be installable without internet.
+Can you look at install.sh and installlib.sh and create a standalone macOS package for the project containing all dependencies such as code server, uv, git, brew if needed, Xcode developers tools. The package MUST be installable without internet.
