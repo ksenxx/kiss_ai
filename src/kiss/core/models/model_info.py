@@ -38,6 +38,12 @@ except ImportError:  # pragma: no cover – google-genai always installed
     logger.debug("Exception caught", exc_info=True)
     GeminiModel = None  # type: ignore[assignment,misc]
 
+try:
+    from kiss.core.models.novita_model import NovitaModel
+except ImportError:
+    logger.debug("Exception caught", exc_info=True)
+    NovitaModel = None  # type: ignore[assignment,misc]
+
 
 class ModelInfo:
     """Container for model metadata including pricing and capabilities."""
@@ -267,6 +273,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),  # Dep 2026-03
     "minimax-m2.5": _mi(1000000, 0.15, 1.20),  # Standard: 50 TPS
     "minimax-m2.5-lightning": _mi(1000000, 0.30, 2.40),  # Lightning: 100 TPS
+    "novita/deepseek/deepseek-v3.2": _mi(163840, 0.25, 0.40),  # Default model
+    "novita/zai-org/glm-5": _mi(202752, 0.80, 2.56),  # GLM-5 from ZAI
+    "novita/minimax/minimax-m2.5": _mi(196608, 0.27, 0.95),
     "MiniMaxAI/MiniMax-M2.5": _mi(196608, 0.30, 1.20),
     "mistralai/Ministral-3-14B-Instruct-2512": _mi(262144, 0.20, 0.20, fc=False),
     "mistralai/Mistral-7B-Instruct-v0.2": _mi(32768, 0.20, 0.20, fc=False),
@@ -785,6 +794,17 @@ def model(
             keys.MINIMAX_API_KEY,
             model_config,
             token_callback,
+        )
+    if model_name.startswith("novita/"):
+        if NovitaModel is None:
+            raise KISSError(
+                "OpenAI SDK not installed. Install 'openai' to use Novita models."
+            )
+        return NovitaModel(
+            model_name=model_name,
+            api_key=keys.NOVITA_API_KEY,
+            model_config=model_config,
+            token_callback=token_callback,
         )
     raise KISSError(f"Unknown model name: {model_name}")
 
