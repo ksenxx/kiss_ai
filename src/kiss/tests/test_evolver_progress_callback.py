@@ -4,6 +4,7 @@
 # add your name here
 
 import os
+import shutil
 import unittest
 import warnings
 
@@ -153,18 +154,30 @@ class _TestableAgentEvolver(AgentEvolver):
 class TestReportProgressDirectly(unittest.TestCase):
     def setUp(self):
         self.original_cwd = os.getcwd()
+        self._work_dirs: list[str] = []
 
     def tearDown(self):
         os.chdir(self.original_cwd)
+        for d in self._work_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _make_evolver(
+        self, agent_metrics: list[dict[str, float]] | None = None, **reset_kwargs: object
+    ) -> _TestableAgentEvolver:
+        evolver = _TestableAgentEvolver(agent_metrics)
+        defaults: dict[str, object] = {
+            "task_description": "test",
+            "max_generations": 1,
+            "initial_frontier_size": 1,
+            "max_frontier_size": 2,
+        }
+        defaults.update(reset_kwargs)
+        evolver._reset(**defaults)  # type: ignore[arg-type]
+        self._work_dirs.append(str(evolver.work_dir))
+        return evolver
 
     def test_update_best_score_noop_on_empty_frontier(self):
-        evolver = _TestableAgentEvolver()
-        evolver._reset(
-            task_description="test",
-            max_generations=1,
-            initial_frontier_size=1,
-            max_frontier_size=2,
-        )
+        evolver = self._make_evolver()
         evolver._update_best_score()
         self.assertIsNone(evolver._best_score)
 
