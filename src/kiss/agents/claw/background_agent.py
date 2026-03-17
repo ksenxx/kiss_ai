@@ -1,9 +1,13 @@
-"""Background agent that listens for tasks on Slack #sorcar channel.
+"""Background agent that listens for tasks on a messaging channel.
 
-Polls the #sorcar Slack channel for messages from user ksen, treats each
+Polls a messaging channel for messages from a configured user, treats each
 message as a task, completes it using SorcarAgent, and sends results back
-to the channel. Agent callbacks (cli_wait_for_user, cli_ask_user_question)
-are routed through Slack thread replies for interactive feedback.
+to the channel.  Agent callbacks (cli_wait_for_user, cli_ask_user_question)
+are routed through channel thread replies for interactive feedback.
+
+The agent is channel-agnostic — it uses the ``ChannelBackend`` protocol
+from ``kiss.channels`` and can work with Slack, Gmail, WhatsApp, or any
+other backend that implements the protocol.
 
 Usage::
 
@@ -17,167 +21,67 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
 
 import yaml
 from filelock import FileLock, Timeout
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_history import _add_task, _set_latest_chat_events
-from kiss.channels.slack_agent import _load_token
+from kiss.channels import ChannelBackend
 
 logger = logging.getLogger(__name__)
 
 _LOCK_FILE = Path.home() / ".kiss" / "claw_background_agent.lock"
 
 _POLL_INTERVAL = 3.0  # seconds between polling for new messages
-_REPLY_POLL_INTERVAL = 2.0  # seconds between polling for user replies
 _CHANNEL_NAME = "sorcar"
-
-
-def _find_channel_id(client: WebClient, name: str) -> str | None:
-    """Find a channel ID by name.
-
-    Args:
-        client: Authenticated Slack WebClient.
-        name: Channel name without '#'.
-
-    Returns:
-        Channel ID string, or None if not found.
-    """
-    cursor = ""
-    while True:
-        kwargs: dict[str, Any] = {"types": "public_channel", "limit": 200}
-        if cursor:
-            kwargs["cursor"] = cursor
-        resp = client.conversations_list(**kwargs)
-        channels: list[dict[str, Any]] = resp.get("channels", [])
-        for ch_dict in channels:
-            if ch_dict.get("name") == name:
-                return str(ch_dict["id"])
-        cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
-        if not cursor:
-            return None
-
-
-def _find_user_id(client: WebClient, username: str) -> str | None:
-    """Find a user ID by display name or username.
-
-    Args:
-        client: Authenticated Slack WebClient.
-        username: Slack username (without @).
-
-    Returns:
-        User ID string, or None if not found.
-    """
-    cursor = ""
-    while True:
-        kwargs: dict[str, Any] = {"limit": 200}
-        if cursor:
-            kwargs["cursor"] = cursor
-        resp = client.users_list(**kwargs)
-        members: list[dict[str, Any]] = resp.get("members", [])
-        for u_dict in members:
-            name_match = u_dict.get("name") == username
-            real_match = str(u_dict.get("real_name", "")).lower() == username.lower()
-            if name_match or real_match:
-                return str(u_dict["id"])
-        cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
-        if not cursor:
-            return None
-
-
-def _wait_for_thread_reply(
-    client: WebClient, channel_id: str, thread_ts: str, user_id: str, bot_user_id: str
-) -> str:
-    """Poll a Slack thread for a reply from a specific user.
-
-    Args:
-        client: Authenticated Slack WebClient.
-        channel_id: Channel ID containing the thread.
-        thread_ts: Timestamp of the parent message (thread root).
-        user_id: User ID to wait for a reply from.
-        bot_user_id: Bot's own user ID (to ignore bot messages).
-
-    Returns:
-        The text of the user's reply message.
-    """
-    seen_ts: set[str] = set()
-    # Mark all existing thread messages as seen
-    try:
-        resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
-        existing: list[dict[str, Any]] = resp.get("messages", [])
-        for msg_dict in existing:
-            seen_ts.add(str(msg_dict["ts"]))
-    except SlackApiError:
-        pass
-
-    while True:
-        time.sleep(_REPLY_POLL_INTERVAL)
-        try:
-            resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
-            replies: list[dict[str, Any]] = resp.get("messages", [])
-            for reply in replies:
-                ts = str(reply["ts"])
-                if ts in seen_ts:
-                    continue
-                seen_ts.add(ts)
-                if reply.get("user") == user_id:
-                    return str(reply.get("text", ""))
-        except SlackApiError:
-            logger.debug("Error polling thread replies", exc_info=True)
+_USERNAME = "ksen"
 
 
 def _run_task(
-    client: WebClient,
+    backend: ChannelBackend,
     channel_id: str,
     user_id: str,
-    bot_user_id: str,
     task_text: str,
     thread_ts: str,
     work_dir: str,
 ) -> None:
-    """Run a single task using SorcarAgent and post results to Slack.
+    """Run a single task using SorcarAgent and post results to the channel.
 
     Args:
-        client: Authenticated Slack WebClient.
+        backend: Channel backend for sending messages and waiting for replies.
         channel_id: Channel ID to post results to.
         user_id: User ID of the task requester (for reply polling).
-        bot_user_id: Bot's own user ID.
         task_text: The task description.
         thread_ts: Thread timestamp to reply in.
         work_dir: Working directory for the agent.
     """
 
-    def slack_wait_for_user(instruction: str, url: str) -> None:
-        """Send a browser action prompt to Slack and wait for user reply."""
+    def channel_wait_for_user(instruction: str, url: str) -> None:
+        """Send a browser action prompt and wait for user reply."""
         msg = f"🔔 *Browser action needed:*\n{instruction}"
         if url:
             msg += f"\n_Current URL:_ {url}"
         msg += "\n\n_Reply in this thread when done._"
-        client.chat_postMessage(channel=channel_id, text=msg, thread_ts=thread_ts)
-        _wait_for_thread_reply(client, channel_id, thread_ts, user_id, bot_user_id)
+        backend.send_message(channel_id, msg, thread_ts)
+        backend.wait_for_reply(channel_id, thread_ts, user_id)
 
-    def slack_ask_user_question(question: str) -> str:
-        """Send a question to Slack and wait for user's reply."""
+    def channel_ask_user_question(question: str) -> str:
+        """Send a question and wait for user's reply."""
         msg = f"❓ *Agent asks:*\n{question}\n\n_Reply in this thread with your answer._"
-        client.chat_postMessage(channel=channel_id, text=msg, thread_ts=thread_ts)
-        return _wait_for_thread_reply(client, channel_id, thread_ts, user_id, bot_user_id)
+        backend.send_message(channel_id, msg, thread_ts)
+        return backend.wait_for_reply(channel_id, thread_ts, user_id)
 
     agent = SorcarAgent(
         "Claw Background Agent",
-        wait_for_user_callback=slack_wait_for_user,
-        ask_user_question_callback=slack_ask_user_question,
+        wait_for_user_callback=channel_wait_for_user,
+        ask_user_question_callback=channel_ask_user_question,
     )
     agent.web_use_tool = None  # No GUI/browser needed
 
-    client.chat_postMessage(
-        channel=channel_id,
-        text=f"⚙️ Working on task:\n> {task_text[:500]}",
-        thread_ts=thread_ts,
+    backend.send_message(
+        channel_id, f"⚙️ Working on task:\n> {task_text[:500]}", thread_ts
     )
 
     _add_task(task_text)
@@ -208,22 +112,20 @@ def _run_task(
     _set_latest_chat_events(chat_events, task=task_text, result=summary)
     emoji = "✅" if success else "❌"
     msg = f"{emoji} *Task {'completed' if success else 'failed'}*\n\n{summary}"
-    # Slack message limit is 40000 chars; truncate if needed
+    # Channel message limits vary; truncate at a safe length
     if len(msg) > 3900:
         msg = msg[:3900] + "\n... (truncated)"
-    client.chat_postMessage(channel=channel_id, text=msg, thread_ts=thread_ts)
+    backend.send_message(channel_id, msg, thread_ts)
 
     cost = f"${agent.budget_used:.4f}" if hasattr(agent, "budget_used") else "unknown"
     tokens = agent.total_tokens_used if hasattr(agent, "total_tokens_used") else "unknown"
-    client.chat_postMessage(
-        channel=channel_id,
-        text=f"📊 Cost: {cost} | Tokens: {tokens}",
-        thread_ts=thread_ts,
+    backend.send_message(
+        channel_id, f"📊 Cost: {cost} | Tokens: {tokens}", thread_ts
     )
 
 
 def run_background_agent(work_dir: str | None = None) -> None:
-    """Main loop: poll #sorcar for tasks from ksen, run them, post results.
+    """Main loop: poll channel for tasks from user, run them, post results.
 
     Only one instance can run at a time. If another instance is already
     running, this function prints a message and returns immediately.
@@ -243,55 +145,43 @@ def run_background_agent(work_dir: str | None = None) -> None:
         return
 
     try:
-        _run_background_agent_locked(work_dir)
+        # Import here to allow swapping backends in the future
+        from kiss.channels.slack_agent import SlackChannelBackend
+
+        backend: ChannelBackend = SlackChannelBackend()
+        _run_background_agent_locked(backend, work_dir)
     finally:
         lock.release()
 
 
-def _run_background_agent_locked(work_dir: str | None = None) -> None:
-    token = _load_token()
-    if not token:
-        print(
-            "No Slack token found. Please store a bot token first.\n"
-            "Run: uv run python -m kiss.channels.slack_agent --task 'check auth'\n"
-            "Or manually save token to ~/.kiss/channels/slack/token.json"
-        )
+def _run_background_agent_locked(
+    backend: ChannelBackend, work_dir: str | None = None
+) -> None:
+    """Core polling loop — requires the single-instance lock to be held.
+
+    Args:
+        backend: Channel backend to use for communication.
+        work_dir: Working directory for agent tasks.
+    """
+    if not backend.connect():
+        print(backend.connection_info)
         return
 
-    client = WebClient(token=token)
+    print(backend.connection_info)
 
-    # Verify auth
-    try:
-        auth = client.auth_test()
-        bot_user_id = auth.get("user_id", "")
-        print(f"Authenticated as {auth.get('user', '')} in {auth.get('team', '')}")
-    except SlackApiError as e:
-        print(f"Slack auth failed: {e}")
-        return
-
-    # Find channel
-    channel_id = _find_channel_id(client, _CHANNEL_NAME)
+    channel_id = backend.find_channel(_CHANNEL_NAME)
     if not channel_id:
         print(f"Channel #{_CHANNEL_NAME} not found. Please create it first.")
         return
     print(f"Monitoring #{_CHANNEL_NAME} (ID: {channel_id})")
 
-    # Join the channel (bot needs to be a member)
-    try:
-        client.conversations_join(channel=channel_id)
-    except SlackApiError:
-        pass  # Already a member or can't join
+    backend.join_channel(channel_id)
 
-    # Find ksen user
-    user_id = _find_user_id(client, "ksen")
-    if not user_id:
-        print("User 'ksen' not found. Will accept messages from any user.")
-        user_id = None
-
+    user_id = backend.find_user(_USERNAME)
     if user_id:
-        print(f"Watching for messages from ksen (ID: {user_id})")
+        print(f"Watching for messages from {_USERNAME} (ID: {user_id})")
     else:
-        print("Watching for messages from any user")
+        print(f"User '{_USERNAME}' not found. Will accept messages from any user.")
 
     resolved_work_dir = work_dir or tempfile.mkdtemp(prefix="claw_")
     Path(resolved_work_dir).mkdir(parents=True, exist_ok=True)
@@ -299,73 +189,66 @@ def _run_background_agent_locked(work_dir: str | None = None) -> None:
 
     # Start polling from now — Slack requires ≤6 decimal places
     last_ts = f"{time.time():.6f}"
-    print(f"\n🤖 Background agent ready. Send a message in #{_CHANNEL_NAME} to start a task.\n")
+    processed_ts: set[str] = set()
+    print(
+        f"\n🤖 Background agent ready. Send a message in #{_CHANNEL_NAME} to start a task.\n"
+    )
 
-    client.chat_postMessage(
-        channel=channel_id,
-        text="🤖 Claw background agent is now online and listening for tasks.",
+    backend.send_message(
+        channel_id,
+        "🤖 Claw background agent is now online and listening for tasks.",
     )
 
     while True:
         try:
-            resp = client.conversations_history(
-                channel=channel_id, oldest=last_ts, limit=10
-            )
-            messages: list[dict[str, Any]] = resp.get("messages", [])
-            # Process oldest first
-            messages.sort(key=lambda m: float(m.get("ts", "0")))
+            messages, last_ts = backend.poll_messages(channel_id, last_ts)
 
             for msg in messages:
-                msg_ts = msg.get("ts", "")
                 msg_user = msg.get("user", "")
                 msg_text = msg.get("text", "").strip()
+                msg_ts = msg.get("ts", "")
 
-                # Update last_ts to avoid reprocessing
-                if float(msg_ts) >= float(last_ts):
-                    last_ts = f"{float(msg_ts) + 0.000001:.6f}"
-
-                # Skip bot messages
-                if msg.get("bot_id") or msg_user == bot_user_id:
+                if backend.is_from_bot(msg):
                     continue
-
-                # Skip if not from ksen (when user_id is known)
                 if user_id and msg_user != user_id:
                     continue
-
-                # Skip empty messages
                 if not msg_text:
                     continue
+                if msg_ts in processed_ts:
+                    continue
+                processed_ts.add(msg_ts)
 
-                # Strip bot mention if present
-                if bot_user_id:
-                    msg_text = msg_text.replace(f"<@{bot_user_id}>", "").strip()
+                msg_text = backend.strip_bot_mention(msg_text)
 
-                print(f"\n📩 New task from {msg_user}: {msg_text[:100]}...", flush=True)
+                print(
+                    f"\n📩 New task from {msg_user}: {msg_text[:100]}...",
+                    flush=True,
+                )
                 _run_task(
-                    client=client,
+                    backend=backend,
                     channel_id=channel_id,
                     user_id=msg_user,
-                    bot_user_id=bot_user_id,
                     task_text=msg_text,
                     thread_ts=msg_ts,
                     work_dir=resolved_work_dir,
                 )
 
-        except SlackApiError as e:
-            logger.error("Slack API error during polling: %s", e)
-            time.sleep(10)
+            # Prevent unbounded growth — keep only recent entries
+            if len(processed_ts) > 1000:
+                processed_ts.clear()
+
         except KeyboardInterrupt:
             print("\n\nShutting down background agent...")
             try:
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text="🔴 Claw background agent is shutting down.",
+                backend.send_message(
+                    channel_id,
+                    "🔴 Claw background agent is shutting down.",
                 )
-            except SlackApiError:
+            except Exception:
                 pass
             break
         except Exception:
-            logger.error("Unexpected error in polling loop", exc_info=True)
+            logger.error("Error in polling loop", exc_info=True)
             time.sleep(10)
 
         time.sleep(_POLL_INTERVAL)
@@ -375,10 +258,14 @@ def main() -> None:
     """Entry point for the background agent CLI."""
     import argparse
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
 
-    parser = argparse.ArgumentParser(description="Claw background agent for Slack")
-    parser.add_argument("--work-dir", type=str, default=".", help="Working directory for tasks")
+    parser = argparse.ArgumentParser(description="Claw background agent")
+    parser.add_argument(
+        "--work-dir", type=str, default=".", help="Working directory for tasks"
+    )
     args = parser.parse_args()
     run_background_agent(work_dir=args.work_dir)
 
