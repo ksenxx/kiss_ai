@@ -164,5 +164,120 @@ class TestBugs:
 
     # --- Bug 13: Write says bytes not characters ---
 
+class TestStopEvent:
+    """Tests that stop_event kills child processes promptly."""
+
+    def test_stop_event_kills_streaming_child(self, temp_test_dir):
+        """When stop_event is set, the streaming Bash child must be killed."""
+        import threading
+        import time
+
+        stop_event = threading.Event()
+        streamed: list[str] = []
+        ut = UsefulTools(stream_callback=streamed.append, stop_event=stop_event)
+
+        pid_file = temp_test_dir / "stop_child.pid"
+        script = temp_test_dir / "stop_target.sh"
+        script.write_text(
+            f"#!/bin/bash\necho $$ > {pid_file}\nwhile true; do echo tick; sleep 0.2; done\n"
+        )
+        script.chmod(0o755)
+
+        child_pid = None
+
+        def set_stop_after_start():
+            nonlocal child_pid
+            for _ in range(50):
+                time.sleep(0.1)
+                if pid_file.exists():
+                    child_pid = int(pid_file.read_text().strip())
+                    break
+            if child_pid:
+                stop_event.set()
+
+        t = threading.Thread(target=set_stop_after_start, daemon=True)
+        t.start()
+        # Bash should return (process killed by monitor) rather than hang
+        ut.Bash(str(script), "stoppable", timeout_seconds=30)
+        t.join(timeout=5)
+
+        if child_pid is None:
+            pytest.skip("Script didn't start in time")
+
+        time.sleep(0.5)
+        alive = False
+        try:
+            os.kill(child_pid, 0)
+            alive = True
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        assert not alive, f"Child {child_pid} survived stop_event!"
+
+    def test_stop_event_kills_nonstreaming_child(self, temp_test_dir):
+        """When stop_event is set, the non-streaming Bash child must be killed."""
+        import threading
+        import time
+
+        stop_event = threading.Event()
+        ut = UsefulTools(stop_event=stop_event)
+
+        pid_file = temp_test_dir / "stop_child_ns.pid"
+        script = temp_test_dir / "stop_target_ns.sh"
+        script.write_text(
+            f"#!/bin/bash\necho $$ > {pid_file}\nsleep 100\n"
+        )
+        script.chmod(0o755)
+
+        child_pid = None
+
+        def set_stop_after_start():
+            nonlocal child_pid
+            for _ in range(50):
+                time.sleep(0.1)
+                if pid_file.exists():
+                    child_pid = int(pid_file.read_text().strip())
+                    break
+            if child_pid:
+                stop_event.set()
+
+        t = threading.Thread(target=set_stop_after_start, daemon=True)
+        t.start()
+        ut.Bash(str(script), "stoppable", timeout_seconds=30)
+        t.join(timeout=5)
+
+        if child_pid is None:
+            pytest.skip("Script didn't start in time")
+
+        time.sleep(0.5)
+        alive = False
+        try:
+            os.kill(child_pid, 0)
+            alive = True
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        assert not alive, f"Child {child_pid} survived stop_event!"
+
+    def test_stop_event_not_set_process_completes_normally(self, temp_test_dir):
+        """If stop_event is never set, the process runs to completion."""
+        import threading
+
+        stop_event = threading.Event()
+        ut = UsefulTools(stop_event=stop_event)
+        result = ut.Bash("echo hello", "test", timeout_seconds=5)
+        assert "hello" in result
+
+    def test_stop_event_not_set_streaming_completes_normally(self, temp_test_dir):
+        """If stop_event is never set, streaming completes normally."""
+        import threading
+
+        stop_event = threading.Event()
+        streamed: list[str] = []
+        ut = UsefulTools(stream_callback=streamed.append, stop_event=stop_event)
+        result = ut.Bash("echo hello", "test", timeout_seconds=5)
+        assert "hello" in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
