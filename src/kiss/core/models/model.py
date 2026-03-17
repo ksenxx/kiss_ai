@@ -385,7 +385,8 @@ class Model(ABC):
             if in_args_section and ":" in stripped:
                 # Parse "param_name: description" or "param_name (type): description"
                 parts = stripped.split(":", 1)
-                if len(parts) == 2:  # pragma: no branch – split(":", 1) with ":" always gives 2 parts
+                # split(":", 1) with ":" always gives 2 parts
+                if len(parts) == 2:  # pragma: no branch
                     param_part = parts[0].strip()
                     desc_part = parts[1].strip()
                     # Handle "param_name (type)" format

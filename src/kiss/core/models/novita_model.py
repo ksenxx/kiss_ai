@@ -6,8 +6,7 @@
 
 import logging
 
-from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, TokenCallback
+from kiss.core.models.model import TokenCallback
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
 logger = logging.getLogger(__name__)
