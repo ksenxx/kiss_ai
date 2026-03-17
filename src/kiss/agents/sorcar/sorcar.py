@@ -558,13 +558,11 @@ def run_chatbot(
             printer.start_recording()
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
-            if hasattr(agent, '_wait_for_user_callback'):
-                agent._wait_for_user_callback = _wait_for_user_browser  # type: ignore[attr-defined]
-            if hasattr(agent, '_ask_user_question_callback'):
-                agent._ask_user_question_callback = _ask_user_question  # type: ignore[attr-defined]
             extra_kwargs = dict(agent_kwargs or {})
             if active_file:
                 extra_kwargs["current_editor_file"] = active_file
+            extra_kwargs.setdefault("wait_for_user_callback", _wait_for_user_browser)
+            extra_kwargs.setdefault("ask_user_question_callback", _ask_user_question)
             result = agent.run(
                 prompt_template=task,
                 work_dir=actual_work_dir,

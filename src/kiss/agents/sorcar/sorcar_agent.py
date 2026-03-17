@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -24,15 +23,8 @@ from kiss.docker.docker_manager import DockerManager
 class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
 
-    def __init__(
-        self,
-        name: str,
-        wait_for_user_callback: Callable[[str, str], None] | None = None,
-        ask_user_question_callback: Callable[[str], str] | None = None,
-    ) -> None:
+    def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._wait_for_user_callback = wait_for_user_callback
-        self._ask_user_question_callback = ask_user_question_callback
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: DockerManager | None = None
 
@@ -40,8 +32,6 @@ class SorcarAgent(RelentlessAgent):
         def _stream(text: str) -> None:
             if self.printer:
                 self.printer.print(text, type="bash_stream")
-
-        ask_callback = self._ask_user_question_callback
 
         def ask_user_question(question: str) -> str:
             """Ask the user a question and wait for their typed response.
@@ -57,6 +47,7 @@ class SorcarAgent(RelentlessAgent):
             Returns:
                 The user's typed response text.
             """
+            ask_callback = getattr(self, "_ask_user_question_callback", None)
             if ask_callback:
                 return ask_callback(question)
             return "(ask_user_question not available in this environment)"
@@ -112,6 +103,8 @@ class SorcarAgent(RelentlessAgent):
         verbose: bool | None = None,
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
+        wait_for_user_callback: callable | None = None,
+        ask_user_question_callback: callable | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -129,13 +122,17 @@ class SorcarAgent(RelentlessAgent):
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
+            wait_for_user_callback: Optional callback used by browser tools when user
+                action is required.
+            ask_user_question_callback: Optional callback used by the ask_user_question
+                tool to collect a text response from the user.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        self.web_use_tool = WebUseTool(
-            wait_for_user_callback=self._wait_for_user_callback,
-        )
+        self._wait_for_user_callback = wait_for_user_callback
+        self._ask_user_question_callback = ask_user_question_callback
+        self.web_use_tool = WebUseTool(wait_for_user_callback=wait_for_user_callback)
         # Extract the per-thread stop event from the printer so UsefulTools
         # can monitor it and kill child processes when the agent is stopped.
         tl = getattr(printer, "_thread_local", None) if printer else None
@@ -182,6 +179,9 @@ class SorcarAgent(RelentlessAgent):
         finally:
             if self.web_use_tool:
                 self.web_use_tool.close()
+            self.web_use_tool = None
+            self._wait_for_user_callback = None
+            self._ask_user_question_callback = None
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -287,11 +287,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     else:
         work_dir = tempfile.mkdtemp()
 
-    agent = SorcarAgent(
-        "Sorcar Agent Test",
-        wait_for_user_callback=cli_wait_for_user,
-        ask_user_question_callback=cli_ask_user_question,
-    )
+    agent = SorcarAgent("Sorcar Agent Test")
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
@@ -305,6 +301,8 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
             work_dir=work_dir,
             headless=args.headless,
             verbose=args.verbose,
+            wait_for_user_callback=cli_wait_for_user,
+            ask_user_question_callback=cli_ask_user_question,
         )
     finally:
         os.chdir(old_cwd)

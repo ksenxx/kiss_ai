@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -791,6 +792,43 @@ def _cli_ask_user_question(question: str) -> str:
 
 
 class SlackAgent(SorcarAgent):
+    def run(  # type: ignore[override]
+        self,
+        model_name: str | None = None,
+        prompt_template: str = "",
+        arguments: dict[str, str] | None = None,
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        work_dir: str | None = None,
+        printer: Any = None,
+        max_sub_sessions: int | None = None,
+        docker_image: str | None = None,
+        headless: bool | None = None,
+        verbose: bool | None = None,
+        current_editor_file: str | None = None,
+        attachments: list | None = None,
+        wait_for_user_callback: Callable[[str, str], None] | None = None,
+        ask_user_question_callback: Callable[[str], str] | None = None,
+    ) -> str:
+        """Run the Slack agent with optional user-interaction callbacks."""
+        return super().run(
+            model_name=model_name,
+            prompt_template=prompt_template,
+            arguments=arguments,
+            max_steps=max_steps,
+            max_budget=max_budget,
+            work_dir=work_dir,
+            printer=printer,
+            max_sub_sessions=max_sub_sessions,
+            docker_image=docker_image,
+            headless=headless,
+            verbose=verbose,
+            current_editor_file=current_editor_file,
+            attachments=attachments,
+            wait_for_user_callback=wait_for_user_callback,
+            ask_user_question_callback=ask_user_question_callback,
+        )
+
     """SorcarAgent extended with Slack workspace tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
@@ -811,16 +849,8 @@ class SlackAgent(SorcarAgent):
         )
     """
 
-    def __init__(
-        self,
-        wait_for_user_callback: Any = None,
-        ask_user_question_callback: Any = None,
-    ) -> None:
-        super().__init__(
-            "Slack Agent",
-            wait_for_user_callback=wait_for_user_callback,
-            ask_user_question_callback=ask_user_question_callback,
-        )
+    def __init__(self) -> None:
+        super().__init__("Slack Agent")
         self._slack_client: WebClient | None = None
         token = _load_token()
         if token:
@@ -948,10 +978,7 @@ def main() -> None:
     else:
         work_dir = tempfile.mkdtemp()
 
-    agent = SlackAgent(
-        wait_for_user_callback=_cli_wait_for_user,
-        ask_user_question_callback=_cli_ask_user_question,
-    )
+    agent = SlackAgent()
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
@@ -964,6 +991,8 @@ def main() -> None:
             work_dir=work_dir,
             headless=args.headless,
             verbose=args.verbose,
+            wait_for_user_callback=_cli_wait_for_user,
+            ask_user_question_callback=_cli_ask_user_question,
         )
     finally:
         os.chdir(old_cwd)

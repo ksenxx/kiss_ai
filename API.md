@@ -753,9 +753,9 @@ ______________________________________________________________________
 
 ##### `class SorcarAgent(RelentlessAgent)` — Agent with both coding tools and browser automation for web + code tasks.
 
-**Constructor:** `SorcarAgent(name: str, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> None`
+**Constructor:** `SorcarAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: callable | None = None, ask_user_question_callback: callable | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
@@ -769,6 +769,8 @@ ______________________________________________________________________
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
+  - `wait_for_user_callback`: Optional callback used by browser tools when user action is required.
+  - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 **`cli_wait_for_user`** — CLI callback for browser-action prompts (prints and waits for Enter).<br/>`def cli_wait_for_user(instruction: str, url: str) -> None`
@@ -1081,9 +1083,11 @@ ______________________________________________________________________
 
 #### `kiss.channels.gmail_agent` — *Gmail Agent — SorcarAgent extension with Gmail API tools.*
 
-##### `class GmailAgent(SorcarAgent)` — SorcarAgent extended with Gmail API tools.
+##### `class GmailAgent(SorcarAgent)`
 
-**Constructor:** `GmailAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+**Constructor:** `GmailAgent() -> None`
+
+- **run** — Run the Gmail agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
 ______________________________________________________________________
 
@@ -1143,17 +1147,21 @@ ______________________________________________________________________
   - `text`: Raw message text.
   - **Returns:** Cleaned text with bot mentions removed.
 
-##### `class SlackAgent(SorcarAgent)` — SorcarAgent extended with Slack workspace tools.
+##### `class SlackAgent(SorcarAgent)`
 
-**Constructor:** `SlackAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+**Constructor:** `SlackAgent() -> None`
+
+- **run** — Run the Slack agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
 ______________________________________________________________________
 
 #### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.*
 
-##### `class WhatsAppAgent(SorcarAgent)` — SorcarAgent extended with WhatsApp Business Cloud API tools.
+##### `class WhatsAppAgent(SorcarAgent)`
 
-**Constructor:** `WhatsAppAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+**Constructor:** `WhatsAppAgent() -> None`
+
+- **run** — Run the WhatsApp agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
 ______________________________________________________________________
 

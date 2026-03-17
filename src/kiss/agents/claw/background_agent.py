@@ -73,11 +73,7 @@ def _run_task(
         backend.send_message(channel_id, msg, thread_ts)
         return backend.wait_for_reply(channel_id, thread_ts, user_id)
 
-    agent = SorcarAgent(
-        "Claw Background Agent",
-        wait_for_user_callback=channel_wait_for_user,
-        ask_user_question_callback=channel_ask_user_question,
-    )
+    agent = SorcarAgent("Claw Background Agent")
     agent.web_use_tool = None  # No GUI/browser needed
 
     backend.send_message(
@@ -96,6 +92,8 @@ def _run_task(
             work_dir=work_dir,
             verbose=True,
             printer=printer,
+            wait_for_user_callback=channel_wait_for_user,
+            ask_user_question_callback=channel_ask_user_question,
         )
     except Exception as e:
         logger.error("Agent error", exc_info=True)

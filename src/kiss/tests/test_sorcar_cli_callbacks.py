@@ -79,22 +79,44 @@ class TestSorcarAgentCallbackWiring:
         finally:
             agent.web_use_tool.close()
 
-    def test_ui_mode_patches_callbacks_after_creation(self) -> None:
-        """UI mode (sorcar.py) patches callbacks after agent creation.
-
-        Verify that patching _ask_user_question_callback after __init__
-        is reflected in _get_tools().
-        """
+    def test_run_sets_callbacks_temporarily(self) -> None:
+        """run() should wire callbacks for tool execution and clear them afterward."""
         agent = SorcarAgent("test")
-        # Simulate what sorcar.py does: patch callback after creation
-        agent._ask_user_question_callback = lambda q: f"UI: {q}"
-        agent.web_use_tool = WebUseTool(user_data_dir=None)
-        try:
-            tools = agent._get_tools()
+        original_run = agent.__class__.__mro__[1].run
+        captured: dict[str, object] = {}
+
+        def wait_callback(instruction: str, url: str) -> None:
+            del instruction, url
+
+        def ask_callback(question: str) -> str:
+            return f"UI: {question}"
+
+        def fake_run(*args: object, **kwargs: object) -> str:
+            captured["wait"] = getattr(agent, "_wait_for_user_callback", None)
+            captured["ask"] = getattr(agent, "_ask_user_question_callback", None)
+            tools = kwargs["tools"]
             ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
-            assert ask_tool("hello") == "UI: hello"
+            captured["answer"] = ask_tool("hello")
+            return "success: true\nsummary: ok\n"
+
+        parent_class = agent.__class__.__mro__[1]
+        parent_class.run = fake_run  # type: ignore[assignment]
+        try:
+            result = agent.run(
+                prompt_template="task",
+                wait_for_user_callback=wait_callback,
+                ask_user_question_callback=ask_callback,
+            )
         finally:
-            agent.web_use_tool.close()
+            parent_class.run = original_run  # type: ignore[assignment]
+
+        assert "success: true" in result
+        assert captured["wait"] is wait_callback
+        assert captured["ask"] is ask_callback
+        assert captured["answer"] == "UI: hello"
+        assert getattr(agent, "_wait_for_user_callback", None) is None
+        assert getattr(agent, "_ask_user_question_callback", None) is None
+        assert agent.web_use_tool is None
 # ---------------------------------------------------------------------------
 # Prompt construction: run() branches
 # ---------------------------------------------------------------------------
