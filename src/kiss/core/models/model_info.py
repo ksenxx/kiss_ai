@@ -16,33 +16,10 @@ from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import AnthropicModel, GeminiModel, NovitaModel, OpenAICompatibleModel
 from kiss.core.models.model import Model, TokenCallback
 
 logger = logging.getLogger(__name__)
-
-try:
-    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-except ImportError:  # pragma: no cover – openai always installed
-    logger.debug("Exception caught", exc_info=True)
-    OpenAICompatibleModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.anthropic_model import AnthropicModel
-except ImportError:  # pragma: no cover – anthropic always installed
-    logger.debug("Exception caught", exc_info=True)
-    AnthropicModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.gemini_model import GeminiModel
-except ImportError:  # pragma: no cover – google-genai always installed
-    logger.debug("Exception caught", exc_info=True)
-    GeminiModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.novita_model import NovitaModel
-except ImportError:
-    logger.debug("Exception caught", exc_info=True)
-    NovitaModel = None  # type: ignore[assignment,misc]
 
 
 class ModelInfo:
