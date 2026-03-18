@@ -28,6 +28,12 @@ def _create_git_repo(tmpdir: str) -> str:
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
     return repo
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _prepare_merge_view
+# ---------------------------------------------------------------------------
+
+
 class TestMergeViewExcludesPreExistingDiffs:
     """Verify merge view only shows diffs from the current task, not pre-existing ones."""
 

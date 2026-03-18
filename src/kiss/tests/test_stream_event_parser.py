@@ -57,6 +57,10 @@ class _TrackingParser(StreamEventParser):
 # ── ConsolePrinter integration tests ──
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/print_to_console.py — ConsolePrinter
+# ---------------------------------------------------------------------------
+
 def test_console_printer_reset_clears_stream_state() -> None:
     buf = StringIO()
     cp = ConsolePrinter(file=buf)

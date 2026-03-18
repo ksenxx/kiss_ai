@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — mod
+# ---------------------------------------------------------------------------
 
 class TestNoSyntaxErrors:
     """Verify the module imports without syntax errors."""

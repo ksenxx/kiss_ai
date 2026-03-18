@@ -4,6 +4,10 @@ import os
 import subprocess
 import tempfile
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/useful_tools.py — git commit attribution
+# ---------------------------------------------------------------------------
+
 
 def test_git_commit_with_kiss_sorcar_attribution():
     """Integration test: a real git commit uses KISS Sorcar as both author and committer."""

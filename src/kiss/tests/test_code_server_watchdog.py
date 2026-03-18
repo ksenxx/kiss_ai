@@ -12,6 +12,9 @@ import sys
 import threading
 import time
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_JS
+# ---------------------------------------------------------------------------
 
 class TestCodeServerWatchdogLogic:
     """Test the code-server watchdog thread logic using real subprocesses."""

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shutil
@@ -14,10 +13,15 @@ from unittest import TestCase
 
 import pytest
 
-
 # ===========================================================================
 # utils.py — config_to_dict traverses dict, list, and __dict__ branches
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/utils.py — config_to_dict
+# ---------------------------------------------------------------------------
+
 class TestConfigToDict(TestCase):
     def test_config_to_dict_covers_all_branches(self) -> None:
         """config_to_dict must traverse dict, list, object, and primitive branches."""
@@ -38,6 +42,12 @@ class TestConfigToDict(TestCase):
 # ===========================================================================
 # config_builder.py — Optional type handling and None values
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/config_builder.py — _add_model_arguments, _flat_to_nested_dict, add_config
+# ---------------------------------------------------------------------------
+
 class TestConfigBuilderOptionalField(TestCase):
     def test_optional_field_unwrapped(self) -> None:
         """_add_model_arguments should handle Optional[int] by extracting int."""
@@ -108,6 +118,12 @@ class TestConfigBuilderOptionalField(TestCase):
 # ===========================================================================
 # model.py — bare list type schema, close_callback_loop, Attachment fallback
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — OpenAICompatibleModel
+# ---------------------------------------------------------------------------
+
 class TestModelBareListSchema(TestCase):
     def test_bare_list_type_produces_array(self) -> None:
         """list (no type args) should produce {"type": "array"}."""
@@ -159,6 +175,10 @@ class TestCloseCallbackLoopNoop(TestCase):
         assert m._callback_loop is None
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/model.py — Attachment
+# ---------------------------------------------------------------------------
+
 class TestAttachmentMimeFallback(TestCase):
     def test_from_file_known_extension(self) -> None:
         from kiss.core.models.model import Attachment
@@ -180,6 +200,13 @@ class TestAttachmentMimeFallback(TestCase):
 # ===========================================================================
 # openai_compatible_model.py — DeepSeek reasoning, cache control, text tools
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — OpenAICompatibleModel, _extract_deepseek_reasoning,
+#   _parse_text_based_tool_calls
+# ---------------------------------------------------------------------------
+
 class TestDeepSeekReasoningNoMatch(TestCase):
     def test_no_think_tags(self) -> None:
         from kiss.core.models.openai_compatible_model import (
@@ -290,6 +317,12 @@ class TestFinalizeStreamResponse(TestCase):
 # ===========================================================================
 # useful_tools.py — streaming and non-streaming bash timeout
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/useful_tools.py — UsefulTools
+# ---------------------------------------------------------------------------
+
 class TestBashTimeout(TestCase):
     def test_streaming_timeout(self) -> None:
         from kiss.agents.sorcar.useful_tools import UsefulTools
@@ -310,6 +343,12 @@ class TestBashTimeout(TestCase):
 # ===========================================================================
 # task_history.py — edge cases with real file operations
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
+
 class TestTaskHistoryEdgeCases(TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
@@ -590,6 +629,12 @@ class TestTaskHistoryEdgeCases(TestCase):
 # ===========================================================================
 # kiss_agent.py — _is_retryable_error
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — _is_retryable_error
+# ---------------------------------------------------------------------------
+
 class TestKISSAgentRetryableErrors(TestCase):
     def test_retryable_errors(self) -> None:
         # Connection errors are retryable
@@ -615,6 +660,12 @@ class TestKISSAgentRetryableErrors(TestCase):
 # ===========================================================================
 # model.py — add_function_results edge case
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/gemini_model.py — GeminiModel
+# ---------------------------------------------------------------------------
+
 class TestModelAddMessageWithUsageInfo(TestCase):
     def test_usage_info_appended_for_user_message(self) -> None:
         """model.py line 254: usage_info_for_messages appended to user content."""
@@ -638,6 +689,10 @@ class TestModelAddMessageWithUsageInfo(TestCase):
         assert last["content"] == "response"
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — OpenAICompatibleModel
+# ---------------------------------------------------------------------------
+
 class TestModelAddFunctionResultsEdge(TestCase):
     def test_no_tool_calls_in_conversation(self) -> None:
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -659,6 +714,12 @@ class TestModelAddFunctionResultsEdge(TestCase):
 # ===========================================================================
 # browser_ui.py — start/stop recording
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter
+# ---------------------------------------------------------------------------
+
 class TestBrowserUIStartRecording(TestCase):
     def test_start_stop_recording(self) -> None:
         from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
@@ -675,6 +736,12 @@ class TestBrowserUIStartRecording(TestCase):
 # ===========================================================================
 # model_info.py — model factory for different providers
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/model_info.py — model
+# ---------------------------------------------------------------------------
+
 class TestModelInfoFactoryBranches(TestCase):
     def test_model_factory_claude(self) -> None:
         from kiss.core.models.model_info import model
@@ -698,6 +765,12 @@ class TestModelInfoFactoryBranches(TestCase):
 # ===========================================================================
 # anthropic_model.py — _build_create_kwargs branches
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/anthropic_model.py — AnthropicModel
+# ---------------------------------------------------------------------------
+
 class TestAnthropicBuildKwargsBranches(TestCase):
     def test_stop_string_converted_to_list(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
@@ -725,6 +798,12 @@ class TestAnthropicBuildKwargsBranches(TestCase):
 # ===========================================================================
 # openai_compatible_model.py — _build_text_based_tools_prompt
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — _build_text_based_tools_prompt
+# ---------------------------------------------------------------------------
+
 class TestBuildTextBasedToolsPrompt(TestCase):
     def test_builds_prompt(self) -> None:
         from kiss.core.models.openai_compatible_model import (
@@ -742,6 +821,13 @@ class TestBuildTextBasedToolsPrompt(TestCase):
 # ===========================================================================
 # code_server.py — _snapshot_files, _file_as_new_hunks
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _file_as_new_hunks, _prepare_merge_view, _restore_merge_files,
+#   _snapshot_files
+# ---------------------------------------------------------------------------
+
 class TestCodeServerMergeHelpers(TestCase):
     def test_snapshot_files_nonexistent(self) -> None:
         from kiss.agents.sorcar.code_server import _snapshot_files
@@ -836,6 +922,12 @@ class TestPrepareMergeView(TestCase):
 # ===========================================================================
 # sorcar.py — module-level helpers
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — _log_exc, _read_active_file
+# ---------------------------------------------------------------------------
+
 class TestSorcarHelpers(TestCase):
     def test_log_exc(self) -> None:
         from kiss.agents.sorcar.sorcar import _log_exc
@@ -855,6 +947,12 @@ class TestSorcarHelpers(TestCase):
 # ===========================================================================
 # web_use_tool.py — _open_in_default_browser
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/web_use_tool.py — WebUseTool
+# ---------------------------------------------------------------------------
+
 class TestOpenInDefaultBrowser(TestCase):
     def test_open_in_default_browser_does_not_crash(self) -> None:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
@@ -863,46 +961,14 @@ class TestOpenInDefaultBrowser(TestCase):
 
 
 # ===========================================================================
-# sorcar_agent.py — _resolve_task, _build_arg_parser
-# ===========================================================================
-class TestSorcarAgentCLI(TestCase):
-    def test_build_arg_parser(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _build_arg_parser
-
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--model_name", "gpt-4o", "--max_steps", "10"])
-        assert args.model_name == "gpt-4o"
-        assert args.max_steps == 10
-
-    def test_resolve_task_from_file(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _resolve_task
-
-        td = Path(tempfile.mkdtemp())
-        task_file = td / "task.txt"
-        task_file.write_text("Do something specific")
-        args = argparse.Namespace(f=str(task_file), task=None)
-        result = _resolve_task(args)
-        assert result == "Do something specific"
-        shutil.rmtree(td, ignore_errors=True)
-
-    def test_resolve_task_from_string(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _resolve_task
-
-        args = argparse.Namespace(f=None, task="My task")
-        result = _resolve_task(args)
-        assert result == "My task"
-
-    def test_resolve_task_default(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _resolve_task
-
-        args = argparse.Namespace(f=None, task=None)
-        result = _resolve_task(args)
-        assert "weather" in result.lower() or len(result) > 0
-
-
-# ===========================================================================
 # relentless_agent.py — finish() with string arguments (lines 73, 75)
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/relentless_agent.py — finish
+# ---------------------------------------------------------------------------
+
 class TestFinishWithStringArgs(TestCase):
     def test_finish_string_success_true(self) -> None:
         from kiss.core.relentless_agent import finish
@@ -928,6 +994,12 @@ class TestFinishWithStringArgs(TestCase):
 # ===========================================================================
 # model.py — __str__ (line 172)
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/gemini_model.py — GeminiModel
+# ---------------------------------------------------------------------------
+
 class TestModelStr(TestCase):
     def test_model_str_gemini(self) -> None:
         """GeminiModel inherits Model.__str__ (line 172) — no override."""
@@ -953,6 +1025,12 @@ class TestModelStr(TestCase):
 # ===========================================================================
 # anthropic_model.py — stop_val neither str nor list (branch 166->170)
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/anthropic_model.py — AnthropicModel
+# ---------------------------------------------------------------------------
+
 class TestAnthropicStopValNotStrOrList(TestCase):
     def test_stop_val_integer_ignored(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
@@ -1014,6 +1092,12 @@ class TestAnthropicAddFunctionResultsNoToolUse(TestCase):
 # ===========================================================================
 # gemini_model.py — unknown role in conversation (branch 153->64)
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/gemini_model.py — GeminiModel
+# ---------------------------------------------------------------------------
+
 class TestGeminiUnknownRole(TestCase):
     def test_unknown_role_skipped(self) -> None:
         from kiss.core.models.gemini_model import GeminiModel
@@ -1116,6 +1200,12 @@ class TestGeminiPartsFromResponseEmpty(TestCase):
 # ===========================================================================
 # browser_ui.py — broadcast with no recordings/clients (branch 502->exit)
 # ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter
+# ---------------------------------------------------------------------------
+
 class TestBrowserUiBroadcastEmpty(TestCase):
     def test_broadcast_no_recordings(self) -> None:
         from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter

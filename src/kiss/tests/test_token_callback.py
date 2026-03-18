@@ -31,6 +31,10 @@ class CollectorPrinter(Printer):
         self.prints.clear()
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent
+# ---------------------------------------------------------------------------
+
 @requires_gemini_api_key
 class TestToolOutputStreaming:
     @pytest.mark.timeout(120)

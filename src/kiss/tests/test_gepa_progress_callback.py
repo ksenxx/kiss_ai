@@ -91,6 +91,10 @@ def create_imperfect_evaluation_fn():
     return evaluation_fn
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/gepa/gepa.py — GEPA, GEPAPhase, GEPAProgress
+# ---------------------------------------------------------------------------
+
 @requires_openai_api_key
 class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
     """Test progress callback with merge functionality."""

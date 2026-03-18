@@ -6,6 +6,9 @@ conversation handling without making external API calls.
 
 from kiss.core.models.gemini_model import GeminiModel
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/gemini_model.py — GeminiModel
+# ---------------------------------------------------------------------------
 
 class TestGeminiModelConversationConversion:
     """Tests for GeminiModel conversation conversion and helpers."""

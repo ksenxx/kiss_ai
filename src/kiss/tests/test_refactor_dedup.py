@@ -12,6 +12,9 @@ from typing import Any
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.printer import parse_result_yaml
 
+# ---------------------------------------------------------------------------
+# kiss/core/printer.py — parse_result_yaml
+# ---------------------------------------------------------------------------
 
 class TestParseResultYaml(unittest.TestCase):
     """Test the shared parse_result_yaml helper."""
@@ -49,6 +52,10 @@ class TestParseResultYaml(unittest.TestCase):
         assert result["success"] is False
         assert result["summary"] == "partial progress"
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — OpenAICompatibleModel
+# ---------------------------------------------------------------------------
 
 class TestBuildToolCallLists(unittest.TestCase):
     """Test the shared _build_tool_call_lists helper."""
@@ -136,6 +143,10 @@ class TestParseToolCallsFromMessage(unittest.TestCase):
         assert fc[0]["name"] == "bash"
         assert fc[0]["arguments"] == {"command": "ls"}
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter
+# ---------------------------------------------------------------------------
 
 class TestStreamEventParseDirect(unittest.TestCase):
     """Verify parse_stream_event works directly (no _handle_stream_event wrapper)."""

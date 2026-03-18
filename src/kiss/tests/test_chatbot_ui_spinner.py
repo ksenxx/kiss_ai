@@ -2,6 +2,9 @@
 
 from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS, CHATBOT_JS, CHATBOT_THEME_CSS
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_CSS, CHATBOT_JS, CHATBOT_THEME_CSS
+# ---------------------------------------------------------------------------
 
 def test_wait_spinner_css_exists():
     assert "#wait-spinner{" in CHATBOT_CSS

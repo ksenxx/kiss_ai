@@ -27,6 +27,11 @@ def _create_git_repo(tmpdir: str) -> str:
     return repo
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _capture_untracked, _parse_diff_hunks, _prepare_merge_view,
+#   _restore_merge_files, _snapshot_files
+# ---------------------------------------------------------------------------
+
 class TestRestoreMergeFiles:
     """Verify _restore_merge_files restores files and cleans up."""
 

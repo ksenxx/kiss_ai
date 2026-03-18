@@ -35,6 +35,11 @@ MODEL_CONFIGS = [
     ),
 ]
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/anthropic_model.py, kiss/core/models/gemini_model.py
+# ---------------------------------------------------------------------------
+
 @requires_anthropic_api_key
 class TestAnthropicModel:
     @pytest.mark.timeout(60)
@@ -90,6 +95,10 @@ class TestGeminiModel:
             raise
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/model_info.py — model
+# ---------------------------------------------------------------------------
+
 @requires_openai_api_key
 class TestOpenAIModel:
     @pytest.mark.timeout(60)
@@ -102,11 +111,21 @@ class TestOpenAIModel:
         assert isinstance(embedding[0], float)
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — _build_text_based_tools_prompt
+# ---------------------------------------------------------------------------
+
 class TestModelHelperFunctions:
     def test_build_text_based_tools_prompt_empty(self):
         from kiss.core.models.openai_compatible_model import _build_text_based_tools_prompt
 
         assert _build_text_based_tools_prompt({}) == ""
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/model_info.py — MODEL_INFO, _mi, calculate_cost, get_flaky_reason,
+#   is_model_flaky
+# ---------------------------------------------------------------------------
 
 class TestModelInfo:
     def test_is_model_flaky(self):
@@ -205,6 +224,10 @@ class TestCachePricing:
         assert info.cache_write_price_per_1M == 2.0
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/anthropic_model.py — AnthropicModel
+# ---------------------------------------------------------------------------
+
 @requires_anthropic_api_key
 class TestAnthropicCacheControl:
 
@@ -225,6 +248,10 @@ class TestAnthropicCacheControl:
         assert isinstance(msg["content"], str)
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/config.py — config_module
+# ---------------------------------------------------------------------------
+
 class TestModelConfigBaseUrlOverride:
 
     @pytest.mark.timeout(60)
@@ -244,6 +271,30 @@ class TestModelConfigBaseUrlOverride:
         assert isinstance(text, str)
         assert len(text) > 0
         assert "ok" in text.lower().strip()
+
+
+class TestOpenAIReasoningTokens:
+    """Verify OpenAI reasoning tokens are counted in usage output."""
+
+    def test_openai_reasoning_tokens_are_counted_in_usage(self) -> None:
+        """Reasoning tokens from completion_tokens_details should count as output tokens."""
+        from types import SimpleNamespace
+
+        model = OpenAICompatibleModel("gpt-5.4", base_url="http://localhost", api_key="test")
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=11,
+                completion_tokens=7,
+                prompt_tokens_details=None,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=13),
+            )
+        )
+
+        input_tokens, output_tokens, cache_read, cache_write = (
+            model.extract_input_output_token_counts_from_response(response)
+        )
+
+        assert (input_tokens, output_tokens, cache_read, cache_write) == (11, 20, 0, 0)
 
 
 if __name__ == "__main__":

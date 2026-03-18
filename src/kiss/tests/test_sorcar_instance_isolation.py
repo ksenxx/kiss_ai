@@ -18,6 +18,10 @@ def _find_free_port() -> int:
         return int(s.getsockname()[1])
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — _KISS_DIR
+# ---------------------------------------------------------------------------
+
 class TestSharedDataDir:
     """Test that all instances of the same work dir share a data directory."""
 

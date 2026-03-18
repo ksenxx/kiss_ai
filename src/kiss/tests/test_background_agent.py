@@ -80,6 +80,11 @@ def _run_in_child(result_queue: multiprocessing.Queue) -> None:  # type: ignore[
     result_queue.put(buf.getvalue())
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/claw/background_agent.py — _LOCK_FILE, _MAX_CHUNK, _PID_FILE, _clear_stale_lock,
+#   _is_pid_alive, _read_pid, _send_chunked, stop_background_agent
+# ---------------------------------------------------------------------------
+
 def test_single_instance_lock() -> None:
     """When one instance holds the lock, a second instance exits immediately."""
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)

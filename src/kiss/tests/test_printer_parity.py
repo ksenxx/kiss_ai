@@ -38,6 +38,10 @@ def _event(evt_dict):
     return SimpleNamespace(event=evt_dict)
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py, kiss/core/print_to_console.py — parity
+# ---------------------------------------------------------------------------
+
 class TestPrintReturnValueParity:
     """Both printers must return the same string from print() for every type."""
 
@@ -106,6 +110,10 @@ class TestToolCallContentParity:
         assert ev["new_string"] == "x = 2"
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/printer.py — MAX_RESULT_LEN
+# ---------------------------------------------------------------------------
+
 class TestToolResultContentParity:
     """Both printers display the same tool result content."""
 
@@ -122,6 +130,10 @@ class TestToolResultContentParity:
         assert "... (truncated) ..." in out
         assert "... (truncated) ..." in tr_events[0]["content"]
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py, kiss/core/print_to_console.py — parity
+# ---------------------------------------------------------------------------
 
 class TestMessageParity:
     """Both printers handle message objects the same way."""

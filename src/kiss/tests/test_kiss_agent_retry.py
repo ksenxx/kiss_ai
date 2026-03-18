@@ -82,6 +82,10 @@ def _make_agent(model_obj: Any, max_steps: int = 5) -> KISSAgent:
     return agent
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent
+# ---------------------------------------------------------------------------
+
 def test_run_agentic_loop_retries_then_succeeds() -> None:
     model = _RetryableErrorModel(failures=2)
     agent = _make_agent(model)
@@ -99,6 +103,10 @@ def test_run_agentic_loop_retries_then_succeeds() -> None:
         in retry_messages[0]["content"]
     )
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent
+# ---------------------------------------------------------------------------
 
 def test_run_agentic_loop_raises_after_three_consecutive_retryable_errors() -> None:
     model = _RetryableErrorModel(failures=3)

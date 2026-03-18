@@ -14,6 +14,9 @@ from kiss.core.utils import (
     read_project_file_from_package,
 )
 
+# ---------------------------------------------------------------------------
+# kiss/core/base.py — Base
+# ---------------------------------------------------------------------------
 
 class TestBaseClass:
     @pytest.fixture(autouse=True)
@@ -38,6 +41,10 @@ class TestBaseClass:
         state = agent._build_state_dict()
         assert state["max_tokens"] is None
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/utils.py — read_project_file, read_project_file_from_package
+# ---------------------------------------------------------------------------
 
 class TestUtils:
     def test_read_project_file_not_found(self):

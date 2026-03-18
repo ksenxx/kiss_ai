@@ -20,6 +20,9 @@ import pytest
 
 from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _CS_EXTENSION_JS
+# ---------------------------------------------------------------------------
 
 class TestDataDirIsolation:
     """Verify that each work directory gets a unique code-server data directory."""
@@ -132,6 +135,10 @@ class TestCodeServerPortIsolation:
         finally:
             shutil.rmtree(tmpdir)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — find_free_port
+# ---------------------------------------------------------------------------
 
 class TestTwoInstanceSubprocess:
     """Integration test: start two Sorcar server subprocesses on different work dirs

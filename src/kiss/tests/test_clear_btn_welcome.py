@@ -26,6 +26,10 @@ def _get_clear_handler() -> str:
     return CHATBOT_JS[start : i - 1]
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_JS
+# ---------------------------------------------------------------------------
+
 class TestClearButtonWelcome:
     """Verify the X button clears chatbox and launches welcome."""
 

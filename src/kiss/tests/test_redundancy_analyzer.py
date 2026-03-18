@@ -51,6 +51,10 @@ def _create_coverage_db(test_code: str, source_code: str) -> str:
     return cov_file
 
 
+# ---------------------------------------------------------------------------
+# kiss/scripts/redundancy_analyzer.py — analyze_redundancy
+# ---------------------------------------------------------------------------
+
 def test_setup_teardown_arcs_grouped_with_method():
     """Setup/teardown arcs are merged into the method's arc set.
 

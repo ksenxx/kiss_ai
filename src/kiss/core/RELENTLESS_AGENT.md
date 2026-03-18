@@ -263,7 +263,7 @@ def _get_tools(self) -> list:
 
 ### What SorcarAgent Does Not Do
 
-SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 220 lines of logic (excluding the CLI `main()`), and its entire `run()` method ends with:
+SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 250 lines of logic (excluding the CLI `main()`), and its entire `run()` method ends with:
 
 ```python
 return super().run(
