@@ -167,7 +167,7 @@ class SorcarAgent(RelentlessAgent):
                         f"to view or screenshot these attachments."
                     )
             if current_editor_file:
-                prompt += (
+                system_instructions += (
                     "\n\n- The path of the file open in the editor is "
                     f"{current_editor_file}"
                 )
