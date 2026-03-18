@@ -26,6 +26,10 @@ TASK_PROMPT = """# Task
 
 {task_description}
 
+{previous_progress}
+"""
+
+IMPORTANT_INSTRUCTIONS = """
 # MOST IMPORTANT INSTRUCTIONS
 - **At step {step_threshold}: you MUST call finish(success=False, is_continue=True, \
 summary="precise chronologically-ordered list of things the agent did \
@@ -33,8 +37,6 @@ with the reason for doing that along with relevant code snippets")** or \
 if the task is not complete and you are at risk of running out of steps or context length.
 - Work dir: {work_dir}
 - Current process PID: {current_pid} — NEVER kill this process.
-
-{previous_progress}
 """
 
 CONTINUATION_PROMPT = """
@@ -143,6 +145,12 @@ class RelentlessAgent(Base):
         progress_section = ""
         summary = ""
         current_pid = str(os.getpid())
+        important_instructions = IMPORTANT_INSTRUCTIONS.format(
+            step_threshold=str(self.max_steps - 2),
+            work_dir=self.work_dir,
+            current_pid=current_pid,
+        )
+        system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
             executor = KISSAgent(f"{self.name} Session-{session}")
             session_info = f"Session: {session + 1}/{self.max_sub_sessions}"
@@ -153,11 +161,8 @@ class RelentlessAgent(Base):
                     arguments={
                         "task_description": self.task_description,
                         "previous_progress": progress_section,
-                        "step_threshold": str(self.max_steps - 2),
-                        "work_dir": self.work_dir,
-                        "current_pid": current_pid,
                     },
-                    system_prompt=self.system_prompt,
+                    system_prompt=system_prompt,
                     tools=all_tools,
                     max_steps=self.max_steps,
                     max_budget=self.max_budget,
