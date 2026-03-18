@@ -129,7 +129,7 @@ class TestChatbotExternalRunHandler:
 
     def test_external_run_clears_input(self) -> None:
         er_idx = CHATBOT_JS.index("function enterRunning()")
-        er_block = CHATBOT_JS[er_idx:er_idx + 300]
+        er_block = CHATBOT_JS[er_idx:er_idx + 500]
         assert "inp.style.height='auto'" in er_block
 
     def test_external_run_disables_run_prompt_btn(self) -> None:

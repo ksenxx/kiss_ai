@@ -89,455 +89,8 @@ def _clear_token() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_slack_tools(client: WebClient) -> list:
-    """Create Slack API tool functions bound to the given WebClient.
-
-    Args:
-        client: Authenticated Slack WebClient instance.
-
-    Returns:
-        List of callable tool functions for Slack operations.
-    """
-
-    def list_channels(
-        types: str = "public_channel", limit: int = 200, cursor: str = ""
-    ) -> str:
-        """List channels in the Slack workspace.
-
-        Args:
-            types: Comma-separated channel types. Options:
-                public_channel, private_channel, mpim, im.
-                Default: "public_channel".
-            limit: Maximum number of channels to return (1-1000).
-                Default: 200.
-            cursor: Pagination cursor for next page of results.
-                Pass the value from the previous response's
-                response_metadata.next_cursor.
-
-        Returns:
-            JSON string with channel list (id, name, purpose, num_members)
-            and pagination cursor.
-        """
-        try:
-            kwargs: dict[str, Any] = {"types": types, "limit": min(limit, 1000)}
-            if cursor:
-                kwargs["cursor"] = cursor
-            resp = client.conversations_list(**kwargs)
-            raw_channels: list[dict[str, Any]] = resp.get("channels", [])
-            channels = [
-                {
-                    "id": ch["id"],
-                    "name": ch.get("name", ""),
-                    "is_private": ch.get("is_private", False),
-                    "purpose": ch.get("purpose", {}).get("value", ""),
-                    "num_members": ch.get("num_members", 0),
-                }
-                for ch in raw_channels
-            ]
-            result: dict[str, Any] = {"ok": True, "channels": channels}
-            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
-            if next_cursor:
-                result["next_cursor"] = next_cursor
-            return json.dumps(result, indent=2)[:8000]
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def read_messages(
-        channel: str, limit: int = 20, cursor: str = "", oldest: str = "", newest: str = ""
-    ) -> str:
-        """Read messages from a Slack channel.
-
-        Args:
-            channel: Channel ID (e.g. "C01234567").
-            limit: Number of messages to return (1-1000). Default: 20.
-            cursor: Pagination cursor for next page.
-            oldest: Only messages after this Unix timestamp.
-            newest: Only messages before this Unix timestamp.
-
-        Returns:
-            JSON string with messages (user, text, ts, thread_ts)
-            and pagination cursor.
-        """
-        try:
-            kwargs: dict[str, Any] = {"channel": channel, "limit": min(limit, 1000)}
-            if cursor:
-                kwargs["cursor"] = cursor
-            if oldest:
-                kwargs["oldest"] = oldest
-            if newest:
-                kwargs["newest"] = newest
-            resp = client.conversations_history(**kwargs)
-            raw_msgs: list[dict[str, Any]] = resp.get("messages", [])
-            messages = [
-                {
-                    "user": msg.get("user", ""),
-                    "text": msg.get("text", ""),
-                    "ts": msg.get("ts", ""),
-                    "thread_ts": msg.get("thread_ts", ""),
-                    "reply_count": msg.get("reply_count", 0),
-                }
-                for msg in raw_msgs
-            ]
-            result: dict[str, Any] = {"ok": True, "messages": messages}
-            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
-            if next_cursor:
-                result["next_cursor"] = next_cursor
-            return json.dumps(result, indent=2)[:8000]
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def read_thread(channel: str, thread_ts: str, limit: int = 50, cursor: str = "") -> str:
-        """Read replies in a message thread.
-
-        Args:
-            channel: Channel ID where the thread lives.
-            thread_ts: Timestamp of the parent message.
-            limit: Number of replies to return (1-1000). Default: 50.
-            cursor: Pagination cursor for next page.
-
-        Returns:
-            JSON string with thread messages and pagination cursor.
-        """
-        try:
-            kwargs: dict[str, Any] = {
-                "channel": channel,
-                "ts": thread_ts,
-                "limit": min(limit, 1000),
-            }
-            if cursor:
-                kwargs["cursor"] = cursor
-            resp = client.conversations_replies(**kwargs)
-            raw_msgs: list[dict[str, Any]] = resp.get("messages", [])
-            messages = [
-                {
-                    "user": msg.get("user", ""),
-                    "text": msg.get("text", ""),
-                    "ts": msg.get("ts", ""),
-                }
-                for msg in raw_msgs
-            ]
-            result: dict[str, Any] = {"ok": True, "messages": messages}
-            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
-            if next_cursor:
-                result["next_cursor"] = next_cursor
-            return json.dumps(result, indent=2)[:8000]
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def send_message(
-        channel: str, text: str, thread_ts: str = "", blocks: str = ""
-    ) -> str:
-        """Send a message to a Slack channel.
-
-        Args:
-            channel: Channel ID or name (e.g. "C01234567" or "#general").
-            text: Message text (supports Slack mrkdwn formatting).
-            thread_ts: Optional parent message timestamp to reply in a thread.
-            blocks: Optional JSON string of Block Kit blocks for rich
-                formatting. If provided, text becomes the fallback.
-
-        Returns:
-            JSON string with ok status and the message timestamp (ts).
-        """
-        try:
-            kwargs: dict[str, Any] = {"channel": channel, "text": text}
-            if thread_ts:
-                kwargs["thread_ts"] = thread_ts
-            if blocks:
-                kwargs["blocks"] = json.loads(blocks)
-            resp = client.chat_postMessage(**kwargs)
-            return json.dumps(
-                {"ok": True, "ts": resp.get("ts", ""), "channel": resp.get("channel", "")}
-            )
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def update_message(channel: str, ts: str, text: str, blocks: str = "") -> str:
-        """Update an existing message in a Slack channel.
-
-        Args:
-            channel: Channel ID where the message is.
-            ts: Timestamp of the message to update.
-            text: New message text.
-            blocks: Optional JSON string of Block Kit blocks.
-
-        Returns:
-            JSON string with ok status and updated timestamp.
-        """
-        try:
-            kwargs: dict[str, Any] = {"channel": channel, "ts": ts, "text": text}
-            if blocks:
-                kwargs["blocks"] = json.loads(blocks)
-            resp = client.chat_update(**kwargs)
-            return json.dumps({"ok": True, "ts": resp.get("ts", "")})
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def delete_message(channel: str, ts: str) -> str:
-        """Delete a message from a Slack channel.
-
-        Args:
-            channel: Channel ID where the message is.
-            ts: Timestamp of the message to delete.
-
-        Returns:
-            JSON string with ok status.
-        """
-        try:
-            client.chat_delete(channel=channel, ts=ts)
-            return json.dumps({"ok": True})
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def list_users(limit: int = 200, cursor: str = "") -> str:
-        """List users in the Slack workspace.
-
-        Args:
-            limit: Maximum number of users to return (1-1000). Default: 200.
-            cursor: Pagination cursor for next page.
-
-        Returns:
-            JSON string with user list (id, name, real_name, is_bot)
-            and pagination cursor.
-        """
-        try:
-            kwargs: dict[str, Any] = {"limit": min(limit, 1000)}
-            if cursor:
-                kwargs["cursor"] = cursor
-            resp = client.users_list(**kwargs)
-            raw_members: list[dict[str, Any]] = resp.get("members", [])
-            users = [
-                {
-                    "id": u["id"],
-                    "name": u.get("name", ""),
-                    "real_name": u.get("real_name", ""),
-                    "is_bot": u.get("is_bot", False),
-                    "is_admin": u.get("is_admin", False),
-                }
-                for u in raw_members
-            ]
-            result: dict[str, Any] = {"ok": True, "users": users}
-            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
-            if next_cursor:
-                result["next_cursor"] = next_cursor
-            return json.dumps(result, indent=2)[:8000]
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def get_user_info(user: str) -> str:
-        """Get detailed information about a Slack user.
-
-        Args:
-            user: User ID (e.g. "U01234567").
-
-        Returns:
-            JSON string with user profile details.
-        """
-        try:
-            resp = client.users_info(user=user)
-            u: dict[str, Any] = resp.get("user", {})
-            profile: dict[str, Any] = u.get("profile", {})
-            return json.dumps(
-                {
-                    "ok": True,
-                    "user": {
-                        "id": u.get("id", ""),
-                        "name": u.get("name", ""),
-                        "real_name": u.get("real_name", ""),
-                        "display_name": profile.get("display_name", ""),
-                        "email": profile.get("email", ""),
-                        "title": profile.get("title", ""),
-                        "is_bot": u.get("is_bot", False),
-                        "is_admin": u.get("is_admin", False),
-                        "tz": u.get("tz", ""),
-                    },
-                },
-                indent=2,
-            )
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def create_channel(name: str, is_private: bool = False) -> str:
-        """Create a new Slack channel.
-
-        Args:
-            name: Channel name (lowercase, no spaces, max 80 chars).
-                Use hyphens instead of spaces.
-            is_private: If True, create a private channel. Default: False.
-
-        Returns:
-            JSON string with the new channel's id and name.
-        """
-        try:
-            resp = client.conversations_create(name=name, is_private=is_private)
-            ch: dict[str, Any] = resp.get("channel", {})
-            return json.dumps({
-                "ok": True,
-                "channel": {"id": ch.get("id", ""), "name": ch.get("name", "")},
-            })
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def invite_to_channel(channel: str, users: str) -> str:
-        """Invite users to a Slack channel.
-
-        Args:
-            channel: Channel ID to invite users to.
-            users: Comma-separated list of user IDs to invite.
-
-        Returns:
-            JSON string with ok status.
-        """
-        try:
-            client.conversations_invite(channel=channel, users=users)
-            return json.dumps({"ok": True})
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def add_reaction(channel: str, timestamp: str, name: str) -> str:
-        """Add an emoji reaction to a message.
-
-        Args:
-            channel: Channel ID where the message is.
-            timestamp: Timestamp of the message to react to.
-            name: Emoji name without colons (e.g. "thumbsup", "heart").
-
-        Returns:
-            JSON string with ok status.
-        """
-        try:
-            client.reactions_add(channel=channel, timestamp=timestamp, name=name)
-            return json.dumps({"ok": True})
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def search_messages(query: str, count: int = 20, sort: str = "timestamp") -> str:
-        """Search for messages across the workspace.
-
-        Note: Requires a user token with search:read scope.
-        Bot tokens cannot use this method.
-
-        Args:
-            query: Search query string (supports Slack search modifiers
-                like "in:#channel", "from:@user", "has:link").
-            count: Number of results to return (1-100). Default: 20.
-            sort: Sort order — "timestamp" (default) or "score".
-
-        Returns:
-            JSON string with matching messages.
-        """
-        try:
-            resp = client.search_messages(query=query, count=min(count, 100), sort=sort)
-            msg_data: dict[str, Any] = resp.get("messages", {})
-            matches: list[dict[str, Any]] = msg_data.get("matches", [])
-            results = [
-                {
-                    "text": m.get("text", ""),
-                    "user": m.get("user", ""),
-                    "ts": m.get("ts", ""),
-                    "channel": m.get("channel", {}).get("name", ""),
-                    "permalink": m.get("permalink", ""),
-                }
-                for m in matches
-            ]
-            return json.dumps({"ok": True, "messages": results}, indent=2)[:8000]
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def set_channel_topic(channel: str, topic: str) -> str:
-        """Set the topic for a Slack channel.
-
-        Args:
-            channel: Channel ID.
-            topic: New topic text.
-
-        Returns:
-            JSON string with ok status.
-        """
-        try:
-            client.conversations_setTopic(channel=channel, topic=topic)
-            return json.dumps({"ok": True})
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def upload_file(channels: str, content: str, filename: str, title: str = "") -> str:
-        """Upload text content as a file to Slack channels.
-
-        Args:
-            channels: Comma-separated channel IDs to share the file in.
-            content: Text content of the file.
-            filename: Name for the file (e.g. "report.txt").
-            title: Optional title for the file.
-
-        Returns:
-            JSON string with ok status and file id.
-        """
-        try:
-            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
-            resp = client.files_upload_v2(
-                channels=channel_list,
-                content=content,
-                filename=filename,
-                title=title or filename,
-            )
-            file_data: dict[str, Any] = resp.get("file", {})
-            return json.dumps({"ok": True, "file_id": file_data.get("id", "")})
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def get_channel_info(channel: str) -> str:
-        """Get detailed information about a Slack channel.
-
-        Args:
-            channel: Channel ID (e.g. "C01234567").
-
-        Returns:
-            JSON string with channel details (name, topic, purpose,
-            num_members, created, creator).
-        """
-        try:
-            resp = client.conversations_info(channel=channel)
-            ch: dict[str, Any] = resp.get("channel", {})
-            return json.dumps(
-                {
-                    "ok": True,
-                    "channel": {
-                        "id": ch.get("id", ""),
-                        "name": ch.get("name", ""),
-                        "topic": ch.get("topic", {}).get("value", ""),
-                        "purpose": ch.get("purpose", {}).get("value", ""),
-                        "num_members": ch.get("num_members", 0),
-                        "is_private": ch.get("is_private", False),
-                        "created": ch.get("created", 0),
-                        "creator": ch.get("creator", ""),
-                    },
-                },
-                indent=2,
-            )
-        except SlackApiError as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    return [
-        list_channels,
-        read_messages,
-        read_thread,
-        send_message,
-        update_message,
-        delete_message,
-        list_users,
-        get_user_info,
-        create_channel,
-        invite_to_channel,
-        add_reaction,
-        search_messages,
-        set_channel_topic,
-        upload_file,
-        get_channel_info,
-    ]
-
-
 # ---------------------------------------------------------------------------
-# SlackChannelBackend — used by background_agent.py
+# SlackChannelBackend — used by background_agent.py and SlackAgent tools
 # ---------------------------------------------------------------------------
 
 _REPLY_POLL_INTERVAL = 2.0
@@ -777,6 +330,472 @@ class SlackChannelBackend:
             return text.replace(f"<@{self._bot_user_id}>", "").strip()
         return text
 
+    # -------------------------------------------------------------------
+    # Slack API tool methods (return JSON strings for LLM agent use)
+    # -------------------------------------------------------------------
+
+    def list_channels(
+        self, types: str = "public_channel", limit: int = 200, cursor: str = ""
+    ) -> str:
+        """List channels in the Slack workspace.
+
+        Args:
+            types: Comma-separated channel types. Options:
+                public_channel, private_channel, mpim, im.
+                Default: "public_channel".
+            limit: Maximum number of channels to return (1-1000).
+                Default: 200.
+            cursor: Pagination cursor for next page of results.
+                Pass the value from the previous response's
+                response_metadata.next_cursor.
+
+        Returns:
+            JSON string with channel list (id, name, purpose, num_members)
+            and pagination cursor.
+        """
+        assert self._client is not None
+        try:
+            kwargs: dict[str, Any] = {"types": types, "limit": min(limit, 1000)}
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._client.conversations_list(**kwargs)
+            raw_channels: list[dict[str, Any]] = resp.get("channels", [])
+            channels = [
+                {
+                    "id": ch["id"],
+                    "name": ch.get("name", ""),
+                    "is_private": ch.get("is_private", False),
+                    "purpose": ch.get("purpose", {}).get("value", ""),
+                    "num_members": ch.get("num_members", 0),
+                }
+                for ch in raw_channels
+            ]
+            result: dict[str, Any] = {"ok": True, "channels": channels}
+            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
+            if next_cursor:
+                result["next_cursor"] = next_cursor
+            return json.dumps(result, indent=2)[:8000]
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def read_messages(
+        self, channel: str, limit: int = 20, cursor: str = "",
+        oldest: str = "", newest: str = "",
+    ) -> str:
+        """Read messages from a Slack channel.
+
+        Args:
+            channel: Channel ID (e.g. "C01234567").
+            limit: Number of messages to return (1-1000). Default: 20.
+            cursor: Pagination cursor for next page.
+            oldest: Only messages after this Unix timestamp.
+            newest: Only messages before this Unix timestamp.
+
+        Returns:
+            JSON string with messages (user, text, ts, thread_ts)
+            and pagination cursor.
+        """
+        assert self._client is not None
+        try:
+            kwargs: dict[str, Any] = {"channel": channel, "limit": min(limit, 1000)}
+            if cursor:
+                kwargs["cursor"] = cursor
+            if oldest:
+                kwargs["oldest"] = oldest
+            if newest:
+                kwargs["newest"] = newest
+            resp = self._client.conversations_history(**kwargs)
+            raw_msgs: list[dict[str, Any]] = resp.get("messages", [])
+            messages = [
+                {
+                    "user": msg.get("user", ""),
+                    "text": msg.get("text", ""),
+                    "ts": msg.get("ts", ""),
+                    "thread_ts": msg.get("thread_ts", ""),
+                    "reply_count": msg.get("reply_count", 0),
+                }
+                for msg in raw_msgs
+            ]
+            result: dict[str, Any] = {"ok": True, "messages": messages}
+            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
+            if next_cursor:
+                result["next_cursor"] = next_cursor
+            return json.dumps(result, indent=2)[:8000]
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def read_thread(
+        self, channel: str, thread_ts: str, limit: int = 50, cursor: str = ""
+    ) -> str:
+        """Read replies in a message thread.
+
+        Args:
+            channel: Channel ID where the thread lives.
+            thread_ts: Timestamp of the parent message.
+            limit: Number of replies to return (1-1000). Default: 50.
+            cursor: Pagination cursor for next page.
+
+        Returns:
+            JSON string with thread messages and pagination cursor.
+        """
+        assert self._client is not None
+        try:
+            kwargs: dict[str, Any] = {
+                "channel": channel,
+                "ts": thread_ts,
+                "limit": min(limit, 1000),
+            }
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._client.conversations_replies(**kwargs)
+            raw_msgs: list[dict[str, Any]] = resp.get("messages", [])
+            messages = [
+                {
+                    "user": msg.get("user", ""),
+                    "text": msg.get("text", ""),
+                    "ts": msg.get("ts", ""),
+                }
+                for msg in raw_msgs
+            ]
+            result: dict[str, Any] = {"ok": True, "messages": messages}
+            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
+            if next_cursor:
+                result["next_cursor"] = next_cursor
+            return json.dumps(result, indent=2)[:8000]
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def post_message(
+        self, channel: str, text: str, thread_ts: str = "", blocks: str = ""
+    ) -> str:
+        """Send a message to a Slack channel.
+
+        Args:
+            channel: Channel ID or name (e.g. "C01234567" or "#general").
+            text: Message text (supports Slack mrkdwn formatting).
+            thread_ts: Optional parent message timestamp to reply in a thread.
+            blocks: Optional JSON string of Block Kit blocks for rich
+                formatting. If provided, text becomes the fallback.
+
+        Returns:
+            JSON string with ok status and the message timestamp (ts).
+        """
+        assert self._client is not None
+        try:
+            kwargs: dict[str, Any] = {"channel": channel, "text": text}
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            if blocks:
+                kwargs["blocks"] = json.loads(blocks)
+            resp = self._client.chat_postMessage(**kwargs)
+            return json.dumps(
+                {"ok": True, "ts": resp.get("ts", ""), "channel": resp.get("channel", "")}
+            )
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def update_message(self, channel: str, ts: str, text: str, blocks: str = "") -> str:
+        """Update an existing message in a Slack channel.
+
+        Args:
+            channel: Channel ID where the message is.
+            ts: Timestamp of the message to update.
+            text: New message text.
+            blocks: Optional JSON string of Block Kit blocks.
+
+        Returns:
+            JSON string with ok status and updated timestamp.
+        """
+        assert self._client is not None
+        try:
+            kwargs: dict[str, Any] = {"channel": channel, "ts": ts, "text": text}
+            if blocks:
+                kwargs["blocks"] = json.loads(blocks)
+            resp = self._client.chat_update(**kwargs)
+            return json.dumps({"ok": True, "ts": resp.get("ts", "")})
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def delete_message(self, channel: str, ts: str) -> str:
+        """Delete a message from a Slack channel.
+
+        Args:
+            channel: Channel ID where the message is.
+            ts: Timestamp of the message to delete.
+
+        Returns:
+            JSON string with ok status.
+        """
+        assert self._client is not None
+        try:
+            self._client.chat_delete(channel=channel, ts=ts)
+            return json.dumps({"ok": True})
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_users(self, limit: int = 200, cursor: str = "") -> str:
+        """List users in the Slack workspace.
+
+        Args:
+            limit: Maximum number of users to return (1-1000). Default: 200.
+            cursor: Pagination cursor for next page.
+
+        Returns:
+            JSON string with user list (id, name, real_name, is_bot)
+            and pagination cursor.
+        """
+        assert self._client is not None
+        try:
+            kwargs: dict[str, Any] = {"limit": min(limit, 1000)}
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._client.users_list(**kwargs)
+            raw_members: list[dict[str, Any]] = resp.get("members", [])
+            users = [
+                {
+                    "id": u["id"],
+                    "name": u.get("name", ""),
+                    "real_name": u.get("real_name", ""),
+                    "is_bot": u.get("is_bot", False),
+                    "is_admin": u.get("is_admin", False),
+                }
+                for u in raw_members
+            ]
+            result: dict[str, Any] = {"ok": True, "users": users}
+            next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
+            if next_cursor:
+                result["next_cursor"] = next_cursor
+            return json.dumps(result, indent=2)[:8000]
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_user_info(self, user: str) -> str:
+        """Get detailed information about a Slack user.
+
+        Args:
+            user: User ID (e.g. "U01234567").
+
+        Returns:
+            JSON string with user profile details.
+        """
+        assert self._client is not None
+        try:
+            resp = self._client.users_info(user=user)
+            u: dict[str, Any] = resp.get("user", {})
+            profile: dict[str, Any] = u.get("profile", {})
+            return json.dumps(
+                {
+                    "ok": True,
+                    "user": {
+                        "id": u.get("id", ""),
+                        "name": u.get("name", ""),
+                        "real_name": u.get("real_name", ""),
+                        "display_name": profile.get("display_name", ""),
+                        "email": profile.get("email", ""),
+                        "title": profile.get("title", ""),
+                        "is_bot": u.get("is_bot", False),
+                        "is_admin": u.get("is_admin", False),
+                        "tz": u.get("tz", ""),
+                    },
+                },
+                indent=2,
+            )
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def create_channel(self, name: str, is_private: bool = False) -> str:
+        """Create a new Slack channel.
+
+        Args:
+            name: Channel name (lowercase, no spaces, max 80 chars).
+                Use hyphens instead of spaces.
+            is_private: If True, create a private channel. Default: False.
+
+        Returns:
+            JSON string with the new channel's id and name.
+        """
+        assert self._client is not None
+        try:
+            resp = self._client.conversations_create(name=name, is_private=is_private)
+            ch: dict[str, Any] = resp.get("channel", {})
+            return json.dumps({
+                "ok": True,
+                "channel": {"id": ch.get("id", ""), "name": ch.get("name", "")},
+            })
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def invite_to_channel(self, channel: str, users: str) -> str:
+        """Invite users to a Slack channel.
+
+        Args:
+            channel: Channel ID to invite users to.
+            users: Comma-separated list of user IDs to invite.
+
+        Returns:
+            JSON string with ok status.
+        """
+        assert self._client is not None
+        try:
+            self._client.conversations_invite(channel=channel, users=users)
+            return json.dumps({"ok": True})
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def add_reaction(self, channel: str, timestamp: str, name: str) -> str:
+        """Add an emoji reaction to a message.
+
+        Args:
+            channel: Channel ID where the message is.
+            timestamp: Timestamp of the message to react to.
+            name: Emoji name without colons (e.g. "thumbsup", "heart").
+
+        Returns:
+            JSON string with ok status.
+        """
+        assert self._client is not None
+        try:
+            self._client.reactions_add(channel=channel, timestamp=timestamp, name=name)
+            return json.dumps({"ok": True})
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def search_messages(self, query: str, count: int = 20, sort: str = "timestamp") -> str:
+        """Search for messages across the workspace.
+
+        Note: Requires a user token with search:read scope.
+        Bot tokens cannot use this method.
+
+        Args:
+            query: Search query string (supports Slack search modifiers
+                like "in:#channel", "from:@user", "has:link").
+            count: Number of results to return (1-100). Default: 20.
+            sort: Sort order — "timestamp" (default) or "score".
+
+        Returns:
+            JSON string with matching messages.
+        """
+        assert self._client is not None
+        try:
+            resp = self._client.search_messages(
+                query=query, count=min(count, 100), sort=sort
+            )
+            msg_data: dict[str, Any] = resp.get("messages", {})
+            matches: list[dict[str, Any]] = msg_data.get("matches", [])
+            results = [
+                {
+                    "text": m.get("text", ""),
+                    "user": m.get("user", ""),
+                    "ts": m.get("ts", ""),
+                    "channel": m.get("channel", {}).get("name", ""),
+                    "permalink": m.get("permalink", ""),
+                }
+                for m in matches
+            ]
+            return json.dumps({"ok": True, "messages": results}, indent=2)[:8000]
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def set_channel_topic(self, channel: str, topic: str) -> str:
+        """Set the topic for a Slack channel.
+
+        Args:
+            channel: Channel ID.
+            topic: New topic text.
+
+        Returns:
+            JSON string with ok status.
+        """
+        assert self._client is not None
+        try:
+            self._client.conversations_setTopic(channel=channel, topic=topic)
+            return json.dumps({"ok": True})
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def upload_file(
+        self, channels: str, content: str, filename: str, title: str = ""
+    ) -> str:
+        """Upload text content as a file to Slack channels.
+
+        Args:
+            channels: Comma-separated channel IDs to share the file in.
+            content: Text content of the file.
+            filename: Name for the file (e.g. "report.txt").
+            title: Optional title for the file.
+
+        Returns:
+            JSON string with ok status and file id.
+        """
+        assert self._client is not None
+        try:
+            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+            resp = self._client.files_upload_v2(
+                channels=channel_list,
+                content=content,
+                filename=filename,
+                title=title or filename,
+            )
+            file_data: dict[str, Any] = resp.get("file", {})
+            return json.dumps({"ok": True, "file_id": file_data.get("id", "")})
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_channel_info(self, channel: str) -> str:
+        """Get detailed information about a Slack channel.
+
+        Args:
+            channel: Channel ID (e.g. "C01234567").
+
+        Returns:
+            JSON string with channel details (name, topic, purpose,
+            num_members, created, creator).
+        """
+        assert self._client is not None
+        try:
+            resp = self._client.conversations_info(channel=channel)
+            ch: dict[str, Any] = resp.get("channel", {})
+            return json.dumps(
+                {
+                    "ok": True,
+                    "channel": {
+                        "id": ch.get("id", ""),
+                        "name": ch.get("name", ""),
+                        "topic": ch.get("topic", {}).get("value", ""),
+                        "purpose": ch.get("purpose", {}).get("value", ""),
+                        "num_members": ch.get("num_members", 0),
+                        "is_private": ch.get("is_private", False),
+                        "created": ch.get("created", 0),
+                        "creator": ch.get("creator", ""),
+                    },
+                },
+                indent=2,
+            )
+        except SlackApiError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_tool_methods(self) -> list:
+        """Return list of bound tool methods for use by the LLM agent.
+
+        Automatically discovers all public methods of this class,
+        excluding ChannelBackend protocol/infrastructure methods.
+
+        Returns:
+            List of callable tool methods for Slack API operations.
+        """
+        non_tool = frozenset({
+            "connect", "find_channel", "find_user", "join_channel",
+            "poll_messages", "send_message", "wait_for_reply",
+            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+        })
+        return [
+            getattr(self, name)
+            for name in sorted(dir(self))
+            if not name.startswith("_")
+            and name not in non_tool
+            and callable(getattr(self, name))
+        ]
+
 
 # ---------------------------------------------------------------------------
 # SlackAgent
@@ -807,6 +826,20 @@ def _cli_ask_user_question(question: str) -> str:
     """
     print(f"\n>>> Agent asks: {question}")
     return input("Your answer: ")
+
+
+def _make_slack_tools(client: WebClient) -> list:
+    """Create Slack API tool functions from a WebClient instance.
+
+    Args:
+        client: An authenticated ``slack_sdk.WebClient``.
+
+    Returns:
+        List of callable tool methods for Slack API operations.
+    """
+    backend = SlackChannelBackend()
+    backend._client = client
+    return backend.get_tool_methods()
 
 
 class SlackAgent(SorcarAgent):
@@ -869,10 +902,10 @@ class SlackAgent(SorcarAgent):
 
     def __init__(self) -> None:
         super().__init__("Slack Agent")
-        self._slack_client: WebClient | None = None
+        self._backend = SlackChannelBackend()
         token = _load_token()
         if token:
-            self._slack_client = WebClient(token=token, retry_handlers=[])
+            self._backend._client = WebClient(token=token, retry_handlers=[])
 
     def _get_tools(self) -> list:
         """Return SorcarAgent tools + Slack auth tools + Slack API tools."""
@@ -888,7 +921,7 @@ class SlackAgent(SorcarAgent):
                 Authentication status with workspace and bot user info,
                 or instructions for how to authenticate.
             """
-            if agent._slack_client is None:
+            if agent._backend._client is None:
                 return (
                     "Not authenticated with Slack. Use authenticate_slack(token=...) "
                     "to set a bot token. The token should start with 'xoxb-'. "
@@ -896,7 +929,7 @@ class SlackAgent(SorcarAgent):
                     "OAuth & Permissions > Bot User OAuth Token."
                 )
             try:
-                resp = agent._slack_client.auth_test()
+                resp = agent._backend._client.auth_test()
                 return json.dumps(
                     {
                         "ok": True,
@@ -925,9 +958,9 @@ class SlackAgent(SorcarAgent):
             token = token.strip()
             if not token:
                 return "Token cannot be empty."
-            agent._slack_client = WebClient(token=token, retry_handlers=[])
+            agent._backend._client = WebClient(token=token, retry_handlers=[])
             try:
-                resp = agent._slack_client.auth_test()
+                resp = agent._backend._client.auth_test()
                 _save_token(token)
                 return json.dumps(
                     {
@@ -938,7 +971,7 @@ class SlackAgent(SorcarAgent):
                     }
                 )
             except SlackApiError as e:
-                agent._slack_client = None
+                agent._backend._client = None
                 return json.dumps(
                     {"ok": False, "error": f"Token validation failed: {e}"}
                 )
@@ -950,13 +983,13 @@ class SlackAgent(SorcarAgent):
                 Status message.
             """
             _clear_token()
-            agent._slack_client = None
+            agent._backend._client = None
             return "Slack authentication cleared."
 
         tools.extend([check_slack_auth, authenticate_slack, clear_slack_auth])
 
-        if agent._slack_client is not None:
-            tools.extend(_make_slack_tools(agent._slack_client))
+        if agent._backend._client is not None:
+            tools.extend(agent._backend.get_tool_methods())
 
         return tools
 

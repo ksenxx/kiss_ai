@@ -7,10 +7,11 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.task_history import HISTORY_FILE, _load_last_model, _save_last_model
+from kiss.agents.sorcar.task_history import _load_last_model, _save_last_model
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core import config as config_module
@@ -94,8 +95,11 @@ class SorcarAgent(RelentlessAgent):
         model_name: str | None = None,
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
+        system_prompt: str | None = None,
+        tools: list[Callable[..., Any]] | None = None,
         max_steps: int | None = None,
         max_budget: float | None = None,
+        model_config: dict[str, Any] | None = None,
         work_dir: str | None = None,
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
@@ -113,6 +117,8 @@ class SorcarAgent(RelentlessAgent):
             model_name: LLM model to use. Defaults to config value.
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
+            system_prompt: system prompt to be appended to the actual system prompt
+            tools: List of tools to be added in addition to bash and web tools.
             max_steps: Maximum steps per sub-session. Defaults to config value.
             max_budget: Maximum budget in USD. Defaults to config value.
             work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
@@ -140,7 +146,10 @@ class SorcarAgent(RelentlessAgent):
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
 
         try:
-            system_instructions = SYSTEM_PROMPT + f"\nTask History File: {HISTORY_FILE}\n"
+            system_instructions = (
+                SYSTEM_PROMPT
+                + (system_prompt if system_prompt else "")
+            )
             prompt = prompt_template
             if attachments:
                 pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")
@@ -164,17 +173,18 @@ class SorcarAgent(RelentlessAgent):
                 )
             return super().run(
                 model_name=model_name,
-                system_instructions=system_instructions,
+                system_prompt=system_instructions,
                 prompt_template=prompt,
                 arguments=arguments,
                 max_steps=max_steps,
                 max_budget=max_budget,
+                model_config=model_config,
                 work_dir=work_dir,
                 printer=printer,
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,
                 verbose=verbose,
-                tools=self._get_tools(),
+                tools=self._get_tools() + (tools if tools else []),
                 attachments=attachments,
             )
         finally:
@@ -193,15 +203,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
-        "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
+        "-m", "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
     )
-    parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
-    parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
     parser.add_argument(
-        "--max_sub_sessions", type=int, default=None,
-        help="Maximum sub-sessions for auto-continuation",
+        "-e", "--endpoint", type=str, default=None, help="Custom endpoint for local model"
     )
-    parser.add_argument("--work_dir", type=str, default=None, help="Working directory")
+    parser.add_argument(
+        "-b", "--max_budget", type=float, default=100.0, help="Maximum budget in USD"
+    )
+    parser.add_argument("-w", "--work_dir", type=str, default=None, help="Working directory")
     parser.add_argument(
         "--headless",
         type=lambda x: str(x).lower() == "true",
@@ -209,14 +219,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Run browser headless (true/false)",
     )
     parser.add_argument(
-        "--verbose",
+        "-v", "--verbose",
         type=lambda x: str(x).lower() == "true",
         default=True,
         help="Print output to console",
     )
-    parser.add_argument("--task", type=str, default=None, help="Prompt template/task description")
     parser.add_argument(
-        "-f", type=str, default=None, help="Path to a file whose contents to use as the task"
+        "-t", "--task", type=str, default=None, help="Prompt template/task description"
+    )
+    parser.add_argument(
+        "-f", "--file", type=str, default=None,
+        help="Path to a file whose contents to use as the task",
     )
     return parser
 
@@ -240,8 +253,8 @@ def _resolve_task(args: argparse.Namespace) -> str:
     Raises:
         FileNotFoundError: If -f path does not exist.
     """
-    if args.f is not None:
-        return Path(args.f).read_text()
+    if args.file is not None:
+        return Path(args.file).read_text()
     if args.task is not None:
         task: str = args.task
         return task
@@ -287,6 +300,9 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         Path(work_dir).mkdir(parents=True, exist_ok=True)
     else:
         work_dir = tempfile.mkdtemp()
+    model_config = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
 
     agent = SorcarAgent("Sorcar Agent Test")
     old_cwd = os.getcwd()
@@ -296,9 +312,8 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         result = agent.run(
             prompt_template=task_description,
             model_name=args.model_name,
-            max_steps=args.max_steps,
             max_budget=args.max_budget,
-            max_sub_sessions=args.max_sub_sessions,
+            model_config=model_config,
             work_dir=work_dir,
             headless=args.headless,
             verbose=args.verbose,

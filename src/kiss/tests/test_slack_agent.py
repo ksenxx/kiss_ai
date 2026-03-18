@@ -104,8 +104,8 @@ class TestSlackTools:
 
         client = WebClient(token="xoxb-invalid-token-for-test")
         tools = _make_slack_tools(client)
-        send_message = next(t for t in tools if t.__name__ == "send_message")
-        result = json.loads(send_message(channel="C01234567", text="test"))
+        post_message = next(t for t in tools if t.__name__ == "post_message")
+        result = json.loads(post_message(channel="C01234567", text="test"))
         assert result["ok"] is False
 
     def test_list_users_returns_error_on_invalid_token(self) -> None:
@@ -299,7 +299,7 @@ class TestSlackAgent:
         result = clear()
         assert "cleared" in result.lower()
         assert _load_token() is None
-        assert agent._slack_client is None
+        assert agent._backend._client is None
 
     def test_clear_auth_when_not_authenticated(self) -> None:
         agent = SlackAgent()

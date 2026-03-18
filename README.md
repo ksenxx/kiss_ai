@@ -48,7 +48,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 ## Installation and Launching KISS Sorcar
 
 You must set the **`ANTHROPIC_API_KEY`** and **`GEMINI_API_KEY`** in the environment. Then download
-[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.46/kiss-offline-installer.pkg) and
+[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.47/kiss-offline-installer.pkg) and
 install using
 
 ```
@@ -428,7 +428,7 @@ kiss/
 │   │   │   ├── task_history.py         # Task history, proposals, and file usage persistence
 │   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit
 │   │   │   ├── web_use_tool.py         # WebUseTool with Playwright-based browser automation
-o│   │   │   ├── config.py               # Sorcar agent configuration
+│   │   │   ├── config.py               # Sorcar agent configuration
 │   │   │   └── SORCAR.md               # Sorcar design document
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── repo_optimizer.py          # Iterative code optimizer using SorcarAgent
@@ -558,6 +558,7 @@ o│   │   │   ├── config.py               # Sorcar agent configuratio
 │   │   ├── test_scm_commit_message.py
 │   │   ├── test_slack_agent.py
 │   │   ├── test_slack_channel_backend.py
+│   │   ├── test_sorcar_autocomplete.py
 │   │   ├── test_sorcar_bash_streaming.py
 │   │   ├── test_sorcar_branch_coverage.py
 │   │   ├── test_sorcar_cli_callbacks.py

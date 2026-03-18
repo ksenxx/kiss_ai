@@ -958,9 +958,15 @@ def run_chatbot(
                     return len(text)
                 return len(text) - (pos + len(q))
 
+            # Build recency rank from insertion order in file_usage.json
+            # (last key = most recently used → rank 0).
+            _usage_keys = list(usage.keys())
+            _recency = {k: i for i, k in enumerate(reversed(_usage_keys))}
+            _n = len(_usage_keys)
             frequent.sort(
                 key=lambda m: (
                     _end_dist(m["text"]),
+                    _recency.get(m["text"], _n),
                     -usage.get(m["text"], 0),
                 )
             )

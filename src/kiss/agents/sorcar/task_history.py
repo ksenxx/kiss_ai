@@ -703,8 +703,16 @@ def _load_file_usage() -> dict[str, int]:
 
 
 def _record_file_usage(path: str) -> None:
-    """Increment the access count for a file path."""
-    _increment_usage(FILE_USAGE_FILE, path)
+    """Increment the access count for a file path.
+
+    Moves the key to the end of the JSON dict so that insertion order
+    reflects recency (most recently used file is last).
+    """
+    def _update(data: dict[str, object]) -> None:
+        old_val = data.pop(path, 0)
+        data[path] = int(old_val) + 1  # type: ignore[call-overload]
+
+    _update_json_locked(FILE_USAGE_FILE, _update)
 
 
 def _add_task(task: str) -> None:

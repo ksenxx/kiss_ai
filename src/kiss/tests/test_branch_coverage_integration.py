@@ -870,9 +870,9 @@ class TestSorcarAgentCLI(TestCase):
         from kiss.agents.sorcar.sorcar_agent import _build_arg_parser
 
         parser = _build_arg_parser()
-        args = parser.parse_args(["--model_name", "gpt-4o", "--max_steps", "10"])
+        args = parser.parse_args(["--model_name", "gpt-4o", "--max_budget", "10.0"])
         assert args.model_name == "gpt-4o"
-        assert args.max_steps == 10
+        assert args.max_budget == 10.0
 
     def test_resolve_task_from_file(self) -> None:
         from kiss.agents.sorcar.sorcar_agent import _resolve_task
@@ -880,7 +880,7 @@ class TestSorcarAgentCLI(TestCase):
         td = Path(tempfile.mkdtemp())
         task_file = td / "task.txt"
         task_file.write_text("Do something specific")
-        args = argparse.Namespace(f=str(task_file), task=None)
+        args = argparse.Namespace(file=str(task_file), task=None)
         result = _resolve_task(args)
         assert result == "Do something specific"
         shutil.rmtree(td, ignore_errors=True)
@@ -888,14 +888,14 @@ class TestSorcarAgentCLI(TestCase):
     def test_resolve_task_from_string(self) -> None:
         from kiss.agents.sorcar.sorcar_agent import _resolve_task
 
-        args = argparse.Namespace(f=None, task="My task")
+        args = argparse.Namespace(file=None, task="My task")
         result = _resolve_task(args)
         assert result == "My task"
 
     def test_resolve_task_default(self) -> None:
         from kiss.agents.sorcar.sorcar_agent import _resolve_task
 
-        args = argparse.Namespace(f=None, task=None)
+        args = argparse.Namespace(file=None, task=None)
         result = _resolve_task(args)
         assert "weather" in result.lower() or len(result) > 0
 

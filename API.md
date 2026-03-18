@@ -729,14 +729,15 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
-- **run** — Run the agent with the provided tools.<br/>`run(model_name: str | None = None, system_instructions: str = '', prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools: list[Callable[..., Any]] | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Run the agent with the provided tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str = '', max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools: list[Callable[..., Any]] | None = None, attachments: list[Attachment] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
-  - `system_instructions`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
+  - `system_prompt`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
+  - `model_config`: Optional dictionary of additional model configuration parameters (e.g. temperature, top_p). Defaults to None.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
@@ -760,10 +761,12 @@ ______________________________________________________________________
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
+  - `system_prompt`: system prompt to be appended to the actual system prompt
+  - `tools`: List of tools to be added in addition to bash and web tools.
   - `max_steps`: Maximum steps per sub-session. Defaults to config value.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
@@ -1155,6 +1158,112 @@ ______________________________________________________________________
 
   - `text`: Raw message text.
   - **Returns:** Cleaned text with bot mentions removed.
+
+- **list_channels** — List channels in the Slack workspace.<br/>`list_channels(types: str = 'public_channel', limit: int = 200, cursor: str = '') -> str`
+
+  - `types`: Comma-separated channel types. Options: public_channel, private_channel, mpim, im. Default: "public_channel".
+  - `limit`: Maximum number of channels to return (1-1000). Default: 200.
+  - `cursor`: Pagination cursor for next page of results. Pass the value from the previous response's response_metadata.next_cursor.
+  - **Returns:** JSON string with channel list (id, name, purpose, num_members) and pagination cursor.
+
+- **read_messages** — Read messages from a Slack channel.<br/>`read_messages(channel: str, limit: int = 20, cursor: str = '', oldest: str = '', newest: str = '') -> str`
+
+  - `channel`: Channel ID (e.g. "C01234567").
+  - `limit`: Number of messages to return (1-1000). Default: 20.
+  - `cursor`: Pagination cursor for next page.
+  - `oldest`: Only messages after this Unix timestamp.
+  - `newest`: Only messages before this Unix timestamp.
+  - **Returns:** JSON string with messages (user, text, ts, thread_ts) and pagination cursor.
+
+- **read_thread** — Read replies in a message thread.<br/>`read_thread(channel: str, thread_ts: str, limit: int = 50, cursor: str = '') -> str`
+
+  - `channel`: Channel ID where the thread lives.
+  - `thread_ts`: Timestamp of the parent message.
+  - `limit`: Number of replies to return (1-1000). Default: 50.
+  - `cursor`: Pagination cursor for next page.
+  - **Returns:** JSON string with thread messages and pagination cursor.
+
+- **post_message** — Send a message to a Slack channel.<br/>`post_message(channel: str, text: str, thread_ts: str = '', blocks: str = '') -> str`
+
+  - `channel`: Channel ID or name (e.g. "C01234567" or "#general").
+  - `text`: Message text (supports Slack mrkdwn formatting).
+  - `thread_ts`: Optional parent message timestamp to reply in a thread.
+  - `blocks`: Optional JSON string of Block Kit blocks for rich formatting. If provided, text becomes the fallback.
+  - **Returns:** JSON string with ok status and the message timestamp (ts).
+
+- **update_message** — Update an existing message in a Slack channel.<br/>`update_message(channel: str, ts: str, text: str, blocks: str = '') -> str`
+
+  - `channel`: Channel ID where the message is.
+  - `ts`: Timestamp of the message to update.
+  - `text`: New message text.
+  - `blocks`: Optional JSON string of Block Kit blocks.
+  - **Returns:** JSON string with ok status and updated timestamp.
+
+- **delete_message** — Delete a message from a Slack channel.<br/>`delete_message(channel: str, ts: str) -> str`
+
+  - `channel`: Channel ID where the message is.
+  - `ts`: Timestamp of the message to delete.
+  - **Returns:** JSON string with ok status.
+
+- **list_users** — List users in the Slack workspace.<br/>`list_users(limit: int = 200, cursor: str = '') -> str`
+
+  - `limit`: Maximum number of users to return (1-1000). Default: 200.
+  - `cursor`: Pagination cursor for next page.
+  - **Returns:** JSON string with user list (id, name, real_name, is_bot) and pagination cursor.
+
+- **get_user_info** — Get detailed information about a Slack user.<br/>`get_user_info(user: str) -> str`
+
+  - `user`: User ID (e.g. "U01234567").
+  - **Returns:** JSON string with user profile details.
+
+- **create_channel** — Create a new Slack channel.<br/>`create_channel(name: str, is_private: bool = False) -> str`
+
+  - `name`: Channel name (lowercase, no spaces, max 80 chars). Use hyphens instead of spaces.
+  - `is_private`: If True, create a private channel. Default: False.
+  - **Returns:** JSON string with the new channel's id and name.
+
+- **invite_to_channel** — Invite users to a Slack channel.<br/>`invite_to_channel(channel: str, users: str) -> str`
+
+  - `channel`: Channel ID to invite users to.
+  - `users`: Comma-separated list of user IDs to invite.
+  - **Returns:** JSON string with ok status.
+
+- **add_reaction** — Add an emoji reaction to a message.<br/>`add_reaction(channel: str, timestamp: str, name: str) -> str`
+
+  - `channel`: Channel ID where the message is.
+  - `timestamp`: Timestamp of the message to react to.
+  - `name`: Emoji name without colons (e.g. "thumbsup", "heart").
+  - **Returns:** JSON string with ok status.
+
+- **search_messages** — Search for messages across the workspace.<br/>`search_messages(query: str, count: int = 20, sort: str = 'timestamp') -> str`
+
+  - `query`: Search query string (supports Slack search modifiers like "in:#channel", "from:@user", "has:link").
+  - `count`: Number of results to return (1-100). Default: 20.
+  - `sort`: Sort order — "timestamp" (default) or "score".
+  - **Returns:** JSON string with matching messages.
+
+- **set_channel_topic** — Set the topic for a Slack channel.<br/>`set_channel_topic(channel: str, topic: str) -> str`
+
+  - `channel`: Channel ID.
+  - `topic`: New topic text.
+  - **Returns:** JSON string with ok status.
+
+- **upload_file** — Upload text content as a file to Slack channels.<br/>`upload_file(channels: str, content: str, filename: str, title: str = '') -> str`
+
+  - `channels`: Comma-separated channel IDs to share the file in.
+  - `content`: Text content of the file.
+  - `filename`: Name for the file (e.g. "report.txt").
+  - `title`: Optional title for the file.
+  - **Returns:** JSON string with ok status and file id.
+
+- **get_channel_info** — Get detailed information about a Slack channel.<br/>`get_channel_info(channel: str) -> str`
+
+  - `channel`: Channel ID (e.g. "C01234567").
+  - **Returns:** JSON string with channel details (name, topic, purpose, num_members, created, creator).
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
+
+  - **Returns:** List of callable tool methods for Slack API operations.
 
 ##### `class SlackAgent(SorcarAgent)`
 

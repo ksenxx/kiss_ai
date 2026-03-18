@@ -112,7 +112,7 @@ class RelentlessAgent(Base):
         self.docker_image = docker_image
         self.docker_manager: DockerManager | None = None
         self.task_description: str = ""
-        self.system_instructions: str = ""
+        self.system_prompt: str = ""
         self.set_printer(printer, verbose=verbose)
 
     def _docker_bash(self, command: str, description: str) -> str:
@@ -157,10 +157,11 @@ class RelentlessAgent(Base):
                         "work_dir": self.work_dir,
                         "current_pid": current_pid,
                     },
-                    system_prompt=self.system_instructions,
+                    system_prompt=self.system_prompt,
                     tools=all_tools,
                     max_steps=self.max_steps,
                     max_budget=self.max_budget,
+                    model_config=self.model_config,
                     printer=self.printer,
                     attachments=attachments if session == 0 else None,
                     session_info=session_info,
@@ -236,11 +237,12 @@ class RelentlessAgent(Base):
     def run(
         self,
         model_name: str | None = None,
-        system_instructions: str = "",
         prompt_template: str = "",
         arguments: dict[str, str] | None = None,
+        system_prompt: str = "",
         max_steps: int | None = None,
         max_budget: float | None = None,
+        model_config: dict[str, Any] | None = None,
         work_dir: str | None = None,
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
@@ -253,12 +255,14 @@ class RelentlessAgent(Base):
 
         Args:
             model_name: LLM model to use. Defaults to config value.
-            system_instructions: System-level instructions passed to the underlying LLM
-                via model_config. Defaults to empty string (no system instructions).
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
+            system_prompt: System-level instructions passed to the underlying LLM
+                via model_config. Defaults to empty string (no system instructions).
             max_steps: Maximum steps per sub-session. Defaults to config value.
             max_budget: Maximum budget in USD. Defaults to config value.
+            model_config: Optional dictionary of additional model configuration
+                parameters (e.g. temperature, top_p). Defaults to None.
             work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
@@ -280,7 +284,8 @@ class RelentlessAgent(Base):
             printer,
             verbose,
         )
-        self.system_instructions = system_instructions
+        self.system_prompt = system_prompt
+        self.model_config = model_config
         args = arguments or {}
         self.task_description = prompt_template.format(**args) if args else prompt_template
 

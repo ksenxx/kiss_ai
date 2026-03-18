@@ -25,6 +25,22 @@ class TestFileUsage(unittest.TestCase):
         self._tmp.write_text("[1,2,3]")
         assert task_history._load_file_usage() == {}
 
+    def test_record_moves_key_to_end(self) -> None:
+        """Recording a file moves its key to the end (most recent)."""
+        task_history._record_file_usage("a.py")
+        task_history._record_file_usage("b.py")
+        task_history._record_file_usage("c.py")
+        assert list(task_history._load_file_usage().keys()) == [
+            "a.py", "b.py", "c.py",
+        ]
+        # Re-access a.py — it should move to the end
+        task_history._record_file_usage("a.py")
+        usage = task_history._load_file_usage()
+        assert list(usage.keys()) == ["b.py", "c.py", "a.py"]
+        assert usage["a.py"] == 2
+        assert usage["b.py"] == 1
+        assert usage["c.py"] == 1
+
 
 def _end_dist(text: str, q: str) -> int:
     """Distance from end of path to end of rightmost query match."""
@@ -53,10 +69,16 @@ def _sort_suggestions(
             frequent.append(item)
         else:
             rest.append(item)
+    # Build recency rank from insertion order in usage dict
+    # (last key = most recently used → rank 0).
+    _usage_keys = list(usage.keys())
+    _recency = {k: i for i, k in enumerate(reversed(_usage_keys))}
+    _n = len(_usage_keys)
     frequent.sort(
         key=lambda m: (
             _end_dist(m["text"], q),
             m["type"] != "file",
+            _recency.get(m["text"], _n),
             -usage.get(m["text"], 0),
         )
     )
@@ -96,15 +118,16 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         assert result[4]["text"] == "dir3/"
 
     def test_files_before_folders_in_frequent(self) -> None:
+        # b.py is last in dict → most recent (recency 0)
         result = _sort_suggestions(
             ["dir1/", "a.py", "dir2/", "b.py"],
             {"dir1/": 10, "a.py": 5, "dir2/": 3, "b.py": 1},
             "",
         )
-        assert result[0] == {"type": "frequent_file", "text": "a.py"}
-        assert result[1] == {"type": "frequent_file", "text": "b.py"}
-        assert result[2] == {"type": "frequent_dir", "text": "dir1/"}
-        assert result[3] == {"type": "frequent_dir", "text": "dir2/"}
+        assert result[0] == {"type": "frequent_file", "text": "b.py"}
+        assert result[1] == {"type": "frequent_file", "text": "a.py"}
+        assert result[2] == {"type": "frequent_dir", "text": "dir2/"}
+        assert result[3] == {"type": "frequent_dir", "text": "dir1/"}
 
     def test_query_filters_before_sort(self) -> None:
         result = _sort_suggestions(
@@ -135,7 +158,7 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         assert result[2]["text"] == "src/kiss/agents/sorcar/browser_ui.py"
 
     def test_end_match_priority_in_frequent(self) -> None:
-        """Frequent paths also sorted by end-match distance."""
+        """Frequent paths also sorted by end-match distance, then recency."""
         result = _sort_suggestions(
             [
                 "lib/utils/config.py",
@@ -146,9 +169,9 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         )
         # "src/config.py" → end_dist=3 (.py)
         # "lib/utils/config.py" → end_dist=3 (.py)
-        # Same end_dist, so by type (both file), then by usage desc
-        assert result[0]["text"] == "lib/utils/config.py"
-        assert result[1]["text"] == "src/config.py"
+        # Same end_dist, same type → src/config.py is more recent (last in dict)
+        assert result[0]["text"] == "src/config.py"
+        assert result[1]["text"] == "lib/utils/config.py"
 
     def test_end_match_mixed_frequent_and_rest(self) -> None:
         """Frequent items come before rest; within each group, sorted by end-match."""
@@ -166,6 +189,18 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         assert result[0] == {"type": "frequent_file", "text": "deep/nested/utils/foo.py"}
         assert result[1] == {"type": "file", "text": "foo.py"}
         assert result[2] == {"type": "file", "text": "lib/foo/bar.py"}
+
+    def test_recency_ordering(self) -> None:
+        """Most recently used files (last in dict) appear first."""
+        # c.py is last in dict → most recent → should appear first
+        result = _sort_suggestions(
+            ["a.py", "b.py", "c.py"],
+            {"a.py": 10, "b.py": 5, "c.py": 1},
+            "",
+        )
+        assert result[0]["text"] == "c.py"  # most recent (last in dict)
+        assert result[1]["text"] == "b.py"
+        assert result[2]["text"] == "a.py"  # least recent (first in dict)
 
     def test_empty_query_no_end_match_sorting(self) -> None:
         """Empty query should not apply end-match sorting (all dist=0)."""

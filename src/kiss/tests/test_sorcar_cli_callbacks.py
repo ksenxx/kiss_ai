@@ -310,7 +310,6 @@ class TestBuildArgParser:
         parser = _build_arg_parser()
         args = parser.parse_args([
             "--model_name", "gpt-4",
-            "--max_steps", "10",
             "--max_budget", "1.5",
             "--work_dir", "/tmp/test",
             "--headless", "true",
@@ -318,7 +317,6 @@ class TestBuildArgParser:
             "--task", "hello world",
         ])
         assert args.model_name == "gpt-4"
-        assert args.max_steps == 10
         assert args.max_budget == 1.5
         assert args.work_dir == "/tmp/test"
         assert args.headless is True

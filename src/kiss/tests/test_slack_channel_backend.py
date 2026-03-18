@@ -152,6 +152,97 @@ class TestSlackChannelBackendMethods:
             pass
 
 
+class TestSlackChannelBackendToolMethods:
+    """Tests for tool methods (return JSON strings) with invalid token."""
+
+    def setup_method(self) -> None:
+        self._backup = _backup_and_clear()
+        _save_token("xoxb-invalid-test-token-for-tools")
+        self.backend = SlackChannelBackend()
+        from slack_sdk import WebClient
+        self.backend._client = WebClient(token="xoxb-invalid-test-token-for-tools")
+
+    def teardown_method(self) -> None:
+        _restore(self._backup)
+
+    def _assert_error_json(self, result: str) -> None:
+        import json
+        data = json.loads(result)
+        assert data["ok"] is False
+        assert "error" in data
+
+    def test_list_channels_error(self) -> None:
+        """list_channels returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.list_channels())
+
+    def test_read_messages_error(self) -> None:
+        """read_messages returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.read_messages("C_FAKE"))
+
+    def test_read_thread_error(self) -> None:
+        """read_thread returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.read_thread("C_FAKE", "1234.5678"))
+
+    def test_post_message_error(self) -> None:
+        """post_message returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.post_message("C_FAKE", "hello"))
+
+    def test_update_message_error(self) -> None:
+        """update_message returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.update_message("C_FAKE", "1234.5678", "new"))
+
+    def test_delete_message_error(self) -> None:
+        """delete_message returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.delete_message("C_FAKE", "1234.5678"))
+
+    def test_list_users_error(self) -> None:
+        """list_users returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.list_users())
+
+    def test_get_user_info_error(self) -> None:
+        """get_user_info returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.get_user_info("U_FAKE"))
+
+    def test_create_channel_error(self) -> None:
+        """create_channel returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.create_channel("test-channel"))
+
+    def test_invite_to_channel_error(self) -> None:
+        """invite_to_channel returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.invite_to_channel("C_FAKE", "U_FAKE"))
+
+    def test_add_reaction_error(self) -> None:
+        """add_reaction returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.add_reaction("C_FAKE", "1234.5678", "thumbsup"))
+
+    def test_search_messages_error(self) -> None:
+        """search_messages returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.search_messages("test query"))
+
+    def test_set_channel_topic_error(self) -> None:
+        """set_channel_topic returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.set_channel_topic("C_FAKE", "new topic"))
+
+    def test_upload_file_error(self) -> None:
+        """upload_file returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.upload_file("C_FAKE", "content", "test.txt"))
+
+    def test_get_channel_info_error(self) -> None:
+        """get_channel_info returns JSON error with invalid token."""
+        self._assert_error_json(self.backend.get_channel_info("C_FAKE"))
+
+    def test_get_tool_methods_returns_all_tools(self) -> None:
+        """get_tool_methods returns 15 bound method callables."""
+        tools = self.backend.get_tool_methods()
+        assert len(tools) == 15
+        names = {t.__name__ for t in tools}
+        assert "list_channels" in names
+        assert "post_message" in names
+        assert "get_channel_info" in names
+        for tool in tools:
+            assert callable(tool)
+
+
 class TestSlackChannelBackendProtocol:
     """Verify SlackChannelBackend conforms to ChannelBackend protocol."""
 
