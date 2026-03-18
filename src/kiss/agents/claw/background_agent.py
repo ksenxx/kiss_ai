@@ -245,6 +245,9 @@ def _run_background_agent_locked(
             except Exception:
                 pass
             break
+        except OSError:
+            logger.warning("Network error in polling loop", exc_info=True)
+            time.sleep(10)
         except Exception:
             logger.error("Error in polling loop", exc_info=True)
             time.sleep(10)

@@ -659,6 +659,9 @@ class SlackChannelBackend:
     ) -> tuple[list[dict[str, Any]], str]:
         """Poll a Slack channel for new messages.
 
+        Retries up to 3 times on transient network errors (e.g. SSL
+        handshake timeouts, connection resets) with exponential backoff.
+
         Args:
             channel_id: Channel ID to poll.
             oldest: Only return messages newer than this timestamp.
@@ -668,9 +671,24 @@ class SlackChannelBackend:
             Tuple of (messages sorted oldest-first, updated oldest timestamp).
         """
         assert self._client is not None
-        resp = self._client.conversations_history(
-            channel=channel_id, oldest=oldest, limit=limit
-        )
+        last_err: OSError | None = None
+        for attempt in range(3):
+            try:
+                resp = self._client.conversations_history(
+                    channel=channel_id, oldest=oldest, limit=limit
+                )
+                break
+            except OSError as e:
+                last_err = e
+                if attempt < 2:
+                    logger.warning(
+                        "Network error polling messages (attempt %d/3): %s",
+                        attempt + 1,
+                        e,
+                    )
+                    time.sleep(2**attempt)
+        else:
+            raise last_err  # type: ignore[misc]
         messages: list[dict[str, Any]] = resp.get("messages", [])
         messages.sort(key=lambda m: float(m.get("ts", "0")))
         new_oldest = oldest
@@ -732,7 +750,7 @@ class SlackChannelBackend:
                     seen_ts.add(ts)
                     if reply.get("user") == user_id:
                         return str(reply.get("text", ""))
-            except SlackApiError:
+            except (SlackApiError, OSError):
                 logger.debug("Error polling thread replies", exc_info=True)
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
