@@ -158,10 +158,18 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 #input-wrap{display:flex;align-items:flex-start;gap:8px}
 #input-text-wrap{position:relative;flex:1;min-width:0}
+#task-input,
+#ghost-overlay{
+  width:100%;padding:0;margin:0;border:none;
+  font-size:15px;font-family:inherit;line-height:1.5;
+  white-space:pre-wrap;word-break:break-word;
+  box-sizing:border-box;
+  tab-size:8;
+}
 #task-input{
-  width:100%;background:transparent;border:none;padding:0;margin:0;
-  color:rgba(255,255,255,0.88);font-size:15px;font-family:inherit;
-  resize:none;outline:none;line-height:1.5;
+  background:transparent;
+  color:rgba(255,255,255,0.88);
+  resize:none;outline:none;
   max-height:50vh;min-height:68px;overflow-y:hidden;
   position:relative;z-index:1;
 }
@@ -175,13 +183,11 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 }
 #merge-warning.visible{opacity:1}
 #ghost-overlay{
-  position:absolute;top:0;left:0;right:0;bottom:0;
+  position:absolute;top:0;left:0;
   pointer-events:none;user-select:none;
-  font-size:15px;font-family:inherit;line-height:1.5;
-  white-space:pre-wrap;word-break:break-word;overflow:hidden;
-  z-index:0;
+  overflow:hidden;z-index:0;
 }
-.gm{visibility:hidden;white-space:pre-wrap}
+.gm{color:transparent}
 .gs{color:rgba(255,255,255,0.35)}
 #input-footer{
   display:flex;justify-content:space-between;align-items:center;
@@ -970,6 +976,7 @@ var llmPanelState=mkS();
 var ghostEl=document.getElementById('ghost-overlay');
 var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
 var ghostCache={q:'',s:''};
+var ghostCursorPos=-1;
 var fileInput=document.getElementById('file-input');
 var uploadBtn=document.getElementById('upload-btn');
 var fileChips=document.getElementById('file-chips');
@@ -1027,6 +1034,7 @@ function resizeInput(){
   inp.style.height='auto';
   inp.style.height=inp.scrollHeight+'px';
   inp.style.overflowY=inp.scrollHeight>inp.clientHeight?'auto':'hidden';
+  syncGhostOverlay();
 }
 function resetOutputState(){
   state=mkS();llmPanel=null;llmPanelState=mkS();
@@ -1038,6 +1046,9 @@ function enterRunning(){
   btn.style.display='none';
   stopBtn.style.display='inline-flex';
   D.classList.add('running');hideAC();startTimer();
+  if(ghostTimer2){clearTimeout(ghostTimer2);ghostTimer2=null}
+  if(acTimer){clearTimeout(acTimer);acTimer=null}
+  if(ghostAbort){ghostAbort.abort();ghostAbort=null}
   inp.style.height='auto';inp.style.overflowY='hidden';
 }
 inp.addEventListener('input',function(){
@@ -1498,7 +1509,7 @@ inp.addEventListener('keydown',function(e){
   }
   if(ghostSuggest){
     if(e.key==='Tab'){e.preventDefault();acceptGhost();return}
-    if(e.key==='ArrowRight'&&inp.selectionStart===inp.value.length){e.preventDefault();acceptGhost();return}
+    if(e.key==='ArrowRight'&&(ghostCursorPos<0?inp.selectionStart===inp.value.length:inp.selectionStart===ghostCursorPos)){e.preventDefault();acceptGhost();return}
     if(e.key==='Escape'){clearGhost();return}
   }
   if(e.key==='ArrowUp'&&ac.style.display!=='block'&&(!inp.value.trim()||histIdx>=0)){
@@ -1516,6 +1527,7 @@ function getAtCtx(){
   return m?{start:before.length-m[0].length,query:m[1]}:null;
 }
 function fetchAC(){
+  if(running){hideAC();return}
   var atCtx=getAtCtx();
   if(!atCtx){hideAC();return}
   var doFetch=function(){
@@ -1557,7 +1569,7 @@ function _acPathHtml(text,query){
     +'<span class="ac-fname">'+esc(fname)+'</span>';
 }
 function renderAC(data){
-  if(!data.length){hideAC();return}
+  if(running||!data.length){hideAC();return}
   ac.innerHTML='';acIdx=-1;
   var atCtx=getAtCtx();
   var searchQ=atCtx?atCtx.query:'';
@@ -1630,6 +1642,7 @@ function updateACSel(items){
     if(atCtx&&items[acIdx].dataset.text){
       var fullPath=items[acIdx].dataset.text;
       var query=atCtx.query;
+      ghostCursorPos=inp.selectionStart||0;
       if(fullPath.toLowerCase().startsWith(query.toLowerCase())){
         ghostSuggest=fullPath.substring(query.length);
       }else{
@@ -1641,23 +1654,47 @@ function updateACSel(items){
     clearGhost();
   }
 }
-function clearGhost(){ghostSuggest='';ghostEl.innerHTML=''}
+function clearGhost(){ghostSuggest='';ghostCursorPos=-1;ghostEl.innerHTML=''}
+function syncGhostOverlay(){
+  ghostEl.style.width=inp.clientWidth+'px';
+  ghostEl.style.height=inp.clientHeight+'px';
+  ghostEl.style.paddingTop=inp.style.paddingTop;
+  ghostEl.style.paddingRight=inp.style.paddingRight;
+  ghostEl.style.paddingBottom=inp.style.paddingBottom;
+  ghostEl.style.paddingLeft=inp.style.paddingLeft;
+  ghostEl.scrollTop=inp.scrollTop;
+}
 function updateGhost(){
-  if(!ghostSuggest){ghostEl.innerHTML='';return}
-  ghostEl.innerHTML='<span class="gm">'+esc(inp.value)+'</span>'
-    +'<span class="gs">'+esc(ghostSuggest)+'</span>';
+  if(running||!ghostSuggest){ghostEl.innerHTML='';return}
+  syncGhostOverlay();
+  var pos=ghostCursorPos>=0?ghostCursorPos:(inp.selectionStart||0);
+  var before=inp.value.substring(0,pos);
+  var after=inp.value.substring(pos);
+  ghostEl.innerHTML='<span class="gm">'+esc(before)+'</span>'
+    +'<span class="gs">'+esc(ghostSuggest)+'</span>'
+    +'<span class="gm">'+esc(after)+'</span>';
 }
 function acceptGhost(){
-  inp.value+=ghostSuggest;
+  var pos=ghostCursorPos>=0?ghostCursorPos:(inp.selectionStart||0);
+  var before=inp.value.substring(0,pos);
+  var after=inp.value.substring(pos);
+  inp.value=before+ghostSuggest+after;
+  var newPos=pos+ghostSuggest.length;
+  inp.setSelectionRange(newPos,newPos);
   resizeInput();
   clearGhost();inp.focus();
 }
 function fetchGhost(){
-  var q=inp.value;  if(!q.trim()||q.trim().length<2){clearGhost();return}
+  if(running){clearGhost();return}
+  var pos=inp.selectionStart||0;
+  if(pos<inp.value.length){clearGhost();return}
+  var q=inp.value;
+  if(q.trim().length<2){clearGhost();return}
   if(ghostCache.q&&q.startsWith(ghostCache.q)&&ghostCache.s){
     var extra=q.substring(ghostCache.q.length);
     if(ghostCache.s.startsWith(extra)){
       ghostSuggest=ghostCache.s.substring(extra.length);
+      ghostCursorPos=pos;
       if(ghostSuggest){updateGhost();return}
     }
   }
@@ -1666,8 +1703,10 @@ function fetchGhost(){
   fetch('/complete?q='+encodeURIComponent(q),{signal:ghostAbort.signal})
     .then(function(r){return r.json()})
     .then(function(d){
-      if(d.suggestion&&inp.value===q){
+      var curPos=inp.selectionStart||0;
+      if(d.suggestion&&inp.value.substring(0,curPos)===q){
         ghostSuggest=d.suggestion;
+        ghostCursorPos=curPos;
         ghostCache={q:q,s:d.suggestion};
         updateGhost();
       }

@@ -13,20 +13,33 @@ logger = logging.getLogger(__name__)
 
 try:
     from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-except ImportError:
+except ImportError:  # pragma: no cover – openai always installed
     logger.debug("Exception caught", exc_info=True)
     OpenAICompatibleModel = None  # type: ignore[assignment,misc]
 
 try:
     from kiss.core.models.anthropic_model import AnthropicModel
-except ImportError:
+except ImportError:  # pragma: no cover – anthropic always installed
     logger.debug("Exception caught", exc_info=True)
     AnthropicModel = None  # type: ignore[assignment,misc]
 
 try:
     from kiss.core.models.gemini_model import GeminiModel
-except ImportError:
+except ImportError:  # pragma: no cover – google-genai always installed
     logger.debug("Exception caught", exc_info=True)
     GeminiModel = None  # type: ignore[assignment,misc]
 
-__all__ = ["Attachment", "Model", "AnthropicModel", "OpenAICompatibleModel", "GeminiModel"]
+try:
+    from kiss.core.models.novita_model import NovitaModel
+except ImportError:
+    logger.debug("Exception caught", exc_info=True)
+    NovitaModel = None  # type: ignore[assignment,misc]
+
+__all__ = [
+    "Attachment",
+    "Model",
+    "AnthropicModel",
+    "OpenAICompatibleModel",
+    "GeminiModel",
+    "NovitaModel",
+]

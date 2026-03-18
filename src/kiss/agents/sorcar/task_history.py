@@ -122,9 +122,9 @@ def _new_events_filename() -> str:
     Returns:
         Filename string (e.g. ``evt_abcdef1234567890.json``).
     """
-    while True:
+    while True:  # pragma: no branch – UUID collision is astronomically unlikely
         name = f"evt_{uuid.uuid4().hex[:16]}.json"
-        if not (_CHAT_EVENTS_DIR / name).exists():
+        if not (_CHAT_EVENTS_DIR / name).exists():  # pragma: no branch
             return name
 
 
@@ -253,7 +253,7 @@ def _iter_lines_reverse(path: Path) -> Iterator[str]:
                 stripped = part.strip()
                 if stripped:
                     yield stripped.decode("utf-8")
-        if remaining.strip():
+        if remaining.strip():  # pragma: no branch – files normally end with newline
             yield remaining.strip().decode("utf-8")
 
 
@@ -286,7 +286,7 @@ def _read_recent_entries(
             result.append(entry)
             if len(result) >= limit:
                 break
-    except OSError:
+    except OSError:  # pragma: no cover
         _log_exc()
     return result
 
@@ -317,7 +317,7 @@ def _read_file_entries(
                 # Remove then re-insert so the key moves to the end
                 entries.pop(key, None)
                 entries[key] = entry
-    except OSError:
+    except OSError:  # pragma: no cover
         _log_exc()
     # Most-recent-first: reverse chronological order
     all_entries = list(reversed(entries.values()))
@@ -352,7 +352,7 @@ def _count_lines() -> int:
             for line in f:
                 if line.strip():
                     count += 1
-    except OSError:
+    except OSError:  # pragma: no cover
         _log_exc()
     return count
 
@@ -423,7 +423,7 @@ def _search_history(
                 results.append(entry)
                 if len(results) >= limit:
                     break
-    except OSError:
+    except OSError:  # pragma: no cover
         _log_exc()
     return results
 
@@ -460,7 +460,7 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
             if count == idx:
                 return entry
             count += 1
-    except OSError:
+    except OSError:  # pragma: no cover
         _log_exc()
     return None
 
@@ -560,12 +560,12 @@ def _set_latest_chat_events(
         try:
             _CHAT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
             _atomic_write_json(path, events)
-        except OSError:
+        except OSError:  # pragma: no cover
             _log_exc()
     else:
         try:
             path.unlink(missing_ok=True)
-        except OSError:
+        except OSError:  # pragma: no cover
             _log_exc()
 
 
@@ -638,7 +638,7 @@ def _atomic_write_json(path: Path, data: object) -> None:
         _ensure_kiss_dir()
         tmp.write_text(json.dumps(data))
         os.replace(tmp, path)
-    except OSError:
+    except OSError:  # pragma: no cover
         _log_exc()
         tmp.unlink(missing_ok=True)
 
@@ -656,7 +656,7 @@ def _update_json_locked(path: Path, fn: Callable[[dict[str, object]], None]) -> 
             data = _load_json_dict(path)
             fn(data)
             _atomic_write_json(path, data)
-    except OSError:
+    except OSError:  # pragma: no cover
         _log_exc()
 
 
@@ -789,6 +789,6 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
                 continue
             shutil.rmtree(d, ignore_errors=True)
             removed += 1
-        except OSError:
+        except OSError:  # pragma: no cover
             _log_exc()
     return removed

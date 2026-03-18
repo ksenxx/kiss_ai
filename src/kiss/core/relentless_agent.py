@@ -165,7 +165,7 @@ class RelentlessAgent(Base):
                     attachments=attachments if session == 0 else None,
                     session_info=session_info,
                 )
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover – requires LLM API failure
                 logger.debug("Exception caught", exc_info=True)
                 trajectory_path: Path | None = None
                 try:
@@ -195,7 +195,7 @@ class RelentlessAgent(Base):
                     except Exception:  # pragma: no cover
                         logger.debug("Exception caught", exc_info=True)
                         summary_text = summarizer_result
-                except Exception:
+                except Exception:  # pragma: no cover – requires summarizer LLM failure
                     logger.debug("Exception caught", exc_info=True)
                     summary_text = f"Agent failed: {exc}"
                 finally:

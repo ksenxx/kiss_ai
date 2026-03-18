@@ -198,7 +198,7 @@ class AnthropicModel(Model):
 
         return kwargs
 
-    def _create_message(self, kwargs: dict[str, Any]) -> Any:
+    def _create_message(self, kwargs: dict[str, Any]) -> Any:  # pragma: no cover – API call
         """Create a message, streaming tokens to the callback when set.
 
         Args:
@@ -220,7 +220,7 @@ class AnthropicModel(Model):
             return stream.get_final_message()
         return self.client.messages.create(**kwargs)
 
-    def generate(self) -> tuple[str, Any]:
+    def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from the current conversation.
 
         Returns:
@@ -234,7 +234,7 @@ class AnthropicModel(Model):
         self.conversation.append({"role": "assistant", "content": blocks or content})
         return content, response
 
-    def generate_and_process_with_tools(
+    def generate_and_process_with_tools(  # pragma: no cover – API call
         self, function_map: dict[str, Callable[..., Any]]
     ) -> tuple[list[dict[str, Any]], str, Any]:
         """Generates content with tools and processes the response.
