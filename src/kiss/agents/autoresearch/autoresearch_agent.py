@@ -110,7 +110,7 @@ class AutoresearchAgent(RelentlessAgent):
 
         return super().run(
             model_name=model_name,
-            system_instructions=SYSTEM_PROMPT,
+            system_prompt=SYSTEM_PROMPT,
             prompt_template=task,
             arguments=arguments,
             max_steps=max_steps,

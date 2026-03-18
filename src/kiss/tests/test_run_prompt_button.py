@@ -53,6 +53,10 @@ def non_md_file():
     os.unlink(f.name)
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py
+# ---------------------------------------------------------------------------
+
 class TestActiveFileTracking:
     """Test the active-file.json reading and prompt detection logic."""
 
@@ -79,6 +83,10 @@ class TestActiveFileTracking:
         assert not os.path.exists(active_file)
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _CS_EXTENSION_JS
+# ---------------------------------------------------------------------------
+
 class TestCodeServerExtensionActiveFileWrite:
     """Test that the extension JS includes writeActiveFile logic."""
 
@@ -89,6 +97,10 @@ class TestCodeServerExtensionActiveFileWrite:
         assert "active-file.json" in _CS_EXTENSION_JS
         assert "onDidChangeActiveTextEditor" in _CS_EXTENSION_JS
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_CSS, CHATBOT_JS, CHATBOT_THEME_CSS
+# ---------------------------------------------------------------------------
 
 class TestRunPromptHTMLButton:
     """Test that the HTML contains the run-prompt button."""

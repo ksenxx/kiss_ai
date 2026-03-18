@@ -6,6 +6,9 @@ import pytest
 
 from kiss.agents.sorcar.chatbot_ui import CHATBOT_CSS, CHATBOT_JS
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_CSS, CHATBOT_JS
+# ---------------------------------------------------------------------------
 
 class TestTextareaAutoResize(unittest.TestCase):
     def test_css_max_height_uses_viewport_units(self) -> None:

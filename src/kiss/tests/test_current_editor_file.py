@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar_agent.py — SorcarAgent
+# ---------------------------------------------------------------------------
 
 class TestActiveFileReading:
     """Test reading active-file.json for current_editor_file."""

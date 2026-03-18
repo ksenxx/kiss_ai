@@ -193,6 +193,8 @@ class KISSAgent(Base):
                     f"{self.name} with id {self.id}."
                 )
             self._setup_tools(tools)
+            if system_prompt and self.printer:
+                self.printer.print(system_prompt, type="system_prompt")
             self._set_prompt(prompt_template, arguments, attachments=attachments)
 
             # Non-agentic mode: single generation, no tool loop

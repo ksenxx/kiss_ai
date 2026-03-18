@@ -18,6 +18,10 @@ def is_docker_available() -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# kiss/docker/docker_manager.py — DockerManager
+# ---------------------------------------------------------------------------
+
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
 class TestDockerManager(unittest.TestCase):
     def test_port_mapping(self) -> None:

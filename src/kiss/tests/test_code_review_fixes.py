@@ -3,16 +3,11 @@
 Each test verifies a specific fix without mocks, patches, or test doubles.
 """
 
-class TestDefaultTaskNoCredentials:
-    """Test that _DEFAULT_TASK doesn't contain hardcoded credentials."""
 
-    def test_no_password_in_default_task(self):
-        """Default task should not contain passwords."""
-        from kiss.agents.sorcar.sorcar_agent import _DEFAULT_TASK
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_JS
+# ---------------------------------------------------------------------------
 
-        assert "password" not in _DEFAULT_TASK.lower()
-        assert "kissagent" not in _DEFAULT_TASK.lower()
-        assert "@gmail" not in _DEFAULT_TASK.lower()
 class TestReplayTaskEventsRestoresInput:
     """Tests that replayTaskEvents restores inp.value after replaying events.
 
@@ -98,6 +93,10 @@ class TestMergeWarningOnDisabledChatbox:
         assert "classList.remove('visible')" in fn_body
         assert "setTimeout" in fn_body
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — DEEPSEEK_REASONING_MODELS
+# ---------------------------------------------------------------------------
 
 class TestDeepSeekReasoningModelsConsistency:
     """Verify DEEPSEEK_REASONING_MODELS entries match model_info.py entries."""

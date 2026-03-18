@@ -62,6 +62,10 @@ TRAIN_EXAMPLES = [
 INITIAL_PROMPT = "Test: {t}"
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/gepa/gepa.py — GEPA
+# ---------------------------------------------------------------------------
+
 class TestGEPABatchedMultiGeneration(unittest.TestCase):
     def test_batched_across_multiple_generations(self):
         batch_call_count = [0]

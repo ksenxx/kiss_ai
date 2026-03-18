@@ -4,6 +4,9 @@ import unittest
 
 from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS, _CS_SETTINGS
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _CS_EXTENSION_JS, _CS_SETTINGS
+# ---------------------------------------------------------------------------
 
 class TestScmMessageExtensionJS(unittest.TestCase):
     def test_extension_polls_for_pending_scm_message(self) -> None:

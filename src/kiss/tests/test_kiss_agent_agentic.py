@@ -9,6 +9,10 @@ from kiss.tests.conftest import requires_gemini_api_key, simple_calculator
 TEST_MODEL = "gemini-3-flash-preview"
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent
+# ---------------------------------------------------------------------------
+
 @requires_gemini_api_key
 class TestKISSAgentErrorHandling(unittest.TestCase):
     def setUp(self) -> None:

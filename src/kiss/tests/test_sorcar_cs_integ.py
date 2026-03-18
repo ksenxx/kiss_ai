@@ -156,6 +156,10 @@ def cs_server():
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py
+# ---------------------------------------------------------------------------
+
 class TestCSGenerateCommitMsgDiffOnly:
     def test_generate_commit_msg_diff_no_untracked(self, cs_server: Any) -> None:
         """Generate commit message with only tracked diff, no untracked files.
@@ -190,6 +194,10 @@ class TestCSGenerateCommitMsgDiffOnly:
             Path(fpath).write_text("line1\nline2\n")
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — _KISS_DIR
+# ---------------------------------------------------------------------------
+
 class TestCSThemeWatcher:
     def test_theme_file_change_detected_by_watcher(self, cs_server: Any) -> None:
         """Write theme file and wait for watcher to detect it (line 459 + 451-452).
@@ -212,6 +220,10 @@ class TestCSThemeWatcher:
         # Restore dark theme
         theme_file.write_text(json.dumps({"kind": "dark"}))
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py
+# ---------------------------------------------------------------------------
 
 class TestCSSSEDisconnect:
     def test_sse_disconnect_triggers_break(self, cs_server: Any) -> None:

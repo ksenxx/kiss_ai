@@ -18,6 +18,10 @@ from kiss.scripts.generate_api_docs import (
     generate_markdown,
 )
 
+# ---------------------------------------------------------------------------
+# kiss/scripts/generate_api_docs.py — ClassInfo, ModuleDoc, _find_def_in_file, _format_annotation,
+#   _format_arg, _format_func_sig, _parse_all_list, discover_modules, generate_markdown
+# ---------------------------------------------------------------------------
 
 class TestFormatAnnotation:
     def test_none(self) -> None:
