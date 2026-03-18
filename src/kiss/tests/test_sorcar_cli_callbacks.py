@@ -136,13 +136,21 @@ class TestSorcarAgentCallbackWiring:
 class TestPromptConstruction:
     """Verify prompt construction branches produce identical results in both modes."""
 
-    def _capture_prompt(
+    def _capture_prompt_and_system(
         self,
         prompt_template: str = "do stuff",
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
-    ) -> str:
-        """Helper: build the prompt as run() would, without calling the LLM."""
+        system_prompt: str | None = None,
+    ) -> tuple[str, str]:
+        """Helper: build the prompt and system prompt as run() would, without calling the LLM.
+
+        Returns:
+            (prompt, system_instructions) tuple.
+        """
+        from kiss.core.base import SYSTEM_PROMPT as BASE_SYSTEM_PROMPT
+
+        system_instructions = BASE_SYSTEM_PROMPT + (system_prompt or "")
         prompt = prompt_template
         if attachments:
             pdf_count = sum(
@@ -164,36 +172,38 @@ class TestPromptConstruction:
                     f"to view or screenshot these attachments."
                 )
         if current_editor_file:
-            prompt += (
+            system_instructions += (
                 "\n\n- The path of the file open in the editor is "
                 f"{current_editor_file}"
             )
-        return prompt
+        return prompt, system_instructions
 
     def test_no_attachments_no_editor_file(self) -> None:
         """Base case: prompt unchanged."""
-        prompt = self._capture_prompt("do stuff")
+        prompt, system = self._capture_prompt_and_system("do stuff")
         assert prompt == "do stuff"
+        assert "file open in the editor" not in system
 
     def test_with_editor_file(self) -> None:
-        """current_editor_file appends path to prompt."""
-        prompt = self._capture_prompt(
+        """current_editor_file appends path to system prompt."""
+        prompt, system = self._capture_prompt_and_system(
             "do stuff", current_editor_file="/path/to/file.py"
         )
-        assert "/path/to/file.py" in prompt
-        assert "file open in the editor" in prompt
+        assert "/path/to/file.py" in system
+        assert "file open in the editor" in system
+        assert "/path/to/file.py" not in prompt
 
     def test_with_images_only(self) -> None:
         """Only image attachments → prompt mentions images only."""
         attachments = [Attachment(data=b"img", mime_type="image/png")]
-        prompt = self._capture_prompt("do stuff", attachments=attachments)
+        prompt, _system = self._capture_prompt_and_system("do stuff", attachments=attachments)
         assert "1 image(s)" in prompt
         assert "PDF" not in prompt
 
     def test_with_pdfs_only(self) -> None:
         """Only PDF attachments → prompt mentions PDFs only."""
         attachments = [Attachment(data=b"pdf", mime_type="application/pdf")]
-        prompt = self._capture_prompt("do stuff", attachments=attachments)
+        prompt, _system = self._capture_prompt_and_system("do stuff", attachments=attachments)
         assert "1 PDF(s)" in prompt
         assert "image" not in prompt
 
@@ -203,7 +213,7 @@ class TestPromptConstruction:
             Attachment(data=b"img", mime_type="image/png"),
             Attachment(data=b"pdf", mime_type="application/pdf"),
         ]
-        prompt = self._capture_prompt("do stuff", attachments=attachments)
+        prompt, _system = self._capture_prompt_and_system("do stuff", attachments=attachments)
         assert "1 image(s)" in prompt
         assert "1 PDF(s)" in prompt
 
@@ -213,30 +223,27 @@ class TestPromptConstruction:
             Attachment(data=b"img1", mime_type="image/png"),
             Attachment(data=b"img2", mime_type="image/jpeg"),
         ]
-        prompt = self._capture_prompt("do stuff", attachments=attachments)
+        prompt, _system = self._capture_prompt_and_system("do stuff", attachments=attachments)
         assert "2 image(s)" in prompt
 
     def test_attachment_with_unknown_mime_no_parts(self) -> None:
         """Attachment with non-image/non-pdf mime → no parts appended."""
         attachments = [Attachment(data=b"data", mime_type="text/plain")]
-        prompt = self._capture_prompt("do stuff", attachments=attachments)
+        prompt, _system = self._capture_prompt_and_system("do stuff", attachments=attachments)
         # No img or pdf parts, so no attachment note
         assert prompt == "do stuff"
 
     def test_with_editor_file_and_attachments(self) -> None:
-        """Both editor file and attachments → both appended."""
+        """Both editor file and attachments → attachments in prompt, editor file in system."""
         attachments = [Attachment(data=b"img", mime_type="image/png")]
-        prompt = self._capture_prompt(
+        prompt, system = self._capture_prompt_and_system(
             "do stuff",
             current_editor_file="/path/to/file.py",
             attachments=attachments,
         )
         assert "1 image(s)" in prompt
-        assert "/path/to/file.py" in prompt
-        # Editor file comes after attachments
-        attach_idx = prompt.index("image(s)")
-        editor_idx = prompt.index("/path/to/file.py")
-        assert editor_idx > attach_idx
+        assert "/path/to/file.py" in system
+        assert "/path/to/file.py" not in prompt
 
 
 # ---------------------------------------------------------------------------
