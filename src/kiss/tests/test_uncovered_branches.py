@@ -169,6 +169,26 @@ class TestRelentlessAgentDockerBash:
 # ---------------------------------------------------------------------------
 
 
+class TestKISSAgentRetryLogic:
+    def test_is_retryable_error_false_for_auth_type(self) -> None:
+        from kiss.core.kiss_agent import _is_retryable_error
+
+        class AuthenticationError(Exception):
+            pass
+
+        assert _is_retryable_error(AuthenticationError("anything")) is False
+
+    def test_is_retryable_error_false_for_auth_message(self) -> None:
+        from kiss.core.kiss_agent import _is_retryable_error
+
+        assert _is_retryable_error(Exception("Unauthorized: invalid API key")) is False
+
+    def test_is_retryable_error_true_for_internal_server_error(self) -> None:
+        from kiss.core.kiss_agent import _is_retryable_error
+
+        assert _is_retryable_error(Exception("Internal server error")) is True
+
+
 # ---------------------------------------------------------------------------
 # config_builder.py — line 130 (empty api_keys_from_env)
 # ---------------------------------------------------------------------------

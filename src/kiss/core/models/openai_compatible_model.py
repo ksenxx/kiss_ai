@@ -296,6 +296,36 @@ class OpenAICompatibleModel(Model):
         kwargs.setdefault("extra_body", {})["cache_control"] = {"type": "ephemeral"}
 
     @staticmethod
+    def _build_tool_call_lists(
+        entries: list[tuple[str, str, str]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Build function_calls and raw_tool_calls from (id, name, arguments_json) triples.
+
+        Args:
+            entries: List of (call_id, function_name, arguments_json_string) tuples.
+
+        Returns:
+            A tuple of (function_calls, raw_tool_calls) for conversation storage.
+        """
+        function_calls: list[dict[str, Any]] = []
+        raw_tool_calls: list[dict[str, Any]] = []
+        for call_id, name, args_json in entries:
+            try:
+                arguments = json.loads(args_json)
+            except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
+                arguments = {}
+            function_calls.append({"id": call_id, "name": name, "arguments": arguments})
+            raw_tool_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": args_json},
+                }
+            )
+        return function_calls, raw_tool_calls
+
+    @staticmethod
     def _parse_tool_call_accum(
         accum: dict[int, dict[str, str]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -307,24 +337,11 @@ class OpenAICompatibleModel(Model):
         Returns:
             A tuple of (function_calls, raw_tool_calls) for conversation storage.
         """
-        function_calls: list[dict[str, Any]] = []
-        raw_tool_calls: list[dict[str, Any]] = []
-        for idx in sorted(accum):
-            tc = accum[idx]
-            try:
-                arguments = json.loads(tc["arguments"])
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                arguments = {}
-            function_calls.append({"id": tc["id"], "name": tc["name"], "arguments": arguments})
-            raw_tool_calls.append(
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                }
-            )
-        return function_calls, raw_tool_calls
+        entries = [
+            (accum[idx]["id"], accum[idx]["name"], accum[idx]["arguments"])
+            for idx in sorted(accum)
+        ]
+        return OpenAICompatibleModel._build_tool_call_lists(entries)
 
     @staticmethod
     def _parse_tool_calls_from_message(
@@ -340,23 +357,11 @@ class OpenAICompatibleModel(Model):
         """
         if not message.tool_calls:
             return [], []
-        function_calls: list[dict[str, Any]] = []
-        raw_tool_calls: list[dict[str, Any]] = []
-        for tc in message.tool_calls:
-            try:
-                arguments = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                arguments = {}
-            function_calls.append({"id": tc.id, "name": tc.function.name, "arguments": arguments})
-            raw_tool_calls.append(
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-            )
-        return function_calls, raw_tool_calls
+        entries = [
+            (tc.id, tc.function.name, tc.function.arguments)
+            for tc in message.tool_calls
+        ]
+        return OpenAICompatibleModel._build_tool_call_lists(entries)
 
     @staticmethod
     def _finalize_stream_response(response: Any | None, last_chunk: Any | None) -> Any:
@@ -375,7 +380,9 @@ class OpenAICompatibleModel(Model):
             return last_chunk
         raise KISSError("Streaming response was empty.")
 
-    def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:
+    def _stream_text(  # pragma: no cover – API streaming
+        self, kwargs: dict[str, Any],
+    ) -> tuple[str, Any]:
         """Stream a chat completion, invoking the token callback for each text delta.
 
         When no callback is set, falls back to a normal (non-streaming) call.
@@ -467,7 +474,7 @@ class OpenAICompatibleModel(Model):
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
-        if self.token_callback is not None:
+        if self.token_callback is not None:  # pragma: no cover – API streaming
             # Streaming path: accumulate text and tool-call deltas.
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
@@ -606,11 +613,17 @@ class OpenAICompatibleModel(Model):
             For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens
             is reported as (prompt_tokens - cached_tokens) so costs apply correctly.
             OpenRouter returns cache_write_tokens in prompt_tokens_details.
+            OpenAI reasoning models may report reasoning tokens in
+            completion_tokens_details.reasoning_tokens; those are counted as output
+            tokens so Sorcar shows thinking-token usage.
         """
         if hasattr(response, "usage") and response.usage:
             usage = response.usage
             prompt_tokens = getattr(usage, "prompt_tokens", None) or 0
             completion_tokens = getattr(usage, "completion_tokens", None) or 0
+            completion_details = getattr(usage, "completion_tokens_details", None)
+            if completion_details is not None:
+                completion_tokens += getattr(completion_details, "reasoning_tokens", 0) or 0
             cached_tokens = 0
             cache_write_tokens = 0
             details = getattr(usage, "prompt_tokens_details", None)

@@ -55,6 +55,10 @@ class APIKeysConfig(BaseModel):
         default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""),
         description="MiniMax API key (can also be set via MINIMAX_API_KEY env var)",
     )
+    NOVITA_API_KEY: str = Field(
+        default_factory=lambda: os.getenv("NOVITA_API_KEY", ""),
+        description="Novita API key (can also be set via NOVITA_API_KEY env var)",
+    )
 
 
 class AgentConfig(BaseModel):

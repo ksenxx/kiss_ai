@@ -407,7 +407,7 @@ class TestBrowserUiUncoveredBranches:
                 "delta": {"type": "signature_delta", "signature": "abc"},
             }
 
-        text = printer._handle_stream_event(FakeEvent())
+        text = printer.parse_stream_event(FakeEvent())
         assert text == ""
 
 # ---------------------------------------------------------------------------

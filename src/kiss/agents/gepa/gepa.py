@@ -33,7 +33,11 @@ from typing import Any
 from kiss.agents.gepa.config import GEPAConfig  # type: ignore # noqa: F401
 from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.utils import get_config_value, get_template_field_names
+from kiss.core.utils import (
+    escape_invalid_template_field_names,
+    get_config_value,
+    get_template_field_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -643,6 +647,8 @@ class GEPA:
         """Normalize and validate placeholders in a prompt template."""
         normalized = re.sub(r"{\s*([\"'])([^{}]+?)\1\s*}", r"{\2}", prompt)
         try:
+            normalized = escape_invalid_template_field_names(normalized,
+                                                             self.valid_placeholders)
             placeholders = set(get_template_field_names(normalized))
         except ValueError:
             logger.debug("Exception caught", exc_info=True)

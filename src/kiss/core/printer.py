@@ -6,6 +6,33 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+_logger = logging.getLogger(__name__)
+
+
+def parse_result_yaml(raw: str) -> dict[str, Any] | None:
+    """Parse a YAML result string and return the dict if it has a 'summary' key.
+
+    Used by both console and browser printers to extract structured result data
+    from agent finish() output.
+
+    Args:
+        raw: Raw result string, potentially YAML-formatted.
+
+    Returns:
+        The parsed dict if valid YAML with a 'summary' key, else None.
+    """
+    try:
+        data = yaml.safe_load(raw)
+    except Exception:
+        _logger.debug("Exception caught", exc_info=True)
+        return None
+    if isinstance(data, dict) and "summary" in data:
+        return data
+    return None
+
+
 LANG_MAP = {
     "py": "python",
     "js": "javascript",

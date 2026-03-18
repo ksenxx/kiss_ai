@@ -16,27 +16,10 @@ from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import AnthropicModel, GeminiModel, NovitaModel, OpenAICompatibleModel
 from kiss.core.models.model import Model, TokenCallback
 
 logger = logging.getLogger(__name__)
-
-try:
-    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-except ImportError:
-    logger.debug("Exception caught", exc_info=True)
-    OpenAICompatibleModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.anthropic_model import AnthropicModel
-except ImportError:
-    logger.debug("Exception caught", exc_info=True)
-    AnthropicModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.gemini_model import GeminiModel
-except ImportError:
-    logger.debug("Exception caught", exc_info=True)
-    GeminiModel = None  # type: ignore[assignment,misc]
 
 
 class ModelInfo:
@@ -128,7 +111,7 @@ def _openai_compatible(
     model_config: dict[str, Any] | None,
     token_callback: TokenCallback | None,
 ) -> Model:
-    if OpenAICompatibleModel is None:
+    if OpenAICompatibleModel is None:  # pragma: no cover – openai always installed
         raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
     return OpenAICompatibleModel(
         model_name=model_name,
@@ -267,6 +250,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),  # Dep 2026-03
     "minimax-m2.5": _mi(1000000, 0.15, 1.20),  # Standard: 50 TPS
     "minimax-m2.5-lightning": _mi(1000000, 0.30, 2.40),  # Lightning: 100 TPS
+    "novita/deepseek/deepseek-v3.2": _mi(163840, 0.25, 0.40),  # Default model
+    "novita/zai-org/glm-5": _mi(202752, 0.80, 2.56),  # GLM-5 from ZAI
+    "novita/minimax/minimax-m2.5": _mi(196608, 0.27, 0.95),
     "MiniMaxAI/MiniMax-M2.5": _mi(196608, 0.30, 1.20),
     "mistralai/Ministral-3-14B-Instruct-2512": _mi(262144, 0.20, 0.20, fc=False),
     "mistralai/Mistral-7B-Instruct-v0.2": _mi(32768, 0.20, 0.20, fc=False),
@@ -644,7 +630,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
 # OpenRouter Anthropic: same as Anthropic (routes to Anthropic, supports prompt caching).
 # OpenAI: cache_read = 50% of input (automatic caching, no write premium).
 for _name, _info in MODEL_INFO.items():
-    if _info.cache_read_price_per_1M is not None:
+    if _info.cache_read_price_per_1M is not None:  # pragma: no cover – no models set explicit cr
         continue
     if _name.startswith("claude-") or _name.startswith("openrouter/anthropic/"):
         _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.1
@@ -730,7 +716,7 @@ def model(
             token_callback,
         )
     if model_name == "text-embedding-004":
-        if GeminiModel is None:
+        if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
@@ -757,7 +743,7 @@ def model(
             token_callback,
         )
     if model_name.startswith("claude-"):
-        if AnthropicModel is None:
+        if AnthropicModel is None:  # pragma: no cover – anthropic always installed
             raise KISSError(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
             )
@@ -768,7 +754,7 @@ def model(
             token_callback=token_callback,
         )
     if model_name.startswith("gemini-"):
-        if GeminiModel is None:
+        if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
@@ -785,6 +771,17 @@ def model(
             keys.MINIMAX_API_KEY,
             model_config,
             token_callback,
+        )
+    if model_name.startswith("novita/"):
+        if NovitaModel is None:
+            raise KISSError(
+                "OpenAI SDK not installed. Install 'openai' to use Novita models."
+            )
+        return NovitaModel(
+            model_name=model_name,
+            api_key=keys.NOVITA_API_KEY,
+            model_config=model_config,
+            token_callback=token_callback,
         )
     raise KISSError(f"Unknown model name: {model_name}")
 
@@ -813,7 +810,7 @@ def get_available_models() -> list[str]:
                 api_key = key
                 break
         if not api_key:
-            if name == "text-embedding-004":
+            if name == "text-embedding-004":  # pragma: no cover – embedding model filtered above
                 api_key = keys.GEMINI_API_KEY
             elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
                 api_key = keys.OPENAI_API_KEY

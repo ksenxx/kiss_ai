@@ -123,7 +123,7 @@ class WebUseTool:
 
         try:
             self._launch_browser(launcher, kwargs)
-        except Exception:
+        except Exception:  # pragma: no cover – Chromium always pre-installed in CI
             # Chromium not installed yet — install it and retry
             logger.info("Playwright Chromium not found, installing...")
             subprocess.run(
@@ -409,9 +409,9 @@ class WebUseTool:
     def _open_in_default_browser(url: str) -> None:
         """Open a URL in the user's default OS browser."""
         try:
-            if not webbrowser.open(url):
+            if not webbrowser.open(url):  # pragma: no cover – platform-dependent
                 logger.warning("webbrowser.open() returned False for %s", url)
-        except Exception:
+        except Exception:  # pragma: no cover – webbrowser.open rarely raises
             logger.warning("Failed to open default browser", exc_info=True)
             cmd: list[str] = []
             if sys.platform == "darwin":

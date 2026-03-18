@@ -4,7 +4,6 @@ import logging
 import sys
 from typing import Any
 
-import yaml
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -16,6 +15,7 @@ from kiss.core.printer import (
     StreamEventParser,
     extract_extras,
     extract_path_and_lang,
+    parse_result_yaml,
     truncate_result,
 )
 
@@ -35,12 +35,8 @@ class ConsolePrinter(StreamEventParser, Printer):
 
     @staticmethod
     def _format_result_content(raw: str) -> Group | str:
-        try:
-            data = yaml.safe_load(raw)
-        except Exception:
-            logger.debug("Exception caught", exc_info=True)
-            return raw
-        if not isinstance(data, dict) or "summary" not in data:
+        data = parse_result_yaml(raw)
+        if data is None:
             return raw
         parts: list[Any] = []
         if "success" in data:
@@ -91,7 +87,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             )
             return ""
         if type == "stream_event":
-            return self._handle_stream_event(content)
+            return self.parse_stream_event(content)
         if type == "message":
             self._handle_message(content, **kwargs)
             return ""
@@ -192,9 +188,6 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._file.write(line + "\n")
             self._file.flush()
         self._console.rule(style=style)
-
-    def _handle_stream_event(self, event: Any) -> str:
-        return self.parse_stream_event(event)
 
     def _on_thinking_start(self) -> None:
         self._flush_newline()

@@ -36,9 +36,13 @@
     - [`kiss.agents.autoresearch`](#kissagentsautoresearch)
       - [`kiss.agents.autoresearch.autoresearch_agent`](#kissagentsautoresearchautoresearch_agent)
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
+    - [`kiss.agents.claw`](#kissagentsclaw)
+      - [`kiss.agents.claw.background_agent`](#kissagentsclawbackground_agent)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
+    - [`kiss.channels.whatsapp_agent`](#kisschannelswhatsapp_agent)
+      - [`kiss.core.models.novita_model`](#kisscoremodelsnovita_model)
   - [`kiss.env`](#kissenv)
 
 </details>
@@ -119,7 +123,7 @@ ______________________________________________________________________
 #### `kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
+from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel, NovitaModel
 ```
 
 ##### `class Attachment` — A file attachment (image or document) to include in a prompt.
@@ -262,7 +266,7 @@ ______________________________________________________________________
 
 - **extract_input_output_token_counts_from_response** — Extract token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
-  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly. OpenRouter returns cache_write_tokens in prompt_tokens_details.
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens). For OpenAI, cached_tokens is a subset of prompt_tokens; input_tokens is reported as (prompt_tokens - cached_tokens) so costs apply correctly. OpenRouter returns cache_write_tokens in prompt_tokens_details. OpenAI reasoning models may report reasoning tokens in completion_tokens_details.reasoning_tokens; those are counted as output tokens so Sorcar shows thinking-token usage.
 
 - **get_embedding** — Generate an embedding vector for the given text.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
@@ -397,10 +401,15 @@ ______________________________________________________________________
   - `token`: The text token to forward.
 
 - **reset** — Reset streaming state on all child printers.<br/>`reset() -> None`
-  **`lang_for_path`** — Map a file path to its syntax-highlighting language name.<br/>`def lang_for_path(path: str) -> str`
+  **`parse_result_yaml`** — Parse a YAML result string and return the dict if it has a 'summary' key. Used by both console and browser printers to extract structured result data from agent finish() output.<br/>`def parse_result_yaml(raw: str) -> dict[str, Any] | None`
+
+- `raw`: Raw result string, potentially YAML-formatted.
+
+- **Returns:** The parsed dict if valid YAML with a 'summary' key, else None.
+
+**`lang_for_path`** — Map a file path to its syntax-highlighting language name.<br/>`def lang_for_path(path: str) -> str`
 
 - `path`: File path whose extension determines the language.
-
 - **Returns:** str: Language name (e.g. "python", "javascript"), or the raw extension, or "text" if no extension is present.
 
 **`truncate_result`** — Truncate long content to MAX_RESULT_LEN, keeping the first and last halves.<br/>`def truncate_result(content: str) -> str`
@@ -490,7 +499,7 @@ ______________________________________________________________________
 
 ##### `class UsefulTools` — A hardened collection of useful tools with improved security.
 
-**Constructor:** `UsefulTools(stream_callback: Callable[[str], None] | None = None) -> None`
+**Constructor:** `UsefulTools(stream_callback: Callable[[str], None] | None = None, stop_event: threading.Event | None = None) -> None`
 
 - **Read** — Read file contents.<br/>`Read(file_path: str, max_lines: int = 2000) -> str`
 
@@ -595,6 +604,12 @@ ______________________________________________________________________
 
 - `text`: The text containing template field placeholders.
 - **Returns:** list\[str\]: A list of field names found in the text.
+
+**`escape_invalid_template_field_names`** — Escape invalid field names from the text.<br/>`def escape_invalid_template_field_names(text: str, valid_field_names: set[str]) -> str`
+
+- `text`: The text containing template field placeholders.
+- `valid_field_names`: A list of valid field names.
+- **Returns:** An escaped string with invalid field placeholders escaped
 
 **`add_prefix_to_each_line`** — Adds a prefix to each line of the text.<br/>`def add_prefix_to_each_line(text: str, prefix: str) -> str`
 
@@ -743,9 +758,9 @@ ______________________________________________________________________
 
 ##### `class SorcarAgent(RelentlessAgent)` — Agent with both coding tools and browser automation for web + code tasks.
 
-**Constructor:** `SorcarAgent(name: str, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> None`
+**Constructor:** `SorcarAgent(name: str) -> None`
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
@@ -759,6 +774,8 @@ ______________________________________________________________________
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
+  - `wait_for_user_callback`: Optional callback used by browser tools when user action is required.
+  - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 **`cli_wait_for_user`** — CLI callback for browser-action prompts (prints and waits for Enter).<br/>`def cli_wait_for_user(instruction: str, url: str) -> None`
@@ -1053,23 +1070,120 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+#### `kiss.agents.claw`
+
+______________________________________________________________________
+
+#### `kiss.agents.claw.background_agent` — *Background agent that listens for tasks on a messaging channel.*
+
+**`stop_background_agent`** — Stop a running background agent instance. Reads the PID file, sends SIGTERM to the process, and cleans up lock/PID files.<br/>`def stop_background_agent() -> bool`
+
+- **Returns:** True if a running instance was stopped, False otherwise.
+
+**`run_background_agent`** — Main loop: poll channel for tasks from user, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
+
+- `work_dir`: Working directory for agent tasks. Defaults to a temp dir.
+
+______________________________________________________________________
+
 ### `kiss.channels` — *Channel integrations for KISS agents.*
 
 ______________________________________________________________________
 
 #### `kiss.channels.gmail_agent` — *Gmail Agent — SorcarAgent extension with Gmail API tools.*
 
-##### `class GmailAgent(SorcarAgent)` — SorcarAgent extended with Gmail API tools.
+##### `class GmailAgent(SorcarAgent)`
 
-**Constructor:** `GmailAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+**Constructor:** `GmailAgent() -> None`
+
+- **run** — Run the Gmail agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
 ______________________________________________________________________
 
 #### `kiss.channels.slack_agent` — *Slack Agent — SorcarAgent extension with Slack API tools.*
 
-##### `class SlackAgent(SorcarAgent)` — SorcarAgent extended with Slack workspace tools.
+##### `class SlackChannelBackend` — ChannelBackend implementation for Slack.
 
-**Constructor:** `SlackAgent(wait_for_user_callback: Any = None, ask_user_question_callback: Any = None) -> None`
+**Constructor:** `SlackChannelBackend() -> None`
+
+- **connect** — Authenticate with Slack using the stored bot token.<br/>`connect() -> bool`
+
+  - **Returns:** True on success, False on failure.
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a Slack channel ID by name.<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name without '#'.
+  - **Returns:** Channel ID string, or None if not found.
+
+- **find_user** — Find a Slack user ID by display name or username.<br/>`find_user(username: str) -> str | None`
+
+  - `username`: Slack username (without @).
+  - **Returns:** User ID string, or None if not found.
+
+- **join_channel** — Join a Slack channel (bot needs to be a member to read/post).<br/>`join_channel(channel_id: str) -> None`
+
+  - `channel_id`: Channel ID to join.
+
+- **poll_messages** — Poll a Slack channel for new messages. Retries up to 3 times on transient network errors (e.g. SSL handshake timeouts, connection resets) with exponential backoff.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Channel ID to poll.
+  - `oldest`: Only return messages newer than this timestamp.
+  - `limit`: Maximum number of messages to return.
+  - **Returns:** Tuple of (messages sorted oldest-first, updated oldest timestamp).
+
+- **send_message** — Send a message to a Slack channel, optionally in a thread.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+  - `channel_id`: Channel ID to post to.
+  - `text`: Message text (supports Slack mrkdwn formatting).
+  - `thread_ts`: If non-empty, reply in this thread.
+
+- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+  - `channel_id`: Channel ID containing the thread.
+  - `thread_ts`: Timestamp of the parent message (thread root).
+  - `user_id`: User ID to wait for a reply from.
+  - **Returns:** The text of the user's reply message.
+
+- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+  - `msg`: Message dict from poll_messages.
+  - **Returns:** True if the message is from the bot.
+
+- **strip_bot_mention** — Remove bot mention markers from message text.<br/>`strip_bot_mention(text: str) -> str`
+
+  - `text`: Raw message text.
+  - **Returns:** Cleaned text with bot mentions removed.
+
+##### `class SlackAgent(SorcarAgent)`
+
+**Constructor:** `SlackAgent() -> None`
+
+- **run** — Run the Slack agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+
+______________________________________________________________________
+
+#### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.*
+
+##### `class WhatsAppAgent(SorcarAgent)`
+
+**Constructor:** `WhatsAppAgent() -> None`
+
+- **run** — Run the WhatsApp agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+
+______________________________________________________________________
+
+#### `kiss.core.models.novita_model` — *Novita model implementation using OpenAI-compatible API.*
+
+##### `class NovitaModel(OpenAICompatibleModel)` — A model that uses Novita's OpenAI-compatible API.
+
+**Constructor:** `NovitaModel(model_name: str, api_key: str, model_config: dict | None = None, token_callback: TokenCallback | None = None)`
+
+- `model_name`: The name of the Novita model to use.
+- `api_key`: The Novita API key for authentication.
+- `model_config`: Optional dictionary of model configuration parameters.
+- `token_callback`: Optional async callback invoked with each streamed text token.
 
 ______________________________________________________________________
 
