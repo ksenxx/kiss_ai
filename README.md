@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.46-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.47-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -58,6 +58,7 @@ open ~/Downloads/kiss-offline-installer.pkg
 
 # To launch sorcar 
 source ~/.zshrc
+cd kiss_ai/
 sorcar
 ```
 
@@ -156,15 +157,14 @@ print(final)
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
 
-## 💡 Key Features and Ideologies behind KISS and Sorcar
+## 💡 Key Features and Principles behind KISS and Sorcar
 
 ### Key Features
 
 - **KISSAgent with ReAct Loop**: The core agent runs a generate-execute-observe loop with native function calling, automatic tool schema generation from Python function signatures and docstrings, trajectory saving, and per-step budget tracking.
-- **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
-- **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, `ask_user_question` for human-in-the-loop interaction, plus full browser automation via Playwright with accessibility-tree-based element selection.
+- **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with explanation and relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
+- **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output) for coding tasks, `ask_user_question` for human-in-the-loop interaction, plus full browser automation via Playwright with accessibility-tree-based element selection.
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
-- **Provider-Agnostic Multi-Model Support**: A clean `Model` abstraction supports Anthropic, OpenAI, Gemini, Together AI, OpenRouter (300+ models), and MiniMax — each with native function calling, token streaming, budget/cost calculation, and embedding generation.
 - **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
 - **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
 - **RepoOptimizer for Iterative Code Improvement**: Wraps `SorcarAgent` to run a command, monitor output in real time, fix errors, and iteratively optimize code for specified metrics — tracking tried ideas to avoid repeating failed approaches.
@@ -173,7 +173,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **Trajectory Visualization**: A web-based UI for viewing complete agent execution histories including message flows, tool calls, token usage, and budget stats — with markdown rendering and syntax-highlighted code blocks.
 - **Docker Integration**: A `DockerManager` for running agent tasks in isolated containers with automatic image pulling, lifecycle management, port mapping, and cleanup.
 
-### Core Ideologies
+### Core Principles
 
 - **Radical Simplicity over Abstraction**: KISS rejects the layered abstraction and ceremony found in frameworks like LangChain, CrewAI, or DSPy. Agents are just functions, orchestration is plain Python function composition, and tools are ordinary callables — no decorators, annotations, or boilerplate required.
 - **No Bloat, No Overengineering**: Every function should do one thing well. After implementation, code is aggressively simplified — unnecessary attributes, variables, config options, conditional checks, and comments are removed. The codebase stays lean by design.
@@ -267,18 +267,7 @@ uv run python -m kiss.viz_trajectory.server artifacts
 uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 5050
 ```
 
-The visualizer provides:
-
-- **Modern UI**: Dark theme with smooth animations
-- **Sidebar Navigation**: List of all trajectories sorted by start time
-- **Markdown Rendering**: Full markdown support for message content
-- **Code Highlighting**: Syntax highlighting for fenced code blocks
-- **Message Display**: Clean, organized view of agent conversations
-- **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
-
 ![Trajectory Visualizer](assets/KISSTrajectory.png)
-
-📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
 ## 📦 Developer Installation
 
@@ -439,7 +428,8 @@ kiss/
 │   │   │   ├── task_history.py         # Task history, proposals, and file usage persistence
 │   │   │   ├── useful_tools.py         # UsefulTools class with Read, Write, Bash, Edit
 │   │   │   ├── web_use_tool.py         # WebUseTool with Playwright-based browser automation
-│   │   │   └── config.py               # Sorcar agent configuration
+o│   │   │   ├── config.py               # Sorcar agent configuration
+│   │   │   └── SORCAR.md               # Sorcar design document
 │   │   ├── coding_agents/          # Coding agents for software development tasks
 │   │   │   ├── repo_optimizer.py          # Iterative code optimizer using SorcarAgent
 │   │   │   ├── repo_agent.py              # Repo-level task agent
@@ -468,7 +458,10 @@ kiss/
 │   │   ├── autoresearch/           # Autoresearch agent for autonomous ML experiments
 │   │   │   ├── autoresearch_agent.py
 │   │   │   ├── config.py
+│   │   │   ├── program.md              # Agent instructions for experimentation loop
 │   │   │   └── README.md
+│   │   ├── claw/                    # Background agent for Slack-based task execution
+│   │   │   └── background_agent.py     # Slack-driven background agent
 │   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   ├── core/            # Core framework components
 │   │   ├── base.py            # Base class with common functionality
@@ -480,15 +473,18 @@ kiss/
 │   │   ├── kiss_error.py      # Custom error class
 │   │   ├── utils.py           # Utility functions
 │   │   ├── relentless_agent.py # RelentlessAgent base class
+│   │   ├── RELENTLESS_AGENT.md # RelentlessAgent design document
 │   │   └── models/            # Model implementations
 │   │       ├── model.py           # Model interface with Attachment support
 │   │       ├── gemini_model.py    # Gemini model implementation
 │   │       ├── openai_compatible_model.py # OpenAI-compatible API model
 │   │       ├── anthropic_model.py # Anthropic model implementation
+│   │       ├── novita_model.py    # Novita model implementation
 │   │       └── model_info.py      # Model info: pricing, context, capabilities
 │   ├── channels/        # Communication channel integrations
 │   │   ├── gmail_agent.py          # Gmail agent with OAuth2 authentication
-│   │   └── slack_agent.py          # Slack bot agent
+│   │   ├── slack_agent.py          # Slack bot agent
+│   │   └── whatsapp_agent.py       # WhatsApp agent
 │   ├── docker/          # Docker integration
 │   │   └── docker_manager.py
 │   ├── scripts/         # Utility scripts
@@ -510,6 +506,8 @@ kiss/
 │   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
 │   │   ├── test_autoresearch.py
+│   │   ├── test_background_agent.py
+│   │   ├── test_branch_coverage_integration.py
 │   │   ├── test_browser_close_shutdown.py
 │   │   ├── test_chat_history_events.py
 │   │   ├── test_chatbot_ui_spinner.py
@@ -526,6 +524,7 @@ kiss/
 │   │   ├── test_current_editor_file.py
 │   │   ├── test_disable_copilot_scm.py
 │   │   ├── test_docker_manager.py
+│   │   ├── test_env.py
 │   │   ├── test_error_handling.py
 │   │   ├── test_evolver_progress_callback.py
 │   │   ├── test_file_usage.py
@@ -541,6 +540,7 @@ kiss/
 │   │   ├── test_kiss_agent_agentic.py
 │   │   ├── test_kiss_agent_coverage.py
 │   │   ├── test_kiss_agent_non_agentic.py
+│   │   ├── test_kiss_agent_retry.py
 │   │   ├── test_merge_individual_accept.py
 │   │   ├── test_merge_restore_on_close.py
 │   │   ├── test_merge_view_second_change.py
@@ -552,10 +552,12 @@ kiss/
 │   │   ├── test_printer_parity.py
 │   │   ├── test_race_conditions.py
 │   │   ├── test_redundancy_analyzer.py
+│   │   ├── test_refactor_dedup.py
 │   │   ├── test_relentless_agent.py
 │   │   ├── test_run_prompt_button.py
 │   │   ├── test_scm_commit_message.py
 │   │   ├── test_slack_agent.py
+│   │   ├── test_slack_channel_backend.py
 │   │   ├── test_sorcar_bash_streaming.py
 │   │   ├── test_sorcar_branch_coverage.py
 │   │   ├── test_sorcar_cli_callbacks.py
@@ -581,11 +583,13 @@ kiss/
 │   │   ├── test_useful_tools.py
 │   │   ├── test_vscode_panel.py
 │   │   ├── test_web_use_tool.py
+│   │   ├── test_whatsapp_agent.py
 │   │   ├── integration_test_assistant_agent.py
 │   │   ├── integration_test_gmail_login.py
 │   │   ├── integration_test_google_search.py
 │   │   └── integration_test_web_use_tool.py
 │   ├── _version.py       # Single source of truth for package version
+│   ├── env.py            # Offline-installer environment setup (paths, env vars)
 │   ├── py.typed          # PEP 561 marker for type checking
 │   └── viz_trajectory/  # Trajectory visualization
 │       ├── server.py                    # Flask server for trajectory visualization
@@ -631,7 +635,7 @@ __version__ = "0.2.0"  # Update to new version
 
 Configuration is managed through environment variables and the `DEFAULT_CONFIG` object:
 
-- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, and/or `MINIMAX_API_KEY` environment variables
+- **API Keys**: Set `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, `MINIMAX_API_KEY`, and/or `NOVITA_API_KEY` environment variables
 - **Agent Settings**: Modify `DEFAULT_CONFIG.agent` in [`src/kiss/core/config.py`](src/kiss/core/config.py):
   - `max_steps`: Maximum iterations in the ReAct loop (default: 100)
   - `verbose`: Enable verbose output (default: True)
@@ -728,14 +732,14 @@ find . -type f -name "*.pyc" -delete
 
 **Generation Models** (text generation with function calling support):
 
-- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4.5-preview, gpt-4-turbo, gpt-4, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro
-- **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, codex-mini-latest
+- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4.5-preview, gpt-4-turbo, gpt-4, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro, gpt-5.3, gpt-5.4, gpt-5.4-pro
+- **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, gpt-5.3-codex, codex-mini-latest
 - **OpenAI (Reasoning)**: o1, o1-mini, o1-pro, o3, o3-mini, o3-mini-high, o3-pro, o3-deep-research, o4-mini, o4-mini-high, o4-mini-deep-research
 - **OpenAI (Open Source)**: openai/gpt-oss-20b, openai/gpt-oss-120b
 - **Anthropic**: claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
 - **Anthropic (Legacy)**: claude-3-5-sonnet-20241022, claude-3-5-haiku, claude-3-5-haiku-20241022, claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307
 - **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-1.5-pro (deprecated), gemini-1.5-flash (deprecated)
-- **Gemini (preview, unreliable function calling)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-2.5-flash-lite
+- **Gemini (preview, unreliable function calling)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-2.5-flash-lite
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
 - **Together AI (Qwen)**: Qwen2.5-72B/7B-Instruct-Turbo, Qwen2.5-Coder-32B, Qwen2.5-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, QwQ-32B (with function calling)
 - **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-V3-0324, DeepSeek-V3.1 (with function calling)
@@ -744,7 +748,7 @@ find . -type f -name "*.pyc" -delete
 - **Together AI (Z.AI)**: GLM-5.0, GLM-4.5-Air, GLM-4.7
 - **Together AI (Other)**: Nemotron-Nano-9B, Arcee (Coder-Large, Maestro-Reasoning, Virtuoso-Large, trinity-mini), DeepCogito (cogito-v2 series), google/gemma-2b/3n, Refuel-LLM-2/2-Small, essentialai/rnj-1, marin-community/marin-8b
 - **OpenRouter**: Access to 300+ models from 60+ providers via unified API:
-  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
+  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2/5.3/5.4 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
   - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6 with 1M context)
   - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemma-2-9b/27b, gemma-3-4b/12b/27b, gemma-3n-e4b)
   - Meta Llama (llama-3-8b/70b, llama-3.1-8b/70b/405b, llama-3.2-1b/3b/11b-vision, llama-3.3-70b, llama-4-maverick/scout, llama-guard-2/3/4)
@@ -765,6 +769,7 @@ find . -type f -name "*.pyc" -delete
   - Baidu ERNIE (ernie-4.5 series including VL and thinking variants)
   - Aurora (openrouter/aurora-alpha — free cloaked reasoning model)
   - And 30+ more providers (ai21, aion-labs, alfredpros, alpindale, anthracite-org, arcee-ai, bytedance, deepcogito, essentialai, ibm-granite, inception, inflection, kwaipilot, liquid, meituan, morph, nex-agi, opengvlab, prime-intellect, relace, sao10k, stepfun-ai, tencent, thedrummer, tngtech, upstage, writer, xiaomi, etc.)
+- **Novita**: deepseek/deepseek-v3.2, zai-org/glm-5, minimax/minimax-m2.5
 
 **Embedding Models** (for RAG and semantic search):
 
@@ -795,7 +800,7 @@ The framework provides embedding generation capabilities through the `get_embedd
 - **Gemini Models**: Full embedding support via Google's embedding API
   - Default model: `text-embedding-004` (can be customized; `gemini-embedding-001` also available)
   - Usage: `model.get_embedding(text, embedding_model="text-embedding-004")`
-- **Anthropic Models**: Embeddings not supported (raises `NotImplementedError`)
+- **Anthropic Models**: Embeddings not supported (raises `KISSError`)
 
 Embeddings are primarily used by the `SimpleRAG` system ([`src/kiss/agents/kiss_evolve/simple_rag.py`](src/kiss/agents/kiss_evolve/simple_rag.py)) for document retrieval. When using `SimpleRAG`, ensure you use an OpenAI, Together AI, or Gemini model that supports embeddings.
 

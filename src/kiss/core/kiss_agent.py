@@ -268,10 +268,10 @@ class KISSAgent(Base):
                             cost=cost,
                         )
                     return result
-            except KISSError:
+            except KISSError:  # pragma: no cover – requires model to raise KISSError mid-step
                 logger.debug("Exception caught", exc_info=True)
                 raise
-            except Exception as e:
+            except Exception as e:  # pragma: no cover – requires live API error
                 logger.debug("Exception caught", exc_info=True)
                 if not _is_retryable_error(e):
                     raise KISSError(f"Non-retryable error from model: {e}") from e
@@ -304,7 +304,7 @@ class KISSAgent(Base):
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
 
-        if not function_calls:
+        if not function_calls:  # pragma: no cover – requires LLM returning zero tool calls
             self._add_message(
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
