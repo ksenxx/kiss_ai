@@ -51,17 +51,54 @@ def test_input_actions_no_shrink():
 class TestGhostCursorPosition(unittest.TestCase):
     """Ghost completion must work at cursor position, not just end of text."""
 
-    def test_fetch_ghost_uses_cursor_position(self) -> None:
-        """fetchGhost should send only text up to cursor, not full value."""
+    def test_fetch_ghost_skips_when_cursor_in_middle(self) -> None:
+        """fetchGhost should not suggest when cursor is not at the end."""
         fn = CHATBOT_JS.split("function fetchGhost")[1].split("\nfunction ")[0]
-        assert "inp.selectionStart" in fn
-        assert "inp.value.substring(0,pos)" in fn
+        assert "if(pos<inp.value.length){clearGhost();return}" in fn
 
     def test_update_ghost_renders_at_cursor(self) -> None:
         """updateGhost should split text at cursor and insert ghost between."""
         fn = CHATBOT_JS.split("function updateGhost")[1].split("\nfunction ")[0]
         assert "inp.value.substring(0,pos)" in fn
         assert "inp.value.substring(pos)" in fn
+
+    def test_ghost_mask_text_uses_transparent_color_not_hidden(self) -> None:
+        """Ghost overlay text should preserve layout so trailing text sits after suggestion."""
+        idx = CHATBOT_CSS.index(".gm{")
+        block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+        assert "color:transparent" in block
+        assert "visibility:hidden" not in block
+
+    def test_ghost_overlay_shares_text_metrics_with_textarea(self) -> None:
+        """Ghost overlay and textarea must share text metrics so trailing text aligns."""
+        idx = CHATBOT_CSS.index("#task-input,")
+        block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+        assert "#ghost-overlay" in block
+        assert "white-space:pre-wrap" in block
+        assert "word-break:break-word" in block
+        assert "box-sizing:border-box" in block
+        assert "tab-size:8" in block
+
+    def test_ghost_overlay_syncs_runtime_size_scroll_and_padding(self) -> None:
+        """Ghost overlay should sync its measured box with the textarea at runtime."""
+        fn = CHATBOT_JS.split("function syncGhostOverlay")[1].split("\nfunction ")[0]
+        assert "ghostEl.style.width=inp.clientWidth+'px'" in fn
+        assert "ghostEl.style.height=inp.clientHeight+'px'" in fn
+        assert "ghostEl.style.paddingTop=inp.style.paddingTop" in fn
+        assert "ghostEl.style.paddingLeft=inp.style.paddingLeft" in fn
+        assert "ghostEl.scrollTop=inp.scrollTop" in fn
+
+    def test_resize_input_keeps_ghost_overlay_in_sync(self) -> None:
+        """Resizing the textarea should also resync the ghost overlay."""
+        fn = CHATBOT_JS.split("function resizeInput")[1].split("\nfunction ")[0]
+        assert "syncGhostOverlay();" in fn
+
+    def test_ghost_suggestion_uses_plain_span_color(self) -> None:
+        """Ghost suggestion styling should only color the suggestion text."""
+        idx = CHATBOT_CSS.index(".gs{")
+        block = CHATBOT_CSS[idx : CHATBOT_CSS.index("}", idx) + 1]
+        assert "color:rgba(255,255,255,0.35)" in block
+        assert "white-space" not in block
 
     def test_accept_ghost_inserts_at_cursor(self) -> None:
         """acceptGhost should insert suggestion at cursor, not append to end."""

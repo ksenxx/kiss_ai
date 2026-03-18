@@ -100,6 +100,47 @@ def _clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'")
 
 
+def _clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
+    """Return only a short, confident autocomplete continuation.
+
+    Keeps at most a few words, stops at strong sentence boundaries, and
+    suppresses low-confidence continuations that look too long or too weak.
+    """
+    s = _clean_llm_output(suggestion)
+    if not s:
+        return ""
+    if s.lower().startswith(query.lower()):
+        s = s[len(query) :]
+    s = s.lstrip()
+    if not s:
+        return ""
+    words: list[str] = []
+    hit_boundary = False
+    for token in s.split():
+        if any(mark in token for mark in ("\n", ":", ";", "!", "?")):
+            hit_boundary = True
+            break
+        if token.endswith((".", ",")):
+            clean = token.rstrip(".,")
+            if clean:
+                words.append(clean)
+            hit_boundary = True
+            break
+        words.append(token)
+        if len(words) >= 4:
+            break
+    clipped = " ".join(words).strip()
+    if len(words) < 1 or len(words) > 4:
+        return ""
+    if hit_boundary:
+        return ""
+    if not clipped or len(clipped) > 40:
+        return ""
+    if s and len(s) > len(clipped) + 20:
+        return ""
+    return clipped
+
+
 def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
     if detailed:
         prompt = (
@@ -1011,7 +1052,7 @@ def run_chatbot(
         if not query or len(query) < 2:
             return JSONResponse({"suggestion": ""})
 
-        fast = _fast_complete(raw_query, query)
+        fast = _clip_autocomplete_suggestion(query, _fast_complete(raw_query, query))
         if fast:
             return JSONResponse({"suggestion": fast})
 
@@ -1044,10 +1085,11 @@ def run_chatbot(
                         "Given the user's partial input, their past task history, "
                         "the list of files/folders in the project, and the content of "
                         "the currently open file in the editor, "
-                        "predict what they want to type and return ONLY the remaining "
-                        "text to complete their input. Do NOT repeat the text they already typed. "
-                        "Keep the completion concise and natural."
-                        "If no good completion, return empty string.\n\n"
+                        "predict only the next few words you are highly confident about. "
+                        "Return ONLY the remaining text to insert, never repeating what the "
+                        "user already typed. Never complete a full sentence or paragraph. "
+                        "Return at most 4 words, with no newline. If confidence is not high, "
+                        "return empty string.\n\n"
                         + "\n\n".join(context_parts)
                         + '\n\nPartial input: "{query}"\n\n'
                     ),
@@ -1060,10 +1102,7 @@ def run_chatbot(
                     },
                     is_agentic=False,
                 )
-                s = _clean_llm_output(result)
-                if s.lower().startswith(query.lower()):  # pragma: no branch
-                    s = s[len(query) :]  # pragma: no cover
-                return s
+                return _clip_autocomplete_suggestion(query, result)
             except Exception:  # pragma: no cover – LLM API failure
                 _log_exc()
                 return ""
@@ -1326,7 +1365,6 @@ def run_chatbot(
             Route("/complete", complete),
             Route("/tasks", tasks),
             Route("/task-events", task_events),
-
             Route("/models", models_endpoint),
             Route("/select-model", select_model_endpoint, methods=["POST"]),
             Route("/theme", theme),
