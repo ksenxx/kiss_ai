@@ -52,8 +52,8 @@ SYSTEM_PROMPT = f"""
   task history from latest to oldest to get the context.
 - Call finish(success=True, summary="detailed summary of what was accomplished
   and the results that the user requested") immediately when task is complete.
-- Whenever the user asks the agent to show something, create a webpage and show
-  the webpage in the user's default browser.
+- Whenever the user asks the agent to show something, try to show it in the results
+  as nicely formatted marrkdown text.
 - Use 'uv run myprogram.py' for running Python programs.
 - READ large files in chunks.
 - Create temporary files in {_artifact_dir.parent}/tmp

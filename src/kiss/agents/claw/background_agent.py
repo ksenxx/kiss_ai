@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import tempfile
 import time
 from pathlib import Path
@@ -29,14 +30,46 @@ from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_history import _add_task, _set_latest_chat_events
 from kiss.channels import ChannelBackend
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import MultiPrinter
 
 logger = logging.getLogger(__name__)
 
 _LOCK_FILE = Path.home() / ".kiss" / "claw_background_agent.lock"
+_PID_FILE = Path.home() / ".kiss" / "claw_background_agent.pid"
 
 _POLL_INTERVAL = 3.0  # seconds between polling for new messages
 _CHANNEL_NAME = "sorcar"
 _USERNAME = "ksen"
+
+
+_MAX_CHUNK = 3900  # stay under Slack's ~4000 char limit per message
+
+
+def _send_chunked(
+    backend: ChannelBackend,
+    channel_id: str,
+    thread_ts: str,
+    text: str,
+) -> None:
+    """Send a long message in chunks, splitting at line boundaries.
+
+    Args:
+        backend: Channel backend for sending messages.
+        channel_id: Channel ID to post to.
+        thread_ts: Thread timestamp to reply in.
+        text: Full message text (may exceed channel message limits).
+    """
+    while text:
+        if len(text) <= _MAX_CHUNK:
+            backend.send_message(channel_id, text, thread_ts)
+            break
+        # Find last newline within the chunk limit for a clean split
+        split = text.rfind("\n", 0, _MAX_CHUNK)
+        if split <= 0:
+            split = _MAX_CHUNK
+        backend.send_message(channel_id, text[:split], thread_ts)
+        text = text[split:].lstrip("\n")
 
 
 def _run_task(
@@ -81,8 +114,9 @@ def _run_task(
     )
 
     _add_task(task_text)
-    printer = BaseBrowserPrinter()
-    printer.start_recording()
+    recorder = BaseBrowserPrinter()
+    recorder.start_recording()
+    printer = MultiPrinter([recorder, ConsolePrinter()])
 
     old_cwd = os.getcwd()
     os.chdir(work_dir)
@@ -105,21 +139,74 @@ def _run_task(
     success = result_data.get("success", False)
     summary = result_data.get("summary", "No summary available.")
 
-    chat_events = printer.stop_recording()
+    chat_events = recorder.stop_recording()
     chat_events.append({"type": "task_done" if success else "task_error"})
     _set_latest_chat_events(chat_events, task=task_text, result=summary)
     emoji = "✅" if success else "❌"
-    msg = f"{emoji} *Task {'completed' if success else 'failed'}*\n\n{summary}"
-    # Channel message limits vary; truncate at a safe length
-    if len(msg) > 3900:
-        msg = msg[:3900] + "\n... (truncated)"
-    backend.send_message(channel_id, msg, thread_ts)
+    header = f"{emoji} *Task {'completed' if success else 'failed'}*\n\n"
+    _send_chunked(backend, channel_id, thread_ts, header + summary)
 
     cost = f"${agent.budget_used:.4f}" if hasattr(agent, "budget_used") else "unknown"
     tokens = agent.total_tokens_used if hasattr(agent, "total_tokens_used") else "unknown"
     backend.send_message(
         channel_id, f"📊 Cost: {cost} | Tokens: {tokens}", thread_ts
     )
+
+
+def _read_pid() -> int | None:
+    """Read the PID stored in the PID file, or None if missing/invalid."""
+    try:
+        return int(_PID_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check whether a process with the given PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _clear_stale_lock() -> None:
+    """Remove lock and PID files if the recorded process is no longer alive."""
+    pid = _read_pid()
+    if pid is not None and not _is_pid_alive(pid):
+        _LOCK_FILE.unlink(missing_ok=True)
+        _PID_FILE.unlink(missing_ok=True)
+
+
+def stop_background_agent() -> bool:
+    """Stop a running background agent instance.
+
+    Reads the PID file, sends SIGTERM to the process, and cleans up
+    lock/PID files.
+
+    Returns:
+        True if a running instance was stopped, False otherwise.
+    """
+    pid = _read_pid()
+    if pid is None:
+        print("No background agent PID file found.")
+        return False
+    if not _is_pid_alive(pid):
+        print(f"Background agent (PID {pid}) is not running. Cleaning up stale files.")
+        _LOCK_FILE.unlink(missing_ok=True)
+        _PID_FILE.unlink(missing_ok=True)
+        return False
+    print(f"Stopping background agent (PID {pid})...")
+    os.kill(pid, signal.SIGTERM)
+    # Wait briefly for it to exit
+    for _ in range(20):
+        time.sleep(0.5)
+        if not _is_pid_alive(pid):
+            print("Background agent stopped.")
+            _PID_FILE.unlink(missing_ok=True)
+            return True
+    print(f"Process {pid} did not exit after SIGTERM. Use 'kill -9 {pid}' to force.")
+    return False
 
 
 def run_background_agent(work_dir: str | None = None) -> None:
@@ -132,16 +219,26 @@ def run_background_agent(work_dir: str | None = None) -> None:
         work_dir: Working directory for agent tasks. Defaults to a temp dir.
     """
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _clear_stale_lock()
     lock = FileLock(_LOCK_FILE, timeout=0)
     try:
         lock.acquire()
     except Timeout:
-        print(
-            "Another background agent instance is already running. "
-            "Only one instance is allowed at a time."
-        )
+        pid = _read_pid()
+        if pid:
+            print(
+                f"Another background agent instance is already running (PID {pid}).\n"
+                f"Use 'uv run python -m kiss.agents.claw.background_agent --stop' "
+                f"or 'kill {pid}' to stop it."
+            )
+        else:
+            print(
+                "Another background agent instance is already running. "
+                "Only one instance is allowed at a time."
+            )
         return
 
+    _PID_FILE.write_text(str(os.getpid()))
     try:
         # Import here to allow swapping backends in the future
         from kiss.channels.slack_agent import SlackChannelBackend
@@ -150,6 +247,7 @@ def run_background_agent(work_dir: str | None = None) -> None:
         _run_background_agent_locked(backend, work_dir)
     finally:
         lock.release()
+        _PID_FILE.unlink(missing_ok=True)
 
 
 def _run_background_agent_locked(
@@ -267,8 +365,26 @@ def main() -> None:
     parser.add_argument(
         "--work-dir", type=str, default=".", help="Working directory for tasks"
     )
+    parser.add_argument(
+        "--stop", action="store_true", help="Stop a running background agent"
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="Check if background agent is running"
+    )
     args = parser.parse_args()
-    run_background_agent(work_dir=args.work_dir)
+
+    if args.stop:
+        stop_background_agent()
+    elif args.status:
+        pid = _read_pid()
+        if pid and _is_pid_alive(pid):
+            print(f"Background agent is running (PID {pid}).")
+        elif pid:
+            print(f"Background agent (PID {pid}) is not running (stale PID file).")
+        else:
+            print("Background agent is not running.")
+    else:
+        run_background_agent(work_dir=args.work_dir)
 
 
 if __name__ == "__main__":

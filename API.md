@@ -1076,6 +1076,10 @@ ______________________________________________________________________
 
 #### `kiss.agents.claw.background_agent` — *Background agent that listens for tasks on a messaging channel.*
 
+**`stop_background_agent`** — Stop a running background agent instance. Reads the PID file, sends SIGTERM to the process, and cleans up lock/PID files.<br/>`def stop_background_agent() -> bool`
+
+- **Returns:** True if a running instance was stopped, False otherwise.
+
 **`run_background_agent`** — Main loop: poll channel for tasks from user, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
 
 - `work_dir`: Working directory for agent tasks. Defaults to a temp dir.
@@ -1122,7 +1126,7 @@ ______________________________________________________________________
 
   - `channel_id`: Channel ID to join.
 
-- **poll_messages** — Poll a Slack channel for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+- **poll_messages** — Poll a Slack channel for new messages. Retries up to 3 times on transient network errors (e.g. SSL handshake timeouts, connection resets) with exponential backoff.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
   - `channel_id`: Channel ID to poll.
   - `oldest`: Only return messages newer than this timestamp.
