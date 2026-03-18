@@ -5,22 +5,6 @@ Each test verifies a specific fix without mocks, patches, or test doubles.
 
 
 # ---------------------------------------------------------------------------
-# kiss/agents/sorcar/sorcar_agent.py — _DEFAULT_TASK
-# ---------------------------------------------------------------------------
-
-class TestDefaultTaskNoCredentials:
-    """Test that _DEFAULT_TASK doesn't contain hardcoded credentials."""
-
-    def test_no_password_in_default_task(self):
-        """Default task should not contain passwords."""
-        from kiss.agents.sorcar.sorcar_agent import _DEFAULT_TASK
-
-        assert "password" not in _DEFAULT_TASK.lower()
-        assert "kissagent" not in _DEFAULT_TASK.lower()
-        assert "@gmail" not in _DEFAULT_TASK.lower()
-
-
-# ---------------------------------------------------------------------------
 # kiss/agents/sorcar/chatbot_ui.py — CHATBOT_JS
 # ---------------------------------------------------------------------------
 

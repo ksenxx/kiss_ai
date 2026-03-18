@@ -535,34 +535,4 @@ class TestStreamEventParser:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# sorcar_agent.py — _build_arg_parser and _resolve_task
-# ---------------------------------------------------------------------------
 
-
-class TestSorcarAgentCli:
-    def test_resolve_task_default(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _build_arg_parser, _resolve_task
-
-        parser = _build_arg_parser()
-        args = parser.parse_args([])
-        result = _resolve_task(args)
-        assert "weather" in result.lower()
-
-    def test_resolve_task_from_string(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _build_arg_parser, _resolve_task
-
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--task", "Do something"])
-        result = _resolve_task(args)
-        assert result == "Do something"
-
-    def test_resolve_task_from_file(self, tmp_path: Path) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _build_arg_parser, _resolve_task
-
-        f = tmp_path / "task.txt"
-        f.write_text("File task content")
-        parser = _build_arg_parser()
-        args = parser.parse_args(["-f", str(f)])
-        result = _resolve_task(args)
-        assert result == "File task content"

@@ -273,5 +273,29 @@ class TestModelConfigBaseUrlOverride:
         assert "ok" in text.lower().strip()
 
 
+class TestOpenAIReasoningTokens:
+    """Verify OpenAI reasoning tokens are counted in usage output."""
+
+    def test_openai_reasoning_tokens_are_counted_in_usage(self) -> None:
+        """Reasoning tokens from completion_tokens_details should count as output tokens."""
+        from types import SimpleNamespace
+
+        model = OpenAICompatibleModel("gpt-5.4", base_url="http://localhost", api_key="test")
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=11,
+                completion_tokens=7,
+                prompt_tokens_details=None,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=13),
+            )
+        )
+
+        input_tokens, output_tokens, cache_read, cache_write = (
+            model.extract_input_output_token_counts_from_response(response)
+        )
+
+        assert (input_tokens, output_tokens, cache_read, cache_write) == (11, 20, 0, 0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

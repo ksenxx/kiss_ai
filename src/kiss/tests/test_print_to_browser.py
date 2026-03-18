@@ -845,5 +845,45 @@ class TestPrintCheckStop(unittest.TestCase):
             p.print("anything", type="text")
 
 
+class TestBrowserPrinterReasoningTokens(unittest.TestCase):
+    """Verify browser printer displays usage with reasoning tokens."""
+
+    def test_browser_printer_displays_usage_with_reasoning_tokens(self) -> None:
+        """Sorcar UI usage text should reflect reasoning-token-inclusive totals."""
+        from types import SimpleNamespace
+
+        from kiss.core.kiss_agent import KISSAgent
+        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+        model = OpenAICompatibleModel("gpt-5.4", base_url="http://localhost", api_key="test")
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=50,
+                prompt_tokens_details=None,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=25),
+            )
+        )
+        agent = KISSAgent("test")
+        agent.model = model  # type: ignore[assignment]
+        agent.total_tokens_used = 0
+        agent.step_count = 1
+        agent.max_steps = 30
+        agent.budget_used = 0.0
+        agent.max_budget = 5.0
+        agent.session_info = ""
+        agent._update_tokens_and_budget_from_response(response)
+        usage = agent._get_usage_info_string()
+
+        printer = BaseBrowserPrinter()
+        client = printer.add_client()
+        printer.print(usage, type="usage_info")
+        event = client.get(timeout=1)
+
+        assert agent.total_tokens_used == 175
+        assert "Tokens: 175/1050000" in usage
+        assert event == {"type": "usage_info", "text": usage}
+
+
 if __name__ == "__main__":
     unittest.main()
