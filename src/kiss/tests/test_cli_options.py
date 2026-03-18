@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 from kiss.core import config as config_module
 from kiss.core.config_builder import add_config
 
+# ---------------------------------------------------------------------------
+# kiss/core/config.py — config_module
+# ---------------------------------------------------------------------------
 
 class CLITestBase(unittest.TestCase):
     def setUp(self):

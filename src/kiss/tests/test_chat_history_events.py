@@ -53,6 +53,11 @@ def _drain(q: queue.Queue) -> list[dict]:
             break
     return events
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter
+# ---------------------------------------------------------------------------
+
 class TestPrinterRecording:
     def test_stop_clears_buffer(self) -> None:
         p = BaseBrowserPrinter()
@@ -64,6 +69,10 @@ class TestPrinterRecording:
 
 # ── Task history storage tests ───────────────────────────────────────────
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
 
 class TestTaskHistoryChatEvents:
     def setup_method(self) -> None:
@@ -135,6 +144,10 @@ class TestEndToEndRecordAndStore:
 # ── Display event types completeness ─────────────────────────────────────
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — _DISPLAY_EVENT_TYPES
+# ---------------------------------------------------------------------------
+
 class TestDisplayEventTypes:
     def test_all_event_types_documented(self) -> None:
         """Verify _DISPLAY_EVENT_TYPES contains the expected types."""
@@ -187,6 +200,10 @@ def _tasks_endpoint_transform(history: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
+
 class TestTasksEndpointFormat:
     def setup_method(self) -> None:
         self.original_file, self.original_events_dir, self.tmp_dir = _use_temp_history()
@@ -202,6 +219,10 @@ class TestTasksEndpointFormat:
 
 # ── JavaScript syntax validation ─────────────────────────────────────────
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_JS
+# ---------------------------------------------------------------------------
 
 class TestChatbotJSSyntax:
     def test_render_tasks_balanced_braces(self) -> None:
@@ -302,6 +323,10 @@ class TestChatbotJSSyntax:
 
 # ── /task-events endpoint logic tests ────────────────────────────────────
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py
+# ---------------------------------------------------------------------------
 
 class TestTaskEventsEndpoint:
     def setup_method(self) -> None:

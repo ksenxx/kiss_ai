@@ -92,6 +92,10 @@ def _make_git_repo(tmpdir: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — _StopRequested, _model_vendor_order, _read_active_file
+# ---------------------------------------------------------------------------
+
 class TestSorcarModuleFunctions:
 
     def test_read_active_file_nonexistent_path(self) -> None:
@@ -122,6 +126,10 @@ class TestSorcarModuleFunctions:
 # sorcar.py - HTTP server integration tests
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
 
 class TestSorcarServerSubprocess:
     """Run the actual run_chatbot in a subprocess with coverage to test sorcar.py."""
@@ -228,6 +236,10 @@ class TestSorcarServerSubprocess:
 
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — _THEME_PRESETS, _build_html
+# ---------------------------------------------------------------------------
 
 class TestSorcarServer:
     """Test HTTP endpoints via Starlette TestClient (real ASGI, no mocks)."""
@@ -593,6 +605,11 @@ class TestSorcarServer:
         r = self.client.get("/models")
         assert "models" in r.json()
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter
+# ---------------------------------------------------------------------------
+
 class TestBaseBrowserPrinterPrint:
     def setup_method(self) -> None:
         self.printer = BaseBrowserPrinter()
@@ -624,6 +641,11 @@ class TestRemoveClientNotFound:
         q: queue.Queue = queue.Queue()
         printer.remove_client(q)  # should not raise
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — _THEME_PRESETS
+# ---------------------------------------------------------------------------
+
 class TestBuildHtml:
 
     def test_theme_presets_complete(self) -> None:
@@ -637,6 +659,10 @@ class TestBuildHtml:
 # task_history.py
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
 
 class TestTaskHistory:
     def setup_method(self) -> None:
@@ -663,6 +689,10 @@ class TestTaskHistory:
         th.MODEL_USAGE_FILE.write_text("not json")
         assert th._load_model_usage() == {}
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/useful_tools.py — UsefulTools, _extract_command_names
+# ---------------------------------------------------------------------------
 
 class TestExtractCommandNames:
 
@@ -713,6 +743,11 @@ class TestUsefulToolsBash:
         result = tools.Bash("echo out; exit 42", "test")
         assert "Error" in result
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py
+# ---------------------------------------------------------------------------
+
 class TestGitDiffAndMerge:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -755,6 +790,10 @@ class TestMergingFlag:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/useful_tools.py — UsefulTools
+# ---------------------------------------------------------------------------
+
 class TestUsefulToolsEdgeCases:
     """Cover remaining branches in useful_tools.py."""
 
@@ -782,6 +821,10 @@ class TestUsefulToolsEdgeCases:
             tools_s.Bash("for i in 1 2 3 4 5; do echo line$i; done", "test")
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _setup_code_server
+# ---------------------------------------------------------------------------
+
 class TestCodeServerEdgeCases:
     """Cover remaining code_server.py branches."""
 
@@ -807,6 +850,10 @@ class TestCodeServerEdgeCases:
             shutil.rmtree(ext_dir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
+
 class TestTaskHistoryRemaining:
     """Cover remaining task_history.py branches."""
 
@@ -824,6 +871,12 @@ class TestTaskHistoryRemaining:
         th._history_cache = None
         history = th._load_history()
         assert len(history) > 0  # SAMPLE_TASKS
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _capture_untracked, _parse_diff_hunks, _prepare_merge_view,
+#   _snapshot_files
+# ---------------------------------------------------------------------------
 
 class TestCodeServerOSErrors:
     """Cover OSError branches in code_server.py."""
@@ -856,6 +909,10 @@ class TestCodeServerOSErrors:
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter, _coalesce_events
+# ---------------------------------------------------------------------------
 
 class TestBrowserUiRemaining:
     """Cover remaining browser_ui branches."""

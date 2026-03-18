@@ -31,6 +31,9 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import RelentlessAgent
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py
+# ---------------------------------------------------------------------------
 
 class TestReadActiveFileDirPath:
     def setup_method(self) -> None:
@@ -41,6 +44,12 @@ class TestReadActiveFileDirPath:
 
 
 # ── SorcarAgent direct tests (covers __init__, _get_tools, _reset, run) ──
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar_agent.py — SorcarAgent
+# ---------------------------------------------------------------------------
+
 class TestSorcarAgentDirect:
 
     def test_run_with_both_attachments(self) -> None:
@@ -193,6 +202,10 @@ def server():
             proc.wait()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — MODEL_USAGE_FILE, _KISS_DIR, task_history
+# ---------------------------------------------------------------------------
 
 class TestSuggestionsFileMatch:
     """Exercise suggestions with file query matching actual files (line 825, 831)."""

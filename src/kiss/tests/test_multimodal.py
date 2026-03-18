@@ -76,6 +76,10 @@ def _create_minimal_pdf() -> bytes:
     )
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/model.py — SUPPORTED_MIME_TYPES
+# ---------------------------------------------------------------------------
+
 class TestAttachment(unittest.TestCase):
 
     def test_supported_mime_types(self) -> None:
@@ -85,6 +89,10 @@ class TestAttachment(unittest.TestCase):
         assert "image/webp" in SUPPORTED_MIME_TYPES
         assert "application/pdf" in SUPPORTED_MIME_TYPES
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent
+# ---------------------------------------------------------------------------
 
 @requires_gemini_api_key
 class TestGeminiMultimodal(unittest.TestCase):

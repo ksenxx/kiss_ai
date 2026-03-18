@@ -10,6 +10,10 @@ via three mechanisms:
 
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — sorcar
+# ---------------------------------------------------------------------------
+
 class TestShutdownTimerDuration:
     """The shutdown timer should use a short delay for quick exit."""
 

@@ -19,10 +19,15 @@ from kiss.core.models.model_info import (
     MODEL_INFO,
 )
 
-
 # ===================================================================
 # utils.py — comprehensive coverage
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/utils.py — read_project_file
+# ---------------------------------------------------------------------------
+
 class TestUtilsFunctions(TestCase):
     def test_read_project_file(self) -> None:
         from kiss.core.utils import read_project_file
@@ -36,6 +41,12 @@ class TestUtilsFunctions(TestCase):
 # ===================================================================
 # model.py — comprehensive coverage
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/model.py — Model
+# ---------------------------------------------------------------------------
+
 class TestModelSchemaConversion(TestCase):
     def _get_model(self) -> Model:
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -69,6 +80,11 @@ class TestModelSchemaConversion(TestCase):
         m = self._get_model()
         assert m._python_type_to_json_schema(inspect.Parameter.empty) == {"type": "string"}
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py — OpenAICompatibleModel
+# ---------------------------------------------------------------------------
+
 class TestModelConversation(TestCase):
     def test_add_message_non_user(self) -> None:
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -82,6 +98,10 @@ class TestModelConversation(TestCase):
         # Non-user messages don't get usage info appended
         assert m.conversation[-1]["content"] == "hi"
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/model.py — _get_callback_loop
+# ---------------------------------------------------------------------------
 
 class TestModelCallbackLoop(TestCase):
     def test_invoke_callback_from_running_loop(self) -> None:
@@ -120,6 +140,12 @@ class TestModelCallbackLoop(TestCase):
 # ===================================================================
 # model_info.py — cover get_model for different prefixes
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/model_info.py — MODEL_INFO
+# ---------------------------------------------------------------------------
+
 class TestGetModel(TestCase):
     def test_model_info_cache_pricing(self) -> None:
         for name, info in MODEL_INFO.items():
@@ -130,6 +156,12 @@ class TestGetModel(TestCase):
 # ===================================================================
 # kiss_agent.py — cover error paths and tool setup
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent, _is_retryable_error
+# ---------------------------------------------------------------------------
+
 class TestKISSAgentErrors(TestCase):
     def test_non_retryable_error(self) -> None:
         assert _is_retryable_error(ConnectionError("test")) is True
@@ -153,6 +185,12 @@ class TestKISSAgentErrors(TestCase):
 # ===================================================================
 # task_history.py — comprehensive tests
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
+
 class TestTaskHistory(TestCase):
     def setUp(self) -> None:
         from kiss.agents.sorcar import task_history as th
@@ -235,6 +273,12 @@ class TestTaskHistory(TestCase):
 # ===================================================================
 # sorcar.py — helper functions
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — _atomic_write_text
+# ---------------------------------------------------------------------------
+
 class TestSorcarHelpers(TestCase):
     def test_atomic_write_text(self) -> None:
         from kiss.agents.sorcar.sorcar import _atomic_write_text
@@ -246,6 +290,12 @@ class TestSorcarHelpers(TestCase):
 # ===================================================================
 # useful_tools.py — comprehensive edge cases
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/useful_tools.py — UsefulTools
+# ---------------------------------------------------------------------------
+
 class TestUsefulTools(TestCase):
     def test_write_and_read(self) -> None:
         from kiss.agents.sorcar.useful_tools import UsefulTools
@@ -265,6 +315,12 @@ class TestUsefulTools(TestCase):
 # ===================================================================
 # browser_ui.py — comprehensive BaseBrowserPrinter tests
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter, find_free_port
+# ---------------------------------------------------------------------------
+
 class TestBrowserUI(TestCase):
         # May or may not have flushed depending on timing
 
@@ -317,6 +373,13 @@ class TestMultiPrinter(TestCase):
 # ===================================================================
 # code_server.py — helper function tests
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _disable_copilot_scm_button, _restore_merge_files,
+#   _snapshot_files
+# ---------------------------------------------------------------------------
+
 class TestCodeServerHelpers(TestCase):
     def test_snapshot_files(self) -> None:
         from kiss.agents.sorcar.code_server import _snapshot_files
@@ -353,6 +416,12 @@ class TestCodeServerHelpers(TestCase):
 # ===================================================================
 # task_history.py — more uncovered branches
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
+
 class TestTaskHistoryExtra(TestCase):
     def setUp(self) -> None:
         from kiss.agents.sorcar import task_history as th
@@ -440,6 +509,12 @@ class TestTaskHistoryExtra(TestCase):
 # ===================================================================
 # model_info.py — more coverage
 # ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# kiss/core/models/model_info.py — calculate_cost
+# ---------------------------------------------------------------------------
+
 class TestModelInfoFunctions(TestCase):
     def test_calculate_cost_with_cache(self) -> None:
         from kiss.core.models.model_info import calculate_cost

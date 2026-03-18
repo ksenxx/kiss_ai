@@ -27,6 +27,10 @@ def _restore(saved):
     th.HISTORY_FILE, th._CHAT_EVENTS_DIR, th._history_cache, th._KISS_DIR = saved
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
+
 class TestJSONLFormat:
     """Test that task history is stored in JSONL format."""
 

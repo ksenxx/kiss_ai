@@ -31,6 +31,10 @@ def _restore(backup: str | None) -> None:
         path.unlink()
 
 
+# ---------------------------------------------------------------------------
+# kiss/channels/slack_agent.py — SlackChannelBackend, _save_token
+# ---------------------------------------------------------------------------
+
 class TestSlackChannelBackendConnect:
     """Tests for SlackChannelBackend.connect()."""
 

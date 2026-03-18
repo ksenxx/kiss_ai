@@ -16,6 +16,9 @@ from __future__ import annotations
 from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _CS_EXTENSION_JS
+# ---------------------------------------------------------------------------
 
 class TestExtensionRunSelectionCommand:
     """Verify the VS Code extension registers kiss.runSelection."""
@@ -66,6 +69,10 @@ class TestExtensionRunSelectionCommand:
         block = _CS_EXTENSION_JS[idx:idx + 200]
         assert "if(!ed)return;" in block
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_JS
+# ---------------------------------------------------------------------------
 
 class TestChatbotExternalRunHandler:
     """Verify the chatbot JS handles external_run events."""
@@ -137,6 +144,10 @@ class TestChatbotExternalRunHandler:
         er_block = CHATBOT_JS[er_idx:er_idx + 300]
         assert "runPromptBtn.disabled=true" in er_block
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _CS_EXTENSION_JS
+# ---------------------------------------------------------------------------
 
 class TestExtensionJSLogicFlow:
     """Verify the logical flow of the runSelection command."""

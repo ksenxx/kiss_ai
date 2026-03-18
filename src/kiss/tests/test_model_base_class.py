@@ -24,6 +24,10 @@ def _make_openai() -> OpenAICompatibleModel:
     return m
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/model.py — Model base class
+# ---------------------------------------------------------------------------
+
 class TestAddFunctionResultsBaseClass:
     """Test add_function_results_to_conversation_and_return from Model base class
     (used by OpenAI and Gemini models)."""

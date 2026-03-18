@@ -22,6 +22,11 @@ def _with_home(tmp_path: Path, fn: object) -> None:
 
 # ── get_install_dir tests ────────────────────────────────────────────────
 
+
+# ---------------------------------------------------------------------------
+# kiss/env.py — env_mod
+# ---------------------------------------------------------------------------
+
 def test_get_install_dir_from_env(tmp_path: Path) -> None:
     """KISS_INSTALL_DIR env var takes highest priority."""
     original = os.environ.get("KISS_INSTALL_DIR")
