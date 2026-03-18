@@ -58,6 +58,7 @@ open ~/Downloads/kiss-offline-installer.pkg
 
 # To launch sorcar 
 source ~/.zshrc
+cd kiss_ai/
 sorcar
 ```
 
@@ -156,13 +157,13 @@ print(final)
 
 No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
 
-## 💡 Key Features and Ideologies behind KISS and Sorcar
+## 💡 Key Features and Principles behind KISS and Sorcar
 
 ### Key Features
 
 - **KISSAgent with ReAct Loop**: The core agent runs a generate-execute-observe loop with native function calling, automatic tool schema generation from Python function signatures and docstrings, trajectory saving, and per-step budget tracking.
-- **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
-- **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output and security-hardened command parsing) for coding tasks, `ask_user_question` for human-in-the-loop interaction, plus full browser automation via Playwright with accessibility-tree-based element selection.
+- **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with explanation and relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
+- **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output) for coding tasks, `ask_user_question` for human-in-the-loop interaction, plus full browser automation via Playwright with accessibility-tree-based element selection.
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
 - **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
 - **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
@@ -172,7 +173,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **Trajectory Visualization**: A web-based UI for viewing complete agent execution histories including message flows, tool calls, token usage, and budget stats — with markdown rendering and syntax-highlighted code blocks.
 - **Docker Integration**: A `DockerManager` for running agent tasks in isolated containers with automatic image pulling, lifecycle management, port mapping, and cleanup.
 
-### Core Ideologies
+### Core Principles
 
 - **Radical Simplicity over Abstraction**: KISS rejects the layered abstraction and ceremony found in frameworks like LangChain, CrewAI, or DSPy. Agents are just functions, orchestration is plain Python function composition, and tools are ordinary callables — no decorators, annotations, or boilerplate required.
 - **No Bloat, No Overengineering**: Every function should do one thing well. After implementation, code is aggressively simplified — unnecessary attributes, variables, config options, conditional checks, and comments are removed. The codebase stays lean by design.
@@ -266,18 +267,7 @@ uv run python -m kiss.viz_trajectory.server artifacts
 uv run python -m kiss.viz_trajectory.server artifacts --host 127.0.0.1 --port 5050
 ```
 
-The visualizer provides:
-
-- **Modern UI**: Dark theme with smooth animations
-- **Sidebar Navigation**: List of all trajectories sorted by start time
-- **Markdown Rendering**: Full markdown support for message content
-- **Code Highlighting**: Syntax highlighting for fenced code blocks
-- **Message Display**: Clean, organized view of agent conversations
-- **Metadata Display**: Shows agent ID, model, steps, tokens, and budget information
-
 ![Trajectory Visualizer](assets/KISSTrajectory.png)
-
-📖 **For detailed trajectory visualizer documentation, see [Trajectory Visualizer README](src/kiss/viz_trajectory/README.md)**
 
 ## 📦 Developer Installation
 
