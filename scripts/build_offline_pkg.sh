@@ -452,10 +452,11 @@ cat > "$SCRIPTS/postinstall" << 'POSTINSTALL'
 #!/bin/bash
 # macOS .pkg postinstall script
 # $2 = install location (e.g., /usr/local or /)
-set -euo pipefail
+set -uo pipefail
 
 # The payload is installed to /usr/local/kiss-offline by the pkg
 BUNDLE="/usr/local/kiss-offline"
+LOG_FILE="/tmp/kiss-install.log"
 
 # Detect the real user: prefer SUDO_USER, then console owner, then USER
 if [ "$(id -u)" = "0" ]; then
@@ -479,18 +480,92 @@ export KISS_INSTALL_DIR="$_INSTALL_DIR"
 export KISS_PROJECT_DIR="$_INSTALL_DIR"
 export HOME="$TARGET_HOME"
 
-if [ "$(id -u)" = "0" ]; then
-    sudo -u "$TARGET_USER" \
-        KISS_INSTALL_DIR="$KISS_INSTALL_DIR" \
-        KISS_PROJECT_DIR="$KISS_PROJECT_DIR" \
-        HOME="$TARGET_HOME" \
+# ---------------------------------------------------------------------------
+# Show a native macOS alert with a scrollable text view containing the
+# installation log.  Uses JXA (JavaScript for Automation) via osascript.
+# ---------------------------------------------------------------------------
+_show_error_window() {
+    local jxa_file="/tmp/kiss-error-dialog.js"
+    cat > "$jxa_file" << 'JXAEOF'
+ObjC.import('Cocoa');
+
+var app = $.NSApplication.sharedApplication;
+app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+
+var errorText = 'Could not read installation log.';
+var fm = $.NSFileManager.defaultManager;
+var logPath = '/tmp/kiss-install.log';
+if (fm.fileExistsAtPath(logPath)) {
+    var data = fm.contentsAtPath(logPath);
+    if (data && data.length > 0) {
+        var s = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+        if (s) errorText = ObjC.unwrap(s);
+    }
+}
+if (errorText.length > 50000) {
+    errorText = '... (earlier output truncated) ...\n\n' + errorText.slice(-50000);
+}
+
+var alert = $.NSAlert.alloc.init;
+alert.messageText = $('KISS Installation Failed');
+alert.informativeText = $('The installation encountered an error. See details below:');
+alert.alertStyle = 2;
+
+var scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 560, 300));
+scrollView.hasVerticalScroller = true;
+scrollView.borderType = 2;
+
+var cs = scrollView.contentSize;
+var textView = $.NSTextView.alloc.initWithFrame(
+    $.NSMakeRect(0, 0, cs.width, cs.height)
+);
+textView.editable = false;
+textView.selectable = true;
+textView.string = $(errorText);
+textView.font = $.NSFont.fontWithNameSize('Menlo', 11);
+textView.verticallyResizable = true;
+textView.textContainer.containerSize = $.NSMakeSize(cs.width, 1e7);
+textView.textContainer.widthTracksTextView = true;
+
+scrollView.documentView = textView;
+alert.accessoryView = scrollView;
+alert.addButtonWithTitle($('OK'));
+
+app.activateIgnoringOtherApps(true);
+alert.runModal;
+JXAEOF
+
+    if [ "$(id -u)" = "0" ]; then
+        sudo -u "$TARGET_USER" osascript -l JavaScript "$jxa_file" 2>/dev/null || true
+    else
+        osascript -l JavaScript "$jxa_file" 2>/dev/null || true
+    fi
+    rm -f "$jxa_file"
+}
+
+# Run the install, capturing all output to a log file (and stdout via tee)
+_run_install() {
+    if [ "$(id -u)" = "0" ]; then
+        sudo -u "$TARGET_USER" \
+            KISS_INSTALL_DIR="$KISS_INSTALL_DIR" \
+            KISS_PROJECT_DIR="$KISS_PROJECT_DIR" \
+            HOME="$TARGET_HOME" \
+            bash "$BUNDLE/install-offline.sh"
+    else
         bash "$BUNDLE/install-offline.sh"
-else
-    bash "$BUNDLE/install-offline.sh"
+    fi
+}
+
+if ! _run_install 2>&1 | tee "$LOG_FILE"; then
+    echo "Installation failed. Showing error details..."
+    _show_error_window
+    rm -f "$LOG_FILE"
+    exit 1
 fi
 
 # Clean up the bundle payload — everything has been copied to user directories
 rm -rf "$BUNDLE"
+rm -f "$LOG_FILE"
 echo "Cleaned up $BUNDLE"
 
 echo "KISS offline installation complete!"

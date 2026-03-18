@@ -7,6 +7,14 @@ if [[ -z "${GEMINI_API_KEY}" ]]; then
   exit 1
 fi
 
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+fi
+
+uv sync
+
+
 if [[ $# -gt 0 ]]; then
   uv run src/kiss/agents/sorcar/sorcar_agent.py "$@"
 else
