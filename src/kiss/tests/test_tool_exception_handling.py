@@ -18,6 +18,10 @@ def _make_agent() -> KISSAgent:
     return agent
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/relentless_agent.py — finish
+# ---------------------------------------------------------------------------
+
 def test_keyboard_interrupt_propagates() -> None:
     def interrupt_tool(x: str) -> str:
         """Tool that raises KeyboardInterrupt.
@@ -49,6 +53,10 @@ def _parse_summarizer_result(summarizer_result: str) -> str:
     except Exception:
         return summarizer_result
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent._summarizer_yaml_to_result
+# ---------------------------------------------------------------------------
 
 def test_summarizer_yaml_invalid_yaml() -> None:
     raw = (

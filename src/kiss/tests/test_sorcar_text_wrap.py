@@ -23,6 +23,10 @@ def _css_block(css: str, selector: str) -> str:
     return match.group(1) if match else ""
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — OUTPUT_CSS
+# ---------------------------------------------------------------------------
+
 class TestToolCallHeaderWrapping:
     """Verify .tc-h (tool call header) wraps long content."""
 
@@ -79,12 +83,20 @@ class TestUsageInfoWrapping:
         assert "overflow-wrap:break-word" in block
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — _build_html
+# ---------------------------------------------------------------------------
+
 class TestBuildHtmlContainsWrappingCSS:
     """Verify _build_html output includes the wrapping CSS."""
 
     def setup_method(self) -> None:
         self.html = _build_html("Test", "", "/tmp")
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter
+# ---------------------------------------------------------------------------
 
 class TestToolCallBroadcastLongContent:
     """Verify tool call events carry full long paths and descriptions."""
@@ -115,6 +127,11 @@ class TestUsageInfoBroadcastLongContent:
     def teardown_method(self) -> None:
         self.printer.remove_client(self.cq)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_CSS
+# ---------------------------------------------------------------------------
+
 class TestChatbotCSSWrapping:
     """Verify CHATBOT_CSS overrides don't break wrapping."""
 
@@ -132,6 +149,10 @@ class TestChatbotCSSWrapping:
         block = _css_block(CHATBOT_CSS, "#assistant-panel .tc-h")
         assert "nowrap" not in block
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — EVENT_HANDLER_JS
+# ---------------------------------------------------------------------------
 
 class TestEventHandlerJSToolCallRendering:
     """Verify the JS event handler for tool_call creates proper HTML structure."""

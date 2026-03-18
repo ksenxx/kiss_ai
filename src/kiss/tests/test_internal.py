@@ -9,6 +9,9 @@ from kiss.core.utils import (
     fc,
 )
 
+# ---------------------------------------------------------------------------
+# kiss/core/utils.py — add_prefix_to_each_line, fc
+# ---------------------------------------------------------------------------
 
 class TestUtilsFunctions(unittest.TestCase):
     def test_add_prefix_to_each_line(self):

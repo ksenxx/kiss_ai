@@ -75,6 +75,17 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._flush_newline()
             self._console.print(content, markup=False, **kwargs)
             return ""
+        if type == "system_prompt":
+            self._flush_newline()
+            self._console.print(
+                Panel(
+                    Text(str(content)),
+                    title="[bold]System Prompt[/bold]",
+                    border_style="magenta",
+                    padding=(1, 2),
+                )
+            )
+            return ""
         if type == "prompt":
             self._flush_newline()
             self._console.print(

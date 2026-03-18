@@ -151,6 +151,19 @@ OUTPUT_CSS = r"""
   word-break:break-word;line-height:1.7;
 }
 .rc-body.pre{white-space:pre-wrap}
+.system-prompt{
+  border:1px solid var(--border);border-radius:8px;margin:10px 0;
+  overflow:hidden;background:var(--surface);
+}
+.system-prompt-h{
+  padding:8px 16px;background:rgba(188,140,255,.08);
+  font-size:11px;font-weight:600;color:var(--purple);
+  text-transform:uppercase;letter-spacing:.04em;
+}
+.system-prompt-body{
+  padding:12px 16px;font-size:13px;
+  word-break:break-word;line-height:1.6;max-height:400px;overflow-y:auto;
+}
 .prompt{
   border:1px solid var(--border);border-radius:8px;margin:10px 0;
   overflow:hidden;background:var(--surface);
@@ -161,7 +174,7 @@ OUTPUT_CSS = r"""
   text-transform:uppercase;letter-spacing:.04em;
 }
 .prompt-body{
-  padding:12px 16px;font-size:13px;white-space:pre-wrap;
+  padding:12px 16px;font-size:13px;
   word-break:break-word;line-height:1.6;max-height:400px;overflow-y:auto;
 }
 .sys{
@@ -178,7 +191,7 @@ OUTPUT_CSS = r"""
 }
 .usage{
   border:1px solid var(--border);border-radius:8px;margin:6px 0;
-  padding:4px 12px;background:var(--surface);font-size:11px;
+  padding:4px 12px;background:var(--surface);font-size:9px;
   color:var(--dim);font-style:italic;
   font-family:'SF Mono','Fira Code',monospace;
   white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;
@@ -373,10 +386,21 @@ function handleOutputEvent(ev,O,state){
     if(typeof hljs!=='undefined')rc.querySelectorAll('pre code').forEach(
       function(bl){hljs.highlightElement(bl)});
     O.appendChild(rc);break}
+  case'system_prompt':{
+    var sp=mkEl('div','ev system-prompt');
+    var spBody=typeof marked!=='undefined'?marked.parse(ev.text||''):esc(ev.text||'');
+    sp.innerHTML='<div class="system-prompt-h">System Prompt</div>'
+      +'<div class="system-prompt-body">'+spBody+'</div>';
+    if(typeof hljs!=='undefined')sp.querySelectorAll('pre code').forEach(
+      function(bl){hljs.highlightElement(bl)});
+    O.appendChild(sp);break}
   case'prompt':{
     var p=mkEl('div','ev prompt');
+    var pBody=typeof marked!=='undefined'?marked.parse(ev.text||''):esc(ev.text||'');
     p.innerHTML='<div class="prompt-h">Prompt</div>'
-      +'<div class="prompt-body">'+esc(ev.text||'')+'</div>';
+      +'<div class="prompt-body">'+pBody+'</div>';
+    if(typeof hljs!=='undefined')p.querySelectorAll('pre code').forEach(
+      function(bl){hljs.highlightElement(bl)});
     O.appendChild(p);break}
   case'usage_info':{
     var u=mkEl('div','ev usage');
@@ -406,7 +430,7 @@ HTML_HEAD = r"""<!DOCTYPE html>
 _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
     "text_delta", "text_end", "tool_call", "tool_result",
-    "system_output", "result", "prompt", "usage_info",
+    "system_output", "result", "system_prompt", "prompt", "usage_info",
     "task_done", "task_error", "task_stopped",
     "followup_suggestion",
 })
@@ -597,6 +621,9 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             text = buf.getvalue()
             if text.strip():
                 self.broadcast({"type": "text_delta", "text": text})
+            return ""
+        if type == "system_prompt":
+            self.broadcast({"type": "system_prompt", "text": str(content)})
             return ""
         if type == "prompt":
             self.broadcast({"type": "prompt", "text": str(content)})

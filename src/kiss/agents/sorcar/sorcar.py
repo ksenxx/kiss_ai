@@ -634,25 +634,25 @@ def run_chatbot(
 
             printer._thread_local.stop_event = None
             chat_events = printer.stop_recording()
+            stopped_externally = False
             with running_lock:
                 if agent_thread is not current_thread:
                     # Stopped externally; stop_agent already broadcast
                     # task_stopped which is captured in chat_events.
-                    _set_latest_chat_events(
-                        chat_events, task=task, result=result_summary,
-                    )
-                    return
-                running = False
-                agent_thread = None
-            # Broadcast AFTER setting running=False so clients can
-            # immediately submit a new task without getting a 409.
-            chat_events.append(done_event)
-            printer.broadcast(done_event)
-            if done_event.get("type") == "task_done":
-                try:
-                    generate_followup(task, result_text)
-                except Exception:  # pragma: no cover – LLM API failure
-                    _log_exc()
+                    stopped_externally = True
+                else:
+                    running = False
+                    agent_thread = None
+            if not stopped_externally:
+                # Broadcast AFTER setting running=False so clients can
+                # immediately submit a new task without getting a 409.
+                chat_events.append(done_event)
+                printer.broadcast(done_event)
+                if done_event.get("type") == "task_done":
+                    try:
+                        generate_followup(task, result_text)
+                    except Exception:  # pragma: no cover – LLM API failure
+                        _log_exc()
             _set_latest_chat_events(
                 chat_events, task=task, result=result_summary,
             )
@@ -958,9 +958,15 @@ def run_chatbot(
                     return len(text)
                 return len(text) - (pos + len(q))
 
+            # Build recency rank from insertion order in file_usage.json
+            # (last key = most recently used → rank 0).
+            _usage_keys = list(usage.keys())
+            _recency = {k: i for i, k in enumerate(reversed(_usage_keys))}
+            _n = len(_usage_keys)
             frequent.sort(
                 key=lambda m: (
                     _end_dist(m["text"]),
+                    _recency.get(m["text"], _n),
                     -usage.get(m["text"], 0),
                 )
             )

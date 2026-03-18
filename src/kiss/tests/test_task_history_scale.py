@@ -53,6 +53,10 @@ def _write_n_tasks(n: int) -> None:
             f.write("\n")
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — th
+# ---------------------------------------------------------------------------
+
 class TestMaxHistory:
     """Verify MAX_HISTORY is 1,000,000."""
 

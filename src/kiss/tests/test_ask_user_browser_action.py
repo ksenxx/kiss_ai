@@ -46,6 +46,10 @@ def http_server():
         thread.join()
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/web_use_tool.py — WebUseTool
+# ---------------------------------------------------------------------------
+
 class TestAskUserBrowserAction:
     def test_with_url_navigates_first(self, http_server: str) -> None:
         """When url is provided, it navigates to that URL before returning."""
