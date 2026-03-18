@@ -641,6 +641,8 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel .llm-panel{padding:8px 10px;margin:6px 0;border-radius:8px}
 #assistant-panel .llm-panel .txt{font-size:10px}
 #assistant-panel .bash-panel{max-height:200px;font-size:10px}
+#assistant-panel .system-prompt-h{font-size:10px;padding:6px 12px}
+#assistant-panel .system-prompt-body{font-size:10px;padding:8px 12px}
 #assistant-panel .prompt-h{font-size:10px;padding:6px 12px}
 #assistant-panel .prompt-body{font-size:10px;padding:8px 12px}
 #assistant-panel .rc-h{
@@ -657,7 +659,7 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel .spinner{font-size:11px}
 #assistant-panel .empty-msg{font-size:11px}
 #assistant-panel .rl{font-size:10px}
-#assistant-panel .usage{font-size:11px}
+#assistant-panel .usage{font-size:9px}
 """
 
 CHATBOT_THEME_CSS = r"""
@@ -942,6 +944,9 @@ body{background:var(--bg)}
   border-color:rgba(var(--accent-rgb),0.3);color:#fff;
 }
 #merge-toolbar .mt-sep{background:rgba(var(--fg-rgb),0.1)}
+#assistant-panel .system-prompt-h{
+  background:rgba(var(--purple-rgb),0.08);color:var(--purple);
+}
 #assistant-panel .prompt-h{
   background:rgba(var(--cyan-rgb),0.08);color:var(--cyan);
 }
