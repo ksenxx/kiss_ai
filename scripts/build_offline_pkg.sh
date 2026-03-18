@@ -184,7 +184,7 @@ mkdir -p "$BUNDLE/project"
 rsync -a --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
     --exclude='.kiss.artifacts' --exclude='htmlcov*' --exclude='.coverage*' \
     --exclude='.mypy_cache' --exclude='.ruff_cache' --exclude='.pytest_cache' \
-    --exclude='node_modules' --exclude='dist' \
+    --exclude='node_modules' --exclude='dist' --exclude='nohup.out' \
     "$PROJECT_ROOT/" "$BUNDLE/project/"
 echo "   project: $(du -sh "$BUNDLE/project" | cut -f1)"
 
