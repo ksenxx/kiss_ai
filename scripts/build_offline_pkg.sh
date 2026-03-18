@@ -186,6 +186,8 @@ rsync -a --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
     --exclude='.mypy_cache' --exclude='.ruff_cache' --exclude='.pytest_cache' \
     --exclude='node_modules' --exclude='dist' --exclude='nohup.out' \
     "$PROJECT_ROOT/" "$BUNDLE/project/"
+# Safety net: remove nohup.out if it slipped through (e.g. created by a concurrent process)
+find "$BUNDLE/project" -name 'nohup.out' -delete 2>/dev/null || true
 echo "   project: $(du -sh "$BUNDLE/project" | cut -f1)"
 
 # ---------------------------------------------------------------------------
@@ -309,7 +311,7 @@ export UV_PYTHON_INSTALL_DIR="$INSTALL_BASE/python"
 export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_BASE/playwright-browsers"
 if [ -d "$KISS_BUNDLE_DIR/project" ]; then
     mkdir -p "$PROJECT_DIR"
-    cp -R "$KISS_BUNDLE_DIR/project/"* "$PROJECT_DIR/"
+    rsync -a --exclude='nohup.out' "$KISS_BUNDLE_DIR/project/" "$PROJECT_DIR/"
     cd "$PROJECT_DIR"
     
     # Create venv with offline Python (--clear to handle re-installs)
@@ -318,6 +320,10 @@ if [ -d "$KISS_BUNDLE_DIR/project" ]; then
     # Install from local wheels (fully offline, including pre-built project wheel)
     # Explicitly target the project venv to avoid uv resolving a different workspace
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "$INSTALL_BASE/bin/uv" pip install --python "$PROJECT_DIR/.venv" --no-index --find-links "$KISS_BUNDLE_DIR/wheels" kiss-agent-framework
+
+    # Copy the sorcar wrapper script into .venv/bin so it is found on PATH
+    cp "$PROJECT_DIR/sorcar" "$PROJECT_DIR/.venv/bin/sorcar"
+    chmod +x "$PROJECT_DIR/.venv/bin/sorcar"
 
     # Symlink project entry-point scripts into $INSTALL_BASE/bin so they are on PATH
     for script in sorcar check generate-api-docs; do
@@ -428,7 +434,7 @@ EOF
     echo ""
     echo "Launching sorcar..."
     cd "$PROJECT_DIR"
-    exec "$PROJECT_DIR/.venv/bin/sorcar" "$PROJECT_DIR"
+    exec ./sorcar "$PROJECT_DIR"
 else
     echo ""
     echo "Set your API keys in a new terminal:"
@@ -438,7 +444,7 @@ else
     # Launch sorcar directly
     echo ""
     echo "To launch sorcar, open a new terminal and run:"
-    echo "  sorcar $PROJECT_DIR"
+    echo "  cd $PROJECT_DIR && ./sorcar $PROJECT_DIR"
 fi
 INSTALL_SCRIPT
 
