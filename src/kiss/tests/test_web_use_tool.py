@@ -116,6 +116,10 @@ def web_tool():
     tool.close()
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/web_use_tool.py
+# ---------------------------------------------------------------------------
+
 class TestNavigation:
 
     def test_go_to_invalid_url(self, web_tool):

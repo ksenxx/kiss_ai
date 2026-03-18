@@ -20,6 +20,9 @@ from kiss.agents.sorcar.code_server import (
     _load_github_token,
 )
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _CS_EXTENSION_JS, _GH_TOKEN_FILENAME, _load_github_token
+# ---------------------------------------------------------------------------
 
 class TestLoadGithubToken:
     """Test _load_github_token with real files."""

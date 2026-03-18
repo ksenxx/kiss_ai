@@ -28,6 +28,10 @@ def _anthropic_auth_error(msg: str = "invalid x-api-key") -> AnthropicAuthError:
     )
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/kiss_agent.py — KISSAgent
+# ---------------------------------------------------------------------------
+
 class TestAgenticLoopAuthError(unittest.TestCase):
     """Test that auth errors fail fast instead of retrying until max_steps."""
 

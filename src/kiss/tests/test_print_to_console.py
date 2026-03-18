@@ -18,6 +18,10 @@ def _make() -> tuple[ConsolePrinter, io.StringIO]:
     return ConsolePrinter(file=buf), buf
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/print_to_console.py — ConsolePrinter
+# ---------------------------------------------------------------------------
+
 class TestInit(unittest.TestCase):
     def test_default_file_is_stdout(self):
         import sys

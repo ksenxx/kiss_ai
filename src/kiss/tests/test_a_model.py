@@ -19,6 +19,10 @@ def model_name(request: pytest.FixtureRequest) -> str:
     return str(request.config.getoption("--model"))
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/kiss_evolve/simple_rag.py — SimpleRAG
+# ---------------------------------------------------------------------------
+
 @pytest.mark.redundancy_check
 class TestAModel(unittest.TestCase):
     model_name = DEFAULT_MODEL

@@ -17,6 +17,10 @@ def _make_current() -> dict[str, dict]:
     }
 
 
+# ---------------------------------------------------------------------------
+# kiss/scripts/update_models.py — compute_changes
+# ---------------------------------------------------------------------------
+
 def test_openrouter_preview_with_zero_pricing_is_added():
     """Free preview models from OpenRouter should be added."""
     current = _make_current()

@@ -18,6 +18,9 @@ from pathlib import Path
 import kiss.agents.sorcar.chatbot_ui as chatbot_ui
 import kiss.agents.sorcar.code_server as code_server
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — code_server
+# ---------------------------------------------------------------------------
 
 class TestSetupCodeServer(unittest.TestCase):
     def setUp(self) -> None:
@@ -86,6 +89,11 @@ class TestSetupCodeServer(unittest.TestCase):
         snippet = js[idx : idx + 400]
         # saveAll passes notifyDone as both success and error handler
         assert ".then(notifyDone,notifyDone)" in snippet
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — chatbot_ui
+# ---------------------------------------------------------------------------
 
 class TestBuildHtmlJavaScript(unittest.TestCase):
     html: str

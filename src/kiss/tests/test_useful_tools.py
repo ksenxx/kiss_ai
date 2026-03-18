@@ -31,6 +31,12 @@ def tools(temp_test_dir):
     return UsefulTools(), temp_test_dir
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/useful_tools.py — UsefulTools, _extract_command_names,
+#   _truncate_output, DISALLOWED_BASH_COMMANDS
+# ---------------------------------------------------------------------------
+
+
 class TestUsefulTools:
 
     def test_write_to_directory_path(self, tools):

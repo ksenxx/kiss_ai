@@ -21,6 +21,9 @@ from kiss.agents.sorcar.task_history import (
 )
 from kiss.core.base import Base
 
+# ---------------------------------------------------------------------------
+# kiss/core/base.py — Base
+# ---------------------------------------------------------------------------
 
 class TestBaseClassLock:
     """Verify Base._class_lock protects agent_counter and global_budget_used."""
@@ -50,6 +53,11 @@ class TestBaseClassLock:
         # Reset for other tests
         Base.global_budget_used = initial
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — _add_task, _load_history, _set_latest_chat_events,
+#   _task_history_module
+# ---------------------------------------------------------------------------
 
 class TestTaskDoneAfterRunningFalse:
     """Verify task_done is broadcast AFTER running=False."""

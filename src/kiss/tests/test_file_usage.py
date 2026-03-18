@@ -5,6 +5,9 @@ from pathlib import Path
 
 from kiss.agents.sorcar import task_history
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — task_history
+# ---------------------------------------------------------------------------
 
 class TestFileUsage(unittest.TestCase):
     """Tests for _load_file_usage / _record_file_usage persistence."""

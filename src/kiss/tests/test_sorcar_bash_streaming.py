@@ -16,6 +16,10 @@ def _drain(q: queue.Queue) -> list[dict]:
     return events
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/browser_ui.py — BaseBrowserPrinter
+# ---------------------------------------------------------------------------
+
 class TestSorcarBashStreaming:
 
     def test_multiline_bash_streams_all_lines(self):

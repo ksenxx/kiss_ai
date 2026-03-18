@@ -23,7 +23,8 @@ TEST_MODEL = "gemini-2.0-flash"
 
 
 # ---------------------------------------------------------------------------
-# Template constant tests
+# kiss/core/relentless_agent.py — TASK_PROMPT, IMPORTANT_INSTRUCTIONS,
+#                                  CONTINUATION_PROMPT
 # ---------------------------------------------------------------------------
 
 
@@ -56,7 +57,7 @@ class TestTemplateConstants(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# finish() standalone function tests (covers all isinstance branches)
+# kiss/core/relentless_agent.py — finish()
 # ---------------------------------------------------------------------------
 
 
@@ -87,7 +88,7 @@ class TestFinish(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _reset() tests
+# kiss/core/relentless_agent.py — RelentlessAgent._reset()
 # ---------------------------------------------------------------------------
 
 
@@ -118,7 +119,7 @@ class TestReset(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _docker_bash() tests
+# kiss/core/relentless_agent.py — RelentlessAgent._docker_bash()
 # ---------------------------------------------------------------------------
 
 
@@ -132,7 +133,7 @@ class TestDockerBash(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# perform_task: system prompt includes IMPORTANT_INSTRUCTIONS
+# kiss/core/relentless_agent.py — RelentlessAgent.perform_task()
 # ---------------------------------------------------------------------------
 
 
@@ -180,11 +181,6 @@ class TestPerformTaskSystemPrompt(unittest.TestCase):
             self.assertIn(str(os.getpid()), important)
 
 
-# ---------------------------------------------------------------------------
-# Integration tests: continuation and exhaustion
-# ---------------------------------------------------------------------------
-
-
 @requires_gemini_api_key
 class TestContinuation(unittest.TestCase):
     def test_empty_summary_no_progress(self) -> None:
@@ -203,11 +199,6 @@ class TestContinuation(unittest.TestCase):
                     work_dir=td,
                     verbose=False,
                 )
-
-
-# ---------------------------------------------------------------------------
-# Integration tests: exception handling paths
-# ---------------------------------------------------------------------------
 
 
 @requires_gemini_api_key
@@ -238,7 +229,7 @@ class TestExceptionPaths(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# run() method branches
+# kiss/core/relentless_agent.py — RelentlessAgent.run()
 # ---------------------------------------------------------------------------
 
 
@@ -264,10 +255,6 @@ class TestRunBranches(unittest.TestCase):
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
         self.assertIsNone(agent.docker_manager)
-
-# ---------------------------------------------------------------------------
-# Docker-specific branch tests
-# ---------------------------------------------------------------------------
 
 
 @requires_gemini_api_key

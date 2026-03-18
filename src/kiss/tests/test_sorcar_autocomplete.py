@@ -1,5 +1,8 @@
 from kiss.agents.sorcar.sorcar import _clip_autocomplete_suggestion
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — _clip_autocomplete_suggestion
+# ---------------------------------------------------------------------------
 
 def test_clip_autocomplete_suggestion_keeps_only_few_words() -> None:
     suggestion = _clip_autocomplete_suggestion(

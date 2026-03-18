@@ -9,6 +9,10 @@ def dummy_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str,
     return "result", []
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/gepa/gepa.py — GEPA
+# ---------------------------------------------------------------------------
+
 class TestSanitizePromptTemplate(unittest.TestCase):
     """Tests for relaxed placeholder validation in _sanitize_prompt_template."""
 

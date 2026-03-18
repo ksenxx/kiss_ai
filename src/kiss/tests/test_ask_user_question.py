@@ -8,6 +8,10 @@ import time
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — ask_user_question callback
+# ---------------------------------------------------------------------------
+
 
 class TestAskUserQuestionCallback:
     """Test the callback pattern used by sorcar.py for ask_user_question."""
@@ -142,6 +146,13 @@ class TestAskUserQuestionCallback:
         t.join(timeout=5)
         assert done.is_set()
         assert result_holder[0] == multiline
+
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — /user-question-done endpoint
+# ---------------------------------------------------------------------------
+
+
 class TestSorcarEndpointIntegration:
     """Test the /user-question-done endpoint via the Starlette app."""
 

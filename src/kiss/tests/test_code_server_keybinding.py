@@ -3,6 +3,9 @@
 from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _CS_EXTENSION_JS
+# ---------------------------------------------------------------------------
 
 def test_extension_js_has_toggle_focus_command():
     """Test that the VS Code extension registers kiss.toggleFocus command."""
@@ -20,6 +23,10 @@ def test_extension_js_polls_for_focus_editor_file():
     assert "pending-focus-editor.json" in _CS_EXTENSION_JS
     assert "focusActiveEditorGroup" in _CS_EXTENSION_JS
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/chatbot_ui.py — CHATBOT_JS
+# ---------------------------------------------------------------------------
 
 def test_chatbot_js_posts_to_focus_editor():
     """Test that Cmd+K in chatbox POSTs to /focus-editor instead of direct iframe focus."""

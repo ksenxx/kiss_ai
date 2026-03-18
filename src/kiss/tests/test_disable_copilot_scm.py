@@ -30,6 +30,10 @@ def _make_copilot_chat_pkg(ext_dir: Path, when_clause: str = "scmProvider == git
     return pkg_path
 
 
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/code_server.py — _install_copilot_extension
+# ---------------------------------------------------------------------------
+
 class TestInstallCopilotCallsDisable:
     def test_source_code_calls_disable_after_subprocess(self) -> None:
         """Verify _install_copilot_extension calls _disable_copilot_scm_button

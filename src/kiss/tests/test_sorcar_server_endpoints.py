@@ -90,6 +90,12 @@ def server():
             proc.wait()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — run_chatbot HTTP endpoints
+# ---------------------------------------------------------------------------
+
+
 class TestServerTasks:
     def test_tasks_returns_list(self, server):
         base_url, _, _ = server

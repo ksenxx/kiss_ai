@@ -34,6 +34,10 @@ def _drain(q: queue.Queue) -> list[dict]:
     return events
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/base.py — Base
+# ---------------------------------------------------------------------------
+
 class TestGlobalBudgetThreadSafety:
     """Verify Base.global_budget_used accumulates correctly under concurrent updates."""
 
@@ -69,6 +73,10 @@ def _worker_increment_usage(usage_file: str, key: str, n: int) -> None:
     for _ in range(n):
         th._increment_usage(Path(usage_file), key)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/task_history.py — _increment_usage, _save_last_model
+# ---------------------------------------------------------------------------
 
 class TestCrossProcessIncrementUsage:
     """Verify _increment_usage is safe under concurrent multi-process access."""
@@ -150,6 +158,10 @@ def _worker_atomic_write(path: str, content: str, n: int) -> None:
     for _ in range(n):
         _atomic_write_text(Path(path), content)
 
+
+# ---------------------------------------------------------------------------
+# kiss/agents/sorcar/sorcar.py — _atomic_write_text
+# ---------------------------------------------------------------------------
 
 class TestAtomicWriteText:
     """Verify _atomic_write_text never leaves a partial/empty file."""

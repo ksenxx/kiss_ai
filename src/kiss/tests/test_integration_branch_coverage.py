@@ -67,6 +67,12 @@ def _make_collector_callback(collector: list[str]):
 # ═══════════════════════════════════════════════════════════════════════
 
 
+# ---------------------------------------------------------------------------
+# kiss/core/models/openai_compatible_model.py —
+#   OpenAICompatibleModel, _build_text_based_tools_prompt,
+#   _parse_text_based_tool_calls
+# ---------------------------------------------------------------------------
+
 class TestBuildTextBasedToolsPrompt:
     def test_function_untyped_param(self) -> None:
         def untyped(x):  # type: ignore[no-untyped-def]
@@ -655,6 +661,10 @@ class TestOpenAICompatibleModelEmbedding:
 # utils.py
 # ═══════════════════════════════════════════════════════════════════════
 
+
+# ---------------------------------------------------------------------------
+# kiss/core/utils.py — get_config_value, is_subpath, read_project_file, resolve_path, utils_finish
+# ---------------------------------------------------------------------------
 
 class TestUtilsFunctions:
     def test_get_config_value_default(self) -> None:
