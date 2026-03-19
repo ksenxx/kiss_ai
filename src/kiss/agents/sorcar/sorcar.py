@@ -380,6 +380,7 @@ def run_chatbot(
                 cs_url = f"http://127.0.0.1:{cs_port}"
                 try:
                     _atomic_write_text(cs_port_file, str(cs_port))
+                    _atomic_write_text(_persistent_port_file, str(cs_port))
                 except OSError:
                     _log_exc()
 
