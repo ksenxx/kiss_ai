@@ -146,6 +146,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "computer-use-preview-2025-03-11": _mi(128000, 3.00, 12.00),
     "deepcogito/cogito-v2-1-671b": _mi(163840, 1.25, 1.25, fc=False),
     "deepseek-ai/DeepSeek-R1": _mi(163840, 3.00, 7.00, fc=False),  # Serves R1-0528
+    "deepseek-ai/DeepSeek-R1-0528": _mi(163840, 3.00, 7.00),  # NEW
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": _mi(131072, 2.00, 2.00),  # NEW
     "deepseek-ai/DeepSeek-V3.1": _mi(131072, 0.60, 1.70, fc=False),
     "essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
@@ -225,6 +226,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5.3-codex": _mi(400000, 1.75, 14.00),  # NEW
     "gpt-5.4": _mi(1050000, 2.50, 15.00),  # NEW
     "gpt-5.4-2026-03-05": _mi(1050000, 2.50, 15.00),  # NEW
+    "gpt-5.4-mini": _mi(400000, 0.75, 4.50),  # NEW
+    "gpt-5.4-mini-2026-03-17": _mi(400000, 0.75, 4.50),  # NEW
+    "gpt-5.4-nano": _mi(400000, 0.20, 1.25),  # NEW
+    "gpt-5.4-nano-2026-03-17": _mi(400000, 0.20, 1.25),  # NEW
     "gpt-5.4-pro": _mi(1050000, 30.00, 180.00),  # NEW
     "gpt-5.4-pro-2026-03-05": _mi(1050000, 30.00, 180.00),  # NEW
     "gpt-audio": _mi(128000, 2.50, 10.00, fc=False),
@@ -240,6 +245,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "meta-llama/Llama-3.2-1B-Instruct": _mi(131072, 0.06, 0.06),  # NEW
     "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),  # Dep 2026-03
     "meta-llama/Llama-3.3-70B-Instruct-Turbo": _mi(131072, 0.88, 0.88, fc=False),
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo-test": _mi(131072, 0.88, 0.88),  # NEW
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": _mi(1048576, 0.27, 0.85),
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": _mi(1048576, 0.18, 0.59),  # NEW
     "meta-llama/Meta-Llama-3-8B-Instruct": _mi(8192, 0.20, 0.20),  # NEW
@@ -250,9 +256,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": _mi(131072, 0.18, 0.18, fc=False),  # Dep 2026-03
     "minimax-m2.5": _mi(1000000, 0.15, 1.20),  # Standard: 50 TPS
     "minimax-m2.5-lightning": _mi(1000000, 0.30, 2.40),  # Lightning: 100 TPS
-    "novita/deepseek/deepseek-v3.2": _mi(163840, 0.25, 0.40),  # Default model
-    "novita/zai-org/glm-5": _mi(202752, 0.80, 2.56),  # GLM-5 from ZAI
-    "novita/minimax/minimax-m2.5": _mi(196608, 0.27, 0.95),
     "MiniMaxAI/MiniMax-M2.5": _mi(196608, 0.30, 1.20),
     "mistralai/Ministral-3-14B-Instruct-2512": _mi(262144, 0.20, 0.20, fc=False),
     "mistralai/Mistral-7B-Instruct-v0.2": _mi(32768, 0.20, 0.20, fc=False),
@@ -263,6 +266,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
+    "novita/deepseek/deepseek-v3.2": _mi(163840, 0.25, 0.40),  # Default model
+    "novita/minimax/minimax-m2.5": _mi(196608, 0.27, 0.95),
+    "novita/zai-org/glm-5": _mi(202752, 0.80, 2.56),  # GLM-5 from ZAI
     "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.06, 0.25),  # NEW
     "o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
     "o1-2024-12-17": _mi(200000, 15.00, 60.00),  # NEW
@@ -371,7 +377,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemma-2-27b-it": _mi(8192, 0.65, 0.65, fc=False),
     "openrouter/google/gemma-2-9b-it": _mi(8192, 0.03, 0.09, fc=False),
     "openrouter/google/gemma-3-12b-it": _mi(131072, 0.04, 0.13, fc=False),
-    "openrouter/google/gemma-3-27b-it": _mi(128000, 0.03, 0.11, fc=False),
+    "openrouter/google/gemma-3-27b-it": _mi(131072, 0.08, 0.16, fc=False),
     "openrouter/google/gemma-3-4b-it": _mi(131072, 0.04, 0.08, fc=False),
     "openrouter/google/gemma-3n-e4b-it": _mi(32768, 0.02, 0.04, fc=False),
     "openrouter/gryphe/mythomax-l2-13b": _mi(4096, 0.06, 0.06, fc=False),
@@ -390,7 +396,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/meta-llama/llama-3-70b-instruct": _mi(8192, 0.51, 0.74, fc=False),
     "openrouter/meta-llama/llama-3-8b-instruct": _mi(8192, 0.03, 0.04, fc=False),
     "openrouter/meta-llama/llama-3.1-405b": _mi(32768, 4.00, 4.00, fc=False),
-    "openrouter/meta-llama/llama-3.1-405b-instruct": _mi(131000, 4.00, 4.00, fc=False, gen=False),
     "openrouter/meta-llama/llama-3.1-70b-instruct": _mi(131072, 0.40, 0.40, fc=False),
     "openrouter/meta-llama/llama-3.1-8b-instruct": _mi(16384, 0.02, 0.05, fc=False),
     "openrouter/meta-llama/llama-3.2-11b-vision-instruct": _mi(131072, 0.05, 0.05, fc=False),
@@ -401,14 +406,15 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/meta-llama/llama-4-scout": _mi(327680, 0.08, 0.30, fc=False),
     "openrouter/meta-llama/llama-guard-3-8b": _mi(131072, 0.02, 0.06, fc=False),  # Safety model
     "openrouter/meta-llama/llama-guard-4-12b": _mi(163840, 0.18, 0.18, fc=False),  # Safety model
-    "openrouter/microsoft/phi-4": _mi(16384, 0.06, 0.14, fc=False),
+    "openrouter/microsoft/phi-4": _mi(16384, 0.065, 0.14, fc=False),
     "openrouter/microsoft/wizardlm-2-8x22b": _mi(65535, 0.62, 0.62, fc=False),
     "openrouter/minimax/minimax-01": _mi(1000192, 0.20, 1.10, fc=False),
     "openrouter/minimax/minimax-m1": _mi(1000000, 0.40, 2.20, fc=False),  # Unreliable FC
     "openrouter/minimax/minimax-m2": _mi(196608, 0.255, 1.00, fc=False),
     "openrouter/minimax/minimax-m2-her": _mi(65536, 0.30, 1.20, fc=False),  # Roleplay model
     "openrouter/minimax/minimax-m2.1": _mi(196608, 0.27, 0.95),
-    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.25, 1.20),
+    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.20, 1.20),
+    "openrouter/minimax/minimax-m2.7": _mi(204800, 0.30, 1.20),  # NEW
     "openrouter/mistralai/codestral-2508": _mi(256000, 0.30, 0.90, fc=False),
     "openrouter/mistralai/devstral-2512": _mi(262144, 0.40, 2.00, fc=False),
     "openrouter/mistralai/devstral-medium": _mi(131072, 0.40, 2.00, fc=False, gen=False),
@@ -426,8 +432,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/mistralai/mistral-nemo": _mi(131072, 0.02, 0.04, fc=False),
     "openrouter/mistralai/mistral-saba": _mi(32768, 0.20, 0.60, fc=False),
     "openrouter/mistralai/mistral-small-24b-instruct-2501": _mi(32768, 0.05, 0.08, fc=False),
+    "openrouter/mistralai/mistral-small-2603": _mi(262144, 0.15, 0.60),  # NEW
     "openrouter/mistralai/mistral-small-3.1-24b-instruct": _mi(128000, 0.35, 0.56, fc=False),
-    "openrouter/mistralai/mistral-small-3.2-24b-instruct": _mi(131072, 0.06, 0.18, fc=False),
+    "openrouter/mistralai/mistral-small-3.2-24b-instruct": _mi(128000, 0.075, 0.20, fc=False),
     "openrouter/mistralai/mistral-small-creative": _mi(32768, 0.10, 0.30, fc=False),
     "openrouter/mistralai/mixtral-8x22b-instruct": _mi(65536, 2.00, 6.00, fc=False),
     "openrouter/mistralai/mixtral-8x7b-instruct": _mi(32768, 0.54, 0.54, fc=False),
@@ -448,6 +455,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/nvidia/llama-3.1-nemotron-70b-instruct": _mi(131072, 1.20, 1.20, fc=False),
     "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": _mi(131072, 0.10, 0.40),
     "openrouter/nvidia/nemotron-3-nano-30b-a3b": _mi(262144, 0.05, 0.20, fc=False),  # Unreliable FC
+    "openrouter/nvidia/nemotron-3-super-120b-a12b": _mi(8000, 0.30, 0.90),  # NEW
     "openrouter/nvidia/nemotron-nano-12b-v2-vl": _mi(131072, 0.20, 0.60, fc=False),  # Vision model
     "openrouter/nvidia/nemotron-nano-9b-v2": _mi(131072, 0.04, 0.16),
     "openrouter/openai/gpt-3.5-turbo": _mi(16385, 0.50, 1.50),
@@ -492,6 +500,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.3-chat": _mi(128000, 1.75, 14.00),  # NEW
     "openrouter/openai/gpt-5.3-codex": _mi(400000, 1.75, 14.00),  # NEW
     "openrouter/openai/gpt-5.4": _mi(1050000, 2.50, 15.00),  # NEW
+    "openrouter/openai/gpt-5.4-mini": _mi(400000, 0.75, 4.50),  # NEW
+    "openrouter/openai/gpt-5.4-nano": _mi(400000, 0.20, 1.25),  # NEW
     "openrouter/openai/gpt-5.4-pro": _mi(1050000, 30.00, 180.00),  # NEW
     "openrouter/openai/gpt-audio": _mi(128000, 2.50, 10.00, fc=False),  # Audio model
     "openrouter/openai/gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),  # Audio model
@@ -516,14 +526,14 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/prime-intellect/intellect-3": _mi(131072, 0.20, 1.10, fc=False),
     "openrouter/qwen/qwen-2.5-72b-instruct": _mi(32768, 0.12, 0.39),
     "openrouter/qwen/qwen-2.5-7b-instruct": _mi(32768, 0.04, 0.10, fc=False),
-    "openrouter/qwen/qwen-2.5-coder-32b-instruct": _mi(32768, 0.20, 0.20, fc=False),
+    "openrouter/qwen/qwen-2.5-coder-32b-instruct": _mi(32768, 0.66, 1.00, fc=False),
     "openrouter/qwen/qwen-2.5-vl-7b-instruct": _mi(32768, 0.20, 0.20, fc=False),  # Vision model
     "openrouter/qwen/qwen-max": _mi(32768, 1.04, 4.16, fc=False),
-    "openrouter/qwen/qwen-plus": _mi(1000000, 0.40, 1.20),
+    "openrouter/qwen/qwen-plus": _mi(1000000, 0.26, 0.78),
     "openrouter/qwen/qwen-plus-2025-07-28": _mi(1000000, 0.26, 0.78),
     "openrouter/qwen/qwen-plus-2025-07-28:thinking": _mi(1000000, 0.40, 4.00),  # SLOW: thinking
     "openrouter/qwen/qwen-turbo": _mi(131072, 0.033, 0.13),
-    "openrouter/qwen/qwen-vl-max": _mi(131072, 0.80, 3.20),  # Vision model
+    "openrouter/qwen/qwen-vl-max": _mi(131072, 0.52, 2.08),  # Vision model
     "openrouter/qwen/qwen-vl-plus": _mi(131072, 0.137, 0.41, fc=False),  # Vision model
     "openrouter/qwen/qwen2.5-coder-7b-instruct": _mi(32768, 0.03, 0.09, fc=False),
     "openrouter/qwen/qwen2.5-vl-32b-instruct": _mi(128000, 0.20, 0.60, fc=False),  # Vision model
@@ -531,10 +541,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-14b": _mi(40960, 0.06, 0.24, fc=False),
     "openrouter/qwen/qwen3-235b-a22b": _mi(131072, 0.455, 1.82, fc=False, gen=False),
     "openrouter/qwen/qwen3-235b-a22b-2507": _mi(262144, 0.07, 0.10, fc=False),
-    "openrouter/qwen/qwen3-235b-a22b-thinking-2507": _mi(262144, 0.11, 0.60),  # SLOW: thinking
+    "openrouter/qwen/qwen3-235b-a22b-thinking-2507": _mi(131072, 0.15, 1.495),  # SLOW: thinking
     "openrouter/qwen/qwen3-30b-a3b": _mi(40960, 0.08, 0.28, fc=False),
     "openrouter/qwen/qwen3-30b-a3b-instruct-2507": _mi(262144, 0.09, 0.30),
-    "openrouter/qwen/qwen3-30b-a3b-thinking-2507": _mi(32768, 0.05, 0.34),  # SLOW: thinking
+    "openrouter/qwen/qwen3-30b-a3b-thinking-2507": _mi(131072, 0.08, 0.40),  # SLOW: thinking
     "openrouter/qwen/qwen3-32b": _mi(40960, 0.08, 0.24, fc=False),
     "openrouter/qwen/qwen3-8b": _mi(40960, 0.05, 0.40, fc=False),
     "openrouter/qwen/qwen3-coder": _mi(262144, 0.22, 1.00),
@@ -542,9 +552,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-coder-flash": _mi(1000000, 0.195, 0.975),
     "openrouter/qwen/qwen3-coder-next": _mi(262144, 0.12, 0.75),  # Latest agentic coding model
     "openrouter/qwen/qwen3-coder-plus": _mi(1000000, 0.65, 3.25, fc=False),
-    "openrouter/qwen/qwen3-max": _mi(262144, 1.20, 6.00),
+    "openrouter/qwen/qwen3-max": _mi(262144, 0.78, 3.90),
     "openrouter/qwen/qwen3-max-thinking": _mi(262144, 0.78, 3.90, fc=False),  # SLOW: thinking
-    "openrouter/qwen/qwen3-next-80b-a3b-instruct": _mi(131072, 0.09, 1.10),
+    "openrouter/qwen/qwen3-next-80b-a3b-instruct": _mi(262144, 0.09, 1.10),
     "openrouter/qwen/qwen3-next-80b-a3b-thinking": _mi(131072, 0.098, 0.78),  # SLOW: thinking
     "openrouter/qwen/qwen3-vl-235b-a22b-instruct": _mi(262144, 0.20, 0.88),  # Vision model
     "openrouter/qwen/qwen3-vl-235b-a22b-thinking": _mi(131072, 0.26, 2.60, fc=False),
@@ -558,9 +568,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-35b-a3b": _mi(262144, 0.163, 1.30),  # NEW
     "openrouter/qwen/qwen3.5-397b-a17b": _mi(262144, 0.39, 2.34),  # NEW
     "openrouter/qwen/qwen3.5-9b": _mi(256000, 0.05, 0.15),  # NEW
-    "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.10, 0.40),  # NEW
+    "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.065, 0.26),  # NEW
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),  # NEW
-    "openrouter/qwen/qwq-32b": _mi(32768, 0.15, 0.40, fc=False),  # SLOW: reasoning model
+    "openrouter/qwen/qwq-32b": _mi(131072, 0.15, 0.58, fc=False),  # SLOW: reasoning model
     "openrouter/relace/relace-apply-3": _mi(256000, 0.85, 1.25, fc=False),
     "openrouter/relace/relace-search": _mi(256000, 1.00, 3.00, fc=False),  # Agentic search
     "openrouter/sao10k/l3-euryale-70b": _mi(8192, 1.48, 1.48),
@@ -590,15 +600,18 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/x-ai/grok-4.20-multi-agent-beta": _mi(2000000, 2.00, 6.00),  # NEW
     "openrouter/x-ai/grok-code-fast-1": _mi(256000, 0.20, 1.50),
     "openrouter/xiaomi/mimo-v2-flash": _mi(262144, 0.09, 0.29, fc=False),
+    "openrouter/xiaomi/mimo-v2-omni": _mi(262144, 0.40, 2.00),  # NEW
+    "openrouter/xiaomi/mimo-v2-pro": _mi(1048576, 1.00, 3.00),  # NEW
     "openrouter/z-ai/glm-4-32b": _mi(128000, 0.10, 0.10),
     "openrouter/z-ai/glm-4.5": _mi(131072, 0.60, 2.20),
     "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.13, 0.85),
     "openrouter/z-ai/glm-4.5v": _mi(65536, 0.60, 1.80, fc=False),
     "openrouter/z-ai/glm-4.6": _mi(204800, 0.39, 1.90, fc=False),  # Unreliable FC
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
-    "openrouter/z-ai/glm-4.7": _mi(202752, 0.38, 1.98),
+    "openrouter/z-ai/glm-4.7": _mi(202752, 0.40, 1.75),
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
-    "openrouter/z-ai/glm-5": _mi(202752, 0.72, 2.30),  # 744B MoE - FC verified
+    "openrouter/z-ai/glm-5": _mi(80000, 0.72, 2.30),  # 744B MoE - FC verified
+    "openrouter/z-ai/glm-5-turbo": _mi(202752, 0.96, 3.20),  # NEW
     "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),  # NEW
     "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),

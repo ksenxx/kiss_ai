@@ -268,9 +268,9 @@ SorcarAgent does not touch the continuation loop, the session boundary mechanism
 ```python
 return super().run(
     model_name=model_name,
-    system_instructions=system_instructions,
+    system_prompt=system_instructions,
     prompt_template=prompt,
-    tools=self._get_tools(),
+    tools=self._get_tools() + (tools if tools else []),
     ...
 )
 ```
