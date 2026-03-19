@@ -1450,27 +1450,63 @@ def _auto_update() -> None:  # pragma: no cover – CLI helper
         return
     project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
     git_dir = project_root / ".git"
+    freshly_initialized = False
+    public_url = "https://github.com/ksenxx/kiss_ai.git"
+    # Suppress credential prompts — public repo needs no auth.
+    git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
     if not git_dir.is_dir():
-        return
+        print("Sorcar: initializing git repo…")
+        try:
+            subprocess.run(
+                ["git", "init"],
+                cwd=project_root, capture_output=True, text=True, timeout=30,
+                check=True, env=git_env,
+            )
+            subprocess.run(
+                ["git", "remote", "add", "origin", public_url],
+                cwd=project_root, capture_output=True, text=True, timeout=30,
+                check=True, env=git_env,
+            )
+            subprocess.run(
+                ["git", "fetch", "origin"],
+                cwd=project_root, capture_output=True, text=True, timeout=60,
+                check=True, env=git_env,
+            )
+            subprocess.run(
+                ["git", "checkout", "-f", "-B", "main", "origin/main"],
+                cwd=project_root, capture_output=True, text=True, timeout=30,
+                check=True, env=git_env,
+            )
+            subprocess.run(
+                ["git", "branch", "--set-upstream-to=origin/main", "main"],
+                cwd=project_root, capture_output=True, text=True, timeout=30,
+                check=True, env=git_env,
+            )
+            freshly_initialized = True
+        except Exception as exc:
+            print(f"git init/fetch error: {exc}", file=sys.stderr)
+            return
     print("Sorcar: checking for updates…")
     try:
         pull = subprocess.run(
-            ["git", "pull", "--ff-only"],
+            ["git", "pull", "--ff-only", public_url, "main"],
             cwd=project_root,
             capture_output=True,
             text=True,
             timeout=30,
+            env=git_env,
         )
-        print(pull.stdout.strip() if pull.stdout.strip() else "(no output from git pull)")
         pull_out = pull.stdout.strip()
         print(pull_out if pull_out else "(no output from git pull)")
         if pull.returncode != 0:
             print(f"git pull failed: {pull.stderr.strip()}", file=sys.stderr)
-            return
+            if not freshly_initialized:
+                return
     except Exception as exc:
         print(f"git pull error: {exc}", file=sys.stderr)
-        return
-    if pull_out == "Already up to date.":
+        if not freshly_initialized:
+            return
+    if not freshly_initialized and pull_out == "Already up to date.":
         print("Sorcar: already up to date.")
         return
     try:
