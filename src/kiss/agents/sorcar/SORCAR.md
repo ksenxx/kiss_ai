@@ -76,7 +76,7 @@ ______________________________________________________________________
 
 I always use Claude Opus 4.6. Sorcar supports every major LLM provider through a unified model abstraction. The model picker in the chat UI lists all available models grouped by vendor (Anthropic, OpenAI, Gemini, MiniMax, Novita, OpenRouter, Together AI), sorted by price, with usage frequency tracking. The user can switch models between tasks with a single click.
 
-This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.3 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
+This is architecturally simpler than Cursor's model management, which involves routing different subagent types to different models, or Claude Code, which is tightly coupled to Anthropic's Claude models. In Sorcar, the model is a parameter to `KISSAgent.run()`. Switching from Claude Opus 4.6 to GPT-5.4 to Gemini 3.1 Pro changes one string. The continuation mechanism, tool calling, and UI all work identically.
 
 ______________________________________________________________________
 
@@ -110,9 +110,8 @@ for session in range(self.max_sub_sessions):
         arguments={
             "task_description": self.task_description,
             "previous_progress": progress_section,
-            "step_threshold": str(self.max_steps - 2),
-            ...
         },
+        system_prompt=system_prompt,  # includes step_threshold, work_dir, PID
         tools=all_tools,
         max_steps=self.max_steps,
         max_budget=self.max_budget,

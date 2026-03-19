@@ -1,22 +1,8 @@
-if [[ -z "${ANTHROPIC_API_KEY}" ]]; then
-  echo "KISS Sorcar requires ANTHROPIC_API_KEY in the environment" 
-  exit 1
-fi
-if [[ -z "${GEMINI_API_KEY}" ]]; then
-  echo "KISS Sorcar requires GEMINI_API_KEY in the environment"
-  exit 1
-fi
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys
 
-if ! command -v uv &> /dev/null; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-fi
+from kiss.agents.sorcar.sorcar import main
 
-uv sync
-
-
-if [[ $# -gt 0 ]]; then
-  uv run src/kiss/agents/sorcar/sorcar_agent.py "$@"
-else
-  uv run sorcar
-fi
+if __name__ == "__main__":
+    sys.exit(main())
