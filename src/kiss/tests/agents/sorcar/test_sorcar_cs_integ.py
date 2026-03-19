@@ -6,7 +6,6 @@ code paths. No mocks or test doubles.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -128,8 +127,7 @@ def cs_server():
         except requests.ConnectionError:
             time.sleep(0.5)
 
-    wd_hash = hashlib.md5(work_dir.encode()).hexdigest()[:8]
-    cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
+    cs_data_dir = str(_KISS_DIR / "cs-data")
 
     keepalive = requests.get(f"{base_url}/events", stream=True, timeout=300)
 
@@ -219,34 +217,19 @@ class TestCSSSEDisconnect:
         time.sleep(2)
 
 
-class TestDataDirIsolation:
-    """Verify that each work directory gets a unique code-server data directory."""
+class TestSingleDataDirLayout:
+    """Verify that a single cs-data directory is used for all work directories."""
 
-    def test_different_work_dirs_get_different_data_dirs(self) -> None:
-        """Two different work directories must produce different data dir hashes."""
-        wd1 = "/home/user/project1"
-        wd2 = "/home/user/project2"
-        h1 = hashlib.md5(wd1.encode()).hexdigest()[:8]
-        h2 = hashlib.md5(wd2.encode()).hexdigest()[:8]
-        assert h1 != h2
+    def test_cs_data_dir_name(self) -> None:
+        """The data directory is always 'cs-data' regardless of work dir."""
+        from kiss.agents.sorcar.task_history import _KISS_DIR
 
-    def test_same_work_dir_gets_same_data_dir(self) -> None:
-        """Same work directory must produce the same data dir hash."""
-        wd = "/home/user/project"
-        h1 = hashlib.md5(wd.encode()).hexdigest()[:8]
-        h2 = hashlib.md5(wd.encode()).hexdigest()[:8]
-        assert h1 == h2
-
-    def test_hash_prefix_is_8_chars(self) -> None:
-        wd = "/any/path"
-        h = hashlib.md5(wd.encode()).hexdigest()[:8]
-        assert len(h) == 8
-        assert h.isalnum()
+        assert (_KISS_DIR / "cs-data").name == "cs-data"
 
 
 _EXTENSION_DATA_DIR_STRINGS = [
     "var dataDir=path.resolve(ctx.globalStorageUri.fsPath",
-    "path.join(dataDir,'assistant-port')",
+    "path.join(home,'.kiss','assistant-port')",
     "path.join(dataDir,'active-file.json')",
     "path.join(dataDir,'pending-merge.json')",
     "path.join(dataDir,'pending-open.json')",
@@ -271,25 +254,19 @@ class TestExtensionJSUsesDataDir:
 
 
 class TestAssistantPortIsolation:
-    """Verify assistant-port file is written per-instance, not globally."""
+    """Verify assistant-port file is written to _KISS_DIR, not per-instance."""
 
-    def test_assistant_port_written_to_data_dir(self) -> None:
-        """Simulate assistant-port being written to the data dir."""
+    def test_assistant_port_written_to_kiss_dir(self) -> None:
+        """Assistant-port is written to _KISS_DIR (stable location)."""
         tmpdir = tempfile.mkdtemp()
         try:
-            data_dir = os.path.join(tmpdir, "cs-test1234")
-            os.makedirs(data_dir, exist_ok=True)
-            port_file = Path(data_dir) / "assistant-port"
+            kiss_dir = Path(tmpdir)
+            port_file = kiss_dir / "assistant-port"
             port_file.write_text("12345")
             assert port_file.read_text() == "12345"
-
-            data_dir_2 = os.path.join(tmpdir, "cs-other5678")
-            os.makedirs(data_dir_2, exist_ok=True)
-            port_file_2 = Path(data_dir_2) / "assistant-port"
-            port_file_2.write_text("67890")
-
-            assert port_file.read_text() == "12345"
-            assert port_file_2.read_text() == "67890"
+            # Overwriting with new port replaces the value
+            port_file.write_text("67890")
+            assert port_file.read_text() == "67890"
         finally:
             shutil.rmtree(tmpdir)
 
@@ -423,39 +400,15 @@ def _find_free_port() -> int:
         return int(s.getsockname()[1])
 
 
-class TestSharedDataDir:
-    """Test that all instances of the same work dir share a data directory."""
+class TestSingleDataDir:
+    """Test that a single cs-data directory is used regardless of work dir."""
 
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.kiss_dir = Path(self.tmpdir) / ".kiss"
-        self.kiss_dir.mkdir()
-        self.work_dir = tempfile.mkdtemp()
-        self.wd_hash = hashlib.md5(self.work_dir.encode()).hexdigest()[:8]
+    def test_data_dir_is_cs_data(self) -> None:
+        """The data directory is always cs-data under KISS_DIR."""
+        from kiss.agents.sorcar.task_history import _KISS_DIR
 
-    def teardown_method(self) -> None:
-        import shutil
-
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        shutil.rmtree(self.work_dir, ignore_errors=True)
-
-    def test_canonical_data_dir_always_used(self) -> None:
-        """Both first and second instances use cs-{wd_hash} as data dir."""
-        cs_data_dir = str(self.kiss_dir / f"cs-{self.wd_hash}")
-        assert f"cs-{self.wd_hash}" in cs_data_dir
-        assert f"-{os.getpid()}" not in cs_data_dir
-
-    def test_same_work_dir_same_data_dir(self) -> None:
-        """Two instances with the same work_dir compute the same data dir."""
-        h1 = hashlib.md5(self.work_dir.encode()).hexdigest()[:8]
-        h2 = hashlib.md5(self.work_dir.encode()).hexdigest()[:8]
-        assert h1 == h2
-
-    def test_different_work_dirs_different_data_dirs(self) -> None:
-        """Two different work directories produce different data dir hashes."""
-        h1 = hashlib.md5(b"/tmp/project_a").hexdigest()[:8]
-        h2 = hashlib.md5(b"/tmp/project_b").hexdigest()[:8]
-        assert h1 != h2
+        expected = str(_KISS_DIR / "cs-data")
+        assert expected.endswith("cs-data")
 
 
 class TestSharedExtensionsDir:
@@ -515,17 +468,16 @@ class TestCodeServerReuse:
             server_sock.close()
 
     def test_assistant_port_overwritten_by_latest(self) -> None:
-        """The latest Sorcar instance overwrites assistant-port in shared data dir."""
+        """The latest Sorcar instance overwrites assistant-port in _KISS_DIR."""
         tmpdir = tempfile.mkdtemp()
         try:
-            data_dir = Path(tmpdir) / "cs-abc12345"
-            data_dir.mkdir()
+            kiss_dir = Path(tmpdir)
 
-            (data_dir / "assistant-port").write_text("11111")
-            assert (data_dir / "assistant-port").read_text() == "11111"
+            (kiss_dir / "assistant-port").write_text("11111")
+            assert (kiss_dir / "assistant-port").read_text() == "11111"
 
-            (data_dir / "assistant-port").write_text("22222")
-            assert (data_dir / "assistant-port").read_text() == "22222"
+            (kiss_dir / "assistant-port").write_text("22222")
+            assert (kiss_dir / "assistant-port").read_text() == "22222"
         finally:
             import shutil
 

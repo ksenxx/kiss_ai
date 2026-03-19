@@ -1419,13 +1419,10 @@ class TestSorcarServerIntegration:
 
     def test_active_file_md(self, server) -> None:
         """Cover active file with .md extension triggering prompt detection."""
-        import hashlib
-
         base_url, work_dir, _, _ = server
         from kiss.agents.sorcar.task_history import _KISS_DIR
 
-        wd_hash = hashlib.md5(work_dir.encode()).hexdigest()[:8]
-        cs_dir = _KISS_DIR / f"cs-{wd_hash}"
+        cs_dir = _KISS_DIR / "cs-data"
         cs_dir.mkdir(parents=True, exist_ok=True)
         (cs_dir / "active-file.json").write_text(
             json.dumps({"path": os.path.join(work_dir, "readme.md")})

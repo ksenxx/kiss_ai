@@ -6,7 +6,6 @@ real objects.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -860,11 +859,8 @@ class TestActiveFileInfoMd:
     def test_active_file_md(self, server) -> None:
         """Set active-file.json to point to a .md file and query."""
         base_url, work_dir, _, tmpdir = server
-        import hashlib
-
         from kiss.agents.sorcar.task_history import _KISS_DIR
-        wd_hash = hashlib.md5(work_dir.encode()).hexdigest()[:8]
-        cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
+        cs_data_dir = str(_KISS_DIR / "cs-data")
         os.makedirs(cs_data_dir, exist_ok=True)
 
         md_file = os.path.join(work_dir, "prompt.md")
@@ -1094,10 +1090,9 @@ def inproc_server():
         except requests.ConnectionError:
             time.sleep(0.2)
 
-    wd_hash = hashlib.md5(work_dir.encode()).hexdigest()[:8]
     from kiss.agents.sorcar.task_history import _KISS_DIR
 
-    cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
+    cs_data_dir = str(_KISS_DIR / "cs-data")
 
     keepalive = requests.get(f"{base_url}/events", stream=True, timeout=300)
 

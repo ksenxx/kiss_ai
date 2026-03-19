@@ -731,50 +731,51 @@ def _add_task(task: str) -> None:
 
 
 def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
-    """Remove stale code-server data directories.
+    """Remove the code-server data directory if stale.
 
-    Scans ``~/.kiss/cs-*`` directories and removes those that are older
-    than ``max_age_hours`` and have no active process on their port.
+    Checks ``~/.kiss/cs-data`` and removes it if older than
+    ``max_age_hours`` and no process is listening on its port.
+    Also removes any legacy ``~/.kiss/cs-*`` per-workdir directories
+    and ``cs-port-*`` files.
 
     Args:
-        max_age_hours: Maximum age in hours before a directory is eligible
-            for cleanup.
+        max_age_hours: Maximum age in hours before the directory is
+            eligible for cleanup.
 
     Returns:
         Number of directories removed.
     """
     threshold = time.time() - max_age_hours * 3600
     removed = 0
+    # Clean up legacy per-workdir cs-* directories and cs-port-* files
+    for p in sorted(_KISS_DIR.glob("cs-port-*")):
+        if p.is_file():
+            try:
+                p.unlink()
+            except OSError:
+                _log_exc()
     for d in sorted(_KISS_DIR.glob("cs-*")):
-        if not d.is_dir() or d.name == "cs-extensions":
+        if not d.is_dir() or d.name in ("cs-extensions", "cs-data"):
             continue
-        try:
-            if d.stat().st_mtime > threshold:
-                continue
-            # Check if a process is still listening on the port.
-            # Try persistent port file first, then in-directory port file.
-            _dir_hash = d.name.split("-", 1)[1] if "-" in d.name else ""
-            _port_candidates = [_KISS_DIR / f"cs-port-{_dir_hash}", d / "cs-port"]
-            _still_in_use = False
-            for _pf in _port_candidates:
-                if _pf.exists():
-                    try:
-                        port = int(_pf.read_text().strip())
-                        with socket.create_connection(
-                            ("127.0.0.1", port), timeout=0.3
-                        ):
-                            _still_in_use = True
-                            break
-                    except (
-                        ConnectionRefusedError,
-                        OSError,
-                        ValueError,
-                    ):
-                        pass
-            if _still_in_use:
-                continue
-            shutil.rmtree(d, ignore_errors=True)
-            removed += 1
-        except OSError:  # pragma: no cover
-            _log_exc()
+        shutil.rmtree(d, ignore_errors=True)
+        removed += 1
+    # Check the single cs-data directory
+    d = _KISS_DIR / "cs-data"
+    if not d.is_dir():
+        return removed
+    try:
+        if d.stat().st_mtime > threshold:
+            return removed
+        _pf = d / "cs-port"
+        if _pf.exists():
+            try:
+                port = int(_pf.read_text().strip())
+                with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                    return removed  # still in use
+            except (ConnectionRefusedError, OSError, ValueError):
+                pass
+        shutil.rmtree(d, ignore_errors=True)
+        removed += 1
+    except OSError:  # pragma: no cover
+        _log_exc()
     return removed

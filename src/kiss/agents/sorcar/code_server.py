@@ -213,7 +213,7 @@ function activate(ctx){
     await applyAll('nc','ns','All changes rejected.');
   }));
   function readPort(){
-    try{return fs.readFileSync(path.join(dataDir,'assistant-port'),'utf8').trim();}
+    try{return fs.readFileSync(path.join(home,'.kiss','assistant-port'),'utf8').trim();}
     catch(e){return '';}
   }
   function postAssistant(p,body){

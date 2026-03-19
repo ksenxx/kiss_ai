@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import os
@@ -226,8 +225,7 @@ def run_chatbot(
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
-    wd_hash = hashlib.md5(actual_work_dir.encode()).hexdigest()[:8]
-    cs_data_dir = str(_KISS_DIR / f"cs-{wd_hash}")
+    cs_data_dir = str(_KISS_DIR / "cs-data")
     # All instances share a single extensions directory so Copilot and
     # other extensions are installed once and reused across work dirs.
     _shared_extensions_dir = str(_KISS_DIR / "cs-extensions")
@@ -240,28 +238,22 @@ def run_chatbot(
         merging = True
         remaining_hunks = recovered
 
-    # Read or assign a code-server port for this work directory.
-    # The port is stored in a persistent file OUTSIDE the cs data dir so it
-    # survives _cleanup_stale_cs_dirs.  Keeping the same port keeps the
-    # browser origin stable, which preserves localStorage-based secrets
-    # (e.g. GitHub Copilot auth tokens) across Sorcar relaunches.
-    _persistent_port_file = _KISS_DIR / f"cs-port-{wd_hash}"
+    # Read or assign a code-server port.  The port is stored in a
+    # persistent file so the browser origin stays stable, preserving
+    # localStorage-based secrets (e.g. GitHub Copilot auth tokens).
     cs_port_file = Path(cs_data_dir) / "cs-port"
     cs_port_file.parent.mkdir(parents=True, exist_ok=True)
     cs_port = 0
-    for _pf in (_persistent_port_file, cs_port_file):
-        if _pf.exists():  # pragma: no cover – port file from previous run
-            try:
-                cs_port = int(_pf.read_text().strip())
-                break
-            except (ValueError, OSError):
-                _log_exc()
+    if cs_port_file.exists():  # pragma: no cover – port file from previous run
+        try:
+            cs_port = int(cs_port_file.read_text().strip())
+        except (ValueError, OSError):
+            _log_exc()
     if not cs_port:  # pragma: no branch – cs_port always 0 on fresh start
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
             _s.bind(("", 0))
             cs_port = int(_s.getsockname()[1])
     try:
-        _atomic_write_text(_persistent_port_file, str(cs_port))
         _atomic_write_text(cs_port_file, str(cs_port))
     except OSError:  # pragma: no cover – filesystem permission error
         _log_exc()
@@ -380,7 +372,6 @@ def run_chatbot(
                 cs_url = f"http://127.0.0.1:{cs_port}"
                 try:
                     _atomic_write_text(cs_port_file, str(cs_port))
-                    _atomic_write_text(_persistent_port_file, str(cs_port))
                 except OSError:
                     _log_exc()
 
@@ -719,7 +710,7 @@ def run_chatbot(
             _kill_cs = True
             try:
                 _cur_port = int(
-                    Path(cs_data_dir, "assistant-port").read_text().strip()
+                    (_KISS_DIR / "assistant-port").read_text().strip()
                 )
                 if _cur_port != port:
                     with socket.create_connection(
@@ -1385,7 +1376,7 @@ def run_chatbot(
     port = find_free_port()
     try:
         Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(Path(cs_data_dir) / "assistant-port", str(port))
+        _atomic_write_text(_KISS_DIR / "assistant-port", str(port))
     except OSError:  # pragma: no cover – filesystem permission error
         _log_exc()
     url = f"http://127.0.0.1:{port}"

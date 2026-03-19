@@ -144,6 +144,35 @@ class TestCleanupStaleCsDirs:
         assert removed == 1
         assert not stale.exists()
 
+    def test_removes_stale_cs_data(self):
+        import os
+
+        kiss_dir = th._KISS_DIR
+        cs_data = kiss_dir / "cs-data"
+        cs_data.mkdir()
+        (cs_data / "cs-port").write_text("99999")
+        old_time = time.time() - 25 * 3600
+        os.utime(cs_data, (old_time, old_time))
+        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
+        assert removed >= 1
+        assert not cs_data.exists()
+
+    def test_removes_legacy_port_files(self):
+        kiss_dir = th._KISS_DIR
+        pf = kiss_dir / "cs-port-abc123"
+        pf.write_text("12345")
+        th._cleanup_stale_cs_dirs(max_age_hours=24)
+        assert not pf.exists()
+
+    def test_keeps_cs_data_when_recent(self):
+        kiss_dir = th._KISS_DIR
+        cs_data = kiss_dir / "cs-data"
+        cs_data.mkdir()
+        (cs_data / "cs-port").write_text("99999")
+        th._cleanup_stale_cs_dirs(max_age_hours=24)
+        # cs-data is recent, should not be removed
+        assert cs_data.exists()
+
 
 class TestMaxHistory:
     def test_max_history_value(self):
