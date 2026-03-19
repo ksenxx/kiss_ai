@@ -696,6 +696,7 @@ def _record_model_usage(model: str) -> None:
 
 
 FILE_USAGE_FILE = _KISS_DIR / "file_usage.json"
+_MAX_FILE_USAGE_ENTRIES = 1000
 
 
 def _load_file_usage() -> dict[str, int]:
@@ -706,11 +707,18 @@ def _record_file_usage(path: str) -> None:
     """Increment the access count for a file path.
 
     Moves the key to the end of the JSON dict so that insertion order
-    reflects recency (most recently used file is last).
+    reflects recency (most recently used file is last).  Keeps at most
+    ``_MAX_FILE_USAGE_ENTRIES`` entries, evicting the least recently
+    used (earliest in insertion order) when the limit is exceeded.
     """
     def _update(data: dict[str, object]) -> None:
         old_val = data.pop(path, 0)
         data[path] = int(old_val) + 1  # type: ignore[call-overload]
+        # Evict least recently used entries (front of dict) if over limit.
+        excess = len(data) - _MAX_FILE_USAGE_ENTRIES
+        if excess > 0:
+            for key in list(data)[:excess]:
+                del data[key]
 
     _update_json_locked(FILE_USAGE_FILE, _update)
 

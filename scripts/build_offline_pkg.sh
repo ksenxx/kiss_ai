@@ -373,10 +373,6 @@ if [ -d "$KISS_BUNDLE_DIR/project" ]; then
     # Explicitly target the project venv to avoid uv resolving a different workspace
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "$INSTALL_BASE/bin/uv" pip install --python "$PROJECT_DIR/.venv" --no-index --find-links "$KISS_BUNDLE_DIR/wheels" kiss-agent-framework
 
-    # Copy the sorcar wrapper script into .venv/bin so it is found on PATH
-    cp "$PROJECT_DIR/sorcar" "$PROJECT_DIR/.venv/bin/sorcar"
-    chmod +x "$PROJECT_DIR/.venv/bin/sorcar"
-
     # Symlink project entry-point scripts into $INSTALL_BASE/bin so they are on PATH
     for script in sorcar check generate-api-docs; do
         if [ -f "$PROJECT_DIR/.venv/bin/$script" ]; then
@@ -508,51 +504,31 @@ chmod +x "$BUNDLE/install-offline.sh"
 echo ">>> Creating package scripts..."
 cat > "$SCRIPTS/postinstall" << 'POSTINSTALL'
 #!/bin/bash
-# macOS .pkg postinstall script
-# $2 = install location (e.g., /tmp )
+# macOS .pkg postinstall script (runs as current user — no root required)
 set -uo pipefail
 
-# The payload is installed to /tmp/kiss-offline by the pkg
-BUNDLE="/tmp/kiss-offline"
-LOG_FILE="/tmp/kiss-install.log"
+# The payload is installed to ~/.kiss-staging/kiss-offline by the pkg
+BUNDLE="$HOME/.kiss-staging/kiss-offline"
+LOG_FILE="$HOME/.kiss-staging/kiss-install.log"
 
-# Detect the real console user (postinstall may run as root)
-TARGET_USER=""
-# Method 1: stat /dev/console (most reliable on macOS)
-if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
-    TARGET_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
-fi
-# Method 2: scutil
-if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
-    TARGET_USER="$(scutil <<< 'show State:/Users/ConsoleUser' 2>/dev/null | awk '/Name :/ { print $3 }' || true)"
-fi
-# Method 3: fallback to $USER
-if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
-    TARGET_USER="${USER:-$(whoami)}"
-fi
-TARGET_HOME=$(eval echo "~$TARGET_USER")
-
-echo "Installing KISS for user: $TARGET_USER (home: $TARGET_HOME)"
+echo "Installing KISS for user: $USER (home: $HOME)"
 
 # Resolve install dir: marker file > default
-_MARKER="$TARGET_HOME/.kiss/install_dir"
+_MARKER="$HOME/.kiss/install_dir"
 if [ -f "$_MARKER" ]; then
     _SAVED_DIR="$(cat "$_MARKER" 2>/dev/null)"
 fi
-_INSTALL_DIR="${_SAVED_DIR:-$TARGET_HOME/kiss_ai}"
+_INSTALL_DIR="${_SAVED_DIR:-$HOME/kiss_ai}"
 
-# Run the install script as the target user
 export KISS_INSTALL_DIR="$_INSTALL_DIR"
 export KISS_PROJECT_DIR="$_INSTALL_DIR"
-export HOME="$TARGET_HOME"
 
 # ---------------------------------------------------------------------------
-# Show a native macOS alert with a scrollable text view containing the
-# installation log.  Uses JXA (JavaScript for Automation) via osascript.
+# Show a native macOS alert with the installation log on failure.
 # ---------------------------------------------------------------------------
 _show_error_window() {
-    local jxa_file="/tmp/kiss-error-dialog.js"
-    cat > "$jxa_file" << 'JXAEOF'
+    local jxa_file="$HOME/.kiss-staging/kiss-error-dialog.js"
+    cat > "$jxa_file" << JXAEOF
 ObjC.import('Cocoa');
 
 var app = $.NSApplication.sharedApplication;
@@ -560,7 +536,7 @@ app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
 
 var errorText = 'Could not read installation log.';
 var fm = $.NSFileManager.defaultManager;
-var logPath = '/tmp/kiss-install.log';
+var logPath = '$LOG_FILE';
 if (fm.fileExistsAtPath(logPath)) {
     var data = fm.contentsAtPath(logPath);
     if (data && data.length > 0) {
@@ -569,12 +545,12 @@ if (fm.fileExistsAtPath(logPath)) {
     }
 }
 if (errorText.length > 50000) {
-    errorText = '... (earlier output truncated) ...\n\n' + errorText.slice(-50000);
+    errorText = '... (earlier output truncated) ...\\n\\n' + errorText.slice(-50000);
 }
 
 var alert = $.NSAlert.alloc.init;
-alert.messageText = $('KISS Installation Failed');
-alert.informativeText = $('The installation encountered an error. See details below:');
+alert.messageText = \$('KISS Installation Failed');
+alert.informativeText = \$('The installation encountered an error. See details below:');
 alert.alertStyle = 2;
 
 var scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 560, 300));
@@ -587,7 +563,7 @@ var textView = $.NSTextView.alloc.initWithFrame(
 );
 textView.editable = false;
 textView.selectable = true;
-textView.string = $(errorText);
+textView.string = \$(errorText);
 textView.font = $.NSFont.fontWithNameSize('Menlo', 11);
 textView.verticallyResizable = true;
 textView.textContainer.containerSize = $.NSMakeSize(cs.width, 1e7);
@@ -595,7 +571,7 @@ textView.textContainer.widthTracksTextView = true;
 
 scrollView.documentView = textView;
 alert.accessoryView = scrollView;
-alert.addButtonWithTitle($('OK'));
+alert.addButtonWithTitle(\$('OK'));
 
 app.activateIgnoringOtherApps(true);
 alert.runModal;
@@ -605,38 +581,16 @@ JXAEOF
     rm -f "$jxa_file"
 }
 
-# Run the install as the target user (not as root)
-_run_install() {
-    if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
-        # We are root but the real user is someone else — run as that user
-        sudo -u "$TARGET_USER" -H \
-            KISS_INSTALL_DIR="$_INSTALL_DIR" \
-            KISS_PROJECT_DIR="$_INSTALL_DIR" \
-            HOME="$TARGET_HOME" \
-            bash "$BUNDLE/install-offline.sh"
-    else
-        bash "$BUNDLE/install-offline.sh"
-    fi
-}
-
-if ! _run_install 2>&1 | tee "$LOG_FILE"; then
+if ! bash "$BUNDLE/install-offline.sh" 2>&1 | tee "$LOG_FILE"; then
     echo "Installation failed. Showing error details..."
     _show_error_window
     rm -f "$LOG_FILE"
     exit 1
 fi
 
-# Fix ownership if we ran as root
-if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
-    echo "Fixing file ownership for $TARGET_USER..."
-    chown -R "$TARGET_USER" "$_INSTALL_DIR" 2>/dev/null || true
-    chown -R "$TARGET_USER" "$TARGET_HOME/.kiss" 2>/dev/null || true
-fi
-
-# Clean up the bundle payload — everything has been copied to user directories
-rm -rf "$BUNDLE"
-rm -f "$LOG_FILE"
-echo "Cleaned up $BUNDLE"
+# Clean up the staging payload — everything has been copied to user directories
+rm -rf "$HOME/.kiss-staging"
+echo "Cleaned up staging directory"
 
 echo "KISS offline installation complete!"
 POSTINSTALL
@@ -666,7 +620,7 @@ pkgbuild \
     --root "$PAYLOAD" \
     --identifier "$PKG_ID" \
     --version "$PKG_VERSION" \
-    --install-location "/tmp" \
+    --install-location ".kiss-staging" \
     --scripts "$SCRIPTS" \
     --component-plist "$STAGE/component.plist" \
     "$COMPONENT_PKG"
@@ -677,7 +631,7 @@ cat > "$STAGE/distribution.xml" << DIST_XML
 <installer-gui-script minSpecVersion="2">
     <title>KISS Agent Framework (Offline)</title>
     <organization>berkeley.edu</organization>
-    <domains enable_localSystem="true"/>
+    <domains enable_currentUserHome="true"/>
     <options customize="never" require-scripts="true" rootVolumeOnly="false"/>
     <welcome language="en" mime-type="text/plain"><![CDATA[
 KISS Agent Framework - Offline Installer
@@ -726,4 +680,4 @@ echo "Output: $OUTPUT"
 echo "Size: $(du -sh "$OUTPUT" | cut -f1)"
 echo ""
 echo "To install: open $OUTPUT"
-echo "Or: installer -pkg $OUTPUT -target /"
+echo "Or: installer -pkg $OUTPUT -target CurrentUserHomeDirectory"
