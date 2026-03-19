@@ -56,7 +56,7 @@ SYSTEM_PROMPT = f"""
   as nicely formatted marrkdown text.
 - Use 'uv run myprogram.py' for running Python programs.
 - READ large files in chunks.
-- Create temporary files in {_artifact_dir.parent}/tmp
+- Create temporary files in {_artifact_dir.parent.parent}/tmp
 - YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
 
 ## Code Style Guidelines
@@ -95,7 +95,7 @@ SYSTEM_PROMPT = f"""
 - For deep research, you must visit and read at least 50 websites
 
 ## Self-Improvement Loop
-- Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
+- Just before finishing an agent task, update `{_artifact_dir.parent.parent}/LESSONS.md`
   with instructions and rules and intelligence for yourself ONLY IF you have learned any
   major lessons (from mistakes) or intelligence about the project or in general during
   the task execution.  Lessons that save running time and number of tokens used by the
