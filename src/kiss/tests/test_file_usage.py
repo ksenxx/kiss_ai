@@ -1,5 +1,6 @@
 """Tests for file usage tracking and @ file picker frequency sorting."""
 
+import json
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from kiss.agents.sorcar import task_history
 # ---------------------------------------------------------------------------
 # kiss/agents/sorcar/task_history.py — task_history
 # ---------------------------------------------------------------------------
+
 
 class TestFileUsage(unittest.TestCase):
     """Tests for _load_file_usage / _record_file_usage persistence."""
@@ -24,9 +26,39 @@ class TestFileUsage(unittest.TestCase):
         if self._tmp.exists():
             self._tmp.unlink()
 
+    def test_load_empty_returns_empty(self) -> None:
+        """Loading from a non-existent file returns empty dict."""
+        assert task_history._load_file_usage() == {}
+
     def test_load_non_dict_json(self) -> None:
         self._tmp.write_text("[1,2,3]")
         assert task_history._load_file_usage() == {}
+
+    def test_load_corrupt_json(self) -> None:
+        """Corrupt JSON file is handled gracefully, returns empty dict."""
+        self._tmp.write_text("{bad json!!")
+        assert task_history._load_file_usage() == {}
+
+    def test_load_filters_non_int_values(self) -> None:
+        """Non-integer values in JSON are filtered out by _int_values."""
+        self._tmp.write_text(json.dumps({"a.py": 3, "b.py": "not_int", "c.py": 1.5}))
+        usage = task_history._load_file_usage()
+        assert usage == {"a.py": 3, "c.py": 1}
+        assert "b.py" not in usage
+
+    def test_record_creates_file(self) -> None:
+        """Recording to a non-existent file creates it."""
+        assert not self._tmp.exists()
+        task_history._record_file_usage("x.py")
+        assert self._tmp.exists()
+        assert task_history._load_file_usage() == {"x.py": 1}
+
+    def test_record_increments_count(self) -> None:
+        """Recording the same file increments its count."""
+        task_history._record_file_usage("a.py")
+        task_history._record_file_usage("a.py")
+        task_history._record_file_usage("a.py")
+        assert task_history._load_file_usage()["a.py"] == 3
 
     def test_record_moves_key_to_end(self) -> None:
         """Recording a file moves its key to the end (most recent)."""
@@ -34,7 +66,9 @@ class TestFileUsage(unittest.TestCase):
         task_history._record_file_usage("b.py")
         task_history._record_file_usage("c.py")
         assert list(task_history._load_file_usage().keys()) == [
-            "a.py", "b.py", "c.py",
+            "a.py",
+            "b.py",
+            "c.py",
         ]
         # Re-access a.py — it should move to the end
         task_history._record_file_usage("a.py")
@@ -43,6 +77,101 @@ class TestFileUsage(unittest.TestCase):
         assert usage["a.py"] == 2
         assert usage["b.py"] == 1
         assert usage["c.py"] == 1
+
+    def test_max_entries_no_eviction_at_limit(self) -> None:
+        """No eviction when exactly at the limit."""
+        orig_max = task_history._MAX_FILE_USAGE_ENTRIES
+        task_history._MAX_FILE_USAGE_ENTRIES = 3
+        try:
+            task_history._record_file_usage("a.py")
+            task_history._record_file_usage("b.py")
+            task_history._record_file_usage("c.py")
+            usage = task_history._load_file_usage()
+            assert len(usage) == 3
+            assert set(usage.keys()) == {"a.py", "b.py", "c.py"}
+        finally:
+            task_history._MAX_FILE_USAGE_ENTRIES = orig_max
+
+    def test_max_entries_evicts_oldest(self) -> None:
+        """file_usage.json never exceeds _MAX_FILE_USAGE_ENTRIES."""
+        orig_max = task_history._MAX_FILE_USAGE_ENTRIES
+        task_history._MAX_FILE_USAGE_ENTRIES = 5
+        try:
+            for i in range(7):
+                task_history._record_file_usage(f"file{i}.py")
+            usage = task_history._load_file_usage()
+            assert len(usage) == 5
+            # Oldest two (file0.py, file1.py) should be evicted
+            assert "file0.py" not in usage
+            assert "file1.py" not in usage
+            # Most recent five should remain
+            for i in range(2, 7):
+                assert f"file{i}.py" in usage
+        finally:
+            task_history._MAX_FILE_USAGE_ENTRIES = orig_max
+
+    def test_max_entries_reaccess_preserves_entry(self) -> None:
+        """Re-accessing a file prevents it from being evicted."""
+        orig_max = task_history._MAX_FILE_USAGE_ENTRIES
+        task_history._MAX_FILE_USAGE_ENTRIES = 3
+        try:
+            task_history._record_file_usage("a.py")
+            task_history._record_file_usage("b.py")
+            task_history._record_file_usage("c.py")
+            # Re-access a.py — moves it to end (most recent)
+            task_history._record_file_usage("a.py")
+            # Now add d.py — should evict b.py (oldest), not a.py
+            task_history._record_file_usage("d.py")
+            usage = task_history._load_file_usage()
+            assert len(usage) == 3
+            assert "b.py" not in usage
+            assert set(usage.keys()) == {"c.py", "a.py", "d.py"}
+            assert usage["a.py"] == 2
+        finally:
+            task_history._MAX_FILE_USAGE_ENTRIES = orig_max
+
+    def test_max_entries_preserves_counts(self) -> None:
+        """Surviving entries keep their original counts after eviction."""
+        orig_max = task_history._MAX_FILE_USAGE_ENTRIES
+        task_history._MAX_FILE_USAGE_ENTRIES = 2
+        try:
+            # Build up counts: a=3, b=1
+            task_history._record_file_usage("a.py")
+            task_history._record_file_usage("a.py")
+            task_history._record_file_usage("a.py")
+            task_history._record_file_usage("b.py")
+            # Add c.py — should evict a.py (oldest, since b.py was accessed more recently)
+            # Wait: a.py was last accessed 2nd-to-last (before b.py), but re-accessing
+            # a.py 3 times moved it to end each time. Let me trace:
+            # After a.py(1): {a:1}
+            # After a.py(2): {a:2}  (popped and re-inserted at end)
+            # After a.py(3): {a:3}
+            # After b.py(1): {a:3, b:1}
+            # Now add c.py: {a:3, b:1, c:1} -> excess=1 -> evict a.py (front)
+            task_history._record_file_usage("c.py")
+            usage = task_history._load_file_usage()
+            assert len(usage) == 2
+            assert "a.py" not in usage
+            assert usage["b.py"] == 1
+            assert usage["c.py"] == 1
+        finally:
+            task_history._MAX_FILE_USAGE_ENTRIES = orig_max
+
+    def test_max_entries_evicts_multiple_at_once(self) -> None:
+        """If file pre-loaded with excess entries, eviction catches up."""
+        orig_max = task_history._MAX_FILE_USAGE_ENTRIES
+        task_history._MAX_FILE_USAGE_ENTRIES = 2
+        try:
+            # Pre-load 4 entries directly (simulating an old file before limit)
+            self._tmp.write_text(json.dumps({"a.py": 1, "b.py": 2, "c.py": 3, "d.py": 4}))
+            # Record one more entry — should evict down to limit
+            task_history._record_file_usage("e.py")
+            usage = task_history._load_file_usage()
+            assert len(usage) == 2
+            # a, b, c should be evicted (oldest 3), d and e remain
+            assert set(usage.keys()) == {"d.py", "e.py"}
+        finally:
+            task_history._MAX_FILE_USAGE_ENTRIES = orig_max
 
 
 def _end_dist(text: str, q: str) -> int:
@@ -60,14 +189,17 @@ def _sort_suggestions(
     usage: dict[str, int],
     q: str,
 ) -> list[dict[str, str]]:
-    """Replicate the sorting logic from the /suggestions?mode=files endpoint."""
+    """Replicate the sorting logic from the /suggestions?mode=files endpoint.
+
+    Matches the actual production code in sorcar.py — all items start with
+    type="file", frequent items get type="frequent".
+    """
     frequent: list[dict[str, str]] = []
     rest: list[dict[str, str]] = []
     for path in file_cache:
         if q and q not in path.lower():
             continue
-        ptype = "dir" if path.endswith("/") else "file"
-        item = {"type": ptype, "text": path}
+        item = {"type": "file", "text": path}
         if usage.get(path, 0) > 0:
             frequent.append(item)
         else:
@@ -80,14 +212,13 @@ def _sort_suggestions(
     frequent.sort(
         key=lambda m: (
             _end_dist(m["text"], q),
-            m["type"] != "file",
             _recency.get(m["text"], _n),
             -usage.get(m["text"], 0),
         )
     )
-    rest.sort(key=lambda m: (_end_dist(m["text"], q), m["type"] != "file"))
+    rest.sort(key=lambda m: _end_dist(m["text"], q))
     for f in frequent:
-        f["type"] = "frequent_" + f["type"]
+        f["type"] = "frequent"
     return (frequent + rest)[:20]
 
 
@@ -100,8 +231,9 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
             {"c.py": 5, "dir/": 2},
             "",
         )
-        assert result[0] == {"type": "frequent_file", "text": "c.py"}
-        assert result[1] == {"type": "frequent_dir", "text": "dir/"}
+        # dir/ is last in dict → most recent (recency 0), c.py → recency 1
+        assert result[0] == {"type": "frequent", "text": "dir/"}
+        assert result[1] == {"type": "frequent", "text": "c.py"}
         assert result[2] == {"type": "file", "text": "a.py"}
         assert result[3] == {"type": "file", "text": "b.py"}
 
@@ -110,27 +242,18 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         assert len(result) == 2
         assert all(r["type"] == "file" for r in result)
 
-    def test_files_before_folders_in_rest(self) -> None:
+    def test_stable_order_in_rest(self) -> None:
+        """Rest items with same end_dist preserve original order."""
         result = _sort_suggestions(
             ["dir1/", "a.py", "dir2/", "b.py", "dir3/"], {}, ""
         )
-        assert result[0]["text"] == "a.py"
-        assert result[1]["text"] == "b.py"
-        assert result[2]["text"] == "dir1/"
-        assert result[3]["text"] == "dir2/"
-        assert result[4]["text"] == "dir3/"
-
-    def test_files_before_folders_in_frequent(self) -> None:
-        # b.py is last in dict → most recent (recency 0)
-        result = _sort_suggestions(
-            ["dir1/", "a.py", "dir2/", "b.py"],
-            {"dir1/": 10, "a.py": 5, "dir2/": 3, "b.py": 1},
-            "",
-        )
-        assert result[0] == {"type": "frequent_file", "text": "b.py"}
-        assert result[1] == {"type": "frequent_file", "text": "a.py"}
-        assert result[2] == {"type": "frequent_dir", "text": "dir2/"}
-        assert result[3] == {"type": "frequent_dir", "text": "dir1/"}
+        assert [r["text"] for r in result] == [
+            "dir1/",
+            "a.py",
+            "dir2/",
+            "b.py",
+            "dir3/",
+        ]
 
     def test_query_filters_before_sort(self) -> None:
         result = _sort_suggestions(
@@ -139,7 +262,7 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
             "src",
         )
         assert len(result) == 2
-        assert result[0] == {"type": "frequent_file", "text": "src/c.py"}
+        assert result[0] == {"type": "frequent", "text": "src/c.py"}
         assert result[1] == {"type": "file", "text": "src/a.py"}
 
     def test_end_match_priority_in_rest(self) -> None:
@@ -172,7 +295,7 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         )
         # "src/config.py" → end_dist=3 (.py)
         # "lib/utils/config.py" → end_dist=3 (.py)
-        # Same end_dist, same type → src/config.py is more recent (last in dict)
+        # Same end_dist → src/config.py is more recent (last in dict)
         assert result[0]["text"] == "src/config.py"
         assert result[1]["text"] == "lib/utils/config.py"
 
@@ -189,7 +312,7 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         )
         # Frequent: "deep/nested/utils/foo.py" → end_dist=3
         # Rest: "foo.py" → end_dist=3, "lib/foo/bar.py" → end_dist=7
-        assert result[0] == {"type": "frequent_file", "text": "deep/nested/utils/foo.py"}
+        assert result[0] == {"type": "frequent", "text": "deep/nested/utils/foo.py"}
         assert result[1] == {"type": "file", "text": "foo.py"}
         assert result[2] == {"type": "file", "text": "lib/foo/bar.py"}
 
@@ -205,18 +328,25 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         assert result[1]["text"] == "b.py"
         assert result[2]["text"] == "a.py"  # least recent (first in dict)
 
-    def test_empty_query_no_end_match_sorting(self) -> None:
-        """Empty query should not apply end-match sorting (all dist=0)."""
+    def test_empty_query_stable_order(self) -> None:
+        """Empty query: all end_dist=0, so original order preserved."""
         result = _sort_suggestions(
             ["z.py", "a.py", "m/", "b/"],
             {},
             "",
         )
-        # Files before dirs, otherwise stable order
-        assert result[0]["text"] == "z.py"
-        assert result[1]["text"] == "a.py"
-        assert result[2]["text"] == "m/"
-        assert result[3]["text"] == "b/"
+        assert [r["text"] for r in result] == ["z.py", "a.py", "m/", "b/"]
+
+    def test_max_20_results(self) -> None:
+        """At most 20 results are returned."""
+        paths = [f"file{i:03d}.py" for i in range(30)]
+        result = _sort_suggestions(paths, {}, "")
+        assert len(result) == 20
+
+    def test_no_match_returns_empty(self) -> None:
+        """Query that matches nothing returns empty list."""
+        result = _sort_suggestions(["a.py", "b.py"], {}, "zzz")
+        assert result == []
 
 
 class TestSelectACSpacing(unittest.TestCase):
