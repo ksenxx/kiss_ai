@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.55-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.56-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -48,7 +48,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 ## Installation and Launching KISS Sorcar
 
 You must set the **`ANTHROPIC_API_KEY`** and **`GEMINI_API_KEY`** in the environment. Then download
-[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.54/kiss-offline-installer.pkg) and
+[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.56/kiss-offline-installer.pkg) and
 install using
 
 ```
