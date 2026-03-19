@@ -147,7 +147,7 @@ python -m kiss.agents.autoresearch.autoresearch_agent \
 | `--max_budget` | `200.0` | Maximum budget in USD |
 | `--work_dir` | current directory | Working directory containing the repo |
 | `--program` | `None` | Path to program.md (defaults to `work_dir/program.md`) |
-| `--verbose` | `true` | Print output to console |
+| `--verbose` | `false` | Print output to console |
 | `--task` | `None` | Direct task prompt (overrides program file) |
 
 ### Configuration

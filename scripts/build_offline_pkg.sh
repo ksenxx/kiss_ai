@@ -175,8 +175,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Project source
+# 7. Project source + build architecture stamp
 # ---------------------------------------------------------------------------
+echo "$ARCH" > "$BUNDLE/build-arch.txt"
 echo ">>> Bundling project source..."
 # Note: Section numbering continues: 8=install script, 9=pkg postinstall, 10=build .pkg
 mkdir -p "$BUNDLE/project"
@@ -211,6 +212,47 @@ _strip_quarantine() {
 }
 
 KISS_BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+
+# Check architecture matches
+BUILD_ARCH="$(cat "$KISS_BUNDLE_DIR/build-arch.txt" 2>/dev/null || echo unknown)"
+HOST_ARCH="$(uname -m)"
+if [ "$BUILD_ARCH" != "$HOST_ARCH" ]; then
+    echo "ERROR: This package was built for $BUILD_ARCH but this machine is $HOST_ARCH."
+    echo "       Please use a package built for $HOST_ARCH."
+    exit 1
+fi
+
+# Check available disk space (need ~3 GB for installation)
+_REQUIRED_MB=3000
+_AVAIL_MB=$(df -m "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "$_AVAIL_MB" ] && [ "$_AVAIL_MB" -lt "$_REQUIRED_MB" ] 2>/dev/null; then
+    echo "ERROR: Insufficient disk space. Need ${_REQUIRED_MB}MB, only ${_AVAIL_MB}MB available."
+    exit 1
+fi
+
+# Kill any existing KISS processes that might interfere with reinstallation
+_kill_existing() {
+    local _pids
+    # Kill code-server instances started by KISS (match the cs- data dir pattern)
+    _pids=$(pgrep -f 'code-server.*\.kiss/cs-' 2>/dev/null || true)
+    if [ -n "$_pids" ]; then
+        echo "   Stopping existing code-server instances..."
+        echo "$_pids" | xargs kill 2>/dev/null || true
+        sleep 1
+    fi
+    # Kill sorcar/kiss processes from the install directory
+    _pids=$(pgrep -f 'kiss_ai.*sorcar\|kiss_ai.*kiss' 2>/dev/null || true)
+    if [ -n "$_pids" ]; then
+        echo "   Stopping existing KISS processes..."
+        echo "$_pids" | xargs kill 2>/dev/null || true
+        sleep 1
+    fi
+}
+_kill_existing
 
 # Determine install location: env var > interactive prompt > default
 _DEFAULT_DIR="$HOME/kiss_ai"
@@ -248,6 +290,7 @@ if [ -f "$KISS_BUNDLE_DIR/bin/uvx" ]; then
 fi
 # 2. Install code-server
 echo ">>> Installing code-server..."
+rm -rf "$INSTALL_BASE/code-server"
 mkdir -p "$INSTALL_BASE/code-server"
 cp -R "$KISS_BUNDLE_DIR/code-server/"* "$INSTALL_BASE/code-server/"
 chmod +x "$INSTALL_BASE/code-server/bin/code-server"
@@ -259,15 +302,15 @@ ln -sf "$INSTALL_BASE/code-server/bin/code-server" "$INSTALL_BASE/bin/code-serve
 echo ">>> Installing Python 3.13..."
 PYTHON_DIRNAME="$(cat "$KISS_BUNDLE_DIR/python-dirname.txt")"
 PYTHON_DEST="$INSTALL_BASE/python/$PYTHON_DIRNAME"
+rm -rf "$PYTHON_DEST"
 mkdir -p "$(dirname "$PYTHON_DEST")"
-if [ ! -d "$PYTHON_DEST" ]; then
-    cp -R "$KISS_BUNDLE_DIR/python" "$PYTHON_DEST"
-    find "$PYTHON_DEST" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
-fi
+cp -R "$KISS_BUNDLE_DIR/python" "$PYTHON_DEST"
+find "$PYTHON_DEST" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
 
 # 4. Install git
 echo ">>> Installing git..."
 if [ -d "$KISS_BUNDLE_DIR/git" ]; then
+    rm -rf "$INSTALL_BASE/git"
     mkdir -p "$INSTALL_BASE/git"
     cp -R "$KISS_BUNDLE_DIR/git/"* "$INSTALL_BASE/git/"
     chmod +x "$INSTALL_BASE/git/bin/git"
@@ -281,15 +324,14 @@ fi
 echo ">>> Installing Playwright Chromium..."
 PW_DEST="$INSTALL_BASE/playwright-browsers"
 if [ -d "$KISS_BUNDLE_DIR/playwright-browsers" ]; then
+    rm -rf "$PW_DEST"
     mkdir -p "$PW_DEST"
     for item in "$KISS_BUNDLE_DIR/playwright-browsers"/chromium-* \
                 "$KISS_BUNDLE_DIR/playwright-browsers"/chromium_headless_shell-* \
                 "$KISS_BUNDLE_DIR/playwright-browsers"/ffmpeg-*; do
         if [ -d "$item" ]; then
             dirname="$(basename "$item")"
-            if [ ! -d "$PW_DEST/$dirname" ]; then
-                cp -R "$item" "$PW_DEST/$dirname"
-            fi
+            cp -R "$item" "$PW_DEST/$dirname"
             echo "   Installed $dirname"
         fi
     done
@@ -457,17 +499,25 @@ echo ">>> Creating package scripts..."
 cat > "$SCRIPTS/postinstall" << 'POSTINSTALL'
 #!/bin/bash
 # macOS .pkg postinstall script
-# $2 = install location (e.g., /usr/local or /)
+# $2 = install location (e.g., /tmp )
 set -uo pipefail
 
-# The payload is installed to /usr/local/kiss-offline by the pkg
-BUNDLE="/usr/local/kiss-offline"
+# The payload is installed to /tmp/kiss-offline by the pkg
+BUNDLE="/tmp/kiss-offline"
 LOG_FILE="/tmp/kiss-install.log"
 
-# Detect the real user: prefer SUDO_USER, then console owner, then USER
-if [ "$(id -u)" = "0" ]; then
-    TARGET_USER="${SUDO_USER:-$(stat -f '%Su' /dev/console 2>/dev/null || echo root)}"
-else
+# Detect the real console user (postinstall may run as root)
+TARGET_USER=""
+# Method 1: stat /dev/console (most reliable on macOS)
+if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+    TARGET_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+fi
+# Method 2: scutil
+if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+    TARGET_USER="$(scutil <<< 'show State:/Users/ConsoleUser' 2>/dev/null | awk '/Name :/ { print $3 }' || true)"
+fi
+# Method 3: fallback to $USER
+if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
     TARGET_USER="${USER:-$(whoami)}"
 fi
 TARGET_HOME=$(eval echo "~$TARGET_USER")
@@ -541,20 +591,17 @@ app.activateIgnoringOtherApps(true);
 alert.runModal;
 JXAEOF
 
-    if [ "$(id -u)" = "0" ]; then
-        sudo -u "$TARGET_USER" osascript -l JavaScript "$jxa_file" 2>/dev/null || true
-    else
-        osascript -l JavaScript "$jxa_file" 2>/dev/null || true
-    fi
+    osascript -l JavaScript "$jxa_file" 2>/dev/null || true
     rm -f "$jxa_file"
 }
 
-# Run the install, capturing all output to a log file (and stdout via tee)
+# Run the install as the target user (not as root)
 _run_install() {
-    if [ "$(id -u)" = "0" ]; then
-        sudo -u "$TARGET_USER" \
-            KISS_INSTALL_DIR="$KISS_INSTALL_DIR" \
-            KISS_PROJECT_DIR="$KISS_PROJECT_DIR" \
+    if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
+        # We are root but the real user is someone else — run as that user
+        sudo -u "$TARGET_USER" -H \
+            KISS_INSTALL_DIR="$_INSTALL_DIR" \
+            KISS_PROJECT_DIR="$_INSTALL_DIR" \
             HOME="$TARGET_HOME" \
             bash "$BUNDLE/install-offline.sh"
     else
@@ -567,6 +614,13 @@ if ! _run_install 2>&1 | tee "$LOG_FILE"; then
     _show_error_window
     rm -f "$LOG_FILE"
     exit 1
+fi
+
+# Fix ownership if we ran as root
+if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
+    echo "Fixing file ownership for $TARGET_USER..."
+    chown -R "$TARGET_USER" "$_INSTALL_DIR" 2>/dev/null || true
+    chown -R "$TARGET_USER" "$TARGET_HOME/.kiss" 2>/dev/null || true
 fi
 
 # Clean up the bundle payload — everything has been copied to user directories
@@ -602,7 +656,7 @@ pkgbuild \
     --root "$PAYLOAD" \
     --identifier "$PKG_ID" \
     --version "$PKG_VERSION" \
-    --install-location "/usr/local" \
+    --install-location "/tmp" \
     --scripts "$SCRIPTS" \
     --component-plist "$STAGE/component.plist" \
     "$COMPONENT_PKG"
@@ -612,8 +666,8 @@ cat > "$STAGE/distribution.xml" << DIST_XML
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>KISS Agent Framework (Offline)</title>
-    <organization>com.kiss</organization>
-    <domains enable_localSystem="true" enable_currentUserHome="true"/>
+    <organization>berkeley.edu</organization>
+    <domains enable_localSystem="true"/>
     <options customize="never" require-scripts="true" rootVolumeOnly="false"/>
     <welcome language="en" mime-type="text/plain"><![CDATA[
 KISS Agent Framework - Offline Installer
@@ -646,7 +700,7 @@ Then set your API keys:
     <choice id="com.kiss.offline-installer" visible="false">
         <pkg-ref id="com.kiss.offline-installer"/>
     </choice>
-    <pkg-ref id="com.kiss.offline-installer" version="${PKG_VERSION}" onConclusion="none">kiss-component.pkg</pkg-ref>
+    <pkg-ref id="com.kiss.offline-installer" version="${PKG_VERSION}" auth="none" onConclusion="none">kiss-component.pkg</pkg-ref>
 </installer-gui-script>
 DIST_XML
 
@@ -662,4 +716,4 @@ echo "Output: $OUTPUT"
 echo "Size: $(du -sh "$OUTPUT" | cut -f1)"
 echo ""
 echo "To install: open $OUTPUT"
-echo "Or: sudo installer -pkg $OUTPUT -target /"
+echo "Or: installer -pkg $OUTPUT -target /"
