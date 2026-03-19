@@ -34,6 +34,7 @@ _CS_SETTINGS = {
     "scm.inputFontSize": 13,
     "debug.console.fontSize": 13,
     "window.restoreWindows": "all",
+    "workbench.editor.enablePreview": False,
     "workbench.editor.restoreViewState": True,
     "files.hotExit": "onExitAndWindowClose",
     "git.repositoryScanMaxDepth": 1,
@@ -418,6 +419,51 @@ function activate(ctx){
       'Reviewing '+data.files.length+' file(s). '
       +'Red = old, Blue = new. Use Accept / Reject on toolbar.');
   }
+  // --- Open tabs persistence ---
+  var tabsFile=path.join(dataDir,'open-tabs.json');
+  function saveOpenTabs(){
+    try{
+      var tabs=[];var active='';
+      for(var g of vscode.window.tabGroups.all){
+        for(var t of g.tabs){
+          if(t.input&&t.input.uri&&t.input.uri.scheme==='file'){
+            tabs.push({path:t.input.uri.fsPath});
+            if(t.isActive&&g.isActive)active=t.input.uri.fsPath;
+          }
+        }
+      }
+      if(tabs.length>0){
+        if(!fs.existsSync(dataDir))fs.mkdirSync(dataDir,{recursive:true});
+        fs.writeFileSync(tabsFile,JSON.stringify({tabs:tabs,active:active}));
+      }
+    }catch(e){}
+  }
+  async function restoreOpenTabs(){
+    try{
+      var hasFileTabs=false;
+      for(var g of vscode.window.tabGroups.all){
+        for(var t of g.tabs){
+          if(t.input&&t.input.uri&&t.input.uri.scheme==='file'){hasFileTabs=true;break;}
+        }
+        if(hasFileTabs)break;
+      }
+      if(hasFileTabs)return;
+      if(!fs.existsSync(tabsFile))return;
+      var data=JSON.parse(fs.readFileSync(tabsFile,'utf8'));
+      if(!data.tabs||!data.tabs.length)return;
+      for(var t of data.tabs){
+        if(!fs.existsSync(t.path))continue;
+        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(t.path));
+        await vscode.window.showTextDocument(doc,{preview:false,preserveFocus:true});
+      }
+      if(data.active&&fs.existsSync(data.active)){
+        var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(data.active));
+        await vscode.window.showTextDocument(doc,{preview:false});
+      }
+    }catch(e){}
+  }
+  setTimeout(function(){restoreOpenTabs();},2000);
+  ctx.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(function(){saveOpenTabs();}));
   // --- GitHub Copilot auth token persistence ---
   var ghTokenFile=path.join(dataDir,'..','github-copilot-token.json');
   async function saveGitHubToken(){
