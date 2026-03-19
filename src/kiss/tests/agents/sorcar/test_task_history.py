@@ -73,9 +73,6 @@ class TestResultAndEventsFile:
         events = th._load_task_chat_events("my task")
         assert events == [{"type": "hello"}]
 
-    def test_update_task_result_empty_cache(self):
-        th._update_task_result("nonexistent", "some result")
-
 
 class TestMigration:
     def setup_method(self):

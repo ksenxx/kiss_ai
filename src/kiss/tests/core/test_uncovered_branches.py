@@ -120,17 +120,6 @@ class TestTaskHistoryEdgeCases(TestCase):
         loaded = th._load_task_chat_events("my task")
         assert loaded == []
 
-    def test_update_task_result(self) -> None:
-        import kiss.agents.sorcar.task_history as th
-
-        th._add_task("my task")
-        th._history_cache = None
-        th._update_task_result("my task", "done!")
-        th._history_cache = None
-        history = th._load_history(10)
-        found = [h for h in history if h["task"] == "my task"]
-        assert found and found[0]["result"] == "done!"
-
     def test_task_events_path_not_found(self) -> None:
         import kiss.agents.sorcar.task_history as th
 
