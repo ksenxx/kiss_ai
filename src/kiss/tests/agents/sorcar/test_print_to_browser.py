@@ -5,10 +5,7 @@ Uses real objects with duck-typed attributes (SimpleNamespace) as
 message inputs and real queue subscribers.
 """
 
-import asyncio
 import queue
-import threading
-import time
 import unittest
 from types import SimpleNamespace
 
@@ -16,7 +13,6 @@ from kiss.agents.sorcar.browser_ui import (
     _DISPLAY_EVENT_TYPES,
     BaseBrowserPrinter,
     _coalesce_events,
-    find_free_port,
 )
 
 

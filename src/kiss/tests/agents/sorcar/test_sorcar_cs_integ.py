@@ -10,7 +10,9 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,12 +23,10 @@ from typing import Any
 import pytest
 import requests
 
+from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
 from kiss.agents.sorcar.sorcar import run_chatbot
 from kiss.core.relentless_agent import RelentlessAgent
 
-import sys
-from kiss.agents.sorcar.code_server import _CS_EXTENSION_JS
-import socket
 pytestmark = [
     pytest.mark.filterwarnings("ignore:websockets.legacy is deprecated:DeprecationWarning"),
     pytest.mark.filterwarnings(

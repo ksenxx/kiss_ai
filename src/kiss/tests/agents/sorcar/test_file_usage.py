@@ -1,6 +1,5 @@
 """Tests for file usage tracking and @ file picker frequency sorting."""
 
-import json
 import unittest
 from pathlib import Path
 

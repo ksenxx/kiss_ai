@@ -171,8 +171,18 @@ class RelentlessAgent(Base):
                     attachments=attachments if session == 0 else None,
                     session_info=session_info,
                 )
-            except Exception as exc:  # pragma: no cover – requires LLM API failure
+            except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
+                # Non-retryable model/API errors: return immediately
+                if exc.__cause__ is not None or not isinstance(exc, KISSError):
+                    self.budget_used += executor.budget_used
+                    self.total_tokens_used += executor.total_tokens_used
+                    error_result: str = yaml.dump(
+                        {"success": False, "is_continue": False, "summary": str(exc)},
+                        sort_keys=False,
+                    )
+                    return error_result
+                # For step/budget limit errors, try to summarize and continue
                 trajectory_path: Path | None = None
                 try:
                     fd, tmp = tempfile.mkstemp(suffix=".json", prefix="trajectory_")

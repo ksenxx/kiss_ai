@@ -26,7 +26,6 @@ import types
 from pathlib import Path
 
 import pytest
-
 from filelock import FileLock
 
 import kiss.agents.sorcar.task_history as th
@@ -36,12 +35,11 @@ from kiss.agents.sorcar.browser_ui import (
     _coalesce_events,
     find_free_port,
 )
-from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS, _build_html
+from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _parse_diff_hunks,
     _prepare_merge_view,
-    _scan_files,
     _setup_code_server,
     _snapshot_files,
 )

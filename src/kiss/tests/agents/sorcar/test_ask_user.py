@@ -9,7 +9,6 @@ import pytest
 
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 
-
 TEST_PAGE = b"""<!DOCTYPE html>
 <html><head><title>CAPTCHA Page</title></head>
 <body>

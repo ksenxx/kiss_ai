@@ -1,9 +1,10 @@
 """Integration tests for RelentlessAgent with actual LLM calls for 100% branch coverage."""
 
-import os
+import http.server
+import json
 import tempfile
+import threading
 import unittest
-from pathlib import Path
 
 import yaml
 
@@ -172,6 +173,110 @@ class TestDockerStreamCallback(unittest.TestCase):
             )
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
+
+
+class TestNonRetryableModelErrors(unittest.TestCase):
+    """Test that non-retryable model errors return finish(False, False, cause)."""
+
+    def _start_fake_server(self, status: int, body: dict) -> tuple:
+        """Start a fake HTTP server that returns the given status and JSON body."""
+        response_body = json.dumps(body).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, port
+
+    def test_auth_error_returns_immediately(self) -> None:
+        """Authentication error (401) returns finish(False, False, cause)."""
+        server, port = self._start_fake_server(
+            401,
+            {"error": {"message": "Invalid API key", "type": "invalid_api_key"}},
+        )
+        try:
+            agent = RelentlessAgent("AuthError")
+            with tempfile.TemporaryDirectory() as td:
+                result = agent.run(
+                    model_name="test-model",
+                    prompt_template="Do something.",
+                    max_steps=5,
+                    max_budget=1.0,
+                    max_sub_sessions=3,
+                    work_dir=td,
+                    verbose=False,
+                    model_config={
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "api_key": "sk-invalid",
+                    },
+                )
+            parsed = yaml.safe_load(result)
+            assert parsed["success"] is False
+            assert parsed["is_continue"] is False
+            assert "summary" in parsed
+            assert len(parsed["summary"]) > 0
+        finally:
+            server.shutdown()
+
+    def test_permission_denied_returns_immediately(self) -> None:
+        """Permission denied error (403) returns finish(False, False, cause)."""
+        server, port = self._start_fake_server(
+            403,
+            {"error": {"message": "Permission denied", "type": "permission_denied"}},
+        )
+        try:
+            agent = RelentlessAgent("PermDenied")
+            with tempfile.TemporaryDirectory() as td:
+                result = agent.run(
+                    model_name="test-model",
+                    prompt_template="Do something.",
+                    max_steps=5,
+                    max_budget=1.0,
+                    max_sub_sessions=3,
+                    work_dir=td,
+                    verbose=False,
+                    model_config={
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "api_key": "sk-invalid",
+                    },
+                )
+            parsed = yaml.safe_load(result)
+            assert parsed["success"] is False
+            assert parsed["is_continue"] is False
+        finally:
+            server.shutdown()
+
+    def test_connection_error_returns_immediately(self) -> None:
+        """Connection error (unreachable server) returns finish(False, False, cause)."""
+        agent = RelentlessAgent("ConnError")
+        with tempfile.TemporaryDirectory() as td:
+            result = agent.run(
+                model_name="test-model",
+                prompt_template="Do something.",
+                max_steps=5,
+                max_budget=1.0,
+                max_sub_sessions=3,
+                work_dir=td,
+                verbose=False,
+                model_config={
+                    "base_url": "http://127.0.0.1:1/v1",
+                    "api_key": "sk-invalid",
+                },
+            )
+        parsed = yaml.safe_load(result)
+        assert parsed["success"] is False
+        assert parsed["is_continue"] is False
 
 
 if __name__ == "__main__":

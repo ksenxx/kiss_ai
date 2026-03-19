@@ -29,7 +29,7 @@ can you please work hard and carefully to precisly detect all actual race condit
 
 ## test compaction
 
-can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.  Run tests with 900 seconds
+can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods. Run tests with 900 seconds
 timeout.
 
 # Past tasks

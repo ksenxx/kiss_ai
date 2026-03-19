@@ -11,15 +11,21 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
+import pytest
+import requests
+
 import kiss.agents.sorcar.task_history as th
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter, _coalesce_events
+from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _cleanup_merge_data,
@@ -31,19 +37,13 @@ from kiss.agents.sorcar.code_server import (
     _setup_code_server,
     _snapshot_files,
 )
-from kiss.agents.sorcar.useful_tools import (
-    UsefulTools,
-    _extract_command_names,
-)
-
-import signal
-import sys
-import pytest
-import requests
-from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS
 from kiss.agents.sorcar.config import AgentConfig, SorcarConfig
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
+)
+from kiss.agents.sorcar.useful_tools import (
+    UsefulTools,
+    _extract_command_names,
 )
 from kiss.agents.sorcar.web_use_tool import (
     INTERACTIVE_ROLES,

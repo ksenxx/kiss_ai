@@ -1,32 +1,30 @@
-from __future__ import annotations
-
 """Integration tests targeting uncovered branches in core/, core/models/, agents/sorcar/.
 
 No mocks, patches, fakes, or test doubles.
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import tempfile
+import threading
+from collections.abc import Generator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
-from kiss.core.kiss_agent import KISSAgent, _is_retryable_error
-from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model, _get_callback_loop
-from kiss.core.models.model_info import (
-    MODEL_INFO,
-)
-
-import json
-import threading
-from collections.abc import Generator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 import yaml
+
+from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import Model, _get_callback_loop
+from kiss.core.models.model_info import MODEL_INFO
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
     _build_text_based_tools_prompt,

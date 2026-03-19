@@ -22,10 +22,6 @@ import pytest
 import requests
 
 import kiss.agents.sorcar.task_history as task_history
-from kiss.agents.sorcar.sorcar import run_chatbot
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core.kiss_error import KISSError
-from kiss.core.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _disable_copilot_scm_button,
@@ -36,6 +32,10 @@ from kiss.agents.sorcar.code_server import (
     _snapshot_files,
     _untracked_base_dir,
 )
+from kiss.agents.sorcar.sorcar import run_chatbot
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.kiss_error import KISSError
+from kiss.core.relentless_agent import RelentlessAgent
 
 
 def _init_git_repo(tmpdir: str) -> None:

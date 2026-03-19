@@ -13,8 +13,6 @@ from kiss.agents.claw.background_agent import (
     _MAX_CHUNK,
     _PID_FILE,
     _clear_stale_lock,
-    _is_pid_alive,
-    _read_pid,
     _send_chunked,
     run_background_agent,
     stop_background_agent,

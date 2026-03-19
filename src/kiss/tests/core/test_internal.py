@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import unittest
+from collections.abc import Generator
 
 import pytest
 
@@ -50,7 +51,7 @@ class TestReadProjectFile:
 
 class TestBaseClass:
     @pytest.fixture(autouse=True)
-    def base_state(self) -> None:
+    def base_state(self) -> Generator[None]:
         original_counter = Base.agent_counter
         original_budget = Base.global_budget_used
         yield
