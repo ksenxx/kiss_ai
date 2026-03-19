@@ -29,4 +29,8 @@ artifacts/
 .ipynb_checkpoints
 screenshots/    
 .kiss.artifacts
+code-server/
+playwright-browsers/
+bin/
+env.sh
 
