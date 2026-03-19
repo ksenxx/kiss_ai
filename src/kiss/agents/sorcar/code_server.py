@@ -468,10 +468,9 @@ function activate(ctx){
   var ghTokenFile=path.join(dataDir,'..','github-copilot-token.json');
   async function saveGitHubToken(){
     try{
-      var scopes=['user:email','repo'];
-      var opts={createIfNone:false};
+      var scopes=['read:user','user:email','repo','workflow'];
       var s=await vscode.authentication.getSession(
-        'github',scopes,opts);
+        'github',scopes,{silent:true});
       if(s&&s.accessToken){
         var d=JSON.stringify({
           accessToken:s.accessToken,

@@ -169,7 +169,7 @@ _EXTENSION_JS_TOKEN_STRINGS = [
     "'github'",
     "'user:email'",
     "'repo'",
-    "createIfNone:false",
+    "silent:true",
     "mode:0o600",
     "onDidChangeSessions",
     "ghInterval",
