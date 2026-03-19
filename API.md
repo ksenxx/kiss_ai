@@ -441,7 +441,7 @@ ______________________________________________________________________
 
   - `content`: The content to display.
   - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
-  - `**kwargs`: Additional options such as tool_input, is_error, cost, step_count, total_tokens.
+  - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
 - **token_callback** — Stream a single token to the console, styled by current block type.<br/>`async token_callback(token: str) -> None`
@@ -482,7 +482,7 @@ ______________________________________________________________________
 
   - `content`: The content to display.
   - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
-  - `**kwargs`: Additional options such as tool_input, is_error, cost, step_count, total_tokens.
+  - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
 - **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`async token_callback(token: str) -> None`

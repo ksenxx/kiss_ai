@@ -135,8 +135,8 @@ class TestMessageParity:
     def test_result_message(self):
         console, buf, browser, bq = _make_printers()
         msg = SimpleNamespace(result="completed successfully")
-        console.print(msg, type="message", step_count=3, budget_used=0.02, total_tokens_used=200)
-        browser.print(msg, type="message", step_count=3, budget_used=0.02, total_tokens_used=200)
+        console.print(msg, type="message", budget_used=0.02, total_tokens_used=200)
+        browser.print(msg, type="message", budget_used=0.02, total_tokens_used=200)
         out = buf.getvalue()
         events = _drain(bq)
         assert "completed successfully" in out
@@ -144,7 +144,6 @@ class TestMessageParity:
         r_events = [e for e in events if e["type"] == "result"]
         assert r_events[0]["text"] == "completed successfully"
         assert r_events[0]["cost"] == "$0.0200"
-        assert r_events[0]["step_count"] == 3
         assert r_events[0]["total_tokens"] == 200
 
     def test_error_content_block_message(self):
@@ -246,7 +245,7 @@ class TestFullAgentSequenceParity:
         import yaml
         result = yaml.dump({"success": True, "summary": "Bug fixed in app.py"})
         for p in (console, browser):
-            p.print(result, type="result", cost="$0.05", step_count=2, total_tokens=500)
+            p.print(result, type="result", cost="$0.05", total_tokens=500)
 
         out = buf.getvalue()
         assert "Fix the bug" in out
@@ -274,5 +273,4 @@ class TestFullAgentSequenceParity:
         assert r[-1]["success"] is True
         assert "Bug fixed" in r[-1]["summary"]
         assert r[-1]["cost"] == "$0.05"
-        assert r[-1]["step_count"] == 2
         assert r[-1]["total_tokens"] == 500

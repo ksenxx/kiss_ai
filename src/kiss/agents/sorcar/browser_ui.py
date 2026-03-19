@@ -378,7 +378,6 @@ function handleOutputEvent(ev,O,state){
       rb+=esc((ev.text||'(no result)').replace(/\n{3,}/g,'\n\n').trim());
     }
     rc.innerHTML='<div class="rc-h"><h3>Result</h3><div class="rs">'
-      +'<span>Steps <b>'+(ev.step_count||0)+'</b></span>'
       +'<span>Tokens <b>'+(ev.total_tokens||0)+'</b></span>'
       +'<span>Cost <b>'+(ev.cost||'N/A')+'</b></span>'
       +'</div></div><div class="rc-body'
@@ -572,14 +571,12 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
     def _broadcast_result(
         self,
         text: str,
-        step_count: int = 0,
         total_tokens: int = 0,
         cost: str = "N/A",
     ) -> None:
         event: dict[str, Any] = {
             "type": "result",
             "text": text or "(no result)",
-            "step_count": step_count,
             "total_tokens": total_tokens,
             "cost": cost,
         }
@@ -605,7 +602,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             type: Content type (e.g. "text", "prompt", "stream_event",
                 "tool_call", "tool_result", "result", "usage_info", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
-                step_count, total_tokens.
+                total_tokens.
 
         Returns:
             str: Extracted text from stream events, or empty string.
@@ -670,7 +667,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             self.broadcast({"type": "text_end"})
             self._broadcast_result(
                 str(content),
-                kwargs.get("step_count", 0),
                 kwargs.get("total_tokens", 0),
                 kwargs.get("cost", "N/A"),
             )
@@ -735,7 +731,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             budget_used = kwargs.get("budget_used", 0.0)
             self._broadcast_result(
                 message.result,
-                kwargs.get("step_count", 0),
                 kwargs.get("total_tokens_used", 0),
                 f"${budget_used:.4f}" if budget_used else "N/A",
             )
