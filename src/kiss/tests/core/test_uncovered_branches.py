@@ -87,7 +87,6 @@ class TestTaskHistoryEdgeCases(TestCase):
             "_KISS_DIR": th._KISS_DIR,
             "_HISTORY_LOCK": th._HISTORY_LOCK,
             "_history_cache": th._history_cache,
-            "_total_count": th._total_count,
         }
 
         th.HISTORY_FILE = Path(self._tmpdir) / "history.jsonl"
@@ -95,7 +94,6 @@ class TestTaskHistoryEdgeCases(TestCase):
         th.MODEL_USAGE_FILE = Path(self._tmpdir) / "model_usage.json"
         th._KISS_DIR = Path(self._tmpdir)
         th._history_cache = None
-        th._total_count = 0
         from filelock import FileLock
         th._HISTORY_LOCK = FileLock(th.HISTORY_FILE.with_suffix(".lock"))
 
@@ -105,12 +103,6 @@ class TestTaskHistoryEdgeCases(TestCase):
         for key, val in self._orig.items():
             setattr(th, key, val)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_count_lines_no_file(self) -> None:
-        import kiss.agents.sorcar.task_history as th
-
-        count = th._count_lines()
-        assert count == 0
 
     def test_search_history_no_file(self) -> None:
         import kiss.agents.sorcar.task_history as th

@@ -167,7 +167,6 @@ class TestTaskHistory(TestCase):
         th.FILE_USAGE_FILE = self.tmpdir / "file_usage.json"
         th._HISTORY_LOCK = th.FileLock(th.HISTORY_FILE.with_suffix(".lock"))
         th._history_cache = None
-        th._total_count = 0
 
     def tearDown(self) -> None:
         th = self.th
@@ -178,7 +177,6 @@ class TestTaskHistory(TestCase):
         th._KISS_DIR = self.orig_kiss_dir # type: ignore[attr-defined]
         th._HISTORY_LOCK = th.FileLock(th.HISTORY_FILE.with_suffix(".lock")) # type: ignore[attr-defined]
         th._history_cache = None # type: ignore[attr-defined]
-        th._total_count = 0 # type: ignore[attr-defined]
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_search_history_empty_query(self) -> None:
@@ -334,7 +332,6 @@ class TestTaskHistoryExtra(TestCase):
         th.FILE_USAGE_FILE = self.tmpdir / "file_usage.json"
         th._HISTORY_LOCK = th.FileLock(th.HISTORY_FILE.with_suffix(".lock"))
         th._history_cache = None
-        th._total_count = 0
 
     def tearDown(self) -> None:
         th = self.th
@@ -345,7 +342,6 @@ class TestTaskHistoryExtra(TestCase):
         th._KISS_DIR = self.orig_kiss_dir # type: ignore[attr-defined]
         th._HISTORY_LOCK = th.FileLock(th.HISTORY_FILE.with_suffix(".lock")) # type: ignore[attr-defined]
         th._history_cache = None # type: ignore[attr-defined]
-        th._total_count = 0 # type: ignore[attr-defined]
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_load_task_chat_events_not_in_cache(self) -> None:

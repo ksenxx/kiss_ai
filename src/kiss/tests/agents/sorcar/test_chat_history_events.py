@@ -73,6 +73,22 @@ class TestTaskHistoryChatEvents:
         for entry in th.SAMPLE_TASKS:
             assert "task" in entry
 
+    def test_first_run_persists_sample_tasks_to_disk(self) -> None:
+        """On first run (empty history), SAMPLE_TASKS are written to the JSONL file."""
+        assert not th.HISTORY_FILE.exists()
+        history = th._load_history()
+        # File should now exist on disk with sample tasks
+        assert th.HISTORY_FILE.exists()
+        lines = [ln for ln in th.HISTORY_FILE.read_text().splitlines() if ln.strip()]
+        assert len(lines) == len(th.SAMPLE_TASKS)
+        # Cache should match sample tasks (most-recent-first = reversed)
+        assert len(history) == len(th.SAMPLE_TASKS)
+        sample_tasks = [s["task"] for s in th.SAMPLE_TASKS]
+        for entry in history:
+            assert entry["task"] in sample_tasks
+            assert entry["has_events"] is False
+            assert entry.get("events_file")
+
 
 class TestEndToEndRecordAndStore:
     def setup_method(self) -> None:
