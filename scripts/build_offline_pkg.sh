@@ -17,7 +17,12 @@ SCRIPTS="$STAGE/scripts"
 PKG_ID="com.kiss.offline-installer"
 PKG_VERSION=$(grep '__version__' "$PROJECT_ROOT/src/kiss/_version.py" | sed 's/.*"\(.*\)".*/\1/')
 OUTPUT="$PROJECT_ROOT/dist/kiss-offline-installer.pkg"
-ARCH="$(uname -m)"  # arm64 or x86_64
+# Detect actual hardware architecture (immune to Rosetta translation)
+if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+    ARCH="arm64"
+else
+    ARCH="x86_64"
+fi
 
 echo "=== Building KISS Offline Installer Package ==="
 echo "Architecture: $ARCH"
@@ -219,7 +224,12 @@ KISS_BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Check architecture matches
 BUILD_ARCH="$(cat "$KISS_BUNDLE_DIR/build-arch.txt" 2>/dev/null || echo unknown)"
-HOST_ARCH="$(uname -m)"
+# Detect actual hardware architecture (immune to Rosetta translation)
+if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
+    HOST_ARCH="arm64"
+else
+    HOST_ARCH="x86_64"
+fi
 if [ "$BUILD_ARCH" != "$HOST_ARCH" ]; then
     echo "ERROR: This package was built for $BUILD_ARCH but this machine is $HOST_ARCH."
     echo "       Please use a package built for $HOST_ARCH."
