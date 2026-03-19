@@ -570,28 +570,6 @@ def _set_latest_chat_events(
             _log_exc()
 
 
-def _update_task_result(task: str, result: str) -> None:
-    """Update the result field of a task in the history. Thread-safe.
-
-    Appends an updated entry to the history file so the dedup logic
-    picks up the new result.
-
-    Args:
-        task: The task description string.
-        result: The result text to store.
-    """
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-        entry = _find_cache_entry(task)
-        if entry is None:
-            return
-        entry["result"] = result
-        _append_entry_to_file(
-            task, bool(entry.get("has_events")), result,
-            str(entry.get("events_file", "")),
-        )
-
 
 def _load_json_dict(path: Path) -> dict:
     if path.exists():

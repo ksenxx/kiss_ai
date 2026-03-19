@@ -190,11 +190,6 @@ class TestTaskHistory(TestCase):
         th._history_cache = [] # type: ignore[attr-defined]
         th._set_latest_chat_events([{"type": "x"}])
 
-    def test_update_task_result_empty_cache(self) -> None:
-        th = self.th
-        th._history_cache = [] # type: ignore[attr-defined]
-        th._update_task_result("task", "result")
-
     def test_parse_line_invalid(self) -> None:
         th = self.th
         assert th._parse_line("not json") is None
