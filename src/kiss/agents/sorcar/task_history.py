@@ -154,7 +154,6 @@ def _task_events_path(task: str) -> Path:
 
 # In-memory cache of the most recent entries (most-recent-first).
 _history_cache: list[_HistoryEntry] | None = None
-_total_count: int = 0
 # Single cross-process + cross-thread lock for both the file and the in-memory cache.
 _HISTORY_LOCK = FileLock(HISTORY_FILE.with_suffix(".lock"))
 
@@ -324,37 +323,32 @@ def _read_file_entries(
     return all_entries[:cap]
 
 
+def _seed_sample_tasks() -> None:
+    """Write SAMPLE_TASKS to history file on first run.  Must hold _HISTORY_LOCK."""
+    _ensure_kiss_dir()
+    _CHAT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    with HISTORY_FILE.open("a") as f:
+        for sample in SAMPLE_TASKS:
+            entry: _HistoryEntry = {
+                "task": sample["task"],
+                "has_events": False,
+                "result": "",
+                "events_file": _new_events_filename(),
+            }
+            f.write(json.dumps(entry) + "\n")
+
+
 def _refresh_cache() -> list[_HistoryEntry]:
     """Reload the recent cache from disk.  Must hold _HISTORY_LOCK."""
-    global _history_cache, _total_count
+    global _history_cache
     _migrate_old_format()
     entries = _read_recent_entries(_RECENT_CACHE_SIZE)
-    if entries:
-        _history_cache = entries
-        _total_count = _count_lines()
-        return _history_cache
-    # No file or empty — show sample tasks without persisting them
-    _history_cache = [
-        {"task": t["task"], "has_events": False}
-        for t in SAMPLE_TASKS
-    ]
-    _total_count = len(_history_cache)
+    if not entries:
+        # First run after installation — persist sample tasks to disk
+        _seed_sample_tasks()
+        entries = _read_recent_entries(_RECENT_CACHE_SIZE)
+    _history_cache = entries
     return _history_cache
-
-
-def _count_lines() -> int:
-    """Count non-empty lines in the history file."""
-    if not HISTORY_FILE.exists():
-        return 0
-    count = 0
-    try:
-        with HISTORY_FILE.open() as f:
-            for line in f:
-                if line.strip():
-                    count += 1
-    except OSError:  # pragma: no cover
-        _log_exc()
-    return count
 
 
 def _load_history(limit: int = 0) -> list[_HistoryEntry]:
@@ -471,8 +465,9 @@ def _load_task_chat_events(
 ) -> list[dict[str, object]]:
     """Load chat events for a specific task from its dedicated file.
 
-    Looks up the ``events_file`` from the task history entry.
-    Returns an empty list if the task is not found in the history.
+    Looks up the ``events_file`` from the task history entry via
+    :func:`_task_events_path`.  Returns an empty list if the task is
+    not found in the history or the file does not exist.
 
     Args:
         task: The task description string.
@@ -480,18 +475,7 @@ def _load_task_chat_events(
     Returns:
         List of chat event dicts, or empty list if none stored.
     """
-    filename = ""
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-        assert _history_cache is not None
-        for entry in _history_cache:
-            if entry["task"] == task:
-                filename = str(entry.get("events_file", ""))
-                break
-    if not filename:
-        return []
-    path = _CHAT_EVENTS_DIR / filename
+    path = _task_events_path(task)
     if path.exists():
         try:
             data = json.loads(path.read_text())
@@ -500,6 +484,42 @@ def _load_task_chat_events(
         except (json.JSONDecodeError, OSError):
             _log_exc()
     return []
+
+
+def _find_cache_entry(task: str | None) -> _HistoryEntry | None:
+    """Find a cache entry by task name or return the most recent entry.
+
+    Must be called with ``_HISTORY_LOCK`` held and cache initialised.
+
+    Args:
+        task: Task name to search for, or ``None`` for the most recent.
+
+    Returns:
+        The matching entry, or ``None`` if not found / cache empty.
+    """
+    if not _history_cache:
+        return None
+    if task:
+        for entry in _history_cache:
+            if entry["task"] == task:
+                return entry
+        return None
+    return _history_cache[0]
+
+
+def _append_entry_to_file(
+    task: str, has_events: bool, result: str, events_file: str,
+) -> None:
+    """Append an entry to the JSONL history file.  Must hold ``_HISTORY_LOCK``."""
+    _ensure_kiss_dir()
+    entry_dict: _HistoryEntry = {
+        "task": task,
+        "has_events": has_events,
+        "result": result,
+        "events_file": events_file,
+    }
+    with HISTORY_FILE.open("a") as f:
+        f.write(json.dumps(entry_dict) + "\n")
 
 
 def _set_latest_chat_events(
@@ -521,37 +541,18 @@ def _set_latest_chat_events(
     with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
-        if not _history_cache:
+        entry = _find_cache_entry(task)
+        if entry is None:
             return
-        target_task: str
-        target_entry: _HistoryEntry
-        if task:
-            for entry in _history_cache:
-                if entry["task"] == task:
-                    entry["has_events"] = bool(events)
-                    if result:
-                        entry["result"] = result
-                    target_task = str(entry["task"])
-                    target_entry = entry
-                    break
-            else:
-                return
-        else:
-            _history_cache[0]["has_events"] = bool(events)
-            _history_cache[0].pop("result", None)
-            target_task = str(_history_cache[0]["task"])
-            target_entry = _history_cache[0]
-        events_file = str(target_entry.get("events_file", ""))
-        # Append updated entry to file; dedup keeps last occurrence
-        _ensure_kiss_dir()
-        entry_dict: _HistoryEntry = {
-            "task": target_task,
-            "has_events": bool(events),
-            "result": result,
-            "events_file": events_file,
-        }
-        with HISTORY_FILE.open("a") as f:
-            f.write(json.dumps(entry_dict) + "\n")
+        entry["has_events"] = bool(events)
+        if task and result:
+            entry["result"] = result
+        elif not task:
+            entry.pop("result", None)
+        events_file = str(entry.get("events_file", ""))
+        _append_entry_to_file(
+            str(entry["task"]), bool(events), result, events_file,
+        )
     # Write events to separate file outside the lock using atomic replace
     if not events_file:
         return
@@ -582,21 +583,14 @@ def _update_task_result(task: str, result: str) -> None:
     with _HISTORY_LOCK:
         if _history_cache is None:
             _refresh_cache()
-        if not _history_cache:
+        entry = _find_cache_entry(task)
+        if entry is None:
             return
-        for entry in _history_cache:
-            if entry["task"] == task:
-                entry["result"] = result
-                _ensure_kiss_dir()
-                entry_dict: _HistoryEntry = {
-                    "task": task,
-                    "has_events": bool(entry.get("has_events")),
-                    "result": result,
-                    "events_file": str(entry.get("events_file", "")),
-                }
-                with HISTORY_FILE.open("a") as f:
-                    f.write(json.dumps(entry_dict) + "\n")
-                return
+        entry["result"] = result
+        _append_entry_to_file(
+            task, bool(entry.get("has_events")), result,
+            str(entry.get("events_file", "")),
+        )
 
 
 def _load_json_dict(path: Path) -> dict:
@@ -755,8 +749,6 @@ def _add_task(task: str) -> None:
             _history_cache[:] = (
                 _history_cache[:_RECENT_CACHE_SIZE]
             )
-        global _total_count
-        _total_count += 1
 
 
 

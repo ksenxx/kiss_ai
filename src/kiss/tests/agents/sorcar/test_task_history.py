@@ -17,7 +17,6 @@ def _redirect(tmpdir: str):
         th._CHAT_EVENTS_DIR,
         th._history_cache,
         th._KISS_DIR,
-        th._total_count,
     )
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -25,7 +24,6 @@ def _redirect(tmpdir: str):
     th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
     th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
     th._history_cache = None
-    th._total_count = 0
     return old
 
 
@@ -35,7 +33,6 @@ def _restore(saved):
         th._CHAT_EVENTS_DIR,
         th._history_cache,
         th._KISS_DIR,
-        th._total_count,
     ) = saved
 
 
