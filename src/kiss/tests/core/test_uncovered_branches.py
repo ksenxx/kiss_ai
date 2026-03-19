@@ -420,7 +420,7 @@ class TestPrintToConsole:
 
         p = ConsolePrinter()
         content = yaml.dump({"summary": "Done without status"})
-        result = p.print(content, type="result", step_count=1, total_tokens=0, cost=0.0)
+        result = p.print(content, type="result", total_tokens=0, cost=0.0)
         assert isinstance(result, str)
 
 

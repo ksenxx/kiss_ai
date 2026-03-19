@@ -36,42 +36,51 @@ def run_command(cmd: list[str], description: str) -> bool:
 
 
 def find_markdown_files() -> list[str]:
-    """Find all markdown files in the project.
+    """Find all non-gitignored markdown files in the project.
 
-    Searches recursively from the project root, skipping hidden directories
-    and common non-project directories like node_modules, venv, __pycache__,
-    and artifacts.
+    Uses ``git ls-files`` to list tracked and untracked-but-not-ignored
+    markdown files, automatically respecting ``.gitignore`` rules.
 
     Returns:
         Sorted list of absolute paths to markdown files found in the project.
     """
     project_root = Path(__file__).parent.parent.parent.parent
-    skip_dirs = {"node_modules", "venv", "__pycache__", "artifacts"}
-    md_files = []
-    for md_file in project_root.rglob("*.md"):
-        # Skip hidden directories and common non-project directories
-        parts = md_file.parts
-        if any(part.startswith(".") or part in skip_dirs for part in parts):
-            continue
-        md_files.append(str(md_file))
-    return sorted(md_files)
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    return sorted(str(project_root / f) for f in result.stdout.strip().split("\n") if f)
 
 
 def _should_skip_path(path: Path) -> bool:
-    """Check if a path should be skipped (e.g., inside .venv or hidden directories).
+    """Check if a path should be skipped by consulting ``.gitignore`` rules.
+
+    Uses ``git check-ignore`` to determine whether *path* (or any ancestor)
+    is covered by ``.gitignore``.  The ``.git`` directory itself is always
+    skipped because it is not listed in ``.gitignore`` but must never be
+    cleaned.
 
     Args:
         path: Path object to check.
 
     Returns:
-        True if the path is inside a directory that should be skipped
-        (.venv, venv, .git, node_modules), False otherwise.
+        True if the path is inside ``.git`` or is git-ignored, False otherwise.
     """
-    skip_dirs = {".venv", "venv", ".git", "node_modules"}
-    for part in path.parts:
-        if part in skip_dirs:
-            return True
-    return False
+    if ".git" in path.parts:
+        return True
+    project_root = Path(__file__).parent.parent.parent.parent
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", str(path)],
+        capture_output=True,
+        cwd=project_root,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def clean_build_artifacts() -> None:

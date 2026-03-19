@@ -1487,6 +1487,7 @@ def _auto_update() -> None:  # pragma: no cover – CLI helper
             print(f"git init/fetch error: {exc}", file=sys.stderr)
             return
     print("Sorcar: checking for updates…")
+    pull_out = ""
     try:
         pull = subprocess.run(
             ["git", "pull", "--ff-only", public_url, "main"],

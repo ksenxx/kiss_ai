@@ -66,7 +66,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             type: Content type (e.g. "text", "prompt", "stream_event",
                 "tool_call", "tool_result", "result", "usage_info", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
-                step_count, total_tokens.
+                total_tokens.
 
         Returns:
             str: Extracted text from stream events, or empty string.
@@ -129,14 +129,13 @@ class ConsolePrinter(StreamEventParser, Printer):
         if type == "result":
             self._flush_newline()
             cost = kwargs.get("cost", "N/A")
-            step_count = kwargs.get("step_count", 0)
             total_tokens = kwargs.get("total_tokens", 0)
             body = self._format_result_content(str(content)) if content else "(no result)"
             self._console.print(
                 Panel(
                     body,
                     title="Result",
-                    subtitle=f"steps={step_count}  tokens={total_tokens}  cost={cost}",
+                    subtitle=f"tokens={total_tokens}  cost={cost}",
                     border_style="bold green",
                     padding=(1, 2),
                 )
@@ -234,7 +233,6 @@ class ConsolePrinter(StreamEventParser, Printer):
                     self._file.flush()
                     self._mid_line = not text.endswith("\n")
         elif hasattr(message, "result"):
-            step_count = kwargs.get("step_count", 0)
             budget_used = kwargs.get("budget_used", 0.0)
             total_tokens_used = kwargs.get("total_tokens_used", 0)
             cost_str = f"${budget_used:.4f}" if budget_used else "N/A"
@@ -244,7 +242,7 @@ class ConsolePrinter(StreamEventParser, Printer):
                 Panel(
                     body,
                     title="Result",
-                    subtitle=(f"steps={step_count}  tokens={total_tokens_used}  cost={cost_str}"),
+                    subtitle=(f"tokens={total_tokens_used}  cost={cost_str}"),
                     border_style="bold green",
                     padding=(1, 2),
                 )
