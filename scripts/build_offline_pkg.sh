@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Build a standalone macOS offline installer package (.pkg) for the KISS project.
-# Bundles: uv, code-server (with node), Python 3.13, git,
+# Bundles: uv, code-server (with node), Python 3.13,
 # Playwright Chromium, all Python wheels, and the project source.
 #
 # Usage: ./scripts/build_offline_pkg.sh
@@ -112,32 +112,7 @@ find "$BUNDLE/python" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarant
 echo "   Python: $(du -sh "$BUNDLE/python" | cut -f1)"
 
 # ---------------------------------------------------------------------------
-# 4. Git (from Xcode CLT - portable binary + git-core)
-# ---------------------------------------------------------------------------
-echo ">>> Bundling git..."
-GIT_BIN="/Library/Developer/CommandLineTools/usr/bin/git"
-GIT_CORE="/Library/Developer/CommandLineTools/usr/libexec/git-core"
-if [ -f "$GIT_BIN" ]; then
-    mkdir -p "$BUNDLE/git/bin" "$BUNDLE/git/libexec"
-    cp "$GIT_BIN" "$BUNDLE/git/bin/git"
-    chmod +x "$BUNDLE/git/bin/git"
-    # Copy git-core helpers
-    cp -R "$GIT_CORE" "$BUNDLE/git/libexec/git-core"
-    # Also copy git-remote-https and other needed helpers from bin
-    for helper in git-remote-https git-remote-http git-receive-pack git-upload-pack git-upload-archive; do
-        if [ -f "/Library/Developer/CommandLineTools/usr/bin/$helper" ]; then
-            cp "/Library/Developer/CommandLineTools/usr/bin/$helper" "$BUNDLE/git/bin/$helper"
-        fi
-    done
-    # Strip quarantine from git executables
-    find "$BUNDLE/git" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
-    echo "   git: $(du -sh "$BUNDLE/git" | cut -f1)"
-else
-    echo "   WARNING: Xcode CLT git not found at $GIT_BIN, git not bundled"
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Python wheels (offline pip cache)
+# 4. Python wheels (offline pip cache)
 # ---------------------------------------------------------------------------
 echo ">>> Downloading Python wheels for offline install..."
 mkdir -p "$BUNDLE/wheels"
@@ -155,7 +130,7 @@ uv build --wheel --out-dir "$BUNDLE/wheels"
 echo "   wheels: $(du -sh "$BUNDLE/wheels" | cut -f1) ($(ls "$BUNDLE/wheels" | wc -l | tr -d ' ') files)"
 
 # ---------------------------------------------------------------------------
-# 6. Playwright Chromium browser
+# 5. Playwright Chromium browser
 # ---------------------------------------------------------------------------
 echo ">>> Bundling Playwright Chromium..."
 PW_BROWSERS="$HOME/Library/Caches/ms-playwright"
@@ -180,7 +155,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Project source + build architecture stamp
+# 6. Project source + build architecture stamp
 # ---------------------------------------------------------------------------
 echo "$ARCH" > "$BUNDLE/build-arch.txt"
 echo ">>> Bundling project source..."
@@ -317,20 +292,7 @@ mkdir -p "$(dirname "$PYTHON_DEST")"
 cp -R "$KISS_BUNDLE_DIR/python" "$PYTHON_DEST"
 find "$PYTHON_DEST" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
 
-# 4. Install git
-echo ">>> Installing git..."
-if [ -d "$KISS_BUNDLE_DIR/git" ]; then
-    rm -rf "$INSTALL_BASE/git"
-    mkdir -p "$INSTALL_BASE/git"
-    cp -R "$KISS_BUNDLE_DIR/git/"* "$INSTALL_BASE/git/"
-    chmod +x "$INSTALL_BASE/git/bin/git"
-    find "$INSTALL_BASE/git" -type f -perm +111 -exec sh -c 'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; codesign --force --sign - "$1" 2>/dev/null; true' _ {} \;
-    ln -sf "$INSTALL_BASE/git/bin/git" "$INSTALL_BASE/bin/git"
-    # Set GIT_EXEC_PATH for the installed git
-    export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
-fi
-
-# 5. Install Playwright Chromium browsers (inside $INSTALL_BASE/playwright-browsers/)
+# 4. Install Playwright Chromium browsers (inside $INSTALL_BASE/playwright-browsers/)
 echo ">>> Installing Playwright Chromium..."
 PW_DEST="$INSTALL_BASE/playwright-browsers"
 if [ -d "$KISS_BUNDLE_DIR/playwright-browsers" ]; then
@@ -419,7 +381,6 @@ PROFILE_SNIPPET="$INSTALL_BASE/env.sh"
 cat > "$PROFILE_SNIPPET" << EOF
 # KISS Agent Framework - added by offline installer
 export PATH="$INSTALL_BASE/bin:\$PATH"
-export GIT_EXEC_PATH="$INSTALL_BASE/git/libexec/git-core"
 export UV_PYTHON_INSTALL_DIR="$INSTALL_BASE/python"
 export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_BASE/playwright-browsers"
 EOF
@@ -642,7 +603,6 @@ without an internet connection:
   • uv (Python package manager)
   • code-server (VS Code in the browser)
   • Python 3.13
-  • Git
   • Playwright Chromium (browser automation)
   • All Python dependencies
   • KISS project source
