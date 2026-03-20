@@ -25,7 +25,7 @@ run 'uv run pytest -v' with 900 seconds timeout and fix tests
 
 ## race detection
 
-can you please work hard and carefully to precisly detect all actual race conditions in src/kiss/agents/sorcar/sorcar.py? You can add random delays within 0.1 seconds before racing events to reliably trigger a race condition to confirm a race condition.
+can you please work hard and carefully to precisly detect all actual race conditions in src/kiss/agents/sorcar/sorcar.py? You can add random delays within 0.1 seconds before racing events to reliably trigger a race condition to confirm a race condition. DO NOT FIX the race conditions.
 
 ## test compaction
 

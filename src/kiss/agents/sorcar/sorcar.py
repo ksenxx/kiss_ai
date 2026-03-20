@@ -873,18 +873,20 @@ def run_chatbot(
 
     async def user_browser_done(request: Request) -> JSONResponse:  # pragma: no cover
         """Signal that the user has finished their browser interaction."""
-        if user_action_event is not None:
-            user_action_event.set()
+        ev = user_action_event
+        if ev is not None:
+            ev.set()
             return JSONResponse({"status": "ok"})
         return JSONResponse({"error": "No pending action"}, status_code=404)
 
     async def user_question_done(request: Request) -> JSONResponse:  # pragma: no cover
         """Signal that the user has answered the agent's question."""
         nonlocal user_question_answer
-        if user_question_event is not None:
+        ev = user_question_event
+        if ev is not None:
             body = await request.json()
             user_question_answer = body.get("answer", "")
-            user_question_event.set()
+            ev.set()
             return JSONResponse({"status": "ok"})
         return JSONResponse({"error": "No pending question"}, status_code=404)
 
