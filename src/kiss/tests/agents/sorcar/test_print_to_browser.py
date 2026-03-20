@@ -18,7 +18,7 @@ from kiss.agents.sorcar.browser_ui import (
 
 def _subscribe(printer: BaseBrowserPrinter) -> queue.Queue:
     q: queue.Queue = queue.Queue()
-    printer._clients.append(q)
+    printer._client_queue = q
     return q
 
 

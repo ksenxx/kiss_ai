@@ -476,8 +476,8 @@ def run_chatbot(
         except Exception:  # pragma: no cover – LLM API failure
             _log_exc()
 
-    def _watch_periodic() -> None:
-        """Combined watcher: check theme file every 1s and client count every 5s."""
+    def _watch_theme() -> None:
+        """Watch for VS Code theme changes and broadcast updates."""
         theme_file = _KISS_DIR / "vscode-theme.json"
         last_mtime = 0.0
         try:
@@ -485,10 +485,7 @@ def run_chatbot(
                 last_mtime = theme_file.stat().st_mtime
         except OSError:  # pragma: no cover – filesystem error
             _log_exc()
-        no_client_since: float | None = None
-        tick = 0
         while not shutting_down.is_set():  # pragma: no branch – daemon thread exit
-            # Theme check every 1s
             try:  # pragma: no cover – daemon thread during server run
                 if theme_file.exists():
                     mtime = theme_file.stat().st_mtime
@@ -500,20 +497,9 @@ def run_chatbot(
                         printer.broadcast({"type": "theme_changed", **colors})
             except (OSError, json.JSONDecodeError):  # pragma: no cover – filesystem/JSON error
                 _log_exc()
-            # Client check every 5s (every 5th tick)
-            tick += 1  # pragma: no cover – daemon thread during server run
-            if tick >= 5:
-                tick = 0
-                if not printer.has_clients():  # pragma: no cover – client timeout
-                    if no_client_since is None:
-                        no_client_since = time.monotonic()
-                    elif time.monotonic() - no_client_since >= 2.0:
-                        _schedule_shutdown()
-                else:
-                    no_client_since = None
             shutting_down.wait(1.0)
 
-    threading.Thread(target=_watch_periodic, daemon=True).start()
+    threading.Thread(target=_watch_theme, daemon=True).start()
 
     def _wait_for_user_browser(instruction: str, url: str) -> None:  # pragma: no cover
         nonlocal user_action_event
@@ -747,8 +733,12 @@ def run_chatbot(
             shutdown_handle.cancel()
             shutdown_handle = None
 
-    def _schedule_shutdown_on_loop() -> None:  # pragma: no cover – timer-triggered shutdown
-        """Schedule shutdown from the asyncio event loop thread."""
+    def _schedule_shutdown() -> None:  # pragma: no cover – timer-triggered shutdown
+        """Schedule a delayed shutdown from the event loop thread.
+
+        Called only from async handlers (SSE disconnect, /closing), so
+        always runs on the event loop thread.
+        """
         nonlocal shutdown_handle
         if printer.has_clients():
             return
@@ -759,24 +749,6 @@ def run_chatbot(
             shutdown_handle.cancel()
         loop = asyncio.get_event_loop()
         shutdown_handle = loop.call_later(1.0, _do_shutdown)
-
-    def _schedule_shutdown() -> None:  # pragma: no cover – timer-triggered shutdown
-        if printer.has_clients():
-            return
-        with running_lock:
-            if running:
-                return
-        try:
-            loop = asyncio.get_running_loop()
-            # Already on the event loop thread (called from async context)
-            _schedule_shutdown_on_loop()
-        except RuntimeError:
-            # Called from a non-async thread; dispatch to the event loop
-            try:
-                loop = asyncio.get_event_loop()
-                loop.call_soon_threadsafe(_schedule_shutdown_on_loop)
-            except RuntimeError:  # pragma: no cover – no event loop available
-                pass
 
     async def index(request: Request) -> HTMLResponse:
         return HTMLResponse(html_page)

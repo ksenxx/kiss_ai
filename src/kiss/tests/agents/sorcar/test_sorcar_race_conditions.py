@@ -5,8 +5,7 @@ Covers:
 2. stop_event set/clear inside running_lock (no stop→run race)
 3. task_done broadcast after running=False (no 409 on immediate re-submit)
 4. _history_cache protected by _HISTORY_LOCK (FileLock, cross-process + cross-thread)
-5. shutdown_timer protected by shutdown_lock
-6. Integration tests: rapid stop/restart, concurrent printer operations,
+5. Integration tests: rapid stop/restart, concurrent printer operations,
    browser_ui coalesce, theme presets, stream events, etc.
 """
 
@@ -217,47 +216,6 @@ class TestHistoryLock:
             _task_history_module._history_cache = orig_cache
             if orig_file_content is not None:
                 _task_history_module.HISTORY_FILE.write_text(orig_file_content)
-
-
-class TestShutdownTimerLock:
-    def test_concurrent_schedule_shutdown_no_error(self):
-        shutdown_timer: threading.Timer | None = None
-        shutdown_lock = threading.Lock()
-        shutdowns_called: list[int] = []
-
-        def _do_shutdown():
-            shutdowns_called.append(1)
-
-        def _schedule_shutdown():
-            nonlocal shutdown_timer
-            with shutdown_lock:
-                if shutdown_timer is not None:
-                    shutdown_timer.cancel()
-                shutdown_timer = threading.Timer(1.0, _do_shutdown)
-                shutdown_timer.daemon = True
-                shutdown_timer.start()
-
-        num = 20
-        barrier = threading.Barrier(num)
-        errors: list[Exception] = []
-
-        def do_schedule():
-            barrier.wait()
-            try:
-                _schedule_shutdown()
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=do_schedule) for _ in range(num)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert errors == []
-        with shutdown_lock:
-            if shutdown_timer is not None:
-                shutdown_timer.cancel()
 
 
 class TestSorcarModuleFunctions:
