@@ -20,9 +20,20 @@ OUTPUT="$PROJECT_ROOT/dist/kiss-offline-installer.pkg"
 # Detect actual hardware architecture (immune to Rosetta translation)
 if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
     ARCH="arm64"
+    ARCH_ALT="arm64"
 else
     ARCH="x86_64"
+    ARCH_ALT="amd64"
 fi
+
+# Fetch latest release version from GitHub. Falls back to $2 if API fails.
+_latest_github_version() {
+    local repo="$1" default="$2" version
+    version="$(curl -sSf --max-time 10 \
+        "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')" || true
+    echo "${version:-$default}"
+}
 
 echo "=== Building KISS Offline Installer Package ==="
 echo "Architecture: $ARCH"
@@ -37,7 +48,6 @@ echo "Staging: $STAGE"
 strip_quarantine() {
     local target="$1"
     xattr -d com.apple.quarantine "$target" 2>/dev/null || true
-    xattr -d com.apple.provenance "$target" 2>/dev/null || true
     codesign --force --sign - "$target" 2>/dev/null || true
 }
 
@@ -71,8 +81,9 @@ echo "   uv: $(du -sh "$BUNDLE/bin/uv" | cut -f1)"
 # 2. code-server (standalone release with bundled node)
 # ---------------------------------------------------------------------------
 echo ">>> Bundling code-server..."
-CS_VERSION="4.111.0"
-CS_TARBALL="code-server-${CS_VERSION}-macos-${ARCH}.tar.gz"
+CS_FALLBACK_VERSION="4.112.0"
+CS_VERSION="$(_latest_github_version coder/code-server "$CS_FALLBACK_VERSION")"
+CS_TARBALL="code-server-${CS_VERSION}-macos-${ARCH_ALT}.tar.gz"
 CS_URL="https://github.com/coder/code-server/releases/download/v${CS_VERSION}/${CS_TARBALL}"
 CS_CACHE="$STAGE/cache/$CS_TARBALL"
 mkdir -p "$STAGE/cache"
@@ -159,7 +170,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "$ARCH" > "$BUNDLE/build-arch.txt"
 echo ">>> Bundling project source..."
-# Note: Section numbering continues: 8=install script, 9=pkg postinstall, 10=build .pkg
+# Note: Section numbering continues: 7=bin install, 8=install script, 9=pkg postinstall, 10=build .pkg
 mkdir -p "$BUNDLE/project"
 # Copy essential project files (excluding .git, venv, artifacts, etc.)
 rsync -a --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
@@ -172,7 +183,27 @@ find "$BUNDLE/project" -name 'nohup.out' -delete 2>/dev/null || true
 echo "   project: $(du -sh "$BUNDLE/project" | cut -f1)"
 
 # ---------------------------------------------------------------------------
-# 7. Create the offline install script (runs as postinstall in .pkg)
+# 7. Install binaries into $PROJECT_ROOT/bin
+# ---------------------------------------------------------------------------
+echo ">>> Installing binaries into $PROJECT_ROOT/bin..."
+mkdir -p "$PROJECT_ROOT/bin"
+UV_BIN="$(which uv)"
+ln -sf "$UV_BIN" "$PROJECT_ROOT/bin/uv"
+if [ -f "$(dirname "$UV_BIN")/uvx" ]; then
+    ln -sf "$(dirname "$UV_BIN")/uvx" "$PROJECT_ROOT/bin/uvx"
+fi
+if [ -x "$PROJECT_ROOT/code-server/bin/code-server" ]; then
+    ln -sf "$PROJECT_ROOT/code-server/bin/code-server" "$PROJECT_ROOT/bin/code-server"
+fi
+for script in sorcar check generate-api-docs; do
+    if [ -f "$PROJECT_ROOT/.venv/bin/$script" ]; then
+        ln -sf "$PROJECT_ROOT/.venv/bin/$script" "$PROJECT_ROOT/bin/$script"
+    fi
+done
+echo "   Binaries installed: $(ls "$PROJECT_ROOT/bin/" | tr '\n' ' ')"
+
+# ---------------------------------------------------------------------------
+# 8. Create the offline install script (runs as postinstall in .pkg)
 # ---------------------------------------------------------------------------
 echo ">>> Creating install script..."
 cat > "$BUNDLE/install-offline.sh" << 'INSTALL_SCRIPT'
@@ -460,7 +491,7 @@ INSTALL_SCRIPT
 chmod +x "$BUNDLE/install-offline.sh"
 
 # ---------------------------------------------------------------------------
-# 8. Create the .pkg postinstall script
+# 9. Create the .pkg postinstall script
 # ---------------------------------------------------------------------------
 echo ">>> Creating package scripts..."
 cat > "$SCRIPTS/postinstall" << 'POSTINSTALL'
@@ -558,7 +589,7 @@ POSTINSTALL
 chmod +x "$SCRIPTS/postinstall"
 
 # ---------------------------------------------------------------------------
-# 9. Build the .pkg
+# 10. Build the .pkg
 # ---------------------------------------------------------------------------
 echo ">>> Building .pkg..."
 mkdir -p "$(dirname "$OUTPUT")"
