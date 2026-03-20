@@ -464,19 +464,19 @@ ______________________________________________________________________
 
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
-- **broadcast** — Send an SSE event dict to all connected clients. The event is also appended to every active per-thread recording.<br/>`broadcast(event: dict[str, Any]) -> None`
+- **broadcast** — Send an SSE event dict to the connected client. The event is also appended to every active per-thread recording.<br/>`broadcast(event: dict[str, Any]) -> None`
 
   - `event`: The event dictionary to broadcast.
 
-- **add_client** — Register a new SSE client and return its event queue.<br/>`add_client() -> queue.Queue[dict[str, Any]]`
+- **add_client** — Register the SSE client and return its event queue. Only one client is supported. A new connection replaces any previous one.<br/>`add_client() -> queue.Queue[dict[str, Any]]`
 
   - **Returns:** queue.Queue\[dict[str, Any]\]: A queue that will receive broadcast events.
 
-- **remove_client** — Unregister an SSE client's event queue.<br/>`remove_client(cq: queue.Queue[dict[str, Any]]) -> None`
+- **remove_client** — Unregister the SSE client's event queue. Only clears the queue if *cq* is the current client (handles reconnection races where the old connection tears down after a new one has already connected).<br/>`remove_client(cq: queue.Queue[dict[str, Any]]) -> None`
 
   - `cq`: The client queue to remove.
 
-- **has_clients**<br/>`has_clients() -> bool`
+- **has_clients** — Return True if a client is currently connected.<br/>`has_clients() -> bool`
 
 - **print** — Render content by broadcasting SSE events to connected browser clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 

@@ -469,7 +469,7 @@ def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 class BaseBrowserPrinter(StreamEventParser, Printer):
     def __init__(self) -> None:
         StreamEventParser.__init__(self)
-        self._clients: list[queue.Queue[dict[str, Any]]] = []
+        self._client_queue: queue.Queue[dict[str, Any]] | None = None
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
         self._bash_buffer: list[str] = []
@@ -527,7 +527,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         return _coalesce_events(filtered)
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        """Send an SSE event dict to all connected clients.
+        """Send an SSE event dict to the connected client.
 
         The event is also appended to every active per-thread recording.
 
@@ -537,36 +537,41 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         with self._lock:
             for events_list in self._recordings.values():
                 events_list.append(event)
-            for cq in self._clients:
-                cq.put(event)
+            if self._client_queue is not None:
+                self._client_queue.put(event)
 
     def add_client(self) -> queue.Queue[dict[str, Any]]:
-        """Register a new SSE client and return its event queue.
+        """Register the SSE client and return its event queue.
+
+        Only one client is supported. A new connection replaces any
+        previous one.
 
         Returns:
             queue.Queue[dict[str, Any]]: A queue that will receive broadcast events.
         """
         cq: queue.Queue[dict[str, Any]] = queue.Queue()
         with self._lock:
-            self._clients.append(cq)
+            self._client_queue = cq
         return cq
 
     def remove_client(self, cq: queue.Queue[dict[str, Any]]) -> None:
-        """Unregister an SSE client's event queue.
+        """Unregister the SSE client's event queue.
+
+        Only clears the queue if *cq* is the current client (handles
+        reconnection races where the old connection tears down after a
+        new one has already connected).
 
         Args:
             cq: The client queue to remove.
         """
         with self._lock:
-            try:
-                self._clients.remove(cq)
-            except ValueError:
-                _log_exc()
-                pass
+            if self._client_queue is cq:
+                self._client_queue = None
 
     def has_clients(self) -> bool:
+        """Return True if a client is currently connected."""
         with self._lock:
-            return bool(self._clients)
+            return self._client_queue is not None
 
     def _broadcast_result(
         self,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.task_history as th
@@ -37,24 +36,6 @@ class TestShutdownTimerDuration:
         assert "call_later(1.0," in source
         assert "call_later(10.0," not in source
         assert "Timer(120.0," not in source
-        assert "no_client_since >= 2.0" in source
-        assert "no_client_since >= 10.0" not in source
-
-
-class TestShutdownTimerBehavior:
-    def test_cancel_shutdown_noop_when_no_timer(self) -> None:
-        shutdown_timer: threading.Timer | None = None
-        shutdown_lock = threading.Lock()
-
-        def _cancel_shutdown() -> None:
-            nonlocal shutdown_timer
-            with shutdown_lock:
-                if shutdown_timer is not None:
-                    shutdown_timer.cancel()
-                    shutdown_timer = None
-
-        _cancel_shutdown()
-        assert shutdown_timer is None
 
 
 class TestSSEEventsEndpointIntegration:

@@ -30,7 +30,7 @@ def _make_printers():
     console = ConsolePrinter(file=buf)
     browser = BaseBrowserPrinter()
     bq: queue.Queue = queue.Queue()
-    browser._clients.append(bq)
+    browser._client_queue = bq
     return console, buf, browser, bq
 
 
