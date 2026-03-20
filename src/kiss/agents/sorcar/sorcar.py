@@ -272,6 +272,29 @@ def run_chatbot(
                 cs_binary = str(_cs_path)
                 break
 
+    def _build_cs_env() -> dict[str, str]:  # pragma: no cover – requires code-server binary
+        """Build environment dict for code-server with gallery and GitHub token."""
+        from kiss.agents.sorcar.code_server import _MS_GALLERY, _load_github_token
+
+        env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
+        gh_token = _load_github_token(cs_data_dir)
+        if gh_token:
+            env["GITHUB_TOKEN"] = gh_token
+        return env
+
+    def _wait_for_cs() -> bool:  # pragma: no cover – requires code-server binary
+        """Wait up to 15s for code-server to accept connections. Sets code_server_url on success."""
+        nonlocal code_server_url
+        for _ in range(30):
+            try:
+                with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
+                    code_server_url = cs_url
+                    return True
+            except (ConnectionRefusedError, OSError):
+                _log_exc()
+                time.sleep(0.5)
+        return False
+
     def _code_server_launch_args() -> list[str]:  # pragma: no cover – requires code-server binary
         assert cs_binary is not None
         return [
@@ -321,32 +344,14 @@ def run_chatbot(
                 logger.warning("code-server on port %d unreachable", cs_port)
             logger.info("Restarting code-server...")
             try:
-                from kiss.agents.sorcar.code_server import _MS_GALLERY, _load_github_token
-
-                cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
-                _gh_token = _load_github_token(cs_data_dir)
-                if _gh_token:
-                    cs_env["GITHUB_TOKEN"] = _gh_token
                 cs_proc = subprocess.Popen(
                     _code_server_launch_args(),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    env=cs_env,
+                    env=_build_cs_env(),
                     start_new_session=True,
                 )
-                restarted = False
-                for _ in range(30):
-                    try:
-                        with socket.create_connection(
-                            ("127.0.0.1", cs_port), timeout=0.5
-                        ):
-                            code_server_url = cs_url
-                            restarted = True
-                            break
-                    except (ConnectionRefusedError, OSError):
-                        _log_exc()
-                        time.sleep(0.5)
-                if restarted:
+                if _wait_for_cs():
                     logger.info("code-server restarted at %s", code_server_url)
                     printer.broadcast({"type": "code_server_restarted"})
                 else:
@@ -404,29 +409,14 @@ def run_chatbot(
             code_server_url = cs_url
             printer.print(f"Reusing existing code-server at {code_server_url}")
         else:
-            from kiss.agents.sorcar.code_server import _MS_GALLERY, _load_github_token
-
-            cs_env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
-            _gh_token = _load_github_token(cs_data_dir)
-            if _gh_token:  # pragma: no cover – requires stored GitHub token
-                cs_env["GITHUB_TOKEN"] = _gh_token
-                logger.info("Restored GitHub Copilot auth token")
             cs_proc = subprocess.Popen(
                 _code_server_launch_args(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                env=cs_env,
+                env=_build_cs_env(),
                 start_new_session=True,
             )
-            for _ in range(30):  # pragma: no branch – loop always breaks on success
-                try:
-                    with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
-                        code_server_url = cs_url
-                        break
-                except (ConnectionRefusedError, OSError):
-                    _log_exc()
-                    time.sleep(0.5)
-            if code_server_url:
+            if _wait_for_cs():
                 printer.print(f"code-server running at {code_server_url}")
             else:  # pragma: no cover – code-server startup failure
                 printer.print("Warning: code-server failed to start")
@@ -682,6 +672,15 @@ def run_chatbot(
         printer.broadcast({"type": "task_stopped"})
         return True
 
+    def _finish_merge() -> None:
+        """End the merge session: reset state, notify clients, clean up data."""
+        nonlocal merging, remaining_hunks
+        with running_lock:
+            merging = False
+            remaining_hunks = 0
+        printer.broadcast({"type": "merge_ended"})
+        _cleanup_merge_data(cs_data_dir)
+
     def _cleanup() -> None:
         nonlocal merging, remaining_hunks
         with running_lock:
@@ -796,26 +795,36 @@ def run_chatbot(
             },
         )
 
-    def _try_start_agent_thread(
-        t: threading.Thread, stop_ev: threading.Event
-    ) -> JSONResponse | None:
-        """Acquire the lock and start the agent thread if not already running.
+    def _create_agent_thread(
+        task: str, model: str, attachments: list | None = None,
+    ) -> tuple[threading.Thread, JSONResponse | None]:
+        """Create an agent thread and register it under the running lock.
 
-        Returns None on success, or a JSONResponse error on conflict.
+        Records model usage, creates the thread (not yet started), and
+        acquires the lock.  Returns ``(thread, None)`` on success, or
+        ``(thread, JSONResponse)`` on conflict.  Caller must call
+        ``thread.start()`` only when error is ``None``.
         """
         nonlocal running, agent_thread, current_stop_event
+        _record_model_usage(model)
+        stop_ev = threading.Event()
+        t = threading.Thread(
+            target=run_agent_thread,
+            args=(task, model, stop_ev, attachments),
+            daemon=True,
+        )
         with running_lock:
             if merging:
-                return JSONResponse(
+                return t, JSONResponse(
                     {"error": "Resolve all diffs in the merge view first"},
                     status_code=409,
                 )
             if running:
-                return JSONResponse({"error": "Agent is already running"}, status_code=409)
+                return t, JSONResponse({"error": "Agent is already running"}, status_code=409)
             current_stop_event = stop_ev
             running = True
             agent_thread = t
-        return None
+        return t, None
 
     async def run_task(request: Request) -> JSONResponse:
         nonlocal selected_model
@@ -826,14 +835,7 @@ def run_chatbot(
         selected_model = model
         if not task:
             return JSONResponse({"error": "Empty task"}, status_code=400)
-        _record_model_usage(model)
-        stop_ev = threading.Event()
-        t = threading.Thread(
-            target=run_agent_thread,
-            args=(task, model, stop_ev, attachments),
-            daemon=True,
-        )
-        err = _try_start_agent_thread(t, stop_ev)
+        t, err = _create_agent_thread(task, model, attachments)
         if err is not None:
             return err
         t.start()
@@ -850,14 +852,7 @@ def run_chatbot(
         text = body.get("text", "").strip()
         if not text:
             return JSONResponse({"error": "No text selected"}, status_code=400)
-        _record_model_usage(selected_model)
-        stop_ev = threading.Event()
-        t = threading.Thread(
-            target=run_agent_thread,
-            args=(text, selected_model, stop_ev, None),
-            daemon=True,
-        )
-        err = _try_start_agent_thread(t, stop_ev)
+        t, err = _create_agent_thread(text, selected_model)
         if err is not None:
             return err
         # Broadcast AFTER lock confirms task will start, so clients
@@ -1178,15 +1173,11 @@ def run_chatbot(
         return JSONResponse({"status": "ok"})
 
     async def merge_action(request: Request) -> JSONResponse:  # pragma: no cover
-        nonlocal merging, remaining_hunks
+        nonlocal remaining_hunks
         body = await request.json()
         action = body.get("action", "")
         if action == "all-done":
-            with running_lock:
-                merging = False
-                remaining_hunks = 0
-            printer.broadcast({"type": "merge_ended"})
-            _cleanup_merge_data(cs_data_dir)
+            _finish_merge()
             return JSONResponse({"status": "ok"})
         if action not in ("prev", "next", "accept-all", "reject-all", "accept", "reject"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
@@ -1194,21 +1185,14 @@ def run_chatbot(
         with open(pending, "w") as f:
             json.dump({"action": action}, f)
         if action in ("accept-all", "reject-all"):
-            with running_lock:
-                merging = False
-                remaining_hunks = 0
-            printer.broadcast({"type": "merge_ended"})
-            _cleanup_merge_data(cs_data_dir)
+            _finish_merge()
         elif action in ("accept", "reject"):
-            merge_done = False
+            done = False
             with running_lock:
                 remaining_hunks = max(0, remaining_hunks - 1)
-                if remaining_hunks == 0:
-                    merging = False
-                    merge_done = True
-            if merge_done:
-                printer.broadcast({"type": "merge_ended"})
-                _cleanup_merge_data(cs_data_dir)
+                done = remaining_hunks == 0
+            if done:
+                _finish_merge()
         return JSONResponse({"status": "ok"})
 
     async def _thread_json_response(
