@@ -43,7 +43,6 @@
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
     - [`kiss.channels.whatsapp_agent`](#kisschannelswhatsapp_agent)
       - [`kiss.core.models.novita_model`](#kisscoremodelsnovita_model)
-  - [`kiss.env`](#kissenv)
 
 </details>
 
@@ -564,7 +563,7 @@ ______________________________________________________________________
   - `amount`: Number of scroll steps (default 3).
   - **Returns:** Updated accessibility tree after scrolling, or "Error scrolling <direction>: <message>" on error.
 
-- **screenshot** — Capture the visible viewport as an image. Use to verify layout, captchas, or visual state.<br/>`screenshot(file_path: str = 'screenshot.png') -> str`
+- **screenshot** — Capture the visible viewport of the Chromium browser as an image. Use to verify layout, captchas, or visual state of a web page currently open in the browser. This does NOT capture or display local files, attached images, or PDFs — it only screenshots the browser window.<br/>`screenshot(file_path: str = 'screenshot.png') -> str`
 
   - `file_path`: Path where the PNG will be saved (default "screenshot.png"). Parent directories are created if needed.
   - **Returns:** "Screenshot saved to \<resolved_path>", or "Error taking screenshot: <message>" on error.
@@ -1293,13 +1292,5 @@ ______________________________________________________________________
 - `api_key`: The Novita API key for authentication.
 - `model_config`: Optional dictionary of model configuration parameters.
 - `token_callback`: Optional async callback invoked with each streamed text token.
-
-______________________________________________________________________
-
-### `kiss.env` — *Ensure standard binary paths and env vars are configured.*
-
-**`get_install_dir`** — Return the KISS installer directory. Resolution order: 1. `KISS_INSTALL_DIR` environment variable 2. `~/.kiss/install_dir` marker file (written by the installer) 3. `~/kiss_ai` (default, backward-compatible)<br/>`def get_install_dir() -> Path`
-
-**`ensure_path`** — Prepend `~/.local/bin` to PATH and set env vars if needed. For offline installs, also sets `UV_PYTHON_INSTALL_DIR` and `PLAYWRIGHT_BROWSERS_PATH` when those directories exist under the install dir.<br/>`def ensure_path() -> None`
 
 ______________________________________________________________________
