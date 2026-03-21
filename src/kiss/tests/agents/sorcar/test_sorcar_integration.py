@@ -1469,8 +1469,11 @@ class TestInProcessEndpoints:
 
     def test_run_error_task(self, inproc_server) -> None:
         """Run a task that raises Exception to cover except Exception branch."""
+        """Run a task that raises Exception: verify Result card and task_error are broadcast."""
         base_url, _, _ = inproc_server
         time.sleep(1)
+        # Connect SSE to capture events
+        sse = requests.get(f"{base_url}/events", stream=True, timeout=30)
         resp = requests.post(
             f"{base_url}/run",
             json={"task": "error_task_for_test"},
@@ -1478,6 +1481,27 @@ class TestInProcessEndpoints:
         )
         assert resp.status_code == 200
         time.sleep(3)
+        # Collect events until we see task_error or timeout
+        events = []
+        deadline = time.monotonic() + 10.0
+        for line in sse.iter_lines(decode_unicode=True):
+            if time.monotonic() > deadline:
+                break
+            if not line or not line.startswith("data: "):
+                continue
+            ev = json.loads(line[6:])
+            events.append(ev)
+            if ev.get("type") == "task_error":
+                break
+        sse.close()
+        # Verify a result event with success=false was broadcast before task_error
+        result_events = [e for e in events if e.get("type") == "result"]
+        error_events = [e for e in events if e.get("type") == "task_error"]
+        assert len(result_events) >= 1, f"Expected result event, got: {[e['type'] for e in events]}"
+        assert result_events[-1].get("success") is False
+        assert "test error from agent" in result_events[-1].get("summary", "")
+        assert len(error_events) == 1
+        assert "test error from agent" in error_events[0].get("text", "")
 
     def test_tasks_has_events(self, inproc_server) -> None:
         """After running tasks, check that tasks endpoint shows has_events."""
