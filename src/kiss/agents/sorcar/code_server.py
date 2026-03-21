@@ -588,9 +588,7 @@ def _install_copilot_extension(extensions_dir: str) -> None:
             timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError):
-        logger.debug("Exception caught", exc_info=True)
         _log_exc()
-        pass
     _disable_copilot_scm_button(extensions_dir)
 
 
@@ -611,7 +609,6 @@ def _setup_code_server(data_dir: str, extensions_dir: str) -> bool:
     try:
         existing = json.loads(settings_file.read_text()) if settings_file.exists() else {}
     except (json.JSONDecodeError, OSError):
-        logger.debug("Exception caught", exc_info=True)
         _log_exc()
         existing = {}
     if "workbench.colorTheme" not in existing:
@@ -744,9 +741,7 @@ def _scan_files(work_dir: str) -> list[str]:
             for d in dirs:
                 paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
     except OSError:  # pragma: no cover — os.walk swallows all OSErrors internally
-        logger.debug("Exception caught", exc_info=True)
         _log_exc()
-        pass
     return paths
 
 
@@ -784,12 +779,6 @@ def _parse_hunk_line(line: str) -> tuple[int, int, int, int] | None:
 
 
 def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]]]:
-    result = subprocess.run(
-        ["git", "diff", "-U0", "HEAD", "--no-color"],
-        capture_output=True,
-        text=True,
-        cwd=work_dir,
-    )
     result = _git(work_dir, "diff", "-U0", "HEAD", "--no-color")
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
@@ -805,12 +794,6 @@ def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]
 
 
 def _capture_untracked(work_dir: str) -> set[str]:
-    result = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        capture_output=True,
-        text=True,
-        cwd=work_dir,
-    )
     result = _git(work_dir, "ls-files", "--others", "--exclude-standard")
     return {line.strip() for line in result.stdout.split("\n") if line.strip()}
 
@@ -831,9 +814,7 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
         try:
             result[fname] = hashlib.md5(fpath.read_bytes()).hexdigest()
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
             _log_exc()
-            pass
     return result
 
 
@@ -875,7 +856,6 @@ def _save_untracked_base(
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(fpath, dest)
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
             _log_exc()
 
 
@@ -899,7 +879,6 @@ def _cleanup_merge_data(data_dir: str) -> None:
         try:
             manifest.unlink()
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
             _log_exc()
 
 

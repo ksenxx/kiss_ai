@@ -620,6 +620,19 @@ def run_chatbot(
             if not stopped_externally:
                 # Broadcast AFTER setting running=False so clients can
                 # immediately submit a new task without getting a 409.
+                if done_event.get("type") == "task_error":
+                    # Show the error in a proper Result card so the user
+                    # sees it prominently (not just the small error bar).
+                    error_result = {
+                        "type": "result",
+                        "text": done_event.get("text", "Unknown error"),
+                        "success": False,
+                        "summary": f"Error: {done_event.get('text', 'Unknown error')}",
+                        "total_tokens": 0,
+                        "cost": "N/A",
+                    }
+                    chat_events.append(error_result)
+                    printer.broadcast(error_result)
                 chat_events.append(done_event)
                 printer.broadcast(done_event)
                 if done_event.get("type") == "task_done":
