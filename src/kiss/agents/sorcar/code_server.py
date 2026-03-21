@@ -10,7 +10,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +32,7 @@ _CS_SETTINGS = {
     "terminal.integrated.fontSize": 13,
     "scm.inputFontSize": 13,
     "debug.console.fontSize": 13,
-    "window.restoreWindows": "none",
+    "window.restoreWindows": "all",
     "workbench.editor.enablePreview": False,
     "workbench.editor.restoreViewState": True,
     "files.hotExit": "onExitAndWindowClose",
@@ -41,8 +40,6 @@ _CS_SETTINGS = {
     "git.autoRepositoryDetection": True,
     "git.openRepositoryInParentFolders": "always",
     "files.saveConflictResolution": "overwriteFileOnDisk",
-    "github.copilot.enable": {"*": True},
-    "github.copilot.editor.enableAutoCompletions": True,
 }
 
 _CS_STATE_ENTRIES = [
@@ -419,8 +416,9 @@ function activate(ctx){
       'Reviewing '+data.files.length+' file(s). '
       +'Red = old, Blue = new. Use Accept / Reject on toolbar.');
   }
-  // --- Open tabs persistence ---
-  var tabsFile=path.join(dataDir,'open-tabs.json');
+  // --- Open tabs persistence via extension globalStorage (filesystem) ---
+  var gsDir=ctx.globalStorageUri.fsPath;
+  var tabsFile=path.join(gsDir,'tabs.json');
   function saveOpenTabs(){
     try{
       var tabs=[];var active='';
@@ -433,7 +431,7 @@ function activate(ctx){
         }
       }
       if(tabs.length>0){
-        if(!fs.existsSync(dataDir))fs.mkdirSync(dataDir,{recursive:true});
+        if(!fs.existsSync(gsDir))fs.mkdirSync(gsDir,{recursive:true});
         fs.writeFileSync(tabsFile,JSON.stringify({tabs:tabs,active:active}));
       }
     }catch(e){}
@@ -450,7 +448,7 @@ function activate(ctx){
       if(hasFileTabs)return;
       if(!fs.existsSync(tabsFile))return;
       var data=JSON.parse(fs.readFileSync(tabsFile,'utf8'));
-      if(!data.tabs||!data.tabs.length)return;
+      if(!data||!data.tabs||!data.tabs.length)return;
       for(var t of data.tabs){
         if(!fs.existsSync(t.path))continue;
         var doc=await vscode.workspace.openTextDocument(vscode.Uri.file(t.path));
@@ -464,138 +462,9 @@ function activate(ctx){
   }
   setTimeout(function(){restoreOpenTabs();},2000);
   ctx.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(function(){saveOpenTabs();}));
-  // --- GitHub Copilot auth token persistence ---
-  var ghTokenFile=path.join(dataDir,'..','github-copilot-token.json');
-  async function saveGitHubToken(){
-    try{
-      // Try each scope set from most to least specific.  Copilot signs in
-      // with minimal scopes (often just 'user:email'), so we must not
-      // demand scopes the session doesn't have.
-      var scopeSets=[['read:user','user:email'],['user:email'],[]];
-      for(var i=0;i<scopeSets.length;i++){
-        var s=await vscode.authentication.getSession(
-          'github',scopeSets[i],{silent:true});
-        if(s&&s.accessToken){
-          var d=JSON.stringify({
-            accessToken:s.accessToken,
-            account:s.account,id:s.id});
-          fs.writeFileSync(ghTokenFile,d,{mode:0o600});
-          return;
-        }
-      }
-    }catch(e){}
-  }
-  // Check periodically and on auth change
-  saveGitHubToken();
-  var ghInterval=setInterval(saveGitHubToken,30000);
-  ctx.subscriptions.push({dispose:function(){clearInterval(ghInterval);}});
-  try{
-    vscode.authentication.onDidChangeSessions(function(e){
-      if(e.provider&&e.provider.id==='github') saveGitHubToken();
-    });
-  }catch(e){}
 }
 module.exports={activate};
 """
-
-
-_GH_TOKEN_FILENAME = "github-copilot-token.json"
-
-
-def _load_github_token(sorcar_data_dir: str) -> str | None:
-    """Load saved GitHub Copilot auth token from disk.
-
-    Reads ``github-copilot-token.json`` from the parent of *sorcar_data_dir*
-    (i.e. ``~/.kiss/github-copilot-token.json``) and returns the
-    ``accessToken`` value, or ``None`` if the file is missing, corrupt,
-    or lacks a truthy ``accessToken``.
-
-    Args:
-        sorcar_data_dir: Sorcar data directory path.
-
-    Returns:
-        The access token string, or None.
-    """
-    token_file = Path(sorcar_data_dir).parent / _GH_TOKEN_FILENAME
-    if not token_file.exists():
-        return None
-    try:
-        data = json.loads(token_file.read_text())
-        token = data.get("accessToken")
-        return token if token else None
-    except (json.JSONDecodeError, OSError):
-        _log_exc()
-        return None
-
-
-_MS_GALLERY = (
-    '{"serviceUrl":"https://marketplace.visualstudio.com/_apis/public/gallery",'
-    '"itemUrl":"https://marketplace.visualstudio.com/items"}'
-)
-
-
-def _disable_copilot_scm_button(extensions_dir: str) -> None:
-    """Remove Copilot's 'generate commit message' button from the SCM input box.
-
-    Modifies the Copilot Chat extension's package.json to set the scm/inputBox
-    menu entry's ``when`` clause to ``"false"``, preventing it from appearing.
-    This ensures only the KISSAgent's generate button is visible.
-
-    Args:
-        extensions_dir: Shared extensions directory.
-    """
-    ext_base = Path(extensions_dir)
-    if not ext_base.is_dir():
-        return
-    for ext_dir in ext_base.iterdir():
-        if not ext_dir.is_dir() or not ext_dir.name.startswith("github.copilot-chat-"):
-            continue
-        pkg_path = ext_dir / "package.json"
-        if not pkg_path.exists():
-            continue
-        try:
-            pkg = json.loads(pkg_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        scm_items = pkg.get("contributes", {}).get("menus", {}).get("scm/inputBox", [])
-        modified = False
-        for item in scm_items:
-            if item.get("command") == "github.copilot.git.generateCommitMessage":
-                if item.get("when") != "false":
-                    item["when"] = "false"
-                    modified = True
-        if modified:
-            try:
-                pkg_path.write_text(json.dumps(pkg))
-            except OSError:
-                _log_exc()
-
-
-def _install_copilot_extension(extensions_dir: str) -> None:
-    """Install GitHub Copilot extension if not already present.
-
-    Args:
-        extensions_dir: Shared extensions directory.
-    """
-    ext_base = Path(extensions_dir)
-    if ext_base.is_dir() and any(
-        d.name.startswith("github.copilot-") for d in ext_base.iterdir() if d.is_dir()
-    ):
-        return
-    cs_binary = shutil.which("code-server")
-    if not cs_binary:
-        return
-    env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
-    try:
-        subprocess.run(
-            [cs_binary, "--install-extension", "github.copilot", "--extensions-dir", str(ext_base)],
-            env=env,
-            capture_output=True,
-            timeout=120,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        _log_exc()
-    _disable_copilot_scm_button(extensions_dir)
 
 
 def _setup_code_server(data_dir: str, extensions_dir: str) -> bool:
@@ -647,11 +516,27 @@ def _setup_code_server(data_dir: str, extensions_dir: str) -> bool:
 
     ws_storage = user_dir / "workspaceStorage"
     if ws_storage.exists():
+        # Clean up stale code-server workspace storage directories.
+        # Code-server creates a new directory each session (short hex ID with
+        # only meta.json and no state.vscdb).  Keep only the newest one.
+        cs_dirs: list[Path] = []
         for ws_dir in ws_storage.iterdir():
+            if not ws_dir.is_dir():
+                continue
+            meta = ws_dir / "meta.json"
+            has_state = (ws_dir / "state.vscdb").exists()
+            # Code-server dirs have meta.json but no workspace.json;
+            # desktop VS Code dirs have workspace.json and state.vscdb.
+            if meta.exists() and not (ws_dir / "workspace.json").exists() and not has_state:
+                cs_dirs.append(ws_dir)
             for sub in ("chatSessions", "chatEditingSessions"):
                 chat_dir = ws_dir / sub
                 if chat_dir.exists():
                     shutil.rmtree(chat_dir, ignore_errors=True)
+        if len(cs_dirs) > 1:
+            cs_dirs.sort(key=lambda d: d.stat().st_mtime)
+            for stale in cs_dirs[:-1]:
+                shutil.rmtree(stale, ignore_errors=True)
 
     ext_root = Path(extensions_dir)
     ext_dir = ext_root / "kiss-init"
@@ -711,11 +596,6 @@ def _setup_code_server(data_dir: str, extensions_dir: str) -> bool:
     ext_file = ext_dir / "extension.js"
     old_content = ext_file.read_text() if ext_file.exists() else ""
     ext_file.write_text(_CS_EXTENSION_JS)
-
-    _disable_copilot_scm_button(extensions_dir)
-    threading.Thread(
-        target=_install_copilot_extension, args=(extensions_dir,), daemon=True,
-    ).start()
 
     return old_content != _CS_EXTENSION_JS
 

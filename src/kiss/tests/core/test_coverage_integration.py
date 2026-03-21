@@ -305,11 +305,6 @@ class TestCodeServerHelpers(TestCase):
             _restore_merge_files(str(data_dir), str(work_dir))
             assert (work_dir / "test.txt").read_text() == "restored"
 
-    def test_disable_copilot_scm_button_no_dir(self) -> None:
-        from kiss.agents.sorcar.code_server import _disable_copilot_scm_button
-        _disable_copilot_scm_button("/nonexistent")
-
-
 class TestTaskHistoryExtra(TestCase):
     def setUp(self) -> None:
         from kiss.agents.sorcar import task_history as th

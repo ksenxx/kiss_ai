@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -295,63 +294,54 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     import time as time_mod
 
 
-    if len(sys.argv) < 1:
+    if len(sys.argv) <= 1:
         print("Usage: sorcar_agent.py [-m MODEL_NAME] [-e ENDPOINT] [-b MAX_BUDGET] "
               "[-w WORK_DIR] [--headless true/false] [-v true/false] "
               "[-t TASK_DESCRIPTION] [-f TASK_FILE]")
         sys.exit(1)
     parser = _build_arg_parser()
-    done = False
     agent = SorcarAgent("Sorcar Agent")
     try:
         args = parser.parse_args()
     except Exception:
         task_description = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else ""
-        work_dir = tempfile.mkdtemp()
-        old_cwd = os.getcwd()
-        os.chdir(work_dir)
-        start_time = time_mod.time()
-        try:
-            result = agent.run(
-                prompt_template=task_description,
-                work_dir=work_dir,
-                wait_for_user_callback=cli_wait_for_user,
-                ask_user_question_callback=cli_ask_user_question,
-            )
-        finally:
-            os.chdir(old_cwd)
-        elapsed = time_mod.time() - start_time
-        done = True
-    if not done:
+        work_dir = str(Path(".").resolve())
+        run_kwargs: dict[str, Any] = {
+            "prompt_template": task_description,
+            "work_dir": work_dir,
+            "wait_for_user_callback": cli_wait_for_user,
+            "ask_user_question_callback": cli_ask_user_question,
+        }
+    else:
         task_description = _resolve_task(args)
-
         if args.work_dir is not None:
             work_dir = args.work_dir
             Path(work_dir).mkdir(parents=True, exist_ok=True)
         else:
-            work_dir = tempfile.mkdtemp()
+            work_dir = str(Path(".").resolve())
         model_config = {}
         if args.endpoint:
             model_config["base_url"] = args.endpoint
+        run_kwargs = {
+            "prompt_template": task_description,
+            "model_name": args.model_name,
+            "max_budget": args.max_budget,
+            "model_config": model_config,
+            "work_dir": work_dir,
+            "headless": args.headless,
+            "verbose": args.verbose,
+            "wait_for_user_callback": cli_wait_for_user,
+            "ask_user_question_callback": cli_ask_user_question,
+        }
 
-        old_cwd = os.getcwd()
-        os.chdir(work_dir)
-        start_time = time_mod.time()
-        try:
-            result = agent.run(
-                prompt_template=task_description,
-                model_name=args.model_name,
-                max_budget=args.max_budget,
-                model_config=model_config,
-                work_dir=work_dir,
-                headless=args.headless,
-                verbose=args.verbose,
-                wait_for_user_callback=cli_wait_for_user,
-                ask_user_question_callback=cli_ask_user_question,
-            )
-        finally:
-            os.chdir(old_cwd)
-        elapsed = time_mod.time() - start_time
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
+    try:
+        result = agent.run(**run_kwargs)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
 
     print("FINAL RESULT:")
     result_data = yaml.safe_load(result)
