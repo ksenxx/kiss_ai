@@ -19,10 +19,6 @@ from kiss.core.printer import (
 logger = logging.getLogger(__name__)
 
 
-def _log_exc() -> None:
-    logger.debug("Exception caught", exc_info=True)
-
-
 def find_free_port() -> int:
     """Find and return an available TCP port on localhost.
 

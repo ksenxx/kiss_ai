@@ -23,7 +23,6 @@ import requests
 import kiss.agents.sorcar.task_history as task_history
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
-    _disable_copilot_scm_button,
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
@@ -255,14 +254,6 @@ class TestScanFiles:
             paths = _scan_files(d)
             assert len(paths) <= 2000
 
-class TestDisableCopilotScmButton:
-    def test_bad_package_json(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "github.copilot-chat-1.0.0"
-            ext_dir.mkdir(parents=True)
-            (ext_dir / "package.json").write_text("not json")
-            _disable_copilot_scm_button(d)
-
 class TestTruncateOutputTailZero:
     def test_tail_zero_branch(self) -> None:
         """When remaining=0 after subtracting msg length, tail=0 and line 29 is hit."""
@@ -324,24 +315,6 @@ class TestTaskHistoryEdgeCases:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
-class TestInstallCopilotExtension:
-    def test_already_installed(self) -> None:
-        """When copilot extension dir exists, return immediately."""
-        from kiss.agents.sorcar.code_server import _install_copilot_extension
-
-        with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "github.copilot-1.0.0"
-            ext_dir.mkdir(parents=True)
-            _install_copilot_extension(d)
-
-class TestDisableCopilotScmButtonEdgeCases:
-    def test_copilot_chat_without_package_json(self) -> None:
-        """Directory exists but no package.json."""
-        with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "github.copilot-chat-1.0.0"
-            ext_dir.mkdir(parents=True)
-            _disable_copilot_scm_button(d)
-
 class TestPrepareMergeViewFilteredHunks:
     """Test the pre_hunks filtering logic in _prepare_merge_view."""
 
@@ -378,31 +351,6 @@ class TestBrowserUiUncoveredBranches:
 
 class TestCodeServerUncoveredBranches:
     """Cover remaining uncovered branches in code_server.py."""
-
-    def test_disable_copilot_write_oserror(self) -> None:
-        """Cover 487-488: OSError when writing back package.json."""
-        with tempfile.TemporaryDirectory() as d:
-            ext_dir = Path(d) / "github.copilot-chat-1.0.0"
-            ext_dir.mkdir(parents=True)
-            pkg = {
-                "contributes": {
-                    "menus": {
-                        "scm/inputBox": [
-                            {
-                                "command": "github.copilot.git.generateCommitMessage",
-                                "when": "scmProvider == git",
-                            }
-                        ]
-                    }
-                }
-            }
-            pkg_path = ext_dir / "package.json"
-            pkg_path.write_text(json.dumps(pkg))
-            pkg_path.chmod(0o444)
-            try:
-                _disable_copilot_scm_button(d)
-            finally:
-                pkg_path.chmod(0o644)
 
     def test_save_untracked_base_oserror_on_copy(self) -> None:
         """Cover 748-749: OSError when copying untracked file (unreadable)."""

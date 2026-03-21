@@ -522,7 +522,6 @@ kiss/
 │   │   ├── test_coverage_integration.py
 │   │   ├── test_cs_data_dir_isolation.py
 │   │   ├── test_current_editor_file.py
-│   │   ├── test_disable_copilot_scm.py
 │   │   ├── test_docker_manager.py
 │   │   ├── test_env.py
 │   │   ├── test_error_handling.py
@@ -533,7 +532,6 @@ kiss/
 │   │   ├── test_gepa_batched.py
 │   │   ├── test_gepa_progress_callback.py
 │   │   ├── test_gepa_sanitize.py
-│   │   ├── test_github_copilot_token.py
 │   │   ├── test_gmail_agent.py
 │   │   ├── test_integration_branch_coverage.py
 │   │   ├── test_internal.py
