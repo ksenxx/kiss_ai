@@ -1106,6 +1106,8 @@ def _prepare_merge_view(
     manifest_files: list[dict[str, Any]] = []
     for fname, fh in file_hunks.items():
         current_path = Path(work_dir) / fname
+        if not current_path.is_file():
+            continue
         base_path = merge_dir / fname
         base_path.parent.mkdir(parents=True, exist_ok=True)
         # For untracked files, use saved pre-task copy as base if available
@@ -1125,6 +1127,8 @@ def _prepare_merge_view(
                 "hunks": fh,
             }
         )
+    if not manifest_files:
+        return {"error": "No changes"}
     # Save current file copies (new lines only) for restoration on ungraceful close
     current_dir = Path(data_dir) / "merge-current"
     if current_dir.exists():

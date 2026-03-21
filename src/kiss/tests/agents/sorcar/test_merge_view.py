@@ -62,6 +62,50 @@ class TestRestoreMergeFiles:
             assert data["files"][0]["name"] == str(Path("sub", "file.txt"))
 
 
+class TestMergeViewDeletedFiles:
+    def test_deleted_file_excluded_from_merge(self) -> None:
+        """When the agent deletes a tracked file, the merge view should not include it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+
+            # Agent deletes the file
+            os.remove(os.path.join(repo, "example.md"))
+
+            result = _prepare_merge_view(repo, data_dir, pre_hunks, pre_untracked)
+            assert result == {"error": "No changes"}
+
+    def test_deleted_file_excluded_but_modified_file_kept(self) -> None:
+        """Deleted files are skipped but other modified files still appear."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # Add a second file
+            Path(repo, "keep.txt").write_text("keep\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "add keep"], cwd=repo, capture_output=True)
+
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+
+            # Agent deletes one file and modifies the other
+            os.remove(os.path.join(repo, "example.md"))
+            Path(repo, "keep.txt").write_text("keep\nmodified\n")
+
+            result = _prepare_merge_view(repo, data_dir, pre_hunks, pre_untracked)
+            assert result.get("status") == "opened"
+            manifest = json.loads(Path(data_dir, "pending-merge.json").read_text())
+            names = [f["name"] for f in manifest["files"]]
+            assert "example.md" not in names
+            assert "keep.txt" in names
+
+
 class TestMergeViewExcludesPreExistingDiffs:
     def test_pre_existing_diff_excluded_on_second_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

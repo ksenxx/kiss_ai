@@ -163,9 +163,11 @@ class SorcarAgent(RelentlessAgent):
                 if parts:
                     prompt += (
                         f"\n\n# Important\n - User attached {', '.join(parts)}. "
-                        f"The files are included in this message. "
-                        f"Examine them directly — do NOT use browser tools "
-                        f"to view or screenshot these attachments."
+                        f"The files are included in this message as inline content "
+                        f"that you can see directly. "
+                        f"Do NOT launch a browser, call screenshot(), go_to_url(), "
+                        f"or any other browser tool to view these attachments — "
+                        f"you already have them."
                     )
             if current_editor_file:
                 system_instructions += (

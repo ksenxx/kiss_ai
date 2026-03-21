@@ -277,18 +277,6 @@ def run_chatbot(
         _log_exc()
     cs_url = f"http://127.0.0.1:{cs_port}"
     cs_binary = shutil.which("code-server")
-    if not cs_binary:
-        # Fallback: check the offline installer's well-known paths
-        from kiss.env import get_install_dir
-
-        _install_dir = get_install_dir()
-        for _cs_path in (
-            _install_dir / "bin" / "code-server",
-            _install_dir / "code-server" / "bin" / "code-server",
-        ):
-            if _cs_path.is_file():  # pragma: no cover – code-server not in test env
-                cs_binary = str(_cs_path)
-                break
 
     def _build_cs_env() -> dict[str, str]:  # pragma: no cover – requires code-server binary
         """Build environment dict for code-server with gallery and GitHub token."""
@@ -1504,8 +1492,6 @@ def _auto_update() -> None:  # pragma: no cover – CLI helper
 def main() -> None:  # pragma: no cover – CLI entry point
     """Launch the KISS Sorcar chatbot UI."""
     import argparse
-
-    import kiss.env  # noqa: F401 – ensure offline-installer bins are on PATH
 
     _auto_update()
 
