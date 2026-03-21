@@ -1,8 +1,8 @@
-"""Ensure offline-installer paths and env vars are configured.
+"""Ensure standard binary paths and env vars are configured.
 
-When KISS is installed via the offline .pkg installer, key binaries (uv, git,
-code-server) live under ``<install_dir>/bin`` and ``~/.local/bin``.  Python
-lives under ``<install_dir>/python/`` and Playwright browsers under
+Binaries (uv, code-server, sorcar, etc.) are installed into ``~/.local/bin``.
+The offline .pkg installer may additionally place Python under
+``<install_dir>/python/`` and Playwright browsers under
 ``<install_dir>/playwright-browsers/``.  The install directory is resolved
 from (in order): the ``KISS_INSTALL_DIR`` env var, the ``~/.kiss/install_dir``
 marker file written by the installer, or the default ``~/kiss_ai``.
@@ -22,7 +22,7 @@ _MARKER_FILE = ".kiss/install_dir"
 
 
 def get_install_dir() -> Path:
-    """Return the KISS offline-installer directory.
+    """Return the KISS installer directory.
 
     Resolution order:
       1. ``KISS_INSTALL_DIR`` environment variable
@@ -44,25 +44,26 @@ def get_install_dir() -> Path:
 
 
 def ensure_path() -> None:
-    """Prepend offline-installer bin dirs to PATH and set env vars if needed."""
+    """Prepend ``~/.local/bin`` to PATH and set env vars if needed.
+
+    For offline installs, also sets ``UV_PYTHON_INSTALL_DIR`` and
+    ``PLAYWRIGHT_BROWSERS_PATH`` when those directories exist under the
+    install dir.
+    """
     home = Path.home()
-    kiss_ai = get_install_dir()
-    extra_dirs = [
-        str(kiss_ai / "bin"),
-        str(home / ".local" / "bin"),
-    ]
+    local_bin = str(home / ".local" / "bin")
     current = os.environ.get("PATH", "")
     parts = current.split(os.pathsep)
-    prepend = [d for d in extra_dirs if d not in parts and Path(d).is_dir()]
-    if prepend:
-        os.environ["PATH"] = os.pathsep.join(prepend + parts)
+    if local_bin not in parts and Path(local_bin).is_dir():
+        os.environ["PATH"] = os.pathsep.join([local_bin] + parts)
 
-    # Set UV_PYTHON_INSTALL_DIR so uv finds Python in <install_dir>/python/
+    # Offline-installer compat: set env vars for bundled Python and browsers
+    kiss_ai = get_install_dir()
+
     python_dir = kiss_ai / "python"
     if python_dir.is_dir() and not os.environ.get("UV_PYTHON_INSTALL_DIR"):
         os.environ["UV_PYTHON_INSTALL_DIR"] = str(python_dir)
 
-    # Set PLAYWRIGHT_BROWSERS_PATH so Playwright finds browsers
     pw_dir = kiss_ai / "playwright-browsers"
     if pw_dir.is_dir() and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(pw_dir)

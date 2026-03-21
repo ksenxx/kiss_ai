@@ -1,4 +1,4 @@
-"""Tests for kiss.env – offline-installer PATH and env var setup."""
+"""Tests for kiss.env – PATH and env var setup."""
 
 from __future__ import annotations
 
@@ -70,24 +70,20 @@ def test_get_install_dir_unreadable_marker(tmp_path: Path) -> None:
             os.environ["KISS_INSTALL_DIR"] = original
 
 
-def test_ensure_path_uses_marker_file(tmp_path: Path) -> None:
-    """ensure_path uses the install dir from marker file."""
-    custom_dir = tmp_path / "custom_install"
-    bin_dir = custom_dir / "bin"
-    bin_dir.mkdir(parents=True)
-    marker = tmp_path / ".kiss" / "install_dir"
-    marker.parent.mkdir(parents=True)
-    marker.write_text(str(custom_dir))
+def test_ensure_path_adds_local_bin(tmp_path: Path) -> None:
+    """ensure_path prepends ~/.local/bin to PATH."""
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
 
     original = os.environ["PATH"]
     original_install = os.environ.pop("KISS_INSTALL_DIR", None)
-    parts = [p for p in original.split(os.pathsep) if p != str(bin_dir)]
+    parts = [p for p in original.split(os.pathsep) if p != str(local_bin)]
     os.environ["PATH"] = os.pathsep.join(parts)
 
     try:
         _with_home(tmp_path, env_mod.ensure_path)
 
-        assert str(bin_dir) in os.environ["PATH"].split(os.pathsep)
+        assert str(local_bin) in os.environ["PATH"].split(os.pathsep)
     finally:
         os.environ["PATH"] = original
         if original_install is not None:

@@ -1296,10 +1296,10 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-### `kiss.env` — *Ensure offline-installer paths and env vars are configured.*
+### `kiss.env` — *Ensure standard binary paths and env vars are configured.*
 
-**`get_install_dir`** — Return the KISS offline-installer directory. Resolution order: 1. `KISS_INSTALL_DIR` environment variable 2. `~/.kiss/install_dir` marker file (written by the installer) 3. `~/kiss_ai` (default, backward-compatible)<br/>`def get_install_dir() -> Path`
+**`get_install_dir`** — Return the KISS installer directory. Resolution order: 1. `KISS_INSTALL_DIR` environment variable 2. `~/.kiss/install_dir` marker file (written by the installer) 3. `~/kiss_ai` (default, backward-compatible)<br/>`def get_install_dir() -> Path`
 
-**`ensure_path`** — Prepend offline-installer bin dirs to PATH and set env vars if needed.<br/>`def ensure_path() -> None`
+**`ensure_path`** — Prepend `~/.local/bin` to PATH and set env vars if needed. For offline installs, also sets `UV_PYTHON_INSTALL_DIR` and `PLAYWRIGHT_BROWSERS_PATH` when those directories exist under the install dir.<br/>`def ensure_path() -> None`
 
 ______________________________________________________________________
