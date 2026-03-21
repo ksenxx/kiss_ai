@@ -731,12 +731,12 @@ def _add_task(task: str) -> None:
 
 
 def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
-    """Remove the code-server data directory if stale.
+    """Remove the sorcar data directory if stale.
 
-    Checks ``~/.kiss/cs-data`` and removes it if older than
+    Checks ``~/.kiss/sorcar-data`` and removes it if older than
     ``max_age_hours`` and no process is listening on its port.
-    Also removes any legacy ``~/.kiss/cs-*`` per-workdir directories
-    and ``cs-port-*`` files.
+    Also removes any legacy ``~/.kiss/cs-*`` per-workdir directories,
+    ``cs-port-*`` files, and the old ``cs-data`` directory.
 
     Args:
         max_age_hours: Maximum age in hours before the directory is
@@ -755,12 +755,12 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
             except OSError:
                 _log_exc()
     for d in sorted(_KISS_DIR.glob("cs-*")):
-        if not d.is_dir() or d.name in ("cs-extensions", "cs-data"):
+        if not d.is_dir() or d.name == "cs-extensions":
             continue
         shutil.rmtree(d, ignore_errors=True)
         removed += 1
-    # Check the single cs-data directory
-    d = _KISS_DIR / "cs-data"
+    # Check the sorcar-data directory
+    d = _KISS_DIR / "sorcar-data"
     if not d.is_dir():
         return removed
     try:

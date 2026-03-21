@@ -144,15 +144,24 @@ class TestCleanupStaleCsDirs:
         assert removed == 1
         assert not stale.exists()
 
-    def test_removes_stale_cs_data(self):
+    def test_removes_stale_sorcar_data(self):
         import os
 
         kiss_dir = th._KISS_DIR
+        sorcar_data = kiss_dir / "sorcar-data"
+        sorcar_data.mkdir()
+        (sorcar_data / "cs-port").write_text("99999")
+        old_time = time.time() - 25 * 3600
+        os.utime(sorcar_data, (old_time, old_time))
+        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
+        assert removed >= 1
+        assert not sorcar_data.exists()
+
+    def test_removes_legacy_cs_data(self):
+        """Old cs-data directories are cleaned up as legacy cs-* dirs."""
+        kiss_dir = th._KISS_DIR
         cs_data = kiss_dir / "cs-data"
         cs_data.mkdir()
-        (cs_data / "cs-port").write_text("99999")
-        old_time = time.time() - 25 * 3600
-        os.utime(cs_data, (old_time, old_time))
         removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
         assert removed >= 1
         assert not cs_data.exists()
@@ -164,14 +173,14 @@ class TestCleanupStaleCsDirs:
         th._cleanup_stale_cs_dirs(max_age_hours=24)
         assert not pf.exists()
 
-    def test_keeps_cs_data_when_recent(self):
+    def test_keeps_sorcar_data_when_recent(self):
         kiss_dir = th._KISS_DIR
-        cs_data = kiss_dir / "cs-data"
-        cs_data.mkdir()
-        (cs_data / "cs-port").write_text("99999")
+        sorcar_data = kiss_dir / "sorcar-data"
+        sorcar_data.mkdir()
+        (sorcar_data / "cs-port").write_text("99999")
         th._cleanup_stale_cs_dirs(max_age_hours=24)
-        # cs-data is recent, should not be removed
-        assert cs_data.exists()
+        # sorcar-data is recent, should not be removed
+        assert sorcar_data.exists()
 
 
 class TestMaxHistory:

@@ -77,13 +77,13 @@ class TestRunAgentThreadEditorFile:
         self,
         tmp_path: Path,
     ) -> None:
-        cs_data_dir = str(tmp_path)
+        sorcar_data_dir = str(tmp_path)
         af = tmp_path / "active-file.json"
         af.write_text(json.dumps({"path": "/test/file.py"}))
 
         active_file = ""
         try:
-            af_path = os.path.join(cs_data_dir, "active-file.json")
+            af_path = os.path.join(sorcar_data_dir, "active-file.json")
             with open(af_path) as f:
                 active_file = json.loads(f.read()).get("path", "")
             if active_file and not os.path.isfile(active_file):
@@ -125,11 +125,11 @@ class TestRunAgentThreadEditorFile:
         self,
         tmp_path: Path,
     ) -> None:
-        cs_data_dir = str(tmp_path)
+        sorcar_data_dir = str(tmp_path)
 
         active_file = ""
         try:
-            af_path = os.path.join(cs_data_dir, "active-file.json")
+            af_path = os.path.join(sorcar_data_dir, "active-file.json")
             with open(af_path) as f:
                 active_file = json.loads(f.read()).get("path", "")
             if active_file and not os.path.isfile(active_file):

@@ -80,7 +80,7 @@ function activate(ctx){
   setTimeout(cleanup,4000);
   setTimeout(cleanup,8000);
   var home=process.env.HOME||process.env.USERPROFILE||'';
-  var dataDir=path.resolve(ctx.globalStorageUri.fsPath,'..','..','..');
+  var dataDir=path.join(home,'.kiss','sorcar-data');
   function writeTheme(){
     var k=vscode.window.activeColorTheme.kind;
     var s=k===1?'light':k===3?'hcDark':k===4?'hcLight':'dark';
@@ -496,21 +496,21 @@ module.exports={activate};
 _GH_TOKEN_FILENAME = "github-copilot-token.json"
 
 
-def _load_github_token(cs_data_dir: str) -> str | None:
+def _load_github_token(sorcar_data_dir: str) -> str | None:
     """Load saved GitHub Copilot auth token from disk.
 
-    Reads ``github-copilot-token.json`` from the parent of *cs_data_dir*
+    Reads ``github-copilot-token.json`` from the parent of *sorcar_data_dir*
     (i.e. ``~/.kiss/github-copilot-token.json``) and returns the
     ``accessToken`` value, or ``None`` if the file is missing, corrupt,
     or lacks a truthy ``accessToken``.
 
     Args:
-        cs_data_dir: Code-server data directory path.
+        sorcar_data_dir: Sorcar data directory path.
 
     Returns:
         The access token string, or None.
     """
-    token_file = Path(cs_data_dir).parent / _GH_TOKEN_FILENAME
+    token_file = Path(sorcar_data_dir).parent / _GH_TOKEN_FILENAME
     if not token_file.exists():
         return None
     try:

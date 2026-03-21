@@ -135,9 +135,9 @@ class TestInstallCopilotCallsDisable:
 class TestLoadGithubToken:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.cs_data_dir = os.path.join(self.tmpdir, "kiss", "cs-test1234")
-        os.makedirs(self.cs_data_dir, exist_ok=True)
-        self.token_file = Path(self.cs_data_dir).parent / _GH_TOKEN_FILENAME
+        self.sorcar_data_dir = os.path.join(self.tmpdir, "kiss", "sorcar-data")
+        os.makedirs(self.sorcar_data_dir, exist_ok=True)
+        self.token_file = Path(self.sorcar_data_dir).parent / _GH_TOKEN_FILENAME
 
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -148,7 +148,7 @@ class TestLoadGithubToken:
             "account": {"label": "testuser", "id": "12345"},
             "id": "session-id",
         }))
-        assert _load_github_token(self.cs_data_dir) == "gho_abc123xyz"
+        assert _load_github_token(self.sorcar_data_dir) == "gho_abc123xyz"
 
     def test_nonexistent_parent_dir(self) -> None:
         assert _load_github_token("/nonexistent/path/cs-test") is None
@@ -157,7 +157,7 @@ class TestLoadGithubToken:
         self.token_file.write_text(json.dumps({"accessToken": "gho_secret"}))
         os.chmod(str(self.token_file), 0o000)
         try:
-            assert _load_github_token(self.cs_data_dir) is None
+            assert _load_github_token(self.sorcar_data_dir) is None
         finally:
             os.chmod(str(self.token_file), 0o644)
 
@@ -206,7 +206,7 @@ class TestExtensionJSTokenCode:
 class TestTokenPathConsistency:
     def test_filename_and_path_consistency(self) -> None:
         assert _GH_TOKEN_FILENAME in _CS_EXTENSION_JS
-        cs_data_dir = "/home/user/.kiss/cs-abc12345"
-        python_path = Path(cs_data_dir).parent / _GH_TOKEN_FILENAME
-        js_path = Path(cs_data_dir) / ".." / _GH_TOKEN_FILENAME
+        sorcar_data_dir = "/home/user/.kiss/sorcar-data"
+        python_path = Path(sorcar_data_dir).parent / _GH_TOKEN_FILENAME
+        js_path = Path(sorcar_data_dir) / ".." / _GH_TOKEN_FILENAME
         assert python_path.resolve() == js_path.resolve()

@@ -860,12 +860,12 @@ class TestActiveFileInfoMd:
         """Set active-file.json to point to a .md file and query."""
         base_url, work_dir, _, tmpdir = server
         from kiss.agents.sorcar.task_history import _KISS_DIR
-        cs_data_dir = str(_KISS_DIR / "cs-data")
-        os.makedirs(cs_data_dir, exist_ok=True)
+        sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
+        os.makedirs(sorcar_data_dir, exist_ok=True)
 
         md_file = os.path.join(work_dir, "prompt.md")
         Path(md_file).write_text("# System Prompt\nYou are a helpful assistant.\n")
-        af = os.path.join(cs_data_dir, "active-file.json")
+        af = os.path.join(sorcar_data_dir, "active-file.json")
         with open(af, "w") as f:
             json.dump({"path": md_file}, f)
 
@@ -1092,11 +1092,11 @@ def inproc_server():
 
     from kiss.agents.sorcar.task_history import _KISS_DIR
 
-    cs_data_dir = str(_KISS_DIR / "cs-data")
+    sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
 
     keepalive = requests.get(f"{base_url}/events", stream=True, timeout=300)
 
-    yield base_url, work_dir, cs_data_dir
+    yield base_url, work_dir, sorcar_data_dir
 
     keepalive.close()
     try:
@@ -1283,11 +1283,11 @@ class TestInProcessEndpoints:
         assert data["is_prompt"] is False
 
     def test_active_file_info_md(self, inproc_server) -> None:
-        base_url, work_dir, cs_data_dir = inproc_server
+        base_url, work_dir, sorcar_data_dir = inproc_server
         md_file = os.path.join(work_dir, "test_prompt.md")
         Path(md_file).write_text("# System Prompt\nYou are helpful.\n")
-        os.makedirs(cs_data_dir, exist_ok=True)
-        af = os.path.join(cs_data_dir, "active-file.json")
+        os.makedirs(sorcar_data_dir, exist_ok=True)
+        af = os.path.join(sorcar_data_dir, "active-file.json")
         with open(af, "w") as f:
             json.dump({"path": md_file}, f)
         resp = requests.get(f"{base_url}/active-file-info", timeout=5)
@@ -1358,7 +1358,7 @@ class TestInProcessEndpoints:
 
     def test_run_task_while_merging(self, inproc_server) -> None:
         """Create file changes that trigger merge view, then try /run."""
-        base_url, work_dir, cs_data_dir = inproc_server
+        base_url, work_dir, sorcar_data_dir = inproc_server
         resp = requests.post(
             f"{base_url}/run",
             json={"task": "create_file_for_merge"},
@@ -1497,7 +1497,7 @@ class TestInProcessEndpoints:
 
     def test_generate_commit_message_with_untracked(self, inproc_server) -> None:
         """Generate commit message with untracked file (untracked branch)."""
-        base_url, work_dir, cs_data_dir = inproc_server
+        base_url, work_dir, sorcar_data_dir = inproc_server
         test_file = os.path.join(work_dir, "gen_cm_untracked.txt")
         Path(test_file).write_text("untracked content for commit msg")
         try:
