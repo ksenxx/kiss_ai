@@ -468,14 +468,20 @@ function activate(ctx){
   var ghTokenFile=path.join(dataDir,'..','github-copilot-token.json');
   async function saveGitHubToken(){
     try{
-      var scopes=['read:user','user:email','repo','workflow'];
-      var s=await vscode.authentication.getSession(
-        'github',scopes,{silent:true});
-      if(s&&s.accessToken){
-        var d=JSON.stringify({
-          accessToken:s.accessToken,
-          account:s.account,id:s.id});
-        fs.writeFileSync(ghTokenFile,d,{mode:0o600});
+      // Try each scope set from most to least specific.  Copilot signs in
+      // with minimal scopes (often just 'user:email'), so we must not
+      // demand scopes the session doesn't have.
+      var scopeSets=[['read:user','user:email'],['user:email'],[]];
+      for(var i=0;i<scopeSets.length;i++){
+        var s=await vscode.authentication.getSession(
+          'github',scopeSets[i],{silent:true});
+        if(s&&s.accessToken){
+          var d=JSON.stringify({
+            accessToken:s.accessToken,
+            account:s.account,id:s.id});
+          fs.writeFileSync(ghTokenFile,d,{mode:0o600});
+          return;
+        }
       }
     }catch(e){}
   }

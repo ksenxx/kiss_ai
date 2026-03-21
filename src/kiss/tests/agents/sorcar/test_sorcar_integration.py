@@ -1009,6 +1009,8 @@ class _InProcessDummyAgent(RelentlessAgent):
                 _t.sleep(0.1)
         if task == "error_task_for_test":
             raise RuntimeError("test error from agent")
+        if task == "fail_result_task_for_test":
+            return "success: false\nis_continue: false\nsummary: Non-retryable API auth error"
         if task == "create_file_for_merge" and work_dir:
             Path(work_dir, "agent_created.txt").write_text("new content\n")
         return "success: true\nsummary: done"
@@ -1502,6 +1504,38 @@ class TestInProcessEndpoints:
         assert "test error from agent" in result_events[-1].get("summary", "")
         assert len(error_events) == 1
         assert "test error from agent" in error_events[0].get("text", "")
+
+    def test_run_fail_result_task(self, inproc_server) -> None:
+        """Agent returns success=False YAML: verify Result card is broadcast."""
+        base_url, _, _ = inproc_server
+        sse = requests.get(f"{base_url}/events", stream=True, timeout=30)
+        resp = requests.post(
+            f"{base_url}/run",
+            json={"task": "fail_result_task_for_test"},
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        time.sleep(3)
+        events = []
+        deadline = time.monotonic() + 10.0
+        for line in sse.iter_lines(decode_unicode=True):
+            if time.monotonic() > deadline:
+                break
+            if not line or not line.startswith("data: "):
+                continue
+            ev = json.loads(line[6:])
+            events.append(ev)
+            if ev.get("type") == "task_done":
+                break
+        sse.close()
+        result_events = [e for e in events if e.get("type") == "result"]
+        done_events = [e for e in events if e.get("type") == "task_done"]
+        assert len(result_events) >= 1, (
+            f"Expected result event, got: {[e['type'] for e in events]}"
+        )
+        assert result_events[-1].get("success") is False
+        assert "Non-retryable API auth error" in result_events[-1].get("summary", "")
+        assert len(done_events) == 1
 
     def test_tasks_has_events(self, inproc_server) -> None:
         """After running tasks, check that tasks endpoint shows has_events."""
