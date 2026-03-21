@@ -29,8 +29,6 @@ from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _cleanup_merge_data,
-    _disable_copilot_scm_button,
-    _install_copilot_extension,
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
@@ -142,13 +140,6 @@ class TestScanFiles:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-class TestDisableCopilotScmButton:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
 class TestGitDiffAndMerge:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -199,13 +190,6 @@ class TestTaskHistoryAdditional:
         _restore_history(*self.old)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-
-class TestInstallCopilotExtension:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 class TestSorcarUtilities:
     def setup_method(self) -> None:
@@ -336,18 +320,6 @@ class TestCodeServerBranches:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_install_copilot_no_binary(self) -> None:
-        """code-server binary not found.
-        Covers line 496 (cs_binary not found -> return)."""
-        ext_dir = Path(self.tmpdir) / "extensions"
-        ext_dir.mkdir(parents=True)
-        old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = ""
-        try:
-            _install_copilot_extension(str(ext_dir))
-        finally:
-            os.environ["PATH"] = old_path
-
 class TestWebUseToolBranches:
     """Cover remaining branches in web_use_tool.py."""
 
@@ -367,32 +339,6 @@ class TestCodeServerBranchesR2:
 
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_disable_copilot_non_matching_items(self) -> None:
-        """scm_items with items that DON'T match copilot command.
-        Covers branch 476->475 (the False path of the if at 476)."""
-        extensions_base = Path(self.tmpdir) / "extensions"
-        ext_dir = extensions_base / "github.copilot-chat-0.1"
-        ext_dir.mkdir(parents=True)
-        pkg = {
-            "contributes": {
-                "menus": {
-                    "scm/inputBox": [
-                        {"command": "some.other.command", "when": "true"},
-                        {
-                            "command": "github.copilot.git.generateCommitMessage",
-                            "when": "true",
-                        },
-                    ]
-                }
-            }
-        }
-        (ext_dir / "package.json").write_text(json.dumps(pkg))
-        _disable_copilot_scm_button(str(extensions_base))
-        result = json.loads((ext_dir / "package.json").read_text())
-        items = result["contributes"]["menus"]["scm/inputBox"]
-        assert items[0]["when"] == "true"
-        assert items[1]["when"] == "false"
 
     def test_prepare_merge_view_hash_oserror_via_directory(self) -> None:
         """File replaced with directory after pre-hash, causing OSError.
@@ -485,34 +431,6 @@ class TestWebUseToolBranchesR2:
         self.tool._context = None
         self.tool._check_for_new_tab()
         self.tool._context = saved_ctx
-
-class TestInstallCopilotOSError:
-    """Cover _install_copilot_extension exception handler (lines 505-507)."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_install_copilot_subprocess_oserror(self) -> None:
-        """Fake code-server binary (garbage bytes) causes OSError.
-        Covers lines 505-507."""
-        ext_dir = Path(self.tmpdir) / "extensions"
-        ext_dir.mkdir(parents=True)
-        fake_bin_dir = os.path.join(self.tmpdir, "bin")
-        os.makedirs(fake_bin_dir)
-        fake_cs = os.path.join(fake_bin_dir, "code-server")
-        with open(fake_cs, "wb") as f:
-            f.write(b"\x00\x01\x02\x03\x04\x05")
-        os.chmod(fake_cs, 0o755)
-        old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = fake_bin_dir + ":" + old_path
-        try:
-            _install_copilot_extension(str(ext_dir))
-        finally:
-            os.environ["PATH"] = old_path
-
 
 class TestWebUseToolCloseException:
     """Separate class for close exception test to avoid polluting other tests."""
@@ -853,14 +771,6 @@ class TestSetupCodeServer:
         ext_dir = os.path.join(self.tmpdir, "extensions")
         _setup_code_server(self.tmpdir, ext_dir)
         assert not ws_dir.exists()
-
-
-class TestDisableCopilotScmButtonBranch:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestThemePresetsBranch:

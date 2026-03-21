@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 import types
-import webbrowser
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
@@ -53,6 +52,7 @@ from kiss.agents.sorcar.task_history import (
     _search_history,
     _set_latest_chat_events,
 )
+from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import (
     _OPENAI_PREFIXES,
@@ -244,21 +244,35 @@ def run_chatbot(
     # Use the standard VS Code data directory so code-server shares
     # desktop VS Code's auth sessions, settings, and secret storage.
     vscode_data_dir = str(Path.home() / "Library" / "Application Support" / "Code")
-    # All instances share a single extensions directory so Copilot and
-    # other extensions are installed once and reused across work dirs.
+    # All instances share a single extensions directory so extensions
+    # are installed once and reused across work dirs.
     _shared_extensions_dir = str(_KISS_DIR / "cs-extensions")
 
     # Restore files from any stale merge state (e.g., previous crash during merge).
     # If hunks were recovered, the merge view will re-open automatically via
     # pending-merge.json when the extension starts.
     recovered = _restore_merge_files(sorcar_data_dir, actual_work_dir)
-    if recovered:  # pragma: no cover – merge recovery on restart
+    if not recovered:
+        # _restore_merge_files only detects merge-current dir.  When Sorcar
+        # shuts down cleanly during an active merge, _cleanup already called
+        # _restore_merge_files (which deletes merge-current), but left
+        # pending-merge.json for the next startup.  Check for it here.
+        pending_merge_path = Path(sorcar_data_dir) / "pending-merge.json"
+        if pending_merge_path.exists():
+            try:
+                pm_data = json.loads(pending_merge_path.read_text())
+                recovered = sum(
+                    len(f.get("hunks", [])) for f in pm_data.get("files", [])
+                )
+            except (json.JSONDecodeError, OSError):
+                _log_exc()
+    if recovered:
         merging = True
         remaining_hunks = recovered
 
     # Read or assign a code-server port.  The port is stored in a
     # persistent file so the browser origin stays stable, preserving
-    # localStorage-based secrets (e.g. GitHub Copilot auth tokens).
+    # localStorage-based secrets.
     cs_port_file = Path(sorcar_data_dir) / "cs-port"
     cs_port_file.parent.mkdir(parents=True, exist_ok=True)
     cs_port = 0
@@ -279,14 +293,14 @@ def run_chatbot(
     cs_binary = shutil.which("code-server")
 
     def _build_cs_env() -> dict[str, str]:  # pragma: no cover – requires code-server binary
-        """Build environment dict for code-server with gallery and GitHub token."""
-        from kiss.agents.sorcar.code_server import _MS_GALLERY, _load_github_token
-
-        env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
-        gh_token = _load_github_token(sorcar_data_dir)
-        if gh_token:
-            env["GITHUB_TOKEN"] = gh_token
-        return env
+        """Build environment dict for code-server with gallery URL."""
+        return {
+            **os.environ,
+            "EXTENSIONS_GALLERY": (
+                '{"serviceUrl":"https://marketplace.visualstudio.com/_apis/public/gallery",'
+                '"itemUrl":"https://marketplace.visualstudio.com/items"}'
+            ),
+        }
 
     def _wait_for_cs() -> bool:  # pragma: no cover – requires code-server binary
         """Wait up to 15s for code-server to accept connections. Sets code_server_url on success."""
@@ -302,6 +316,7 @@ def run_chatbot(
         return False
 
     def _code_server_launch_args() -> list[str]:  # pragma: no cover – requires code-server binary
+        """Build code-server CLI arguments."""
         assert cs_binary is not None
         return [
             cs_binary,
@@ -1374,9 +1389,28 @@ def run_chatbot(
 
     atexit.register(_cleanup)
 
-    port = find_free_port()
+    # Read or assign a persistent UI port so the browser origin stays
+    # stable across restarts, preserving code-server iframe storage
+    # (e.g. auth tokens encrypted in browser storage).
+    ui_port_file = Path(sorcar_data_dir) / "ui-port"
+    port = 0
+    if ui_port_file.exists():
+        try:
+            port = int(ui_port_file.read_text().strip())
+        except (ValueError, OSError):
+            _log_exc()
+    if port:
+        # Verify the saved port is still available (not grabbed by another process).
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+                _s.bind(("127.0.0.1", port))
+        except OSError:
+            port = 0  # Port in use; pick a fresh one.
+    if not port:
+        port = find_free_port()
     try:
         Path(sorcar_data_dir).mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(ui_port_file, str(port))
         _atomic_write_text(_KISS_DIR / "assistant-port", str(port))
     except OSError:  # pragma: no cover – filesystem permission error
         _log_exc()
@@ -1388,27 +1422,7 @@ def run_chatbot(
 
     async def _open_browser_async() -> None:  # pragma: no cover – browser launch
         await asyncio.sleep(2)
-        try:
-            if not webbrowser.open(url):
-                logger.warning("webbrowser.open() returned False for %s", url)
-        except Exception:
-            logger.warning("Failed to open browser", exc_info=True)
-            cmd: list[str] = []
-            if sys.platform == "darwin":
-                cmd = ["open", url]
-            elif sys.platform.startswith("linux"):
-                cmd = ["xdg-open", url]
-            elif sys.platform == "win32":
-                cmd = ["cmd", "/c", "start", "", url]
-            if cmd:
-                try:
-                    subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    logger.warning("Fallback command %s also failed", cmd, exc_info=True)
+        WebUseTool._open_in_default_browser(url)
 
     async def _on_startup() -> None:  # pragma: no cover – browser launch
         asyncio.create_task(_open_browser_async())

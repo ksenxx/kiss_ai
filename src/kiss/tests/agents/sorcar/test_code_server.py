@@ -1,26 +1,17 @@
-"""Tests for code-server: keybinding, watchdog, copilot SCM disable, GitHub token persistence."""
+"""Tests for code-server: keybinding, watchdog, and extension JS."""
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-from pathlib import Path
-
-import pytest
 
 from kiss.agents.sorcar.chatbot_ui import CHATBOT_JS
 from kiss.agents.sorcar.code_server import (
     _CS_EXTENSION_JS,
-    _GH_TOKEN_FILENAME,
-    _install_copilot_extension,
-    _load_github_token,
 )
 
 
@@ -121,92 +112,4 @@ class TestProcessMonitoringEdgeCases:
         assert proc2.poll() == -signal.SIGTERM
 
 
-class TestInstallCopilotCallsDisable:
-    def test_source_code_calls_disable_after_subprocess(self) -> None:
-        import inspect
 
-        source = inspect.getsource(_install_copilot_extension)
-        assert "_disable_copilot_scm_button" in source
-        idx_subprocess = source.index("subprocess.run")
-        idx_disable = source.index("_disable_copilot_scm_button")
-        assert idx_disable > idx_subprocess
-
-
-class TestLoadGithubToken:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.sorcar_data_dir = os.path.join(self.tmpdir, "kiss", "sorcar-data")
-        os.makedirs(self.sorcar_data_dir, exist_ok=True)
-        self.token_file = Path(self.sorcar_data_dir).parent / _GH_TOKEN_FILENAME
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_valid_token(self) -> None:
-        self.token_file.write_text(json.dumps({
-            "accessToken": "gho_abc123xyz",
-            "account": {"label": "testuser", "id": "12345"},
-            "id": "session-id",
-        }))
-        assert _load_github_token(self.sorcar_data_dir) == "gho_abc123xyz"
-
-    def test_nonexistent_parent_dir(self) -> None:
-        assert _load_github_token("/nonexistent/path/cs-test") is None
-
-    def test_unreadable_file(self) -> None:
-        self.token_file.write_text(json.dumps({"accessToken": "gho_secret"}))
-        os.chmod(str(self.token_file), 0o000)
-        try:
-            assert _load_github_token(self.sorcar_data_dir) is None
-        finally:
-            os.chmod(str(self.token_file), 0o644)
-
-
-_EXTENSION_JS_TOKEN_STRINGS = [
-    "github-copilot-token.json",
-    "path.join(dataDir,'..','github-copilot-token.json')",
-    "vscode.authentication.getSession(",
-    "'github'",
-    "'user:email'",
-    "scopeSets",
-    "silent:true",
-    "mode:0o600",
-    "onDidChangeSessions",
-    "ghInterval",
-    "setInterval(saveGitHubToken",
-]
-
-
-class TestExtensionJSTokenCode:
-    def test_js_syntax_valid(self) -> None:
-        result = subprocess.run(
-            ["node", "--check", "--input-type=commonjs"],
-            input=_CS_EXTENSION_JS,
-            capture_output=True, text=True, timeout=10,
-        )
-        assert result.returncode == 0, f"JS syntax error: {result.stderr}"
-
-    @pytest.mark.parametrize("expected", _EXTENSION_JS_TOKEN_STRINGS)
-    def test_extension_contains_token_string(self, expected: str) -> None:
-        assert expected in _CS_EXTENSION_JS
-
-    def test_saves_on_startup(self) -> None:
-        def_end = _CS_EXTENSION_JS.index("async function saveGitHubToken(){")
-        remaining = _CS_EXTENSION_JS[def_end:]
-        assert "saveGitHubToken();" in remaining
-
-    def test_token_saving_inside_activate(self) -> None:
-        stripped = _CS_EXTENSION_JS.strip()
-        assert stripped.endswith("module.exports={activate};")
-        idx_save = stripped.index("saveGitHubToken")
-        idx_exports = stripped.index("module.exports")
-        assert idx_save < idx_exports
-
-
-class TestTokenPathConsistency:
-    def test_filename_and_path_consistency(self) -> None:
-        assert _GH_TOKEN_FILENAME in _CS_EXTENSION_JS
-        sorcar_data_dir = "/home/user/.kiss/sorcar-data"
-        python_path = Path(sorcar_data_dir).parent / _GH_TOKEN_FILENAME
-        js_path = Path(sorcar_data_dir) / ".." / _GH_TOKEN_FILENAME
-        assert python_path.resolve() == js_path.resolve()
