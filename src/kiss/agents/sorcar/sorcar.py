@@ -633,6 +633,30 @@ def run_chatbot(
                     }
                     chat_events.append(error_result)
                     printer.broadcast(error_result)
+                elif done_event.get("type") == "task_done":
+                    # If the agent returned a failure result (e.g. non-retryable
+                    # API error caught by perform_task) without broadcasting a
+                    # result card, show the error in the Results panel.
+                    has_result = any(
+                        e.get("type") == "result" for e in chat_events
+                    )
+                    if not has_result:
+                        try:
+                            pr = yaml.safe_load(result_text)
+                            if isinstance(pr, dict) and not pr.get("success", True):
+                                summary = str(pr.get("summary", "Unknown error"))
+                                fail_result = {
+                                    "type": "result",
+                                    "text": summary,
+                                    "success": False,
+                                    "summary": summary,
+                                    "total_tokens": 0,
+                                    "cost": "N/A",
+                                }
+                                chat_events.append(fail_result)
+                                printer.broadcast(fail_result)
+                        except Exception:
+                            _log_exc()
                 chat_events.append(done_event)
                 printer.broadcast(done_event)
                 if done_event.get("type") == "task_done":

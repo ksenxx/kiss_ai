@@ -168,7 +168,7 @@ _EXTENSION_JS_TOKEN_STRINGS = [
     "vscode.authentication.getSession(",
     "'github'",
     "'user:email'",
-    "'repo'",
+    "scopeSets",
     "silent:true",
     "mode:0o600",
     "onDidChangeSessions",
