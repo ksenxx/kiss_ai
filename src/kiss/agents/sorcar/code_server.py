@@ -33,7 +33,7 @@ _CS_SETTINGS = {
     "terminal.integrated.fontSize": 13,
     "scm.inputFontSize": 13,
     "debug.console.fontSize": 13,
-    "window.restoreWindows": "all",
+    "window.restoreWindows": "none",
     "workbench.editor.enablePreview": False,
     "workbench.editor.restoreViewState": True,
     "files.hotExit": "onExitAndWindowClose",
