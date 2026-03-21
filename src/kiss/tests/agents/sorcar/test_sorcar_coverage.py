@@ -1422,9 +1422,9 @@ class TestSorcarServerIntegration:
         base_url, work_dir, _, _ = server
         from kiss.agents.sorcar.task_history import _KISS_DIR
 
-        cs_dir = _KISS_DIR / "cs-data"
-        cs_dir.mkdir(parents=True, exist_ok=True)
-        (cs_dir / "active-file.json").write_text(
+        sorcar_dir = _KISS_DIR / "sorcar-data"
+        sorcar_dir.mkdir(parents=True, exist_ok=True)
+        (sorcar_dir / "active-file.json").write_text(
             json.dumps({"path": os.path.join(work_dir, "readme.md")})
         )
         r = requests.get(f"{base_url}/active-file-info", timeout=5)

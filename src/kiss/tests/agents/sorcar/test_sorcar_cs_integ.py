@@ -127,11 +127,11 @@ def cs_server():
         except requests.ConnectionError:
             time.sleep(0.5)
 
-    cs_data_dir = str(_KISS_DIR / "cs-data")
+    sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
 
     keepalive = requests.get(f"{base_url}/events", stream=True, timeout=300)
 
-    yield base_url, work_dir, cs_data_dir, tmpdir
+    yield base_url, work_dir, sorcar_data_dir, tmpdir
 
     keepalive.close()
     try:
@@ -218,17 +218,17 @@ class TestCSSSEDisconnect:
 
 
 class TestSingleDataDirLayout:
-    """Verify that a single cs-data directory is used for all work directories."""
+    """Verify that a single sorcar-data directory is used for all work directories."""
 
-    def test_cs_data_dir_name(self) -> None:
-        """The data directory is always 'cs-data' regardless of work dir."""
+    def test_sorcar_data_dir_name(self) -> None:
+        """The data directory is always 'sorcar-data' regardless of work dir."""
         from kiss.agents.sorcar.task_history import _KISS_DIR
 
-        assert (_KISS_DIR / "cs-data").name == "cs-data"
+        assert (_KISS_DIR / "sorcar-data").name == "sorcar-data"
 
 
 _EXTENSION_DATA_DIR_STRINGS = [
-    "var dataDir=path.resolve(ctx.globalStorageUri.fsPath",
+    "var dataDir=path.join(home,'.kiss','sorcar-data')",
     "path.join(home,'.kiss','assistant-port')",
     "path.join(dataDir,'active-file.json')",
     "path.join(dataDir,'pending-merge.json')",
@@ -241,7 +241,7 @@ _EXTENSION_DATA_DIR_STRINGS = [
 
 
 class TestExtensionJSUsesDataDir:
-    """Verify the extension JS uses ctx.globalStorageUri-derived paths, not hardcoded ones."""
+    """Verify the extension JS uses sorcar-data paths."""
 
     @pytest.mark.parametrize("expected", _EXTENSION_DATA_DIR_STRINGS)
     def test_extension_uses_data_dir_paths(self, expected: str) -> None:
@@ -401,14 +401,14 @@ def _find_free_port() -> int:
 
 
 class TestSingleDataDir:
-    """Test that a single cs-data directory is used regardless of work dir."""
+    """Test that a single sorcar-data directory is used regardless of work dir."""
 
-    def test_data_dir_is_cs_data(self) -> None:
-        """The data directory is always cs-data under KISS_DIR."""
+    def test_data_dir_is_sorcar_data(self) -> None:
+        """The data directory is always sorcar-data under KISS_DIR."""
         from kiss.agents.sorcar.task_history import _KISS_DIR
 
-        expected = str(_KISS_DIR / "cs-data")
-        assert expected.endswith("cs-data")
+        expected = str(_KISS_DIR / "sorcar-data")
+        assert expected.endswith("sorcar-data")
 
 
 class TestSharedExtensionsDir:

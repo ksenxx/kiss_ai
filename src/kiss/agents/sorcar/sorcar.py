@@ -83,9 +83,9 @@ def _atomic_write_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def _read_active_file(cs_data_dir: str) -> str:
+def _read_active_file(sorcar_data_dir: str) -> str:
     try:
-        af_path = os.path.join(cs_data_dir, "active-file.json")
+        af_path = os.path.join(sorcar_data_dir, "active-file.json")
         with open(af_path) as af:
             path: str = json.loads(af.read()).get("path", "")
         if path and os.path.isfile(path):
@@ -225,7 +225,25 @@ def run_chatbot(
 
     cs_proc: subprocess.Popen[bytes] | None = None
     code_server_url = ""
-    cs_data_dir = str(_KISS_DIR / "cs-data")
+    sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
+
+    # Remove stale VS Code profile leftovers that may linger from before
+    # code-server switched to the shared desktop VS Code data directory.
+    for _name in (
+        "CachedExtensionVSIXs", "CachedProfilesData",
+        "code-server-ipc.sock", "coder.json", "logs",
+        "Machine", "serve-web-key-half", "User",
+    ):
+        _stale = Path(sorcar_data_dir) / _name
+        if not _stale.exists():  # pragma: no branch
+            continue
+        if _stale.is_dir():  # pragma: no cover – only on upgrade
+            shutil.rmtree(_stale, ignore_errors=True)
+        else:  # pragma: no cover – only on upgrade
+            _stale.unlink(missing_ok=True)
+    # Use the standard VS Code data directory so code-server shares
+    # desktop VS Code's auth sessions, settings, and secret storage.
+    vscode_data_dir = str(Path.home() / "Library" / "Application Support" / "Code")
     # All instances share a single extensions directory so Copilot and
     # other extensions are installed once and reused across work dirs.
     _shared_extensions_dir = str(_KISS_DIR / "cs-extensions")
@@ -233,7 +251,7 @@ def run_chatbot(
     # Restore files from any stale merge state (e.g., previous crash during merge).
     # If hunks were recovered, the merge view will re-open automatically via
     # pending-merge.json when the extension starts.
-    recovered = _restore_merge_files(cs_data_dir, actual_work_dir)
+    recovered = _restore_merge_files(sorcar_data_dir, actual_work_dir)
     if recovered:  # pragma: no cover – merge recovery on restart
         merging = True
         remaining_hunks = recovered
@@ -241,7 +259,7 @@ def run_chatbot(
     # Read or assign a code-server port.  The port is stored in a
     # persistent file so the browser origin stays stable, preserving
     # localStorage-based secrets (e.g. GitHub Copilot auth tokens).
-    cs_port_file = Path(cs_data_dir) / "cs-port"
+    cs_port_file = Path(sorcar_data_dir) / "cs-port"
     cs_port_file.parent.mkdir(parents=True, exist_ok=True)
     cs_port = 0
     if cs_port_file.exists():  # pragma: no cover – port file from previous run
@@ -277,7 +295,7 @@ def run_chatbot(
         from kiss.agents.sorcar.code_server import _MS_GALLERY, _load_github_token
 
         env = {**os.environ, "EXTENSIONS_GALLERY": _MS_GALLERY}
-        gh_token = _load_github_token(cs_data_dir)
+        gh_token = _load_github_token(sorcar_data_dir)
         if gh_token:
             env["GITHUB_TOKEN"] = gh_token
         return env
@@ -307,7 +325,7 @@ def run_chatbot(
             f"127.0.0.1:{cs_port}",
             "--disable-telemetry",
             "--user-data-dir",
-            cs_data_dir,
+            vscode_data_dir,
             "--extensions-dir",
             _shared_extensions_dir,
             "--disable-getting-started-override",
@@ -359,7 +377,7 @@ def run_chatbot(
             except Exception:
                 _log_exc()
     if cs_binary:
-        ext_changed = _setup_code_server(cs_data_dir, extensions_dir=_shared_extensions_dir)
+        ext_changed = _setup_code_server(vscode_data_dir, extensions_dir=_shared_extensions_dir)
         port_in_use = False
         try:
             with socket.create_connection(("127.0.0.1", cs_port), timeout=0.5):
@@ -380,7 +398,7 @@ def run_chatbot(
                 except OSError:
                     _log_exc()
 
-        workdir_file = Path(cs_data_dir) / "workdir"
+        workdir_file = Path(sorcar_data_dir) / "workdir"
         prev_workdir = ""
         try:
             prev_workdir = workdir_file.read_text().strip() if workdir_file.exists() else ""
@@ -563,7 +581,7 @@ def run_chatbot(
             _save_untracked_base(
                 actual_work_dir, pre_untracked | set(pre_hunks.keys())
             )
-            active_file = _read_active_file(cs_data_dir)
+            active_file = _read_active_file(sorcar_data_dir)
             printer.start_recording()
             printer.broadcast({"type": "clear", "active_file": active_file})
             agent = agent_factory("Chatbot")
@@ -627,7 +645,7 @@ def run_chatbot(
             try:
                 merge_result = _prepare_merge_view(
                     actual_work_dir,
-                    cs_data_dir,
+                    sorcar_data_dir,
                     pre_hunks,
                     pre_untracked,
                     pre_file_hashes,
@@ -679,7 +697,7 @@ def run_chatbot(
             merging = False
             remaining_hunks = 0
         printer.broadcast({"type": "merge_ended"})
-        _cleanup_merge_data(cs_data_dir)
+        _cleanup_merge_data(sorcar_data_dir)
 
     def _cleanup() -> None:
         nonlocal merging, remaining_hunks
@@ -688,7 +706,7 @@ def run_chatbot(
             merging = False
             remaining_hunks = 0
         if was_merging:  # pragma: no cover – cleanup during active merge
-            _restore_merge_files(cs_data_dir, actual_work_dir)
+            _restore_merge_files(sorcar_data_dir, actual_work_dir)
         stop_agent()
         if cs_proc and cs_proc.poll() is None:  # pragma: no cover – cleanup timing
             # Don't kill code-server if another Sorcar instance is using it.
@@ -1027,7 +1045,7 @@ def run_chatbot(
             history = _load_history(limit=20)
             task_list = "\n".join(f"- {e['task']}" for e in history)
             files_list = "\n".join(file_cache[:200])
-            active_path = _read_active_file(cs_data_dir)
+            active_path = _read_active_file(sorcar_data_dir)
             active_content = ""
             if active_path:
                 try:
@@ -1112,7 +1130,7 @@ def run_chatbot(
 
     async def get_ui_state(request: Request) -> JSONResponse:  # pragma: no cover
         """Return saved UI state (divider position, etc.)."""
-        ui_state_file = os.path.join(cs_data_dir, "ui-state.json")
+        ui_state_file = os.path.join(sorcar_data_dir, "ui-state.json")
         try:
             if os.path.exists(ui_state_file):
                 with open(ui_state_file) as f:
@@ -1124,9 +1142,9 @@ def run_chatbot(
     async def save_ui_state(request: Request) -> JSONResponse:  # pragma: no cover
         """Save UI state (divider position, etc.)."""
         body = await request.json()
-        ui_state_file = os.path.join(cs_data_dir, "ui-state.json")
+        ui_state_file = os.path.join(sorcar_data_dir, "ui-state.json")
         try:
-            Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
+            Path(sorcar_data_dir).mkdir(parents=True, exist_ok=True)
             with open(ui_state_file, "w") as f:
                 json.dump(body, f)
         except OSError:
@@ -1143,7 +1161,7 @@ def run_chatbot(
         return JSONResponse({"status": "ok"})
 
     async def focus_editor(request: Request) -> JSONResponse:
-        pending = os.path.join(cs_data_dir, "pending-focus-editor.json")
+        pending = os.path.join(sorcar_data_dir, "pending-focus-editor.json")
         with open(pending, "w") as f:
             json.dump({"focus": True}, f)
         return JSONResponse({"status": "ok"})
@@ -1167,7 +1185,7 @@ def run_chatbot(
         full = rel if rel.startswith("/") else os.path.join(actual_work_dir, rel)
         if not os.path.isfile(full):
             return JSONResponse({"error": "File not found"}, status_code=404)
-        pending = os.path.join(cs_data_dir, "pending-open.json")
+        pending = os.path.join(sorcar_data_dir, "pending-open.json")
         with open(pending, "w") as f:
             json.dump({"path": full}, f)
         return JSONResponse({"status": "ok"})
@@ -1181,7 +1199,7 @@ def run_chatbot(
             return JSONResponse({"status": "ok"})
         if action not in ("prev", "next", "accept-all", "reject-all", "accept", "reject"):
             return JSONResponse({"error": "Invalid action"}, status_code=400)
-        pending = os.path.join(cs_data_dir, "pending-action.json")
+        pending = os.path.join(sorcar_data_dir, "pending-action.json")
         with open(pending, "w") as f:
             json.dump({"action": action}, f)
         if action in ("accept-all", "reject-all"):
@@ -1259,7 +1277,7 @@ def run_chatbot(
                 if untracked_files:  # pragma: no branch
                     context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
                 msg = _generate_commit_msg("\n\n".join(context_parts), detailed=True)
-                scm_pending = os.path.join(cs_data_dir, "pending-scm-message.json")
+                scm_pending = os.path.join(sorcar_data_dir, "pending-scm-message.json")
                 with open(scm_pending, "w") as f:
                     json.dump({"message": msg}, f)
                 return {"message": msg}
@@ -1271,7 +1289,7 @@ def run_chatbot(
 
     async def active_file_info(request: Request) -> JSONResponse:
         """Check if the current editor file is a runnable prompt."""
-        fpath = _read_active_file(cs_data_dir)
+        fpath = _read_active_file(sorcar_data_dir)
         if not fpath or not fpath.lower().endswith(".md"):
             return JSONResponse({"is_prompt": False, "path": fpath})
         return JSONResponse(
@@ -1333,7 +1351,7 @@ def run_chatbot(
 
     port = find_free_port()
     try:
-        Path(cs_data_dir).mkdir(parents=True, exist_ok=True)
+        Path(sorcar_data_dir).mkdir(parents=True, exist_ok=True)
         _atomic_write_text(_KISS_DIR / "assistant-port", str(port))
     except OSError:  # pragma: no cover – filesystem permission error
         _log_exc()
