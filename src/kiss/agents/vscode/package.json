@@ -13,7 +13,9 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:kissSorcar.chatView"
+    "onStartupFinished",
+    "onView:kissSorcar.chatView",
+    "onView:kissSorcar.chatViewSecondary"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -36,7 +38,17 @@
         {
           "id": "kissSorcar",
           "title": "KISS Sorcar",
-          "icon": "media/spark.svg"
+          "icon": "media/spark.svg",
+          "when": "kissSorcar:doesNotSupportSecondarySidebar"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "kissSorcarSecondary",
+          "title": "KISS Sorcar",
+          "icon": "media/spark.svg",
+          "when": "!kissSorcar:doesNotSupportSecondarySidebar",
+          "order": -100
         }
       ]
     },
@@ -45,7 +57,16 @@
         {
           "type": "webview",
           "id": "kissSorcar.chatView",
-          "name": "Chat"
+          "name": "Chat",
+          "when": "kissSorcar:doesNotSupportSecondarySidebar"
+        }
+      ],
+      "kissSorcarSecondary": [
+        {
+          "type": "webview",
+          "id": "kissSorcar.chatViewSecondary",
+          "name": "Chat",
+          "when": "!kissSorcar:doesNotSupportSecondarySidebar"
         }
       ]
     },
