@@ -119,7 +119,7 @@ export class AgentProcess extends EventEmitter {
         continue;
       }
     }
-    return 'uv';
+    return 'uv'; // unreachable since 'uv' is in candidates, but kept for safety
   }
 
   /**
@@ -241,10 +241,4 @@ export class AgentProcess extends EventEmitter {
     this.removeAllListeners();
   }
 
-  /**
-   * Check if process is running.
-   */
-  isRunning(): boolean {
-    return this.process !== null;
-  }
 }

@@ -40,7 +40,6 @@ exports.SorcarViewProvider = void 0;
 const vscode = __importStar(require("vscode"));
 const AgentProcess_1 = require("./AgentProcess");
 class SorcarViewProvider {
-    static viewType = 'kissSorcar.chatView';
     _view;
     _agentProcess;
     _extensionUri;

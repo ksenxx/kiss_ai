@@ -128,6 +128,10 @@
   function esc(t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
   function mkEl(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
+  function hlBlock(el) {
+    if (typeof hljs !== 'undefined') el.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
+  }
+
   function toggleTC(el) {
     el.nextElementSibling.classList.toggle('hide');
     el.querySelector('.chv').classList.toggle('open');
@@ -249,7 +253,7 @@
         + '<div class="tc-b' + (b ? '' : ' hide') + '">' + body + '</div>';
       target.appendChild(c);
       if (ev.command) { var bp = mkEl('div', 'bash-panel'); target.appendChild(bp); tState.bashPanel = bp; }
-      if (typeof hljs !== 'undefined') c.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
+      hlBlock(c);
       break;
     }
     case 'tool_result': {
@@ -300,7 +304,7 @@
         + '<span>Tokens <b>' + (ev.total_tokens || 0) + '</b></span>'
         + '<span>Cost <b>' + (ev.cost || 'N/A') + '</b></span>'
         + '</div></div><div class="rc-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
-      if (typeof hljs !== 'undefined') rc.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
+      hlBlock(rc);
       target.appendChild(rc); break;
     }
     case 'system_prompt': {
@@ -308,7 +312,7 @@
       var spBody = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
       sp.innerHTML = '<div class="system-prompt-h">System Prompt</div>'
         + '<div class="system-prompt-body">' + spBody + '</div>';
-      if (typeof hljs !== 'undefined') sp.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
+      hlBlock(sp);
       target.appendChild(sp); break;
     }
     case 'prompt': {
@@ -316,7 +320,7 @@
       var pBody = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
       pr.innerHTML = '<div class="prompt-h">Prompt</div>'
         + '<div class="prompt-body">' + pBody + '</div>';
-      if (typeof hljs !== 'undefined') pr.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
+      hlBlock(pr);
       target.appendChild(pr); break;
     }
     case 'usage_info': {
@@ -500,18 +504,14 @@
       setReady('Done (' + (em > 0 ? em + 'm ' : '') + el % 60 + 's)');
       break;
     }
-    case 'task_error': {
-      var err = mkEl('div', 'ev tr err');
-      err.innerHTML = '<div class="rl fail">ERROR</div>' + esc(ev.text || 'Unknown error');
-      O.appendChild(err);
-      setReady('Error');
-      break;
-    }
+    case 'task_error':
     case 'task_stopped': {
-      var stEl = mkEl('div', 'ev tr err');
-      stEl.innerHTML = '<div class="rl fail">STOPPED</div>Agent execution stopped by user';
-      O.appendChild(stEl);
-      setReady('Stopped');
+      var isErr = t === 'task_error';
+      var banner = mkEl('div', 'ev tr err');
+      banner.innerHTML = '<div class="rl fail">' + (isErr ? 'ERROR' : 'STOPPED') + '</div>'
+        + esc(isErr ? (ev.text || 'Unknown error') : 'Agent execution stopped by user');
+      O.appendChild(banner);
+      setReady(isErr ? 'Error' : 'Stopped');
       break;
     }
     default:
@@ -534,14 +534,10 @@
   }
 
   function setReady(label) {
-    isRunning = false;
-    statusDot.classList.remove('running');
+    setRunningState(false);
     stopTimer();
     removeSpinner();
     statusText.textContent = label || 'Ready';
-    sendBtn.style.display = 'flex';
-    stopBtn.style.display = 'none';
-    sendBtn.disabled = false;
     inp.focus();
   }
 
@@ -615,8 +611,8 @@
       // Autocomplete navigation
       if (autocomplete.style.display === 'block') {
         var items = autocomplete.querySelectorAll('.ac-item');
-        if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = Math.min(acIdx + 1, items.length - 1); updateACSel(items); return; }
-        if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = Math.max(acIdx - 1, -1); updateACSel(items); return; }
+        if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = Math.min(acIdx + 1, items.length - 1); updateSel(items, acIdx); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = Math.max(acIdx - 1, -1); updateSel(items, acIdx); return; }
         if (e.key === 'Tab') { e.preventDefault(); var ti = acIdx >= 0 ? acIdx : 0; if (items[ti]) items[ti].click(); return; }
         if (e.key === 'Enter' && acIdx >= 0) { e.preventDefault(); items[acIdx].click(); return; }
         if (e.key === 'Escape') { hideAC(); return; }
@@ -688,8 +684,8 @@
     modelSearch.addEventListener('input', function() { renderModelList(this.value); });
     modelSearch.addEventListener('keydown', function(e) {
       var items = modelList.querySelectorAll('.model-item');
-      if (e.key === 'ArrowDown') { e.preventDefault(); modelDDIdx = Math.min(modelDDIdx + 1, items.length - 1); updateModelSel(items); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); modelDDIdx = Math.max(modelDDIdx - 1, -1); updateModelSel(items); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); modelDDIdx = Math.min(modelDDIdx + 1, items.length - 1); updateSel(items, modelDDIdx); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); modelDDIdx = Math.max(modelDDIdx - 1, -1); updateSel(items, modelDDIdx); return; }
       if (e.key === 'Enter') { e.preventDefault(); var ti = modelDDIdx >= 0 ? modelDDIdx : 0; if (items[ti]) items[ti].click(); return; }
       if (e.key === 'Escape') { e.preventDefault(); closeModelDD(); return; }
     });
@@ -924,9 +920,9 @@
     modelDDIdx = -1;
   }
 
-  function updateModelSel(items) {
-    items.forEach(function(it, i) { it.classList.toggle('sel', i === modelDDIdx); });
-    if (modelDDIdx >= 0) items[modelDDIdx].scrollIntoView({ block: 'nearest' });
+  function updateSel(items, idx) {
+    items.forEach(function(it, i) { it.classList.toggle('sel', i === idx); });
+    if (idx >= 0) items[idx].scrollIntoView({ block: 'nearest' });
   }
 
   function renderHistory(sessions) {
@@ -998,10 +994,7 @@
       + '<span class="ac-fname">' + esc(fname) + '</span>';
   }
   function hideAC() { autocomplete.style.display = 'none'; acIdx = -1; }
-  function updateACSel(items) {
-    items.forEach(function(it, i) { it.classList.toggle('sel', i === acIdx); });
-    if (acIdx >= 0) items[acIdx].scrollIntoView({ block: 'nearest' });
-  }
+
   function renderAutocomplete(data) {
     if (!data || !data.length) { hideAC(); return; }
     autocomplete.innerHTML = ''; acIdx = -1;
@@ -1048,7 +1041,7 @@
     autocomplete.style.display = 'block';
     acIdx = 0;
     var allItems = autocomplete.querySelectorAll('.ac-item');
-    updateACSel(allItems);
+    updateSel(allItems, acIdx);
   }
 
   function insertAtMention(file) {
