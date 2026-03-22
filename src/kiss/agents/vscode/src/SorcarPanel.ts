@@ -169,6 +169,15 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     const styleUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this._extensionUri, 'media', 'main.css')
     );
+    const hljsCssUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight-github-dark.min.css')
+    );
+    const hljsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.min.js')
+    );
+    const markedUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this._extensionUri, 'media', 'marked.min.js')
+    );
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this._extensionUri, 'media', 'main.js')
     );
@@ -180,6 +189,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: https:; font-src ${webview.cspSource};">
   <link href="${styleUri}" rel="stylesheet">
+  <link href="${hljsCssUri}" rel="stylesheet">
   <title>KISS Sorcar</title>
 </head>
 <body>
@@ -281,6 +291,8 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
+  <script nonce="${nonce}" src="${hljsUri}"></script>
+  <script nonce="${nonce}" src="${markedUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

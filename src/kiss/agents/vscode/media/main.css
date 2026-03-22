@@ -565,6 +565,74 @@ header {
 }
 #ask-user-submit:hover { opacity: 0.9; }
 
+/* ── Markdown content rendering ──────────────────────── */
+.system-prompt-body p,
+.prompt-body p,
+.rc-body p {
+  margin: 4px 0;
+}
+.system-prompt-body h1, .system-prompt-body h2, .system-prompt-body h3,
+.system-prompt-body h4, .system-prompt-body h5, .system-prompt-body h6,
+.prompt-body h1, .prompt-body h2, .prompt-body h3,
+.prompt-body h4, .prompt-body h5, .prompt-body h6,
+.rc-body h1, .rc-body h2, .rc-body h3,
+.rc-body h4, .rc-body h5, .rc-body h6 {
+  margin: 8px 0 4px; font-weight: 600; color: var(--fg);
+}
+.system-prompt-body h1, .prompt-body h1, .rc-body h1 { font-size: 14px; }
+.system-prompt-body h2, .prompt-body h2, .rc-body h2 { font-size: 12px; }
+.system-prompt-body h3, .prompt-body h3, .rc-body h3 { font-size: 11px; }
+.system-prompt-body ul, .system-prompt-body ol,
+.prompt-body ul, .prompt-body ol,
+.rc-body ul, .rc-body ol {
+  margin: 4px 0; padding-left: 20px;
+}
+.system-prompt-body li, .prompt-body li, .rc-body li {
+  margin: 2px 0;
+}
+.system-prompt-body code, .prompt-body code, .rc-body code {
+  background: rgba(255,255,255,0.08); padding: 1px 4px; border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, 'Fira Code', monospace); font-size: 10px;
+}
+.system-prompt-body pre, .prompt-body pre, .rc-body pre {
+  background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 6px 0;
+}
+.system-prompt-body pre code, .prompt-body pre code, .rc-body pre code {
+  background: none; padding: 0; font-size: 10px;
+}
+.system-prompt-body blockquote, .prompt-body blockquote, .rc-body blockquote {
+  border-left: 3px solid var(--accent); padding: 4px 10px; margin: 6px 0;
+  color: var(--dim); font-style: italic;
+}
+.system-prompt-body a, .prompt-body a, .rc-body a {
+  color: var(--accent); text-decoration: underline;
+}
+.system-prompt-body strong, .prompt-body strong, .rc-body strong {
+  font-weight: 600; color: var(--fg);
+}
+.system-prompt-body em, .prompt-body em, .rc-body em {
+  font-style: italic;
+}
+.system-prompt-body hr, .prompt-body hr, .rc-body hr {
+  border: none; border-top: 1px solid var(--border); margin: 8px 0;
+}
+.system-prompt-body table, .prompt-body table, .rc-body table {
+  border-collapse: collapse; margin: 6px 0; width: 100%;
+}
+.system-prompt-body th, .system-prompt-body td,
+.prompt-body th, .prompt-body td,
+.rc-body th, .rc-body td {
+  border: 1px solid var(--border); padding: 4px 8px; font-size: 10px;
+}
+.system-prompt-body th, .prompt-body th, .rc-body th {
+  background: rgba(255,255,255,0.04); font-weight: 600;
+}
+
+/* ── Syntax highlighting overrides ───────────────────── */
+code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
+.hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }
+
 /* ── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
