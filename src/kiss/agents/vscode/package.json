@@ -13,9 +13,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onView:kissSorcar.chatView",
-    "onView:kissSorcar.chatViewSecondary"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
