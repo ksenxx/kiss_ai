@@ -293,7 +293,7 @@
       var rc = mkEl('div', 'ev rc');
       var rb = '';
       if (ev.success === false) {
-        rb += '<div style="color:var(--red);font-weight:700;font-size:14px;margin-bottom:10px">Status: FAILED</div>';
+        rb += '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
       }
       var usePre = true;
       if (ev.summary) {
@@ -503,9 +503,9 @@
       break;
     case 'merge_data': {
       var mc = mkEl('div', 'ev merge-info');
-      mc.innerHTML = '<div style="color:var(--yellow);font-weight:600;font-size:11px;margin-bottom:4px">'
+      mc.innerHTML = '<div style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">'
         + '\u2731 Reviewing ' + (ev.hunk_count || 0) + ' change(s)</div>'
-        + '<div style="font-size:10px;color:var(--dim)">Red = old lines, Blue = new lines. '
+        + '<div style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Blue = new lines. '
         + 'Use the merge toolbar to accept or reject changes.</div>';
       O.appendChild(mc);
       break;
