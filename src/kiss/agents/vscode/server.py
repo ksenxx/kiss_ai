@@ -98,6 +98,7 @@ class VSCodeServer:
         self._user_answer: str = ""
         self._selected_model = os.environ.get("KISS_MODEL", "claude-opus-4-6")
         self._file_cache: list[str] = []
+        self._task_thread: threading.Thread | None = None
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -118,7 +119,11 @@ class VSCodeServer:
         cmd_type = cmd.get("type")
 
         if cmd_type == "run":
-            self._run_task(cmd)
+            if self._task_thread and self._task_thread.is_alive():
+                self.printer.broadcast({"type": "error", "text": "Task already running"})
+                return
+            self._task_thread = threading.Thread(target=self._run_task, args=(cmd,), daemon=True)
+            self._task_thread.start()
         elif cmd_type == "stop":
             self._stop_task()
         elif cmd_type == "getModels":
