@@ -55,11 +55,7 @@ header {
 }
 .dot.running { background: var(--green); animation: pulse 1.5s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-.header-right button {
-  background: none; border: none; color: rgba(255,255,255,0.4);
-  cursor: pointer; padding: 4px; border-radius: 4px; transition: all 0.15s;
-}
-.header-right button:hover { color: rgba(255,255,255,0.8); background: rgba(255,255,255,0.08); }
+
 
 /* ── Output Area ────────────────────────────────────── */
 #output {
@@ -305,7 +301,7 @@ header {
   position: relative;
 }
 #file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-#file-chips:empty { display: none; }
+#file-chips:empty { display: none; margin-bottom: 0; }
 .file-chip {
   display: inline-flex; align-items: center; gap: 6px;
   background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.2);
@@ -331,30 +327,26 @@ header {
 }
 #task-input::placeholder { color: rgba(255,255,255,0.35); }
 
-#input-actions { display: flex; gap: 6px; align-items: center; }
-#input-actions button {
-  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 6px; color: rgba(255,255,255,0.5); cursor: pointer; padding: 4px 6px;
-  display: flex; align-items: center; justify-content: center; transition: all 0.15s;
-}
-#input-actions button:hover { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.8); }
-#upload-btn svg { width: 11px; height: 11px; }
+#input-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
 
 #send-btn {
-  background: rgba(88,166,255,0.18) !important; color: var(--accent) !important;
-  border: none !important; border-radius: 50% !important; width: 28px; height: 28px;
+  background: rgba(88,166,255,0.18); color: var(--accent); border: none;
+  border-radius: 50%; width: 28px; height: 28px; cursor: pointer;
+  transition: all 0.2s; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
 }
 #send-btn svg { width: 12px; height: 12px; }
-#send-btn:hover { background: rgba(88,166,255,0.35) !important; color: #fff !important; }
-#send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+#send-btn:hover { background: rgba(88,166,255,0.35); color: #fff; box-shadow: 0 0 12px rgba(88,166,255,0.2); }
+#send-btn:disabled { opacity: 0.3; cursor: not-allowed; box-shadow: none; }
 
 #stop-btn {
-  background: rgba(248,81,73,0.1) !important; color: var(--red) !important;
-  border: 1px solid rgba(248,81,73,0.15) !important; border-radius: 50% !important;
-  width: 28px; height: 28px;
+  background: rgba(248,81,73,0.1); color: var(--red);
+  border: 1px solid rgba(248,81,73,0.15); border-radius: 50%;
+  width: 28px; height: 28px; cursor: pointer; transition: all 0.2s; display: none;
+  align-items: center; justify-content: center; flex-shrink: 0;
 }
 #stop-btn svg { width: 11px; height: 11px; }
-#stop-btn:hover { background: rgba(248,81,73,0.2) !important; }
+#stop-btn:hover { background: rgba(248,81,73,0.2); box-shadow: 0 0 12px rgba(248,81,73,0.15); }
 
 /* Input Footer */
 #input-footer {
@@ -363,16 +355,33 @@ header {
 }
 
 /* Model Picker */
-#model-picker { position: relative; overflow: visible; }
+#model-picker { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: visible; }
 #model-btn {
   display: flex; align-items: center; gap: 6px;
   background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 6px; padding: 4px 8px; font-size: 11px;
-  color: rgba(255,255,255,0.5); cursor: pointer; transition: all 0.15s;
+  border-radius: 6px; padding: 4px 8px; font-size: 11px; font-family: inherit;
+  color: rgba(255,255,255,0.5); cursor: pointer; transition: border-color 0.2s;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px;
+  outline: none;
 }
 #model-btn:hover { border-color: rgba(255,255,255,0.2); color: rgba(255,255,255,0.7); }
 #model-btn svg { flex-shrink: 0; opacity: 0.4; }
+#upload-btn {
+  background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.5);
+  border: 1px solid rgba(255,255,255,0.08); border-radius: 6px;
+  padding: 4px 6px; cursor: pointer; flex-shrink: 0;
+  transition: color 0.15s, border-color 0.2s;
+  display: flex; align-items: center; justify-content: center;
+}
+#upload-btn:hover { color: rgba(255,255,255,0.65); border-color: rgba(255,255,255,0.16); background: rgba(255,255,255,0.05); }
+#upload-btn svg { width: 11px; height: 11px; }
+#history-btn {
+  background: none; border: none;
+  color: rgba(255,255,255,0.3); cursor: pointer;
+  padding: 4px; transition: color 0.15s;
+  display: flex; align-items: center;
+}
+#history-btn:hover { color: rgba(255,255,255,0.6); }
 #model-dropdown {
   position: absolute; bottom: 100%; left: 0; min-width: 280px; max-width: 380px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;

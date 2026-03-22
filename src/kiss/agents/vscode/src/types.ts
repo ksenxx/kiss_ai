@@ -9,13 +9,6 @@ export interface Attachment {
   data: string; // Base64 encoded
 }
 
-/** Model information */
-export interface ModelInfo {
-  name: string;
-  cost: string;
-  vendor: string;
-}
-
 /** Session/conversation info */
 export interface SessionInfo {
   id: string;
@@ -31,7 +24,6 @@ export type FromWebviewMessage =
   | { type: 'selectModel'; model: string }
   | { type: 'getModels' }
   | { type: 'getHistory'; query?: string }
-  | { type: 'resumeSession'; id: string }
   | { type: 'getFiles'; prefix: string }
   | { type: 'userAnswer'; answer: string }
   | { type: 'userActionDone' }
@@ -69,16 +61,9 @@ export type ToWebviewMessage =
   | { type: 'waitForUser'; instruction: string; url: string }
   | { type: 'error'; text: string };
 
-/** Usage/cost information */
-export interface UsageInfo {
-  cost: number;
-  tokens: number;
-  elapsed: number;
-}
-
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage';
   prompt?: string;
   model?: string;
   workDir?: string;
