@@ -587,8 +587,8 @@
   function renderWelcomeSuggestions(suggestions) {
     var container = document.getElementById('suggestions');
     if (!container) return;
-    if (!suggestions || suggestions.length === 0) return;
     container.innerHTML = '';
+    if (!suggestions || suggestions.length === 0) return;
     suggestions.forEach(function(s) {
       var chip = document.createElement('div');
       chip.className = 'suggestion-chip';
@@ -799,12 +799,6 @@
           vscode.postMessage({ type: 'openFile', path: raw });
         }
       }
-    });
-    document.querySelectorAll('.suggestion-chip').forEach(function(chip) {
-      chip.addEventListener('click', function() {
-        inp.value = chip.dataset.prompt;
-        inp.focus();
-      });
     });
     askUserSubmit.addEventListener('click', function() {
       var answer = askUserInput.value;
