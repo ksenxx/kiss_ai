@@ -1,2 +1,2 @@
-uv run python -m kiss.agents.sorcar.sorcar
+uv run python -m kiss.agents.sorcar.sorcar "${@:2}"
 

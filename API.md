@@ -38,6 +38,8 @@
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
     - [`kiss.agents.claw`](#kissagentsclaw)
       - [`kiss.agents.claw.background_agent`](#kissagentsclawbackground_agent)
+    - [`kiss.agents.vscode`](#kissagentsvscode)
+      - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
@@ -1085,6 +1087,27 @@ ______________________________________________________________________
 **`run_background_agent`** — Main loop: poll channel for tasks from user, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
 
 - `work_dir`: Working directory for agent tasks. Defaults to a temp dir.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode` — *KISS Sorcar VS Code Extension backend.*
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.server` — *VS Code extension backend server for Sorcar agent.*
+
+##### `class VSCodePrinter(BaseBrowserPrinter)` — Printer that outputs JSON events to stdout for VS Code extension.
+
+**Constructor:** `VSCodePrinter() -> None`
+
+- **broadcast** — Write event as a JSON line to stdout and record it.<br/>`broadcast(event: dict[str, Any]) -> None`
+  - `event`: The event dictionary to emit.
+
+##### `class VSCodeServer` — Backend server for VS Code extension.
+
+**Constructor:** `VSCodeServer() -> None`
+
+- **run** — Main loop: read commands from stdin, execute them.<br/>`run() -> None`
 
 ______________________________________________________________________
 

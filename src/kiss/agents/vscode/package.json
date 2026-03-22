@@ -1,0 +1,87 @@
+{
+  "name": "kiss-sorcar",
+  "displayName": "KISS Sorcar",
+  "description": "AI coding assistant powered by KISS Sorcar Agent",
+  "version": "0.1.0",
+  "publisher": "kiss",
+  "engines": {
+    "vscode": "^1.98.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:kissSorcar.chatView"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kissSorcar.openPanel",
+        "title": "KISS: Open Sorcar Chat"
+      },
+      {
+        "command": "kissSorcar.newConversation",
+        "title": "KISS: New Conversation"
+      },
+      {
+        "command": "kissSorcar.stopTask",
+        "title": "KISS: Stop Current Task"
+      },
+      {
+        "command": "kissSorcar.testFilePicker",
+        "title": "ZZTest: KISS File Picker Test"
+      },
+      {
+        "command": "kissSorcar.testModelPicker",
+        "title": "ZZTest: KISS Model Picker Test"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kissSorcar",
+          "title": "KISS Sorcar",
+          "icon": "media/spark.svg"
+        }
+      ]
+    },
+    "views": {
+      "kissSorcar": [
+        {
+          "type": "webview",
+          "id": "kissSorcar.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "KISS Sorcar",
+      "properties": {
+        "kissSorcar.defaultModel": {
+          "type": "string",
+          "default": "claude-opus-4-6",
+          "description": "Default LLM model for new conversations"
+        },
+        "kissSorcar.kissProjectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to KISS project root (auto-detected if empty)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.98.0",
+    "typescript": "^5.0.0"
+  }
+}

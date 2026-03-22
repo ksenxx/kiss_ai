@@ -33,4 +33,5 @@ code-server/
 playwright-browsers/
 bin/
 env.sh
+node_modules/
 
