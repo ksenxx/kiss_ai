@@ -66,12 +66,9 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.stopTask', () => {
         getActiveProvider()?.stopTask();
     }));
-    // Auto-open the chat view on startup
+    // Set context for conditional view visibility, then auto-open on startup
     vscode.commands.executeCommand('setContext', 'kissSorcar:doesNotSupportSecondarySidebar', !supportsSecondarySidebar).then(() => {
-        const viewId = supportsSecondarySidebar
-            ? 'kissSorcar.chatViewSecondary.focus'
-            : 'kissSorcar.chatView.focus';
-        vscode.commands.executeCommand(viewId);
+        vscode.commands.executeCommand('kissSorcar.openPanel');
     });
     console.log('KISS Sorcar extension activated');
 }
