@@ -21,6 +21,7 @@ from kiss.agents.sorcar.code_server import (
     _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
+    _save_untracked_base,
     _snapshot_files,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -240,6 +241,7 @@ class VSCodeServer:
 
         if self._merging:
             self.printer.broadcast(
+                {"type": "error", "text": "Cannot run a task while merge review is in progress. Accept or reject all changes first."}
             )
             return
 
