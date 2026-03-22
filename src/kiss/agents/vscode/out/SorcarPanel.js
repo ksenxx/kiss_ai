@@ -38,6 +38,8 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SorcarViewProvider = void 0;
 const vscode = __importStar(require("vscode"));
+const path = __importStar(require("path"));
+const fs = __importStar(require("fs"));
 const AgentProcess_1 = require("./AgentProcess");
 class SorcarViewProvider {
     static viewType = 'kissSorcar.chatView';
@@ -46,12 +48,20 @@ class SorcarViewProvider {
     _extensionUri;
     _selectedModel;
     _isRunning = false;
+    /** Maps file path -> original content saved before a Write/Edit tool call. */
+    _originals = new Map();
+    /** The file path from the most recent file-modifying tool_call, if any. */
+    _pendingDiffPath = null;
+    /** Directory for storing original file snapshots for diff view. */
+    _tmpDir;
     constructor(extensionUri) {
         this._extensionUri = extensionUri;
         this._agentProcess = new AgentProcess_1.AgentProcess();
         this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get('defaultModel') || 'claude-opus-4-6';
+        this._tmpDir = path.join(extensionUri.fsPath, '.diff-originals');
         // Listen for agent events
         this._agentProcess.on('message', (msg) => {
+            this._handleAgentEvent(msg);
             this.sendToWebview(msg);
             if (msg.type === 'status') {
                 this._isRunning = msg.running;
@@ -150,6 +160,99 @@ class SorcarViewProvider {
             this._view.webview.postMessage(message);
         }
     }
+    /**
+     * Handle agent events to detect file modifications and show merge/diff views.
+     *
+     * On tool_call for Write/Edit: saves the original file content.
+     * On tool_result (success) after a file-modifying tool: opens VS Code diff editor.
+     * On task_done/task_error/task_stopped: cleans up temporary files.
+     */
+    _handleAgentEvent(msg) {
+        if (msg.type === 'tool_call') {
+            const isFileModify = msg.name === 'Write' || msg.name === 'Edit';
+            if (isFileModify && msg.path) {
+                this._saveOriginal(msg.path);
+                this._pendingDiffPath = msg.path;
+            }
+            else {
+                this._pendingDiffPath = null;
+            }
+        }
+        else if (msg.type === 'tool_result' && this._pendingDiffPath) {
+            const filePath = this._pendingDiffPath;
+            this._pendingDiffPath = null;
+            if (!msg.is_error) {
+                this._showDiff(filePath);
+            }
+        }
+        else if (msg.type === 'task_done' || msg.type === 'task_error' || msg.type === 'task_stopped') {
+            this._cleanup();
+        }
+    }
+    /**
+     * Save a snapshot of the file's current content before modification.
+     */
+    _saveOriginal(filePath) {
+        try {
+            if (this._originals.has(filePath)) {
+                return; // Already have an original for this file in this session
+            }
+            if (fs.existsSync(filePath)) {
+                this._originals.set(filePath, fs.readFileSync(filePath, 'utf-8'));
+            }
+            else {
+                // New file - original is empty
+                this._originals.set(filePath, '');
+            }
+        }
+        catch {
+            // Ignore errors reading file
+        }
+    }
+    /**
+     * Show VS Code diff editor comparing the original file content to the current modified version.
+     */
+    async _showDiff(filePath) {
+        const original = this._originals.get(filePath);
+        if (original === undefined) {
+            return;
+        }
+        try {
+            // Write original content to a temp file for the diff left side
+            if (!fs.existsSync(this._tmpDir)) {
+                fs.mkdirSync(this._tmpDir, { recursive: true });
+            }
+            const fileName = path.basename(filePath);
+            const tmpFile = path.join(this._tmpDir, `original-${fileName}`);
+            fs.writeFileSync(tmpFile, original, 'utf-8');
+            const originalUri = vscode.Uri.file(tmpFile);
+            const modifiedUri = vscode.Uri.file(filePath);
+            const title = `${fileName} (Sorcar Changes)`;
+            await vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri, title);
+        }
+        catch {
+            // Ignore errors showing diff
+        }
+    }
+    /**
+     * Clean up temporary diff files and reset state.
+     */
+    _cleanup() {
+        this._originals.clear();
+        this._pendingDiffPath = null;
+        try {
+            if (fs.existsSync(this._tmpDir)) {
+                const files = fs.readdirSync(this._tmpDir);
+                for (const file of files) {
+                    fs.unlinkSync(path.join(this._tmpDir, file));
+                }
+                fs.rmdirSync(this._tmpDir);
+            }
+        }
+        catch {
+            // Ignore cleanup errors
+        }
+    }
     newConversation() {
         // Clear the chat and start fresh
         this.sendToWebview({ type: 'status', running: false });
@@ -160,6 +263,7 @@ class SorcarViewProvider {
     }
     dispose() {
         this._agentProcess.dispose();
+        this._cleanup();
     }
     _getHtmlContent(webview) {
         const nonce = this._getNonce();
