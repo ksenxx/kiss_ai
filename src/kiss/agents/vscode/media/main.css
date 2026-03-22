@@ -78,7 +78,7 @@ header {
 }
 #welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: 3px; letter-spacing: -0.3px; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: 14px; }
-#suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; width: 100%; }
+#suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
 .suggestion-chip {
   background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
   border-radius: 8px; padding: 7px 11px; cursor: pointer; text-align: left;

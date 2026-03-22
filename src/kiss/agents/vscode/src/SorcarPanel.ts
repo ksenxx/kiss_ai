@@ -261,24 +261,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI coding assistant. Ask me anything about your code!</p>
-        <div id="suggestions">
-          <div class="suggestion-chip" data-prompt="Explain this codebase structure">
-            <span class="chip-label">Quick Start</span>
-            Explain this codebase structure
-          </div>
-          <div class="suggestion-chip" data-prompt="Find and fix bugs in this file">
-            <span class="chip-label">Quick Start</span>
-            Find and fix bugs in this file
-          </div>
-          <div class="suggestion-chip" data-prompt="Write tests for the current file">
-            <span class="chip-label">Quick Start</span>
-            Write tests for the current file
-          </div>
-          <div class="suggestion-chip" data-prompt="Optimize this code for performance">
-            <span class="chip-label">Quick Start</span>
-            Optimize this code for performance
-          </div>
-        </div>
+        <div id="suggestions"></div>
       </div>
     </div>
 
