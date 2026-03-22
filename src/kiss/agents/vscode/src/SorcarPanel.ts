@@ -3,8 +3,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
 import { AgentProcess } from './AgentProcess';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
@@ -17,26 +15,13 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   private _selectedModel: string;
   private _isRunning: boolean = false;
 
-  /** Maps file path -> original content saved before a Write/Edit tool call. */
-  private _originals: Map<string, string> = new Map();
-
-  /** The file path from the most recent file-modifying tool_call, if any. */
-  private _pendingDiffPath: string | null = null;
-
-  /** Directory for storing original file snapshots for diff view. */
-  private _tmpDir: string;
-
   constructor(extensionUri: vscode.Uri) {
     this._extensionUri = extensionUri;
     this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || 'claude-opus-4-6';
-    this._tmpDir = path.join(
-      extensionUri.fsPath, '.diff-originals'
-    );
 
     // Listen for agent events
     this._agentProcess.on('message', (msg: ToWebviewMessage) => {
-      this._handleAgentEvent(msg);
       this.sendToWebview(msg);
       if (msg.type === 'status') {
         this._isRunning = msg.running;
@@ -113,7 +98,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'selectModel':
-        this._selectedModel = message.model;
+        this._agentProcess.sendCommand({ type: 'selectModel', model: message.model });
         break;
 
       case 'getModels':
@@ -163,100 +148,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /**
-   * Handle agent events to detect file modifications and show merge/diff views.
-   *
-   * On tool_call for Write/Edit: saves the original file content.
-   * On tool_result (success) after a file-modifying tool: opens VS Code diff editor.
-   * On task_done/task_error/task_stopped: cleans up temporary files.
-   */
-  private _handleAgentEvent(msg: ToWebviewMessage): void {
-    if (msg.type === 'tool_call') {
-      const isFileModify = msg.name === 'Write' || msg.name === 'Edit';
-      if (isFileModify && msg.path) {
-        this._saveOriginal(msg.path);
-        this._pendingDiffPath = msg.path;
-      } else {
-        this._pendingDiffPath = null;
-      }
-    } else if (msg.type === 'tool_result' && this._pendingDiffPath) {
-      const filePath = this._pendingDiffPath;
-      this._pendingDiffPath = null;
-      if (!msg.is_error) {
-        this._showDiff(filePath);
-      }
-    } else if (msg.type === 'task_done' || msg.type === 'task_error' || msg.type === 'task_stopped') {
-      this._cleanup();
-    }
-  }
-
-  /**
-   * Save a snapshot of the file's current content before modification.
-   */
-  private _saveOriginal(filePath: string): void {
-    try {
-      if (this._originals.has(filePath)) {
-        return; // Already have an original for this file in this session
-      }
-      if (fs.existsSync(filePath)) {
-        this._originals.set(filePath, fs.readFileSync(filePath, 'utf-8'));
-      } else {
-        // New file - original is empty
-        this._originals.set(filePath, '');
-      }
-    } catch {
-      // Ignore errors reading file
-    }
-  }
-
-  /**
-   * Show VS Code diff editor comparing the original file content to the current modified version.
-   */
-  private async _showDiff(filePath: string): Promise<void> {
-    const original = this._originals.get(filePath);
-    if (original === undefined) {
-      return;
-    }
-
-    try {
-      // Write original content to a temp file for the diff left side
-      if (!fs.existsSync(this._tmpDir)) {
-        fs.mkdirSync(this._tmpDir, { recursive: true });
-      }
-
-      const fileName = path.basename(filePath);
-      const tmpFile = path.join(this._tmpDir, `original-${fileName}`);
-      fs.writeFileSync(tmpFile, original, 'utf-8');
-
-      const originalUri = vscode.Uri.file(tmpFile);
-      const modifiedUri = vscode.Uri.file(filePath);
-      const title = `${fileName} (Sorcar Changes)`;
-
-      await vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri, title);
-    } catch {
-      // Ignore errors showing diff
-    }
-  }
-
-  /**
-   * Clean up temporary diff files and reset state.
-   */
-  private _cleanup(): void {
-    this._originals.clear();
-    this._pendingDiffPath = null;
-    try {
-      if (fs.existsSync(this._tmpDir)) {
-        const files = fs.readdirSync(this._tmpDir);
-        for (const file of files) {
-          fs.unlinkSync(path.join(this._tmpDir, file));
-        }
-        fs.rmdirSync(this._tmpDir);
-      }
-    } catch {
-      // Ignore cleanup errors
-    }
-  }
-
   public newConversation(): void {
     // Clear the chat and start fresh
     this.sendToWebview({ type: 'status', running: false });
@@ -269,7 +160,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   public dispose(): void {
     this._agentProcess.dispose();
-    this._cleanup();
   }
 
   private _getHtmlContent(webview: vscode.Webview): string {
@@ -302,14 +192,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           <span id="status-text">Ready</span>
         </div>
       </div>
-      <div class="header-right">
-        <button id="history-btn" title="History">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"></circle>
-            <polyline points="12 6 12 12 16 14"></polyline>
-          </svg>
-        </button>
-      </div>
     </header>
 
     <div id="output">
@@ -339,43 +221,39 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
     <div id="input-area">
       <div id="autocomplete"></div>
-      <div id="file-chips"></div>
       <div id="input-container">
+        <div id="file-chips"></div>
         <div id="input-wrap">
           <div id="input-text-wrap">
             <textarea id="task-input" placeholder="Ask anything... (@ to mention files)" rows="1"></textarea>
-          </div>
-          <div id="input-actions">
-            <button id="upload-btn" title="Attach file">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
-              </svg>
-            </button>
-            <button id="send-btn" title="Send">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="22" y1="2" x2="11" y2="13"></line>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-              </svg>
-            </button>
-            <button id="stop-btn" title="Stop" style="display:none;">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="6" width="12" height="12" rx="2"></rect>
-              </svg>
-            </button>
           </div>
         </div>
         <div id="input-footer">
           <div id="model-picker">
             <button id="model-btn">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
               <span id="model-name">claude-opus-4-6</span>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="6 9 12 15 18 9"></polyline>
+            </button>
+            <button id="upload-btn" title="Attach files">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <button id="history-btn" title="Task history">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
             </button>
             <div id="model-dropdown">
               <input type="text" id="model-search" placeholder="Search models...">
               <div id="model-list"></div>
             </div>
+          </div>
+          <div id="input-actions">
+            <button id="send-btn" title="Send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+            <button id="stop-btn" title="Stop" style="display:none;">
+              <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            </button>
           </div>
         </div>
       </div>

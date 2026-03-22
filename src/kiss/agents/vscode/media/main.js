@@ -599,15 +599,6 @@
     });
   }
 
-  function modelVendor(name) {
-    if (name.startsWith('claude-')) return 'Anthropic';
-    if (/^(gpt|o[134]|codex|computer-use)/.test(name) && !name.startsWith('openai/')) return 'OpenAI';
-    if (name.startsWith('gemini-')) return 'Gemini';
-    if (name.startsWith('minimax-')) return 'MiniMax';
-    if (name.startsWith('openrouter/')) return 'OpenRouter';
-    return 'Together AI';
-  }
-
   function renderModelItem(m) {
     var d = mkEl('div', 'model-item' + (m.name === selectedModel ? ' active' : ''));
     var price = '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
@@ -633,7 +624,7 @@
     }
     var lastVendor = '';
     rest.forEach(function(m) {
-      var v = modelVendor(m.name);
+      var v = m.vendor;
       if (v !== lastVendor) {
         var hdr = mkEl('div', 'model-group-hdr');
         hdr.textContent = v;
