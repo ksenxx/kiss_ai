@@ -50,57 +50,6 @@ def _init_git_repo(tmpdir: str) -> None:
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
 
 
-class TestSaveUntrackedBase:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.data_dir = tempfile.mkdtemp()
-        _init_git_repo(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        base_dir = _untracked_base_dir()
-        if base_dir.exists():
-            shutil.rmtree(base_dir, ignore_errors=True)
-
-class TestCleanupMergeData:
-    def setup_method(self) -> None:
-        self.data_dir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        base_dir = _untracked_base_dir()
-        if base_dir.exists():
-            shutil.rmtree(base_dir, ignore_errors=True)
-
-class TestPrepareMergeViewUntrackedModified:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.data_dir = tempfile.mkdtemp()
-        _init_git_repo(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        base_dir = _untracked_base_dir()
-        if base_dir.exists():
-            shutil.rmtree(base_dir, ignore_errors=True)
-
-class TestPrepareMergeViewTrackedPreHash:
-    """Test _prepare_merge_view with tracked files that have pre_file_hashes."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.data_dir = tempfile.mkdtemp()
-        _init_git_repo(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        base_dir = _untracked_base_dir()
-        if base_dir.exists():
-            shutil.rmtree(base_dir, ignore_errors=True)
-
 class TestUsefulToolsRead:
 
     def test_read_nonexistent_file(self) -> None:
@@ -204,37 +153,6 @@ class TestUsefulToolsBash:
         result = tools.Bash("eval 'echo hello'", "test disallowed")
         assert "not allowed" in result
 
-class TestTaskHistory:
-    def setup_method(self) -> None:
-        from kiss.agents.sorcar import task_history
-
-        self._orig_history_file = task_history.HISTORY_FILE
-        self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
-        self._orig_file_usage_file = task_history.FILE_USAGE_FILE
-        self._orig_kiss_dir = task_history._KISS_DIR
-
-        self.tmpdir = tempfile.mkdtemp()
-        self._orig_events_dir = task_history._CHAT_EVENTS_DIR
-        task_history._KISS_DIR = Path(self.tmpdir)
-        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
-        task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
-        task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
-
-        task_history._history_cache = None
-
-    def teardown_method(self) -> None:
-        from kiss.agents.sorcar import task_history
-
-        task_history.HISTORY_FILE = self._orig_history_file
-        task_history._CHAT_EVENTS_DIR = self._orig_events_dir
-        task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
-        task_history.FILE_USAGE_FILE = self._orig_file_usage_file
-        task_history._KISS_DIR = self._orig_kiss_dir
-        task_history._history_cache = None
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
 class TestScanFiles:
     def test_respects_depth_limit(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -285,50 +203,6 @@ class TestBrowserPrinterBashStream:
         printer.reset()
         assert printer._bash_flush_timer is None
 
-
-class TestTaskHistoryEdgeCases:
-    def setup_method(self) -> None:
-        from kiss.agents.sorcar import task_history
-
-        self._orig_history_file = task_history.HISTORY_FILE
-        self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
-        self._orig_file_usage_file = task_history.FILE_USAGE_FILE
-        self._orig_kiss_dir = task_history._KISS_DIR
-        self._orig_events_dir = task_history._CHAT_EVENTS_DIR
-        self.tmpdir = tempfile.mkdtemp()
-        task_history._KISS_DIR = Path(self.tmpdir)
-        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
-        task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
-        task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
-        task_history._history_cache = None
-
-    def teardown_method(self) -> None:
-        from kiss.agents.sorcar import task_history
-
-        task_history.HISTORY_FILE = self._orig_history_file
-        task_history._CHAT_EVENTS_DIR = self._orig_events_dir
-        task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
-        task_history.FILE_USAGE_FILE = self._orig_file_usage_file
-        task_history._KISS_DIR = self._orig_kiss_dir
-        task_history._history_cache = None
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestPrepareMergeViewFilteredHunks:
-    """Test the pre_hunks filtering logic in _prepare_merge_view."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.data_dir = tempfile.mkdtemp()
-        _init_git_repo(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        base_dir = _untracked_base_dir()
-        if base_dir.exists():
-            shutil.rmtree(base_dir, ignore_errors=True)
 
 class TestBrowserUiUncoveredBranches:
     """Cover remaining uncovered branches in browser_ui.py."""
@@ -392,36 +266,6 @@ class TestCodeServerUncoveredBranches:
             base_dir = _untracked_base_dir()
             if base_dir.exists():
                 shutil.rmtree(base_dir, ignore_errors=True)
-
-class TestTaskHistoryUncoveredBranches:
-    def setup_method(self) -> None:
-        from kiss.agents.sorcar import task_history
-
-        self._orig_history_file = task_history.HISTORY_FILE
-        self._orig_model_usage_file = task_history.MODEL_USAGE_FILE
-        self._orig_file_usage_file = task_history.FILE_USAGE_FILE
-        self._orig_kiss_dir = task_history._KISS_DIR
-        self._orig_events_dir = task_history._CHAT_EVENTS_DIR
-
-        self.tmpdir = tempfile.mkdtemp()
-        task_history._KISS_DIR = Path(self.tmpdir)
-        task_history.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
-        task_history._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        task_history.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
-        task_history.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
-        task_history._history_cache = None
-
-    def teardown_method(self) -> None:
-        from kiss.agents.sorcar import task_history
-
-        task_history.HISTORY_FILE = self._orig_history_file
-        task_history._CHAT_EVENTS_DIR = self._orig_events_dir
-        task_history.MODEL_USAGE_FILE = self._orig_model_usage_file
-        task_history.FILE_USAGE_FILE = self._orig_file_usage_file
-        task_history._KISS_DIR = self._orig_kiss_dir
-        task_history._history_cache = None
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
 
 class TestUsefulToolsUncoveredBranches:
     def test_edit_write_permission_error(self) -> None:
@@ -552,17 +396,6 @@ class TestWebUseToolPersistentContext:
                 tool.close()
 
 
-class TestWebUseToolResolveLocator:
-    """Test _resolve_locator edge cases."""
-
-    def setup_method(self) -> None:
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        self.tool = WebUseTool(user_data_dir=None)
-
-    def teardown_method(self) -> None:
-        self.tool.close()
-
 class TestWebUseToolEdgeCases:
     """Cover remaining edge cases in web_use_tool.py."""
 
@@ -593,14 +426,6 @@ class TestWebUseToolEdgeCases:
         self.tool.go_to_url("data:text/html,<h1>Single</h1>")
         assert len(self.tool._context.pages) == 1
         self.tool._check_for_new_tab()
-
-
-class TestReadActiveFileDirPath:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestSorcarAgentDirect:
@@ -999,8 +824,21 @@ def inproc_server():
     _sh.which = _no_cs  # type: ignore[assignment]
     _wb.open = lambda url: None  # type: ignore[assignment,misc]
 
+    import kiss.agents.sorcar.task_history as _th
     from kiss.agents.sorcar import browser_ui
     from kiss.agents.sorcar import sorcar as sorcar_module
+
+    # Redirect _KISS_DIR to temp so no stale ui-port file prevents
+    # find_free_port from being called.
+    tmp_kiss = Path(tmpdir) / ".kiss"
+    tmp_kiss.mkdir(parents=True, exist_ok=True)
+    _old_kiss_dir = _th._KISS_DIR
+    _old_db_path = _th._DB_PATH
+    _old_db_conn = _th._db_conn
+    _th._KISS_DIR = tmp_kiss
+    _th._DB_PATH = tmp_kiss / "history.db"
+    _th._db_conn = None
+    sorcar_module._KISS_DIR = tmp_kiss
 
     port_holder: list[int] = []
     _orig_ffp = browser_ui.find_free_port
@@ -1040,9 +878,7 @@ def inproc_server():
         except requests.ConnectionError:
             time.sleep(0.2)
 
-    from kiss.agents.sorcar.task_history import _KISS_DIR
-
-    sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
+    sorcar_data_dir = str(tmp_kiss / "sorcar-data")
 
     keepalive = requests.get(f"{base_url}/events", stream=True, timeout=300)
 
@@ -1057,6 +893,12 @@ def inproc_server():
     _sh.which = old_which  # type: ignore[assignment]
     _wb.open = old_open  # type: ignore[assignment,misc]
     sorcar_module.find_free_port = _orig_ffp  # type: ignore[attr-defined]
+    if _th._db_conn is not None:
+        _th._db_conn.close()
+    _th._KISS_DIR = _old_kiss_dir
+    _th._DB_PATH = _old_db_path
+    _th._db_conn = _old_db_conn
+    sorcar_module._KISS_DIR = _old_kiss_dir
     time.sleep(1)
     shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1613,13 +1455,8 @@ class TestInProcessEndpoints:
 
     def test_select_model_persists(self, inproc_server) -> None:
         """Selecting a model via /select-model persists it for next startup."""
-        import json
-
-        from kiss.agents.sorcar.task_history import MODEL_USAGE_FILE
-
         base_url, _, _ = inproc_server
-        original = json.loads(MODEL_USAGE_FILE.read_text()) if MODEL_USAGE_FILE.exists() else {}
-        original_last = original.get("_last", "")
+        original_last = task_history._load_last_model()
         try:
             resp = requests.post(
                 f"{base_url}/select-model",
@@ -1631,6 +1468,5 @@ class TestInProcessEndpoints:
             resp = requests.get(f"{base_url}/models", timeout=5)
             assert resp.json()["selected"] == "gemini-2.5-pro"
         finally:
-            data = json.loads(MODEL_USAGE_FILE.read_text()) if MODEL_USAGE_FILE.exists() else {}
-            data["_last"] = original_last
-            MODEL_USAGE_FILE.write_text(json.dumps(data))
+            if original_last:
+                task_history._save_last_model(original_last)

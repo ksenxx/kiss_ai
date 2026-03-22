@@ -1,6 +1,5 @@
-"""Tests for task history: JSONL format, migration, stale cleanup, scale, and atomicity."""
+"""Tests for task history: SQLite storage, dedup, events, model/file usage, cleanup."""
 
-import json
 import shutil
 import tempfile
 import time
@@ -12,114 +11,203 @@ import kiss.agents.sorcar.task_history as th
 
 
 def _redirect(tmpdir: str):
-    old = (
-        th.HISTORY_FILE,
-        th._CHAT_EVENTS_DIR,
-        th._history_cache,
-        th._KISS_DIR,
-    )
+    """Redirect DB to a temp dir and reset the singleton connection."""
+    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
-    th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
-    th._history_cache = None
+    th._DB_PATH = kiss_dir / "history.db"
+    th._db_conn = None
     return old
 
 
 def _restore(saved):
-    (
-        th.HISTORY_FILE,
-        th._CHAT_EVENTS_DIR,
-        th._history_cache,
-        th._KISS_DIR,
-    ) = saved
+    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
-def _write_n_tasks(n: int) -> None:
-    th._ensure_kiss_dir()
-    with th.HISTORY_FILE.open("w") as f:
-        for i in range(n):
-            f.write(json.dumps({"task": f"task-{i}", "has_events": False}))
-            f.write("\n")
-
-
-class TestResultAndEventsFile:
+class TestTaskHistory:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self):
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_load_task_chat_events_uses_events_file_from_history(self):
+    def test_add_and_load(self):
+        th._add_task("my task")
+        entries = th._load_history(limit=10)
+        tasks = [e["task"] for e in entries]
+        assert "my task" in tasks
+
+    def test_dedup_keeps_latest(self):
+        th._add_task("dup")
+        time.sleep(0.01)
+        th._add_task("unique")
+        time.sleep(0.01)
+        th._add_task("dup")
+        entries = th._load_history()
+        tasks = [e["task"] for e in entries]
+        assert tasks.count("dup") == 1
+        assert tasks[0] == "dup"
+
+    def test_search_history(self):
+        th._add_task("alpha test")
+        th._add_task("beta test")
+        th._add_task("gamma work")
+        results = th._search_history("test", limit=10)
+        tasks = [e["task"] for e in results]
+        assert "alpha test" in tasks
+        assert "beta test" in tasks
+        assert "gamma work" not in tasks
+
+    def test_search_empty_query(self):
+        th._add_task("x")
+        results = th._search_history("", limit=10)
+        assert len(results) >= 1
+
+    def test_get_history_entry(self):
+        th._add_task("first")
+        time.sleep(0.01)
+        th._add_task("second")
+        entry = th._get_history_entry(0)
+        assert entry is not None
+        assert entry["task"] == "second"
+        entry1 = th._get_history_entry(1)
+        assert entry1 is not None
+        assert entry1["task"] == "first"
+        assert th._get_history_entry(99999) is None
+
+    def test_load_history_limit(self):
+        for i in range(5):
+            th._add_task(f"t{i}")
+            time.sleep(0.001)
+        entries = th._load_history(limit=3)
+        assert len(entries) == 3
+
+    def test_seed_sample_tasks(self):
+        entries = th._load_history()
+        assert len(entries) == len(th.SAMPLE_TASKS)
+
+
+class TestChatEvents:
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+
+    def teardown_method(self):
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_set_and_load_events(self):
         th._add_task("my task")
         th._set_latest_chat_events([{"type": "hello"}], task="my task")
         events = th._load_task_chat_events("my task")
         assert events == [{"type": "hello"}]
-        custom_name = "custom_events.json"
-        old_path = th._task_events_path("my task")
-        new_path = th._CHAT_EVENTS_DIR / custom_name
-        old_path.rename(new_path)
-        lines = th.HISTORY_FILE.read_text().strip().split("\n")
-        with th.HISTORY_FILE.open("w") as f:
-            for line in lines:
-                entry = json.loads(line)
-                if entry["task"] == "my task":
-                    entry["events_file"] = custom_name
-                f.write(json.dumps(entry) + "\n")
-        th._history_cache = None
-        events = th._load_task_chat_events("my task")
-        assert events == [{"type": "hello"}]
+
+    def test_set_events_updates_has_events(self):
+        th._add_task("t")
+        th._set_latest_chat_events([{"x": 1}], task="t", result="done")
+        entry = th._load_history(limit=1)[0]
+        assert entry["task"] == "t"
+        assert entry["has_events"] == 1
+        assert entry["result"] == "done"
+
+    def test_set_events_no_task(self):
+        th._add_task("latest")
+        th._set_latest_chat_events([{"a": 1}])
+        events = th._load_task_chat_events("latest")
+        assert events == [{"a": 1}]
+
+    def test_load_events_nonexistent(self):
+        assert th._load_task_chat_events("nope") == []
+
+    def test_clear_events(self):
+        th._add_task("t")
+        th._set_latest_chat_events([{"x": 1}], task="t")
+        th._set_latest_chat_events([], task="t")
+        assert th._load_task_chat_events("t") == []
 
 
-class TestMigration:
+class TestModelUsage:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self):
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_migrate_old_json_format(self):
-        old_file = th.HISTORY_FILE.parent / "task_history.json"
-        old_data = [
-            {"task": "old task 1", "chat_events": [{"type": "text_delta", "text": "hi"}]},
-            {"task": "old task 2", "chat_events": []},
-        ]
-        old_file.write_text(json.dumps(old_data))
-        history = th._load_history()
-        assert len(history) == 2
-        assert history[0]["task"] == "old task 1"
-        assert history[0]["has_events"] is True
-        assert history[1]["task"] == "old task 2"
-        assert history[1]["has_events"] is False
-        assert not old_file.exists()
-        assert th.HISTORY_FILE.exists()
-        events = th._load_task_chat_events("old task 1")
-        assert events == [{"type": "text_delta", "text": "hi"}]
-        assert th._load_task_chat_events("old task 2") == []
+    def test_record_and_load(self):
+        th._record_model_usage("gpt-4o")
+        th._record_model_usage("gpt-4o")
+        usage = th._load_model_usage()
+        assert usage["gpt-4o"] == 2
 
-    def test_migrate_old_json_with_duplicates(self):
-        old_file = th.HISTORY_FILE.parent / "task_history.json"
-        old_data = [
-            {"task": "dup", "chat_events": []},
-            {"task": "dup", "chat_events": []},
-            {"task": "unique", "chat_events": []},
-        ]
-        old_file.write_text(json.dumps(old_data))
-        history = th._load_history()
-        tasks = [e["task"] for e in history]
-        assert tasks.count("dup") == 1
-        assert not old_file.exists()
+    def test_save_and_load_last_model(self):
+        th._save_last_model("claude-opus-4-6")
+        assert th._load_last_model() == "claude-opus-4-6"
+        th._save_last_model("gemini-2.0-flash")
+        assert th._load_last_model() == "gemini-2.0-flash"
 
-    def test_migrate_corrupt_old_file(self):
-        old_file = th.HISTORY_FILE.parent / "task_history.json"
-        old_file.write_text("not json {{")
-        history = th._load_history()
-        assert len(history) > 0
+    def test_record_sets_last(self):
+        th._record_model_usage("a")
+        th._record_model_usage("b")
+        assert th._load_last_model() == "b"
+
+    def test_load_last_model_empty(self):
+        assert th._load_last_model() == ""
+
+
+class TestFileUsage:
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+
+    def teardown_method(self):
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_record_and_load(self):
+        th._record_file_usage("src/main.py")
+        th._record_file_usage("src/main.py")
+        usage = th._load_file_usage()
+        assert usage["src/main.py"] == 2
+
+    def test_recency_ordering(self):
+        th._record_file_usage("a.py")
+        time.sleep(0.01)
+        th._record_file_usage("b.py")
+        usage = th._load_file_usage()
+        keys = list(usage.keys())
+        assert keys.index("a.py") < keys.index("b.py")
+
+    def test_eviction(self):
+        orig = th._MAX_FILE_USAGE_ENTRIES
+        th._MAX_FILE_USAGE_ENTRIES = 3
+        try:
+            th._record_file_usage("a.py")
+            th._record_file_usage("b.py")
+            th._record_file_usage("c.py")
+            th._record_file_usage("a.py")
+            th._record_file_usage("d.py")
+            usage = th._load_file_usage()
+            assert len(usage) == 3
+            assert "b.py" not in usage
+        finally:
+            th._MAX_FILE_USAGE_ENTRIES = orig
 
 
 class TestCleanupStaleCsDirs:
@@ -128,6 +216,9 @@ class TestCleanupStaleCsDirs:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self):
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -158,7 +249,6 @@ class TestCleanupStaleCsDirs:
         assert not sorcar_data.exists()
 
     def test_removes_legacy_cs_data(self):
-        """Old cs-data directories are cleaned up as legacy cs-* dirs."""
         kiss_dir = th._KISS_DIR
         cs_data = kiss_dir / "cs-data"
         cs_data.mkdir()
@@ -179,57 +269,7 @@ class TestCleanupStaleCsDirs:
         sorcar_data.mkdir()
         (sorcar_data / "cs-port").write_text("99999")
         th._cleanup_stale_cs_dirs(max_age_hours=24)
-        # sorcar-data is recent, should not be removed
         assert sorcar_data.exists()
-
-
-class TestMaxHistory:
-    def test_max_history_value(self):
-        assert th.MAX_HISTORY == 1_000_000
-
-
-class TestLoadHistoryLimit:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestGetHistoryEntry:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_get_entry_no_file(self):
-        entry = th._get_history_entry(100)
-        assert entry is None
-
-
-class TestDeduplication:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestAtomicWrite:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -53,32 +53,6 @@ def non_md_file():
     os.unlink(f.name)
 
 
-class TestActiveFileTracking:
-    """Test the active-file.json reading and prompt detection logic."""
-
-    def test_active_file_json_write_read(self, tmp_path: Path) -> None:
-        active_file = os.path.join(str(tmp_path), "active-file.json")
-        data = {"path": "/some/file.md"}
-        with open(active_file, "w") as f:
-            json.dump(data, f)
-        with open(active_file) as f:
-            loaded = json.loads(f.read())
-        assert loaded["path"] == "/some/file.md"
-
-    def test_active_file_json_empty_path(self, tmp_path: Path) -> None:
-        active_file = os.path.join(str(tmp_path), "active-file.json")
-        data = {"path": ""}
-        with open(active_file, "w") as f:
-            json.dump(data, f)
-        with open(active_file) as f:
-            loaded = json.loads(f.read())
-        assert loaded["path"] == ""
-
-    def test_active_file_json_missing(self, tmp_path: Path) -> None:
-        active_file = os.path.join(str(tmp_path), "active-file.json")
-        assert not os.path.exists(active_file)
-
-
 class TestCodeServerExtensionActiveFileWrite:
     """Test that the extension JS includes writeActiveFile logic."""
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import signal
 import subprocess
 import sys
 import threading
@@ -80,36 +78,6 @@ class TestCodeServerLaunchArgs:
     def test_chatbot_js_has_iframe_reload(self) -> None:
         assert "code_server_restarted" in CHATBOT_JS
 
-
-class TestSSEHeartbeat:
-    def test_sse_format(self) -> None:
-        heartbeat = ": heartbeat\n\n"
-        assert heartbeat.startswith(":")
-        assert heartbeat.endswith("\n\n")
-        event = {"type": "code_server_restarted"}
-        sse_line = f"data: {json.dumps(event)}\n\n"
-        assert sse_line.startswith("data: ")
-        assert sse_line.endswith("\n\n")
-        parsed = json.loads(sse_line[6:].strip())
-        assert parsed["type"] == "code_server_restarted"
-
-
-class TestProcessMonitoringEdgeCases:
-    def test_process_poll_return_codes(self) -> None:
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "pass"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        proc.wait()
-        assert proc.poll() == 0
-
-        proc2 = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        proc2.send_signal(signal.SIGTERM)
-        proc2.wait()
-        assert proc2.poll() == -signal.SIGTERM
 
 
 

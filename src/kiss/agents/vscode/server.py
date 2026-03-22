@@ -24,6 +24,13 @@ from kiss.agents.sorcar.code_server import (
     _save_untracked_base,
     _snapshot_files,
 )
+from kiss.agents.sorcar.shared_utils import (
+    FAST_MODEL,
+    clip_autocomplete_suggestion,
+    generate_followup_text,
+    model_vendor,
+    rank_file_suggestions,
+)
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
@@ -44,66 +51,6 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 
 logger = logging.getLogger(__name__)
-
-_FAST_MODEL = "gemini-2.0-flash"
-
-_OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "codex", "computer-use")
-
-
-def _model_vendor(name: str) -> tuple[str, int]:
-    """Return (vendor_display_name, sort_order) for a model name."""
-    if name.startswith("claude-"):
-        return "Anthropic", 0
-    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
-        return "OpenAI", 1
-    if name.startswith("gemini-"):
-        return "Gemini", 2
-    if name.startswith("minimax-"):
-        return "MiniMax", 3
-    if name.startswith("openrouter/"):
-        return "OpenRouter", 4
-    return "Together AI", 5
-
-
-def _clean_llm_output(text: str) -> str:
-    return text.strip().strip('"').strip("'")
-
-
-def _clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
-    """Return only a short, confident autocomplete continuation."""
-    s = _clean_llm_output(suggestion)
-    if not s:
-        return ""
-    if s.lower().startswith(query.lower()):
-        s = s[len(query):]
-    s = s.lstrip()
-    if not s:
-        return ""
-    words: list[str] = []
-    hit_boundary = False
-    for token in s.split():
-        if any(mark in token for mark in ("\n", ":", ";", "!", "?")):
-            hit_boundary = True
-            break
-        if token.endswith((".", ",")):
-            clean = token.rstrip(".,")
-            if clean:
-                words.append(clean)
-            hit_boundary = True
-            break
-        words.append(token)
-        if len(words) >= 4:
-            break
-    clipped = " ".join(words).strip()
-    if len(words) < 1:
-        return ""
-    if hit_boundary:
-        return ""
-    if not clipped or len(clipped) > 40:
-        return ""
-    if s and len(s) > len(clipped) + 20:
-        return ""
-    return clipped
 
 
 class VSCodePrinter(BaseBrowserPrinter):
@@ -241,7 +188,11 @@ class VSCodeServer:
 
         if self._merging:
             self.printer.broadcast(
-                {"type": "error", "text": "Cannot run a task while merge review is in progress. Accept or reject all changes first."}
+                {
+                    "type": "error",
+                    "text": "Cannot run a task while merge review is in progress."
+                    " Accept or reject all changes first.",
+                }
             )
             return
 
@@ -321,9 +272,7 @@ class VSCodeServer:
 
     def _handle_merge_action(self, action: str) -> None:
         """Handle merge accept/reject actions from the extension."""
-        if action == "all-done":
-            self._finish_merge()
-        elif action in ("accept-all", "reject-all"):
+        if action in ("all-done", "accept-all", "reject-all"):
             self._finish_merge()
         elif action in ("accept", "reject"):
             self._remaining_hunks = max(0, self._remaining_hunks - 1)
@@ -373,7 +322,7 @@ class VSCodeServer:
         for name in get_available_models():
             info = MODEL_INFO.get(name)
             if info and info.is_function_calling_supported:
-                vendor_name, vendor_order = _model_vendor(name)
+                vendor_name, vendor_order = model_vendor(name)
                 models_list.append({
                     "name": name,
                     "inp": info.input_price_per_1M,
@@ -402,16 +351,15 @@ class VSCodeServer:
 
         sessions = []
         for entry in entries:
-            if isinstance(entry, dict):
-                task = str(entry.get("task", ""))
-                has_events = bool(entry.get("has_events", False))
-                sessions.append({
-                    "id": task,
-                    "title": task[:50] + "..." if len(task) > 50 else task,
-                    "timestamp": 0,
-                    "preview": task[:100],
-                    "has_events": has_events,
-                })
+            task = str(entry.get("task", ""))
+            has_events = bool(entry.get("has_events", False))
+            sessions.append({
+                "id": task,
+                "title": task[:50] + "..." if len(task) > 50 else task,
+                "timestamp": entry.get("timestamp", 0),
+                "preview": task[:100],
+                "has_events": has_events,
+            })
         self.printer.broadcast({"type": "history", "sessions": sessions})
 
     def _replay_session(self, task: str) -> None:
@@ -427,41 +375,23 @@ class VSCodeServer:
         entries = _load_history(limit=10)
         suggestions = []
         for entry in entries:
-            if isinstance(entry, dict):
-                task = str(entry.get("task", ""))
-                if task:
-                    suggestions.append({
-                        "text": task,
-                        "has_events": bool(entry.get("has_events", False)),
-                    })
+            task = str(entry.get("task", ""))
+            if task:
+                suggestions.append({
+                    "text": task,
+                    "has_events": bool(entry.get("has_events", False)),
+                })
         self.printer.broadcast({"type": "welcome_suggestions", "suggestions": suggestions})
 
     def _generate_followup(self, task: str, result: str) -> None:
         """Generate a follow-up suggestion using LLM after task completion."""
         def _run() -> None:
-            try:
-                agent = KISSAgent("Followup Proposer")
-                raw = agent.run(
-                    model_name=_FAST_MODEL,
-                    prompt_template=(
-                        "A developer just completed this task:\n"
-                        "Task: {task}\n"
-                        "Result summary: {result}\n\n"
-                        "Suggest ONE short, concrete follow-up task they "
-                        "might want to do next. Return ONLY the task "
-                        "description as a single plain-text sentence."
-                    ),
-                    arguments={"task": task, "result": result[:500]},
-                    is_agentic=False,
-                )
-                suggestion = _clean_llm_output(raw)
-                if suggestion:
-                    self.printer.broadcast({
-                        "type": "followup_suggestion",
-                        "text": suggestion,
-                    })
-            except Exception:
-                logger.debug("Followup generation failed", exc_info=True)
+            suggestion = generate_followup_text(task, result)
+            if suggestion:
+                self.printer.broadcast({
+                    "type": "followup_suggestion",
+                    "text": suggestion,
+                })
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -470,7 +400,7 @@ class VSCodeServer:
         try:
             entries = _load_history(limit=20)
             task_list = "\n".join(
-                f"- {e.get('task', '')}" for e in entries if isinstance(e, dict)
+                f"- {e.get('task', '')}" for e in entries
             )[:1000]
 
             files_list = "\n".join(self._file_cache[:50]) if self._file_cache else ""
@@ -483,7 +413,7 @@ class VSCodeServer:
 
             agent = KISSAgent("Autocomplete")
             raw = agent.run(
-                model_name=_FAST_MODEL,
+                model_name=FAST_MODEL,
                 prompt_template=(
                     "You are an inline autocomplete engine for a coding assistant. "
                     "Given the user's partial input and context, "
@@ -497,7 +427,7 @@ class VSCodeServer:
                 arguments={"query": query},
                 is_agentic=False,
             )
-            suggestion = _clip_autocomplete_suggestion(query, raw)
+            suggestion = clip_autocomplete_suggestion(query, raw)
             self.printer.broadcast({"type": "ghost", "suggestion": suggestion})
         except Exception:
             logger.debug("Autocomplete failed", exc_info=True)
@@ -513,42 +443,9 @@ class VSCodeServer:
         """Send file list for autocomplete with usage-based sorting."""
         if not self._file_cache:
             self._refresh_file_cache()
-
-        q = prefix.lower()
         usage = _load_file_usage()
-        frequent: list[dict[str, str]] = []
-        rest: list[dict[str, str]] = []
-
-        for path in self._file_cache:
-            if not q or q in path.lower():
-                item = {"type": "file", "text": path}
-                if usage.get(path, 0) > 0:
-                    frequent.append(item)
-                else:
-                    rest.append(item)
-
-        def _end_dist(text: str) -> int:
-            if not q:
-                return 0
-            pos = text.lower().rfind(q)
-            if pos < 0:
-                return len(text)
-            return len(text) - (pos + len(q))
-
-        _usage_keys = list(usage.keys())
-        _recency = {k: i for i, k in enumerate(reversed(_usage_keys))}
-        _n = len(_usage_keys)
-        frequent.sort(
-            key=lambda m: (
-                _end_dist(m["text"]),
-                _recency.get(m["text"], _n),
-                -usage.get(m["text"], 0),
-            )
-        )
-        rest.sort(key=lambda m: _end_dist(m["text"]))
-        for f in frequent:
-            f["type"] = "frequent"
-        self.printer.broadcast({"type": "files", "files": (frequent + rest)[:20]})
+        ranked = rank_file_suggestions(self._file_cache, prefix, usage)
+        self.printer.broadcast({"type": "files", "files": ranked})
 
 
 def main() -> None:

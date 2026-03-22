@@ -35,6 +35,14 @@ from kiss.agents.sorcar.code_server import (
     _setup_code_server,
     _snapshot_files,
 )
+from kiss.agents.sorcar.shared_utils import (
+    FAST_MODEL,
+    clean_llm_output,
+    clip_autocomplete_suggestion,
+    generate_followup_text,
+    model_vendor,
+    rank_file_suggestions,
+)
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
     _RECENT_CACHE_SIZE,
@@ -55,7 +63,6 @@ from kiss.agents.sorcar.task_history import (
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import (
-    _OPENAI_PREFIXES,
     MODEL_INFO,
     get_available_models,
 )
@@ -67,9 +74,7 @@ logger = logging.getLogger(__name__)
 def _log_exc() -> None:
     logger.debug("Exception caught", exc_info=True)
 
-_FAST_MODEL = "gemini-2.0-flash"
-_COMMIT_MODEL = "gemini-2.0-flash"
-_INTERNAL_MODELS = frozenset({_FAST_MODEL, _COMMIT_MODEL})
+_INTERNAL_MODELS = frozenset({FAST_MODEL})
 
 
 class _StopRequested(BaseException):
@@ -95,51 +100,6 @@ def _read_active_file(sorcar_data_dir: str) -> str:
     return ""
 
 
-def _clean_llm_output(text: str) -> str:
-    return text.strip().strip('"').strip("'")
-
-
-def _clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
-    """Return only a short, confident autocomplete continuation.
-
-    Keeps at most a few words, stops at strong sentence boundaries, and
-    suppresses low-confidence continuations that look too long or too weak.
-    """
-    s = _clean_llm_output(suggestion)
-    if not s:
-        return ""
-    if s.lower().startswith(query.lower()):
-        s = s[len(query) :]
-    s = s.lstrip()
-    if not s:
-        return ""
-    words: list[str] = []
-    hit_boundary = False
-    for token in s.split():
-        if any(mark in token for mark in ("\n", ":", ";", "!", "?")):
-            hit_boundary = True
-            break
-        if token.endswith((".", ",")):
-            clean = token.rstrip(".,")
-            if clean:
-                words.append(clean)
-            hit_boundary = True
-            break
-        words.append(token)
-        if len(words) >= 4:
-            break
-    clipped = " ".join(words).strip()
-    if len(words) < 1 or len(words) > 4:
-        return ""
-    if hit_boundary:
-        return ""
-    if not clipped or len(clipped) > 40:
-        return ""
-    if s and len(s) > len(clipped) + 20:
-        return ""
-    return clipped
-
-
 def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
     if detailed:
         prompt = (
@@ -157,29 +117,15 @@ def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
     agent = KISSAgent("Commit Message Generator")
     try:
         raw = agent.run(
-            model_name=_COMMIT_MODEL,
+            model_name=FAST_MODEL,
             prompt_template=prompt,
             arguments={"context": diff_text},
             is_agentic=False,
         )
-        return _clean_llm_output(raw)
+        return clean_llm_output(raw)
     except Exception:  # pragma: no cover – LLM API failure
         _log_exc()
         return ""
-
-
-def _model_vendor_order(name: str) -> int:
-    if name.startswith("claude-"):
-        return 0
-    if name.startswith(_OPENAI_PREFIXES):
-        return 1
-    if name.startswith("gemini-"):
-        return 2
-    if name.startswith("minimax-"):
-        return 3
-    if name.startswith("openrouter/"):
-        return 4
-    return 5
 
 
 def run_chatbot(
@@ -459,24 +405,7 @@ def run_chatbot(
 
     def generate_followup(task: str, result: str) -> None:
         try:
-            agent = KISSAgent("Followup Proposer")
-            raw = agent.run(
-                model_name=_FAST_MODEL,
-                prompt_template=(
-                    "A developer just completed this task:\n"
-                    "Task: {task}\n"
-                    "Result summary: {result}\n\n"
-                    "Suggest ONE short, concrete follow-up task they "
-                    "might want to do next. Return ONLY the task "
-                    "description as a single plain-text sentence."
-                ),
-                arguments={
-                    "task": task,
-                    "result": result[:500],
-                },
-                is_agentic=False,
-            )
-            suggestion = _clean_llm_output(raw)
+            suggestion = generate_followup_text(task, result)
             if suggestion:  # pragma: no branch – LLM always returns non-empty
                 printer.broadcast(
                     {
@@ -952,47 +881,8 @@ def run_chatbot(
         query = request.query_params.get("q", "").strip()
         mode = request.query_params.get("mode", "general")
         if mode == "files":
-            q = query.lower()
             usage = _load_file_usage()
-            frequent: list[dict[str, str]] = []
-            rest: list[dict[str, str]] = []
-            for path in file_cache:
-                if not q or q in path.lower():
-                    item = {"type": "file", "text": path}
-                    if usage.get(path, 0) > 0:
-                        frequent.append(item)
-                    else:
-                        rest.append(item)
-
-            def _end_dist(text: str) -> int:
-                """Distance from end of path to end of rightmost query match.
-
-                Lower = match is closer to end of path = higher priority.
-                Returns 0 when query is empty (all items equal).
-                """
-                if not q:
-                    return 0
-                pos = text.lower().rfind(q)
-                if pos < 0:
-                    return len(text)
-                return len(text) - (pos + len(q))
-
-            # Build recency rank from insertion order in file_usage.json
-            # (last key = most recently used → rank 0).
-            _usage_keys = list(usage.keys())
-            _recency = {k: i for i, k in enumerate(reversed(_usage_keys))}
-            _n = len(_usage_keys)
-            frequent.sort(
-                key=lambda m: (
-                    _end_dist(m["text"]),
-                    _recency.get(m["text"], _n),
-                    -usage.get(m["text"], 0),
-                )
-            )
-            rest.sort(key=lambda m: _end_dist(m["text"]))
-            for f in frequent:
-                f["type"] = "frequent"
-            return JSONResponse((frequent + rest)[:20])
+            return JSONResponse(rank_file_suggestions(file_cache, query, usage))
         if not query:
             return JSONResponse([])
         results = []
@@ -1077,7 +967,7 @@ def run_chatbot(
         if not query or len(query) < 2:
             return JSONResponse({"suggestion": ""})
 
-        fast = _clip_autocomplete_suggestion(query, _fast_complete(raw_query, query))
+        fast = clip_autocomplete_suggestion(query, _fast_complete(raw_query, query))
         if fast:
             return JSONResponse({"suggestion": fast})
 
@@ -1104,7 +994,7 @@ def run_chatbot(
             agent = KISSAgent("Autocomplete")
             try:
                 result = agent.run(
-                    model_name=_FAST_MODEL,
+                    model_name=FAST_MODEL,
                     prompt_template=(
                         "You are an inline autocomplete engine for a coding assistant. "
                         "Given the user's partial input, their past task history, "
@@ -1127,7 +1017,7 @@ def run_chatbot(
                     },
                     is_agentic=False,
                 )
-                return _clip_autocomplete_suggestion(query, result)
+                return clip_autocomplete_suggestion(query, result)
             except Exception:  # pragma: no cover – LLM API failure
                 _log_exc()
                 return ""
@@ -1151,7 +1041,7 @@ def run_chatbot(
                 )
         models_list.sort(
             key=lambda m: (
-                _model_vendor_order(str(m["name"])),
+                model_vendor(str(m["name"]))[1],
                 -(float(m["inp"]) + float(m["out"])),
             )
         )

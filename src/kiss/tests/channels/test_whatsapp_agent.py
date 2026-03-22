@@ -16,8 +16,6 @@ import pytest
 
 from kiss.channels.whatsapp_agent import (
     WhatsAppAgent,
-    _cli_ask_user_question,
-    _cli_wait_for_user,
     _config_path,
     _load_config,
     _make_whatsapp_tools,
@@ -226,9 +224,6 @@ class TestWhatsAppAgent:
 
 
 class TestCLIMain:
-    def test_main_is_callable(self) -> None:
-        assert callable(main)
-
     def test_main_missing_task_exits(self) -> None:
         original_argv = sys.argv
         sys.argv = ["whatsapp_agent"]
@@ -239,7 +234,3 @@ class TestCLIMain:
             assert e.code == 2
         finally:
             sys.argv = original_argv
-
-    def test_cli_callbacks_are_callable(self) -> None:
-        assert callable(_cli_wait_for_user)
-        assert callable(_cli_ask_user_question)

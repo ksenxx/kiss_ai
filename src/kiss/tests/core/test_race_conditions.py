@@ -2,10 +2,9 @@
 
 Verifies thread-safety of shared mutable state: agent_counter,
 global_budget_used, _bash_buffer, and _callback_helper_loop.
-Also verifies cross-process safety of _increment_usage and _save_last_model.
+Also verifies cross-process safety of _record_model_usage and _save_last_model.
 """
 
-import json
 import multiprocessing
 import os
 import queue
@@ -59,19 +58,20 @@ class TestGlobalBudgetThreadSafety:
         assert abs(Base.global_budget_used - expected) < 1e-9
 
 
-def _worker_increment_usage(usage_file: str, key: str, n: int) -> None:
-    """Child-process worker: increment usage counter *n* times."""
+def _worker_record_model_usage(db_dir: str, model: str, n: int) -> None:
+    """Child-process worker: record model usage *n* times via SQLite."""
     import kiss.agents.sorcar.task_history as th
 
-    th._KISS_DIR = Path(usage_file).parent
-    th.MODEL_USAGE_FILE = Path(usage_file)
-    th.FILE_USAGE_FILE = Path(usage_file).parent / "file_usage.json"
+    kiss_dir = Path(db_dir)
+    th._KISS_DIR = kiss_dir
+    th._DB_PATH = kiss_dir / "history.db"
+    th._db_conn = None
     for _ in range(n):
-        th._increment_usage(Path(usage_file), key)
+        th._record_model_usage(model)
 
 
-class TestCrossProcessIncrementUsage:
-    """Verify _increment_usage is safe under concurrent multi-process access."""
+class TestCrossProcessRecordModelUsage:
+    """Verify _record_model_usage is safe under concurrent multi-process access."""
 
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -80,16 +80,16 @@ class TestCrossProcessIncrementUsage:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_concurrent_processes_no_lost_increments(self):
-        """N processes each incrementing the same key M times yields N*M total."""
-        usage_file = os.path.join(self.tmpdir, "model_usage.json")
-        Path(usage_file).write_text(json.dumps({"mymodel": 0}))
+        """N processes each recording the same model M times yields N*M total."""
+        kiss_dir = os.path.join(self.tmpdir, ".kiss")
+        os.makedirs(kiss_dir, exist_ok=True)
 
         n_procs = 5
         increments_each = 10
         procs = [
             multiprocessing.Process(
-                target=_worker_increment_usage,
-                args=(usage_file, "mymodel", increments_each),
+                target=_worker_record_model_usage,
+                args=(kiss_dir, "mymodel", increments_each),
             )
             for _ in range(n_procs)
         ]
@@ -98,16 +98,29 @@ class TestCrossProcessIncrementUsage:
         for p in procs:
             p.join()
 
-        result = json.loads(Path(usage_file).read_text())
-        assert result["mymodel"] == n_procs * increments_each
+        import kiss.agents.sorcar.task_history as th
+        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = Path(kiss_dir)
+        th._DB_PATH = Path(kiss_dir) / "history.db"
+        th._db_conn = None
+        try:
+            usage = th._load_model_usage()
+            assert usage["mymodel"] == n_procs * increments_each
+        finally:
+            if th._db_conn is not None:
+                th._db_conn.close()
+                th._db_conn = None
+            (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
-def _worker_save_last_model(usage_file: str, model: str, n: int) -> None:
-    """Child-process worker: call _save_last_model *n* times."""
+def _worker_save_last_model(db_dir: str, model: str, n: int) -> None:
+    """Child-process worker: call _save_last_model *n* times via SQLite."""
     import kiss.agents.sorcar.task_history as th
 
-    th._KISS_DIR = Path(usage_file).parent
-    th.MODEL_USAGE_FILE = Path(usage_file)
+    kiss_dir = Path(db_dir)
+    th._KISS_DIR = kiss_dir
+    th._DB_PATH = kiss_dir / "history.db"
+    th._db_conn = None
     for _ in range(n):
         th._save_last_model(model)
 
@@ -122,14 +135,14 @@ class TestCrossProcessSaveLastModel:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_concurrent_save_last_model_no_corruption(self):
-        """Multiple processes saving last model concurrently produce valid JSON."""
-        usage_file = os.path.join(self.tmpdir, "model_usage.json")
-        Path(usage_file).write_text(json.dumps({"_last": "old"}))
+        """Multiple processes saving last model concurrently produce valid data."""
+        kiss_dir = os.path.join(self.tmpdir, ".kiss")
+        os.makedirs(kiss_dir, exist_ok=True)
 
         procs = [
             multiprocessing.Process(
                 target=_worker_save_last_model,
-                args=(usage_file, f"model-{i}", 5),
+                args=(kiss_dir, f"model-{i}", 5),
             )
             for i in range(4)
         ]
@@ -138,8 +151,19 @@ class TestCrossProcessSaveLastModel:
         for p in procs:
             p.join()
 
-        data = json.loads(Path(usage_file).read_text())
-        assert "_last" in data
+        import kiss.agents.sorcar.task_history as th
+        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = Path(kiss_dir)
+        th._DB_PATH = Path(kiss_dir) / "history.db"
+        th._db_conn = None
+        try:
+            last = th._load_last_model()
+            assert isinstance(last, str) and len(last) > 0
+        finally:
+            if th._db_conn is not None:
+                th._db_conn.close()
+                th._db_conn = None
+            (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
 def _worker_atomic_write(path: str, content: str, n: int) -> None:

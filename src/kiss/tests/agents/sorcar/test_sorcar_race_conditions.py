@@ -4,7 +4,7 @@ Covers:
 1. Base._class_lock protects agent_counter and global_budget_used
 2. stop_event set/clear inside running_lock (no stop→run race)
 3. task_done broadcast after running=False (no 409 on immediate re-submit)
-4. _history_cache protected by _HISTORY_LOCK (FileLock, cross-process + cross-thread)
+4. _db_lock protects SQLite access (thread-safe)
 5. Integration tests: rapid stop/restart, concurrent printer operations,
    browser_ui coalesce, theme presets, stream events, etc.
 """
@@ -17,7 +17,6 @@ import queue
 import random
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -25,14 +24,12 @@ import types
 from pathlib import Path
 
 import pytest
-from filelock import FileLock
 
 import kiss.agents.sorcar.task_history as th
 from kiss.agents.sorcar import task_history as _task_history_module
 from kiss.agents.sorcar.browser_ui import (
     BaseBrowserPrinter,
     _coalesce_events,
-    find_free_port,
 )
 from kiss.agents.sorcar.chatbot_ui import _THEME_PRESETS
 from kiss.agents.sorcar.code_server import (
@@ -42,8 +39,8 @@ from kiss.agents.sorcar.code_server import (
     _setup_code_server,
     _snapshot_files,
 )
+from kiss.agents.sorcar.shared_utils import model_vendor
 from kiss.agents.sorcar.sorcar import (
-    _model_vendor_order,
     _read_active_file,
     _StopRequested,
 )
@@ -60,31 +57,20 @@ from kiss.core.base import Base
 
 
 def _redirect_history(tmpdir: str):
-    old_hist = th.HISTORY_FILE
-    old_model = th.MODEL_USAGE_FILE
-    old_file = th.FILE_USAGE_FILE
-    old_cache = th._history_cache
-    old_kiss = th._KISS_DIR
-    old_events = th._CHAT_EVENTS_DIR
-
+    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
-    th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
-    th.MODEL_USAGE_FILE = kiss_dir / "model_usage.json"
-    th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
-    th._history_cache = None
-    return old_hist, old_model, old_file, old_cache, old_kiss, old_events
+    th._DB_PATH = kiss_dir / "history.db"
+    th._db_conn = None
+    return old
 
 
 def _restore_history(saved):
-    th.HISTORY_FILE = saved[0]
-    th.MODEL_USAGE_FILE = saved[1]
-    th.FILE_USAGE_FILE = saved[2]
-    th._history_cache = saved[3]
-    th._KISS_DIR = saved[4]
-    th._CHAT_EVENTS_DIR = saved[5]
+    if th._db_conn is not None:
+        th._db_conn.close()
+        th._db_conn = None
+    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
 def _make_git_repo(tmpdir: str) -> str:
@@ -166,21 +152,16 @@ class TestTaskDoneAfterRunningFalse:
             assert not running
 
 
-class TestHistoryLock:
-    def test_history_lock_exists(self):
-        assert hasattr(_task_history_module, "_HISTORY_LOCK")
-        assert isinstance(_task_history_module._HISTORY_LOCK, FileLock)
+class TestDbLock:
+    def test_db_lock_exists(self):
+        assert hasattr(_task_history_module, "_db_lock")
+        assert isinstance(_task_history_module._db_lock, type(threading.Lock()))
 
     def test_concurrent_set_chat_events_and_add_task(self):
-        orig_cache = _task_history_module._history_cache
-        orig_file_content = None
-        if _task_history_module.HISTORY_FILE.exists():
-            orig_file_content = _task_history_module.HISTORY_FILE.read_text()
-
+        tmpdir = tempfile.mkdtemp()
+        saved = _redirect_history(tmpdir)
         try:
-            _task_history_module._history_cache = None
             _add_task("initial_task")
-            _task_history_module._history_cache = None
 
             errors: list[Exception] = []
             barrier = threading.Barrier(2)
@@ -213,9 +194,8 @@ class TestHistoryLock:
             assert isinstance(history, list)
             assert len(history) > 0
         finally:
-            _task_history_module._history_cache = orig_cache
-            if orig_file_content is not None:
-                _task_history_module.HISTORY_FILE.write_text(orig_file_content)
+            _restore_history(saved)
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestSorcarModuleFunctions:
@@ -229,112 +209,18 @@ class TestSorcarModuleFunctions:
             shutil.rmtree(tmpdir)
 
     def test_model_vendor_order(self) -> None:
-        assert _model_vendor_order("claude-3.5-sonnet") == 0
-        assert _model_vendor_order("gpt-4o") == 1
-        assert _model_vendor_order("o1-preview") == 1
-        assert _model_vendor_order("gemini-2.0-flash") == 2
-        assert _model_vendor_order("minimax-model") == 3
-        assert _model_vendor_order("openrouter/anthropic/claude") == 4
-        assert _model_vendor_order("unknown-model") == 5
+        assert model_vendor("claude-3.5-sonnet")[1] == 0
+        assert model_vendor("gpt-4o")[1] == 1
+        assert model_vendor("o1-preview")[1] == 1
+        assert model_vendor("gemini-2.0-flash")[1] == 2
+        assert model_vendor("minimax-model")[1] == 3
+        assert model_vendor("openrouter/anthropic/claude")[1] == 4
+        assert model_vendor("unknown-model")[1] == 5
 
     def test_stop_requested_is_base_exception(self) -> None:
         assert issubclass(_StopRequested, BaseException)
         with pytest.raises(_StopRequested):
             raise _StopRequested()
-
-
-class TestSorcarServerSubprocess:
-    @pytest.fixture(autouse=True)
-    def setup_env(self):
-        import socket
-
-        self.tmpdir = tempfile.mkdtemp()
-        self.work_dir = os.path.join(self.tmpdir, "work")
-        os.makedirs(self.work_dir)
-        _make_git_repo(self.work_dir)
-
-        self.port = find_free_port()
-        kiss_dir = Path(self.tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        (kiss_dir / "assistant-port").write_text(str(self.port))
-
-        helper = Path(self.tmpdir) / "run_server.py"
-        src_path = os.path.join(os.path.dirname(__file__), "..", "..")
-        helper.write_text(
-            f"import sys, os, signal, threading, time\n"
-            f"sys.path.insert(0, {src_path!r})\n"
-            f"import webbrowser\n"
-            f"webbrowser.open = lambda *a, **k: None\n"
-            f"import kiss.agents.sorcar.browser_ui as bui\n"
-            f"bui.find_free_port = lambda: {self.port}\n"
-            f"import kiss.agents.sorcar.task_history as th\n"
-            f"from pathlib import Path\n"
-            f"kiss_dir = Path({str(kiss_dir)!r})\n"
-            f"th._KISS_DIR = kiss_dir\n"
-            f"th.HISTORY_FILE = kiss_dir / 'task_history.jsonl'\n"
-            f"th._CHAT_EVENTS_DIR = kiss_dir / 'chat_events'\n"
-            f"th.MODEL_USAGE_FILE = kiss_dir / 'model_usage.json'\n"
-            f"th.FILE_USAGE_FILE = kiss_dir / 'file_usage.json'\n"
-            f"th._history_cache = None\n"
-            f"original_exit = os._exit\n"
-            f"os._exit = lambda code: sys.exit(code)\n"
-            f"from kiss.agents.sorcar.sorcar_agent import SorcarAgent\n"
-            f"from kiss.agents.sorcar.sorcar import run_chatbot\n"
-            f"try:\n"
-            f"    run_chatbot(\n"
-            f"        agent_factory=SorcarAgent,\n"
-            f"        title='Test',\n"
-            f"        work_dir={self.work_dir!r},\n"
-            f"        default_model='claude-opus-4-6',\n"
-            f"    )\n"
-            f"except (SystemExit, KeyboardInterrupt):\n"
-            f"    pass\n"
-        )
-
-        self.cov_file = os.path.join(self.tmpdir, ".coverage.subprocess")
-        env = {**os.environ, "COVERAGE_FILE": self.cov_file}
-        self.proc = subprocess.Popen(
-            [
-                sys.executable, "-m", "coverage", "run",
-                "--branch",
-                "--source=kiss.agents.sorcar",
-                str(helper),
-            ],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        for _ in range(80):
-            try:
-                with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):
-                    break
-            except (ConnectionRefusedError, OSError):
-                time.sleep(0.25)
-        else:
-            self.proc.terminate()
-            pytest.fail("Server didn't start")
-
-        self.base = f"http://127.0.0.1:{self.port}"
-        yield
-
-        self.proc.send_signal(2)
-        try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
-
-        if os.path.exists(self.cov_file):
-            main_cov = os.path.join(os.getcwd(), ".coverage")
-            subprocess.run(
-                [sys.executable, "-m", "coverage", "combine",
-                 "--append", self.cov_file],
-                env={**os.environ, "COVERAGE_FILE": main_cov},
-                capture_output=True,
-            )
-
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestBaseBrowserPrinterPrint:
@@ -391,50 +277,13 @@ class TestTaskHistory:
         th._add_task("exists")
         th._set_latest_chat_events([{"type": "z"}], task="missing")
         history = th._load_history()
-        assert history[0]["has_events"] is False
-
-    def test_load_history_corrupt(self) -> None:
-        th.HISTORY_FILE.write_text("bad json")
-        th._history_cache = None
-        history = th._load_history()
-        assert len(history) > 0
-
-    def test_load_json_dict_corrupt(self) -> None:
-        th.MODEL_USAGE_FILE.write_text("not json")
-        assert th._load_model_usage() == {}
+        assert not history[0]["has_events"]
 
 
 class TestExtractCommandNames:
     def test_env_var_prefix(self) -> None:
         names = _extract_command_names("FOO=bar python script.py")
         assert "python" in names
-
-
-class TestUsefulToolsRead:
-    def setup_method(self) -> None:
-        self.tools = UsefulTools()
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir)
-
-
-class TestUsefulToolsWrite:
-    def setup_method(self) -> None:
-        self.tools = UsefulTools()
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir)
-
-
-class TestUsefulToolsEdit:
-    def setup_method(self) -> None:
-        self.tools = UsefulTools()
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir)
 
 
 class TestUsefulToolsBash:
@@ -445,15 +294,6 @@ class TestUsefulToolsBash:
         result = self.tools.Bash("python -c \"print('x'*100000)\"", "test",
                                 max_output_chars=100)
         assert "truncated" in result
-
-
-class TestGitDiffAndMerge:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        _make_git_repo(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir)
 
 
 class TestMergingFlag:
@@ -530,9 +370,7 @@ class TestTaskHistoryRemaining:
         _restore_history(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_load_history_empty_file(self) -> None:
-        th.HISTORY_FILE.write_text("")
-        th._history_cache = None
+    def test_load_history_fresh_db_has_samples(self) -> None:
         history = th._load_history()
         assert len(history) > 0
 

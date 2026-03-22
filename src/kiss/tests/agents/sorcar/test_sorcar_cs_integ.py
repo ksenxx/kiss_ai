@@ -253,47 +253,6 @@ class TestExtensionJSUsesDataDir:
         assert "code-server-data" not in _CS_EXTENSION_JS
 
 
-class TestAssistantPortIsolation:
-    """Verify assistant-port file is written to _KISS_DIR, not per-instance."""
-
-    def test_assistant_port_written_to_kiss_dir(self) -> None:
-        """Assistant-port is written to _KISS_DIR (stable location)."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            kiss_dir = Path(tmpdir)
-            port_file = kiss_dir / "assistant-port"
-            port_file.write_text("12345")
-            assert port_file.read_text() == "12345"
-            # Overwriting with new port replaces the value
-            port_file.write_text("67890")
-            assert port_file.read_text() == "67890"
-        finally:
-            shutil.rmtree(tmpdir)
-
-
-class TestCodeServerPortIsolation:
-    """Verify code-server ports are stored per-data-dir."""
-
-    def test_cs_port_file_in_data_dir(self) -> None:
-        """Each data dir stores its own code-server port."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            data_dir = os.path.join(tmpdir, "cs-test1234")
-            os.makedirs(data_dir, exist_ok=True)
-            port_file = Path(data_dir) / "cs-port"
-            port_file.write_text("13340")
-            assert int(port_file.read_text().strip()) == 13340
-
-            data_dir_2 = os.path.join(tmpdir, "cs-other5678")
-            os.makedirs(data_dir_2, exist_ok=True)
-            port_file_2 = Path(data_dir_2) / "cs-port"
-            port_file_2.write_text("13341")
-
-            assert int(port_file.read_text().strip()) == 13340
-            assert int(port_file_2.read_text().strip()) == 13341
-        finally:
-            shutil.rmtree(tmpdir)
-
 
 class TestTwoInstanceSubprocess:
     """Integration test: start two Sorcar server subprocesses on different work dirs
@@ -342,11 +301,8 @@ class TestTwoInstanceSubprocess:
                 f"from pathlib import Path\n"
                 f"kiss_dir = Path({str(kiss_dir)!r})\n"
                 f"th._KISS_DIR = kiss_dir\n"
-                f"th.HISTORY_FILE = kiss_dir / 'task_history.jsonl'\n"
-                f"th._CHAT_EVENTS_DIR = kiss_dir / 'chat_events'\n"
-                f"th.MODEL_USAGE_FILE = kiss_dir / 'model_usage.json'\n"
-                f"th.FILE_USAGE_FILE = kiss_dir / 'file_usage.json'\n"
-                f"th._history_cache = None\n"
+                f"th._DB_PATH = kiss_dir / 'history.db'\n"
+                f"th._db_conn = None\n"
                 f"os._exit = lambda code: sys.exit(code)\n"
                 f"# Patch _KISS_DIR in sorcar module too\n"
                 f"import kiss.agents.sorcar.sorcar as sm\n"
@@ -444,42 +400,4 @@ class TestSharedExtensionsDir:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestCodeServerReuse:
-    """Test that instances reuse existing code-server instead of creating new ones."""
-
-    def test_reuse_when_port_in_use(self) -> None:
-        """When code-server port is already in use, instance reuses it (cs_proc=None)."""
-        port = _find_free_port()
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", port))
-        server_sock.listen(1)
-        try:
-            port_in_use = False
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                    port_in_use = True
-            except (ConnectionRefusedError, OSError):
-                pass
-            assert port_in_use
-            cs_proc = None
-            assert cs_proc is None
-        finally:
-            server_sock.close()
-
-    def test_assistant_port_overwritten_by_latest(self) -> None:
-        """The latest Sorcar instance overwrites assistant-port in _KISS_DIR."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            kiss_dir = Path(tmpdir)
-
-            (kiss_dir / "assistant-port").write_text("11111")
-            assert (kiss_dir / "assistant-port").read_text() == "11111"
-
-            (kiss_dir / "assistant-port").write_text("22222")
-            assert (kiss_dir / "assistant-port").read_text() == "22222"
-        finally:
-            import shutil
-
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
