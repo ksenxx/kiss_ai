@@ -39,23 +39,41 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SorcarViewProvider = void 0;
 const vscode = __importStar(require("vscode"));
 const AgentProcess_1 = require("./AgentProcess");
+const MergeManager_1 = require("./MergeManager");
 class SorcarViewProvider {
     _view;
     _agentProcess;
     _extensionUri;
     _selectedModel;
     _isRunning = false;
-    constructor(extensionUri) {
+    _mergeManager;
+    constructor(extensionUri, mergeManager) {
         this._extensionUri = extensionUri;
         this._agentProcess = new AgentProcess_1.AgentProcess();
+        this._mergeManager = mergeManager || new MergeManager_1.MergeManager();
         this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get('defaultModel') || 'claude-opus-4-6';
+        this._mergeManager.on('allDone', () => {
+            this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+            this.sendToWebview({ type: 'merge_ended' });
+        });
+        this._mergeManager.on('hunkProcessed', () => {
+            this._agentProcess.sendCommand({ type: 'mergeAction', action: 'accept' });
+        });
         // Listen for agent events
         this._agentProcess.on('message', (msg) => {
+            if (msg.type === 'merge_data') {
+                this._mergeManager.openMerge(msg.data).catch((err) => {
+                    console.error('[SorcarPanel] merge open failed:', err);
+                });
+            }
             this.sendToWebview(msg);
             if (msg.type === 'status') {
                 this._isRunning = msg.running;
             }
         });
+    }
+    get mergeManager() {
+        return this._mergeManager;
     }
     resolveWebviewView(webviewView, _context, _token) {
         this._view = webviewView;
@@ -153,6 +171,30 @@ class SorcarViewProvider {
             case 'complete':
                 this._agentProcess.sendCommand({ type: 'complete', query: message.query });
                 break;
+            case 'mergeAction': {
+                const action = message.action;
+                if (action === 'accept') {
+                    this._mergeManager.acceptChange();
+                }
+                else if (action === 'reject') {
+                    this._mergeManager.rejectChange();
+                }
+                else if (action === 'accept-all') {
+                    this._mergeManager.acceptAll();
+                    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'accept-all' });
+                }
+                else if (action === 'reject-all') {
+                    this._mergeManager.rejectAll();
+                    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'reject-all' });
+                }
+                else if (action === 'next') {
+                    this._mergeManager.nextChange();
+                }
+                else if (action === 'prev') {
+                    this._mergeManager.prevChange();
+                }
+                break;
+            }
         }
     }
     sendToWebview(message) {
@@ -170,6 +212,7 @@ class SorcarViewProvider {
     }
     dispose() {
         this._agentProcess.dispose();
+        this._mergeManager.dispose();
     }
     _getHtmlContent(webview) {
         const nonce = this._getNonce();

@@ -40,24 +40,30 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const SorcarPanel_1 = require("./SorcarPanel");
+const MergeManager_1 = require("./MergeManager");
 let primaryProvider;
 let secondaryProvider;
+let mergeManager;
 function getActiveProvider() {
     return secondaryProvider ?? primaryProvider;
+}
+function getActiveMergeManager() {
+    return getActiveProvider()?.mergeManager ?? mergeManager;
 }
 function activate(context) {
     console.log('KISS Sorcar extension activating...');
     // Check if VS Code supports secondary sidebar (1.98+)
     const supportsSecondarySidebar = typeof vscode.ViewColumn !== 'undefined';
+    mergeManager = new MergeManager_1.MergeManager();
+    context.subscriptions.push({ dispose: () => mergeManager?.dispose() });
     // Create and register the primary (activitybar) webview provider
-    primaryProvider = new SorcarPanel_1.SorcarViewProvider(context.extensionUri);
+    primaryProvider = new SorcarPanel_1.SorcarViewProvider(context.extensionUri, mergeManager);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider('kissSorcar.chatView', primaryProvider, { webviewOptions: { retainContextWhenHidden: true } }));
     // Create and register the secondary sidebar webview provider
-    secondaryProvider = new SorcarPanel_1.SorcarViewProvider(context.extensionUri);
+    secondaryProvider = new SorcarPanel_1.SorcarViewProvider(context.extensionUri, mergeManager);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider('kissSorcar.chatViewSecondary', secondaryProvider, { webviewOptions: { retainContextWhenHidden: true } }));
     // Register commands
     context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.openPanel', () => {
-        // Try secondary sidebar first, then fall back to primary
         vscode.commands.executeCommand('kissSorcar.chatViewSecondary.focus').then(undefined, () => vscode.commands.executeCommand('kissSorcar.chatView.focus'));
     }));
     context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.newConversation', () => {
@@ -65,6 +71,20 @@ function activate(context) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.stopTask', () => {
         getActiveProvider()?.stopTask();
+    }));
+    // Merge commands
+    context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.acceptChange', () => {
+        getActiveMergeManager()?.acceptChange();
+    }), vscode.commands.registerCommand('kissSorcar.rejectChange', () => {
+        getActiveMergeManager()?.rejectChange();
+    }), vscode.commands.registerCommand('kissSorcar.prevChange', () => {
+        getActiveMergeManager()?.prevChange();
+    }), vscode.commands.registerCommand('kissSorcar.nextChange', () => {
+        getActiveMergeManager()?.nextChange();
+    }), vscode.commands.registerCommand('kissSorcar.acceptAll', () => {
+        getActiveMergeManager()?.acceptAll();
+    }), vscode.commands.registerCommand('kissSorcar.rejectAll', () => {
+        getActiveMergeManager()?.rejectAll();
     }));
     // Set context for conditional view visibility, then auto-open on startup
     vscode.commands.executeCommand('setContext', 'kissSorcar:doesNotSupportSecondarySidebar', !supportsSecondarySidebar).then(() => {

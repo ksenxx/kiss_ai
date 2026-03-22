@@ -689,6 +689,56 @@ header {
   background: rgba(255,255,255,0.04); font-weight: 600;
 }
 
+/* ── Merge Toolbar ──────────────────────────────────── */
+.merge-toolbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 8px 12px; background: rgba(210,153,34,0.08);
+  border-bottom: 1px solid rgba(210,153,34,0.25);
+  flex-shrink: 0; animation: fadeIn 0.2s ease;
+}
+.merge-label {
+  font-size: 10px; font-weight: 600; color: var(--yellow);
+  margin-right: 4px; white-space: nowrap;
+}
+.merge-btn {
+  font-size: 10px; font-family: inherit; border: none; border-radius: 5px;
+  padding: 4px 10px; cursor: pointer; transition: all 0.15s;
+  white-space: nowrap; font-weight: 500;
+}
+.merge-btn.merge-accept {
+  background: rgba(35,209,139,0.15); color: var(--green);
+  border: 1px solid rgba(35,209,139,0.25);
+}
+.merge-btn.merge-accept:hover { background: rgba(35,209,139,0.25); }
+.merge-btn.merge-reject {
+  background: rgba(248,81,73,0.1); color: var(--red);
+  border: 1px solid rgba(248,81,73,0.2);
+}
+.merge-btn.merge-reject:hover { background: rgba(248,81,73,0.2); }
+.merge-btn.merge-nav {
+  background: rgba(255,255,255,0.04); color: var(--dim);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.merge-btn.merge-nav:hover { background: rgba(255,255,255,0.08); color: var(--fg); }
+.merge-btn.merge-accept-all {
+  background: rgba(35,209,139,0.1); color: var(--green);
+  border: 1px solid rgba(35,209,139,0.2);
+}
+.merge-btn.merge-accept-all:hover { background: rgba(35,209,139,0.2); }
+.merge-btn.merge-reject-all {
+  background: rgba(248,81,73,0.08); color: var(--red);
+  border: 1px solid rgba(248,81,73,0.15);
+}
+.merge-btn.merge-reject-all:hover { background: rgba(248,81,73,0.15); }
+.merge-sep {
+  flex: 1; min-width: 4px;
+}
+.merge-info {
+  border: 1px solid rgba(210,153,34,0.2); border-radius: 8px;
+  padding: 10px 14px; margin: 8px 0;
+  background: rgba(210,153,34,0.04);
+}
+
 /* ── Syntax highlighting overrides ───────────────────── */
 code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
 .hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }

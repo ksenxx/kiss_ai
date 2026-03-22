@@ -14,9 +14,16 @@ from pathlib import Path
 
 from kiss.agents.vscode.server import (
     VSCodeServer,
-    _model_vendor_name,
-    _model_vendor_order,
+    _model_vendor,
 )
+
+
+def _model_vendor_name(name: str) -> str:
+    return _model_vendor(name)[0]
+
+
+def _model_vendor_order(name: str) -> int:
+    return _model_vendor(name)[1]
 
 
 class TestModelVendorOrder(unittest.TestCase):

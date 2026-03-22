@@ -34,7 +34,8 @@ export type FromWebviewMessage =
   | { type: 'resumeSession'; id: string }
   | { type: 'clearChat' }
   | { type: 'getWelcomeSuggestions' }
-  | { type: 'complete'; query: string };
+  | { type: 'complete'; query: string }
+  | { type: 'mergeAction'; action: string };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -70,11 +71,14 @@ export type ToWebviewMessage =
   | { type: 'tasks_updated' }
   | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
   | { type: 'task_events'; events: any[] }
-  | { type: 'ghost'; suggestion: string };
+  | { type: 'ghost'; suggestion: string }
+  | { type: 'merge_data'; data: any; hunk_count: number }
+  | { type: 'merge_started' }
+  | { type: 'merge_ended' };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'complete';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'complete' | 'mergeAction' | 'refreshFiles';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -85,4 +89,5 @@ export interface AgentCommand {
   answer?: string;
   path?: string;
   sessionId?: string;
+  action?: string;
 }

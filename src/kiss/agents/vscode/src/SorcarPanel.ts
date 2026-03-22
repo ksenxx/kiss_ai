@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import { AgentProcess } from './AgentProcess';
+import { MergeManager } from './MergeManager';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
 export class SorcarViewProvider implements vscode.WebviewViewProvider {
@@ -12,19 +13,38 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _isRunning: boolean = false;
+  private _mergeManager: MergeManager;
 
-  constructor(extensionUri: vscode.Uri) {
+  constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
     this._agentProcess = new AgentProcess();
+    this._mergeManager = mergeManager || new MergeManager();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || 'claude-opus-4-6';
+
+    this._mergeManager.on('allDone', () => {
+      this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+      this.sendToWebview({ type: 'merge_ended' } as ToWebviewMessage);
+    });
+    this._mergeManager.on('hunkProcessed', () => {
+      this._agentProcess.sendCommand({ type: 'mergeAction', action: 'accept' });
+    });
 
     // Listen for agent events
     this._agentProcess.on('message', (msg: ToWebviewMessage) => {
+      if (msg.type === 'merge_data') {
+        this._mergeManager.openMerge((msg as any).data).catch((err) => {
+          console.error('[SorcarPanel] merge open failed:', err);
+        });
+      }
       this.sendToWebview(msg);
       if (msg.type === 'status') {
         this._isRunning = msg.running;
       }
     });
+  }
+
+  get mergeManager(): MergeManager {
+    return this._mergeManager;
   }
 
   public resolveWebviewView(
@@ -152,6 +172,26 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       case 'complete':
         this._agentProcess.sendCommand({ type: 'complete', query: message.query });
         break;
+
+      case 'mergeAction': {
+        const action = message.action;
+        if (action === 'accept') {
+          this._mergeManager.acceptChange();
+        } else if (action === 'reject') {
+          this._mergeManager.rejectChange();
+        } else if (action === 'accept-all') {
+          this._mergeManager.acceptAll();
+          this._agentProcess.sendCommand({ type: 'mergeAction', action: 'accept-all' });
+        } else if (action === 'reject-all') {
+          this._mergeManager.rejectAll();
+          this._agentProcess.sendCommand({ type: 'mergeAction', action: 'reject-all' });
+        } else if (action === 'next') {
+          this._mergeManager.nextChange();
+        } else if (action === 'prev') {
+          this._mergeManager.prevChange();
+        }
+        break;
+      }
     }
   }
 
@@ -173,6 +213,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   public dispose(): void {
     this._agentProcess.dispose();
+    this._mergeManager.dispose();
   }
 
   private _getHtmlContent(webview: vscode.Webview): string {

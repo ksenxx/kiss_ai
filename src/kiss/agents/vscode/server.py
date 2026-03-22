@@ -16,8 +16,17 @@ import threading
 from typing import Any
 
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+from kiss.agents.sorcar.code_server import (
+    _capture_untracked,
+    _cleanup_merge_data,
+    _parse_diff_hunks,
+    _prepare_merge_view,
+    _snapshot_files,
+)
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_history import (
+    _KISS_DIR,
+    _add_task,
     _load_file_usage,
     _load_history,
     _load_last_model,
@@ -141,6 +150,10 @@ class VSCodeServer:
         )
         self._file_cache: list[str] = []
         self._task_thread: threading.Thread | None = None
+        self._merging = False
+        self._remaining_hunks = 0
+        self._sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
+        os.makedirs(self._sorcar_data_dir, exist_ok=True)
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -194,6 +207,8 @@ class VSCodeServer:
                 self._replay_session(task)
         elif cmd_type == "getWelcomeSuggestions":
             self._get_welcome_suggestions()
+        elif cmd_type == "mergeAction":
+            self._handle_merge_action(cmd.get("action", ""))
         elif cmd_type == "complete":
             query = cmd.get("query", "")
             if query:
@@ -223,9 +238,24 @@ class VSCodeServer:
                 if mime.startswith("image/"):
                     image_urls.append(f"data:{mime};base64,{data_b64}")
 
+        if self._merging:
+            self.printer.broadcast(
+            )
+            return
+
         self._stop_event = threading.Event()
         self.printer._thread_local.stop_event = self._stop_event
         self._user_answer_event = threading.Event()
+
+        pre_hunks = _parse_diff_hunks(work_dir)
+        pre_untracked = _capture_untracked(work_dir)
+        pre_file_hashes = _snapshot_files(
+            work_dir, set(pre_hunks.keys()) | pre_untracked
+        )
+        _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
+
+        _add_task(prompt)
+        self.printer.broadcast({"type": "tasks_updated"})
 
         self.printer.broadcast({"type": "status", "running": True})
         user_msg_event: dict[str, Any] = {"type": "user_msg", "text": prompt}
@@ -258,12 +288,52 @@ class VSCodeServer:
         finally:
             chat_events = self.printer.stop_recording()
             _set_latest_chat_events(chat_events, task=prompt, result=result_summary)
-            self.printer.broadcast({"type": "tasks_updated"})
             self.printer.broadcast({"type": "status", "running": False})
             self.printer.reset()
             self._stop_event = None
             self._user_answer_event = None
+            try:
+                merge_result = _prepare_merge_view(
+                    work_dir,
+                    self._sorcar_data_dir,
+                    pre_hunks,
+                    pre_untracked,
+                    pre_file_hashes,
+                )
+                if merge_result.get("status") == "opened":
+                    self._merging = True
+                    self._remaining_hunks = merge_result.get("hunk_count", 0)
+                    merge_json = os.path.join(self._sorcar_data_dir, "pending-merge.json")
+                    if os.path.exists(merge_json):
+                        with open(merge_json) as f:
+                            merge_data = json.load(f)
+                        self.printer.broadcast({
+                            "type": "merge_data",
+                            "data": merge_data,
+                            "hunk_count": self._remaining_hunks,
+                        })
+                    self.printer.broadcast({"type": "merge_started"})
+            except Exception:
+                logger.debug("Merge view error", exc_info=True)
             self._refresh_file_cache()
+
+    def _handle_merge_action(self, action: str) -> None:
+        """Handle merge accept/reject actions from the extension."""
+        if action == "all-done":
+            self._finish_merge()
+        elif action in ("accept-all", "reject-all"):
+            self._finish_merge()
+        elif action in ("accept", "reject"):
+            self._remaining_hunks = max(0, self._remaining_hunks - 1)
+            if self._remaining_hunks == 0:
+                self._finish_merge()
+
+    def _finish_merge(self) -> None:
+        """End the merge session: reset state, notify clients, clean up data."""
+        self._merging = False
+        self._remaining_hunks = 0
+        self.printer.broadcast({"type": "merge_ended"})
+        _cleanup_merge_data(self._sorcar_data_dir)
 
     def _stop_task(self) -> None:
         """Signal the agent to stop."""

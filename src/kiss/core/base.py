@@ -122,7 +122,7 @@ class Base:
 
     model_name: str
     messages: list[dict[str, Any]]
-    function_map: Any
+    function_map: dict[str, Any]
     run_start_timestamp: int
     budget_used: float
     total_tokens_used: int
@@ -143,7 +143,7 @@ class Base:
         self.printer: Printer | None = None
         self.model_name = ""
         self.messages: list[dict[str, Any]] = []
-        self.function_map: dict[str, Any] = {}
+        self.function_map = {}
         self.run_start_timestamp = 0
         self.budget_used = 0.0
         self.total_tokens_used = 0

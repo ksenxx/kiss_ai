@@ -57,6 +57,9 @@
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
 
+  // Merge state
+  let isMerging = false;
+
   // Streaming state (mirrors browser handleOutputEvent)
   let state = mkS();
   let lastToolName = '';
@@ -498,6 +501,23 @@
     case 'ghost':
       updateGhost(ev.suggestion || '');
       break;
+    case 'merge_data': {
+      var mc = mkEl('div', 'ev merge-info');
+      mc.innerHTML = '<div style="color:var(--yellow);font-weight:600;font-size:11px;margin-bottom:4px">'
+        + '\u2731 Reviewing ' + (ev.hunk_count || 0) + ' change(s)</div>'
+        + '<div style="font-size:10px;color:var(--dim)">Red = old lines, Blue = new lines. '
+        + 'Use the merge toolbar to accept or reject changes.</div>';
+      O.appendChild(mc);
+      break;
+    }
+    case 'merge_started':
+      isMerging = true;
+      showMergeToolbar();
+      break;
+    case 'merge_ended':
+      isMerging = false;
+      hideMergeToolbar();
+      break;
     case 'task_done': {
       var el = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
       var em = Math.floor(el / 60);
@@ -596,6 +616,46 @@
       processOutputEvent(ev);
     });
     sb();
+  }
+
+  // --- Merge toolbar ---
+  function showMergeToolbar() {
+    if (document.getElementById('merge-toolbar')) return;
+    var bar = mkEl('div', 'merge-toolbar');
+    bar.id = 'merge-toolbar';
+    bar.innerHTML =
+      '<span class="merge-label">\u2731 Reviewing Changes</span>'
+      + '<button class="merge-btn merge-accept" id="merge-accept-btn" title="Accept current change">\u2713 Accept</button>'
+      + '<button class="merge-btn merge-reject" id="merge-reject-btn" title="Reject current change">\u2717 Reject</button>'
+      + '<button class="merge-btn merge-nav" id="merge-prev-btn" title="Previous change">\u25C0 Prev</button>'
+      + '<button class="merge-btn merge-nav" id="merge-next-btn" title="Next change">Next \u25B6</button>'
+      + '<span class="merge-sep"></span>'
+      + '<button class="merge-btn merge-accept-all" id="merge-accept-all-btn" title="Accept all changes">\u2713\u2713 Accept All</button>'
+      + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn" title="Reject all changes">\u2717\u2717 Reject All</button>';
+    O.parentElement.insertBefore(bar, O);
+    document.getElementById('merge-accept-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'accept' });
+    });
+    document.getElementById('merge-reject-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'reject' });
+    });
+    document.getElementById('merge-prev-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'prev' });
+    });
+    document.getElementById('merge-next-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'next' });
+    });
+    document.getElementById('merge-accept-all-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'accept-all' });
+    });
+    document.getElementById('merge-reject-all-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'reject-all' });
+    });
+  }
+
+  function hideMergeToolbar() {
+    var bar = document.getElementById('merge-toolbar');
+    if (bar) bar.remove();
   }
 
   // --- Init and event listeners ---

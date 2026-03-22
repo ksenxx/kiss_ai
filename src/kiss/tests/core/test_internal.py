@@ -61,7 +61,6 @@ class TestBaseClass:
     def test_build_state_dict_unknown_model(self) -> None:
         agent = Base("test")
         agent.model_name = "unknown-model-xyz"
-        agent.function_map = []
         agent.messages = []
         agent.step_count = 0
         agent.total_tokens_used = 0

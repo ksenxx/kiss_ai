@@ -150,7 +150,7 @@ class AgentProcess extends events_1.EventEmitter {
                 continue;
             }
         }
-        return 'uv';
+        return 'uv'; // unreachable since 'uv' is in candidates, but kept for safety
     }
     /**
      * Start the Python backend process.
@@ -258,12 +258,6 @@ class AgentProcess extends events_1.EventEmitter {
             this.process = null;
         }
         this.removeAllListeners();
-    }
-    /**
-     * Check if process is running.
-     */
-    isRunning() {
-        return this.process !== null;
     }
 }
 exports.AgentProcess = AgentProcess;
