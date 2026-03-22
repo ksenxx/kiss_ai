@@ -27,6 +27,14 @@ run 'uv run pytest -v' with 900 seconds timeout and fix tests
 
 can you please work hard and carefully to precisly detect all actual race conditions in src/kiss/agents/sorcar/sorcar.py? You can add random delays within 0.1 seconds before racing events to reliably trigger a race condition to confirm a race condition. DO NOT FIX the race conditions.
 
+## dead code elimination
+
+can you carefully analyze all Python source files under src/kiss/ and identify any dead code — unused functions, unreachable branches, unused imports, and unused variables? Remove them, ensure existing tests still pass (run 'uv run pytest -v' with 900 seconds timeout), and verify that branch coverage does not decrease after your changes.
+
+## error handling audit
+
+can you carefully audit all Python source files under src/kiss/ for improper error handling? Look for bare except clauses, overly broad exception catching, swallowed exceptions (caught but silently ignored), missing error context in raised exceptions, and places where errors should be caught but aren't. Fix them to ensure exceptions are specific, informative, and properly propagated or logged. Make sure existing tests still pass (run 'uv run pytest -v' with 900 seconds timeout) and that branch coverage does not decrease.
+
 ## test compaction
 
 can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods. Run tests with 900 seconds

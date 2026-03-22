@@ -513,10 +513,12 @@
     case 'merge_started':
       isMerging = true;
       showMergeToolbar();
+      updateInputDisabled();
       break;
     case 'merge_ended':
       isMerging = false;
       hideMergeToolbar();
+      updateInputDisabled();
       break;
     case 'task_done': {
       var el = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
@@ -542,12 +544,25 @@
     sb();
   }
 
+  function updateInputDisabled() {
+    var blocked = isRunning || isMerging;
+    inp.disabled = blocked;
+    if (uploadBtn) uploadBtn.disabled = blocked;
+    if (modelBtn) modelBtn.disabled = blocked;
+    if (inputContainer) {
+      inputContainer.classList.toggle('disabled', isRunning && !isMerging);
+      inputContainer.classList.toggle('disabled-merge', isMerging);
+    }
+    if (blocked) { clearGhost(); hideAC(); }
+  }
+
   function setRunningState(running) {
     isRunning = running;
     sendBtn.style.display = running ? 'none' : 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
-    sendBtn.disabled = running;
+    sendBtn.disabled = running || isMerging;
     statusDot.classList.toggle('running', running);
+    updateInputDisabled();
     if (running) {
       startTimer();
     }
@@ -618,21 +633,27 @@
     sb();
   }
 
-  // --- Merge toolbar ---
+  // --- Merge toolbar (inline in output) ---
   function showMergeToolbar() {
     if (document.getElementById('merge-toolbar')) return;
-    var bar = mkEl('div', 'merge-toolbar');
+    var bar = mkEl('div', 'merge-toolbar-card');
     bar.id = 'merge-toolbar';
     bar.innerHTML =
-      '<span class="merge-label">\u2731 Reviewing Changes</span>'
+      '<div class="merge-toolbar-header">\u2731 Review Changes</div>'
+      + '<div class="merge-toolbar-hint">Red = old lines, Blue = new lines. Accept to keep changes, reject to discard.</div>'
+      + '<div class="merge-toolbar-actions">'
+      + '<div class="merge-toolbar-row">'
       + '<button class="merge-btn merge-accept" id="merge-accept-btn" title="Accept current change">\u2713 Accept</button>'
       + '<button class="merge-btn merge-reject" id="merge-reject-btn" title="Reject current change">\u2717 Reject</button>'
       + '<button class="merge-btn merge-nav" id="merge-prev-btn" title="Previous change">\u25C0 Prev</button>'
       + '<button class="merge-btn merge-nav" id="merge-next-btn" title="Next change">Next \u25B6</button>'
-      + '<span class="merge-sep"></span>'
+      + '</div>'
+      + '<div class="merge-toolbar-row">'
       + '<button class="merge-btn merge-accept-all" id="merge-accept-all-btn" title="Accept all changes">\u2713\u2713 Accept All</button>'
-      + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn" title="Reject all changes">\u2717\u2717 Reject All</button>';
-    O.parentElement.insertBefore(bar, O);
+      + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn" title="Reject all changes">\u2717\u2717 Reject All</button>'
+      + '</div>'
+      + '</div>';
+    O.appendChild(bar);
     document.getElementById('merge-accept-btn').addEventListener('click', function() {
       vscode.postMessage({ type: 'mergeAction', action: 'accept' });
     });
@@ -651,6 +672,7 @@
     document.getElementById('merge-reject-all-btn').addEventListener('click', function() {
       vscode.postMessage({ type: 'mergeAction', action: 'reject-all' });
     });
+    sb();
   }
 
   function hideMergeToolbar() {
@@ -790,6 +812,18 @@
       askUserModal.style.display = 'none';
       askUserInput.value = '';
     });
+
+    // Notify user when clicking on disabled input during merge
+    var _mergeClickShown = false;
+    if (inputContainer) {
+      inputContainer.addEventListener('click', function() {
+        if (isMerging && !_mergeClickShown) {
+          _mergeClickShown = true;
+          addError('Cannot send messages while merge review is in progress. Accept or reject all changes first.');
+          setTimeout(function() { _mergeClickShown = false; }, 3000);
+        }
+      });
+    }
 
     // Paste images/PDFs
     inp.addEventListener('paste', function(e) {
