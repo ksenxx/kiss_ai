@@ -15,6 +15,7 @@ export interface SessionInfo {
   title: string;
   timestamp: number;
   preview: string;
+  has_events?: boolean;
 }
 
 /** Messages from webview to extension */
@@ -29,7 +30,11 @@ export type FromWebviewMessage =
   | { type: 'userActionDone' }
   | { type: 'openFile'; path: string; line?: number }
   | { type: 'recordFileUsage'; path: string }
-  | { type: 'ready' };
+  | { type: 'ready' }
+  | { type: 'resumeSession'; id: string }
+  | { type: 'clearChat' }
+  | { type: 'getWelcomeSuggestions' }
+  | { type: 'complete'; query: string };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -48,6 +53,7 @@ export type ToWebviewMessage =
   | { type: 'usage_info'; text: string }
   // Lifecycle events
   | { type: 'clear' }
+  | { type: 'clearChat' }
   | { type: 'task_done' }
   | { type: 'task_error'; text: string }
   | { type: 'task_stopped' }
@@ -59,11 +65,16 @@ export type ToWebviewMessage =
   | { type: 'files'; files: Array<{type: string; text: string}> }
   | { type: 'askUser'; question: string }
   | { type: 'waitForUser'; instruction: string; url: string }
-  | { type: 'error'; text: string };
+  | { type: 'error'; text: string }
+  | { type: 'followup_suggestion'; text: string }
+  | { type: 'tasks_updated' }
+  | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
+  | { type: 'task_events'; events: any[] }
+  | { type: 'ghost'; suggestion: string };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'complete';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -73,4 +84,5 @@ export interface AgentCommand {
   prefix?: string;
   answer?: string;
   path?: string;
+  sessionId?: string;
 }

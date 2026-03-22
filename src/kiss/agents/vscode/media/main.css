@@ -68,7 +68,7 @@ header {
 }
 #welcome h2 { font-size: 17px; font-weight: 600; color: var(--fg); margin-bottom: 3px; letter-spacing: -0.3px; }
 #welcome p { font-size: 11px; color: var(--dim); margin-bottom: 14px; }
-#suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
+#suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; width: 100%; }
 .suggestion-chip {
   background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
   border-radius: 8px; padding: 7px 11px; cursor: pointer; text-align: left;
@@ -281,7 +281,7 @@ header {
   white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
 }
 
-/* Spinner */
+/* Spinner (output area) */
 .spinner {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 0; color: var(--dim); font-size: 11px;
@@ -293,6 +293,66 @@ header {
   border-radius: 50%; flex-shrink: 0; animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Wait spinner (input actions) */
+#wait-spinner {
+  width: 12px; height: 12px;
+  border: 2px solid rgba(255,255,255,0.08);
+  border-top-color: rgba(255,255,255,0.15);
+  border-radius: 50%; flex-shrink: 0;
+  transition: opacity 0.2s; opacity: 0;
+}
+#wait-spinner.active {
+  border-color: rgba(255,255,255,0.15);
+  border-top-color: rgba(88,166,255,0.7);
+  animation: spin .8s linear infinite; opacity: 1;
+}
+
+/* Follow-up suggestion bar */
+.followup-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; margin: 8px 0;
+  background: rgba(88,166,255,0.05); border: 1px solid rgba(88,166,255,0.15);
+  border-radius: 8px; cursor: pointer; transition: all 0.15s;
+  animation: fadeIn .3s ease;
+}
+.followup-bar:hover {
+  background: rgba(88,166,255,0.1); border-color: rgba(88,166,255,0.25);
+}
+.fu-label {
+  font-size: 9px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--accent); opacity: 0.7; flex-shrink: 0;
+}
+.fu-text {
+  font-size: 11px; color: rgba(255,255,255,0.75);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Ghost text overlay */
+#ghost-overlay {
+  position: absolute; top: 0; left: 0; right: 0;
+  pointer-events: none; white-space: pre-wrap; word-break: break-word;
+  font-family: inherit; font-size: 11px; line-height: 1.5;
+  color: transparent; padding: 0; min-height: 24px;
+}
+#ghost-overlay .ghost-text {
+  color: rgba(255,255,255,0.2);
+}
+
+/* Clear button */
+#clear-btn {
+  background: none; border: none;
+  color: rgba(255,255,255,0.3); cursor: pointer;
+  padding: 4px; transition: color 0.15s;
+  display: flex; align-items: center;
+}
+#clear-btn:hover { color: rgba(255,255,255,0.6); }
+
+/* Drag-over visual feedback */
+#input-container.drag-over {
+  border-color: var(--accent);
+  background: rgba(88,166,255,0.06);
+}
 
 /* ── Input Area ─────────────────────────────────────── */
 #input-area {
@@ -319,7 +379,7 @@ header {
 }
 #input-container:focus-within { border-color: rgba(88,166,255,0.4); }
 #input-wrap { display: flex; align-items: flex-start; gap: 4px; }
-#input-text-wrap { flex: 1; min-width: 0; }
+#input-text-wrap { flex: 1; min-width: 0; position: relative; }
 #task-input {
   width: 100%; background: transparent; border: none; color: var(--fg);
   font-family: inherit; font-size: 11px; line-height: 1.5;
