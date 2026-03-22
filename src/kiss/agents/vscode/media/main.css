@@ -343,7 +343,7 @@ header {
   position: absolute; top: 0; left: 0; right: 0;
   pointer-events: none; white-space: pre-wrap; word-break: break-word;
   font-family: inherit; font-size: var(--fs-base); line-height: 1.5;
-  color: transparent; padding: 0; min-height: 24px;
+  color: transparent; padding: 0; min-height: 4.5em;
 }
 #ghost-overlay .ghost-text {
   color: rgba(255,255,255,0.2);
@@ -393,7 +393,7 @@ header {
 #task-input {
   width: 100%; background: transparent; border: none; color: var(--fg);
   font-family: inherit; font-size: var(--fs-base); line-height: 1.5;
-  resize: none; outline: none; min-height: 24px; max-height: 200px;
+  resize: none; outline: none; min-height: 4.5em; max-height: 200px;
 }
 #task-input::placeholder { color: rgba(255,255,255,0.35); }
 
