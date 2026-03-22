@@ -1,11 +1,12 @@
 """Integration tests for chat history event recording and replay.
 
 Tests the full flow: recording events via BaseBrowserPrinter, storing them
-in JSONL task history with separate chat event files, and retrieving them
-for replay. No mocks or patches.
+in SQLite task history with events table, and retrieving them for replay.
+No mocks or patches.
 """
 
 import queue
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -20,21 +21,27 @@ from kiss.agents.sorcar.browser_ui import (
 
 
 def _use_temp_history():
-    """Redirect HISTORY_FILE and _CHAT_EVENTS_DIR to temp locations."""
-    original_file = th.HISTORY_FILE
-    original_events_dir = th._CHAT_EVENTS_DIR
+    """Redirect DB to a temp location and reset the singleton connection."""
+    original_db_path = th._DB_PATH
+    original_db_conn = th._db_conn
+    original_kiss_dir = th._KISS_DIR
     tmp_dir = Path(tempfile.mkdtemp())
-    th.HISTORY_FILE = tmp_dir / "task_history.jsonl"
-    th._CHAT_EVENTS_DIR = tmp_dir / "chat_events"
-    th._history_cache = None
-    return original_file, original_events_dir, tmp_dir
+    kiss_dir = tmp_dir / ".kiss"
+    kiss_dir.mkdir(parents=True, exist_ok=True)
+    th._KISS_DIR = kiss_dir
+    th._DB_PATH = kiss_dir / "history.db"
+    th._db_conn = None
+    return original_db_path, original_db_conn, original_kiss_dir, tmp_dir
 
 
-def _restore_history(original_file: Path, original_events_dir: Path, tmp_dir: Path) -> None:
-    th.HISTORY_FILE = original_file
-    th._CHAT_EVENTS_DIR = original_events_dir
-    th._history_cache = None
-    import shutil
+def _restore_history(
+    original_db_path: Path, original_db_conn, original_kiss_dir: Path, tmp_dir: Path
+) -> None:
+    if th._db_conn is not None:
+        th._db_conn.close()
+    th._DB_PATH = original_db_path
+    th._db_conn = original_db_conn
+    th._KISS_DIR = original_kiss_dir
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -64,38 +71,31 @@ class TestPrinterRecording:
 
 class TestTaskHistoryChatEvents:
     def setup_method(self) -> None:
-        self.original_file, self.original_events_dir, self.tmp_dir = _use_temp_history()
+        self.saved = _use_temp_history()
 
     def teardown_method(self) -> None:
-        _restore_history(self.original_file, self.original_events_dir, self.tmp_dir)
+        _restore_history(*self.saved)
 
     def test_sample_tasks_have_task_key(self) -> None:
         for entry in th.SAMPLE_TASKS:
             assert "task" in entry
 
-    def test_first_run_persists_sample_tasks_to_disk(self) -> None:
-        """On first run (empty history), SAMPLE_TASKS are written to the JSONL file."""
-        assert not th.HISTORY_FILE.exists()
+    def test_first_run_seeds_sample_tasks(self) -> None:
+        """On first run (empty DB), SAMPLE_TASKS are inserted."""
         history = th._load_history()
-        # File should now exist on disk with sample tasks
-        assert th.HISTORY_FILE.exists()
-        lines = [ln for ln in th.HISTORY_FILE.read_text().splitlines() if ln.strip()]
-        assert len(lines) == len(th.SAMPLE_TASKS)
-        # Cache should match sample tasks (most-recent-first = reversed)
         assert len(history) == len(th.SAMPLE_TASKS)
         sample_tasks = [s["task"] for s in th.SAMPLE_TASKS]
         for entry in history:
             assert entry["task"] in sample_tasks
-            assert entry["has_events"] is False
-            assert entry.get("events_file")
+            assert entry["has_events"] == 0
 
 
 class TestEndToEndRecordAndStore:
     def setup_method(self) -> None:
-        self.original_file, self.original_events_dir, self.tmp_dir = _use_temp_history()
+        self.saved = _use_temp_history()
 
     def teardown_method(self) -> None:
-        _restore_history(self.original_file, self.original_events_dir, self.tmp_dir)
+        _restore_history(*self.saved)
 
     def test_record_store_retrieve(self) -> None:
         """Full integration: record events, store in history, retrieve."""
@@ -120,11 +120,11 @@ class TestEndToEndRecordAndStore:
 
         th._set_latest_chat_events(events)
 
-        th._history_cache = None
         history = th._load_history()
-        assert history[0]["has_events"] is True
+        task_entry = next(e for e in history if e["task"] == "integration test task")
+        assert task_entry["has_events"] == 1
 
-        stored_events = th._load_task_chat_events(str(history[0]["task"]))
+        stored_events = th._load_task_chat_events(str(task_entry["task"]))
 
         assert len(stored_events) > 0
         types = [e["type"] for e in stored_events]
@@ -174,14 +174,6 @@ class TestDisplayEventTypes:
         for t in non_display:
             assert t not in _DISPLAY_EVENT_TYPES
 
-class TestJsonRoundtrip:
-    def setup_method(self) -> None:
-        self.original_file, self.original_events_dir, self.tmp_dir = _use_temp_history()
-
-    def teardown_method(self) -> None:
-        _restore_history(self.original_file, self.original_events_dir, self.tmp_dir)
-
-
 def _tasks_endpoint_transform(history: list[Any]) -> list[dict[str, Any]]:
     """Replicate the /tasks endpoint list comprehension from sorcar.py."""
     return [
@@ -192,10 +184,10 @@ def _tasks_endpoint_transform(history: list[Any]) -> list[dict[str, Any]]:
 
 class TestTasksEndpointFormat:
     def setup_method(self) -> None:
-        self.original_file, self.original_events_dir, self.tmp_dir = _use_temp_history()
+        self.saved = _use_temp_history()
 
     def teardown_method(self) -> None:
-        _restore_history(self.original_file, self.original_events_dir, self.tmp_dir)
+        _restore_history(*self.saved)
 
     def test_sample_tasks_all_have_has_events_false(self) -> None:
         result = _tasks_endpoint_transform(th.SAMPLE_TASKS)
@@ -296,13 +288,6 @@ class TestChatbotJSSyntax:
                 depth -= 1
         assert depth == 0, f"Full JS has unbalanced braces, depth={depth}"
 
-
-class TestTaskEventsEndpoint:
-    def setup_method(self) -> None:
-        self.original_file, self.original_events_dir, self.tmp_dir = _use_temp_history()
-
-    def teardown_method(self) -> None:
-        _restore_history(self.original_file, self.original_events_dir, self.tmp_dir)
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

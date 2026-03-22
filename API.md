@@ -38,6 +38,7 @@
       - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
     - [`kiss.agents.claw`](#kissagentsclaw)
       - [`kiss.agents.claw.background_agent`](#kissagentsclawbackground_agent)
+      - [`kiss.agents.sorcar.shared_utils`](#kissagentssorcarshared_utils)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.channels`](#kisschannels)
@@ -1087,6 +1088,33 @@ ______________________________________________________________________
 **`run_background_agent`** — Main loop: poll channel for tasks from user, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
 
 - `work_dir`: Working directory for agent tasks. Defaults to a temp dir.
+
+______________________________________________________________________
+
+#### `kiss.agents.sorcar.shared_utils` — *Shared utilities for Sorcar agent backends (chatbot UI and VS Code).*
+
+**`clean_llm_output`** — Strip whitespace and surrounding quotes from LLM output.<br/>`def clean_llm_output(text: str) -> str`
+
+**`clip_autocomplete_suggestion`** — Return only a short, confident autocomplete continuation. Keeps at most a few words, stops at strong sentence boundaries, and suppresses low-confidence continuations that look too long or too weak.<br/>`def clip_autocomplete_suggestion(query: str, suggestion: str) -> str`
+
+**`model_vendor`** — Return (vendor_display_name, sort_order) for a model name.<br/>`def model_vendor(name: str) -> tuple[str, int]`
+
+- `name`: The model name string.
+- **Returns:** Tuple of (display name, numeric sort order).
+
+**`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str) -> str`
+
+- `task`: The completed task description.
+- `result`: The task result summary (truncated to 500 chars internally).
+- **Returns:** Suggestion text, or empty string on failure.
+
+**`rank_file_suggestions`** — Rank and filter file paths by query match, recency, and usage.<br/>`def rank_file_suggestions(file_cache: list[str], query: str, usage: dict[str, int], limit: int = 20) -> list[dict[str, str]]`
+
+- `file_cache`: List of file paths to search.
+- `query`: Case-insensitive substring to match against paths.
+- `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
+- `limit`: Maximum number of results to return.
+- **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
 
 ______________________________________________________________________
 

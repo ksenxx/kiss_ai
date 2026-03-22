@@ -12,8 +12,6 @@ import pytest
 
 from kiss.channels.slack_agent import (
     SlackAgent,
-    _cli_ask_user_question,
-    _cli_wait_for_user,
     _load_token,
     _make_slack_tools,
     _save_token,
@@ -167,9 +165,6 @@ class TestSlackAgent:
 
 
 class TestCLIMain:
-    def test_main_is_callable(self) -> None:
-        assert callable(main)
-
     def test_main_missing_task_exits(self) -> None:
         import sys
 
@@ -182,7 +177,3 @@ class TestCLIMain:
             assert e.code == 2
         finally:
             sys.argv = original_argv
-
-    def test_cli_callbacks_are_callable(self) -> None:
-        assert callable(_cli_wait_for_user)
-        assert callable(_cli_ask_user_question)

@@ -2,8 +2,10 @@
 
 import shutil
 import sys
+import tempfile
 import traceback
 import webbrowser
+from pathlib import Path
 from typing import Any
 
 
@@ -22,9 +24,21 @@ def main() -> None:
 
     webbrowser.open = lambda url: None  # type: ignore[assignment,misc]
 
+    import kiss.agents.sorcar.task_history as th
     from kiss.agents.sorcar import browser_ui
     from kiss.agents.sorcar import sorcar as sorcar_module
     from kiss.core.relentless_agent import RelentlessAgent
+
+    # Redirect to a temp dir so we don't pollute ~/.kiss and so no
+    # stale ui-port file prevents find_free_port from being called.
+    tmp_kiss = Path(tempfile.mkdtemp()) / ".kiss"
+    tmp_kiss.mkdir(parents=True, exist_ok=True)
+    th._KISS_DIR = tmp_kiss
+    th._DB_PATH = tmp_kiss / "history.db"
+    th._db_conn = None
+    # sorcar.py binds _KISS_DIR locally via `from ... import _KISS_DIR`,
+    # so we must also patch the sorcar module's own binding.
+    sorcar_module._KISS_DIR = tmp_kiss
 
     class DummyAgent(RelentlessAgent):
         def __init__(self, name: str) -> None:

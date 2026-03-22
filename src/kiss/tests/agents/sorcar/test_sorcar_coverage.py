@@ -36,11 +36,7 @@ from kiss.agents.sorcar.code_server import (
     _snapshot_files,
 )
 from kiss.agents.sorcar.config import AgentConfig, SorcarConfig
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-)
 from kiss.agents.sorcar.useful_tools import (
-    UsefulTools,
     _extract_command_names,
 )
 from kiss.agents.sorcar.web_use_tool import (
@@ -50,72 +46,21 @@ from kiss.agents.sorcar.web_use_tool import (
 
 
 def _redirect_history(tmpdir: str):
-    """Redirect all task_history files to a temp dir."""
-    old_hist = th.HISTORY_FILE
-    old_model = th.MODEL_USAGE_FILE
-    old_file = th.FILE_USAGE_FILE
-    old_cache = th._history_cache
-    old_events = th._CHAT_EVENTS_DIR
-
-    th.HISTORY_FILE = Path(tmpdir) / "history.jsonl"
-    th._CHAT_EVENTS_DIR = Path(tmpdir) / "chat_events"
-    th.MODEL_USAGE_FILE = Path(tmpdir) / "model_usage.json"
-    th.FILE_USAGE_FILE = Path(tmpdir) / "file_usage.json"
-    th._history_cache = None
-
-    return old_hist, old_model, old_file, old_cache, old_events
+    """Redirect task_history DB to a temp dir."""
+    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    kiss_dir = Path(tmpdir) / ".kiss"
+    kiss_dir.mkdir(parents=True, exist_ok=True)
+    th._KISS_DIR = kiss_dir
+    th._DB_PATH = kiss_dir / "history.db"
+    th._db_conn = None
+    return old
 
 
-def _restore_history(old_hist, old_model, old_file, old_cache, old_events):
-    th.HISTORY_FILE = old_hist
-    th._CHAT_EVENTS_DIR = old_events
-    th.MODEL_USAGE_FILE = old_model
-    th.FILE_USAGE_FILE = old_file
-    th._history_cache = old_cache
-
-
-class TestTaskHistory:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.old = _redirect_history(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        _restore_history(*self.old)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestUsefulToolsRead:
-    def setup_method(self) -> None:
-        self.tools = UsefulTools()
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestUsefulToolsWrite:
-    def setup_method(self) -> None:
-        self.tools = UsefulTools()
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestUsefulToolsEdit:
-    def setup_method(self) -> None:
-        self.tools = UsefulTools()
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _write(self, content: str) -> str:
-        p = os.path.join(self.tmpdir, "edit.txt")
-        Path(p).write_text(content)
-        return p
-
-class TestUsefulToolsBash:
-    def setup_method(self) -> None:
-        self.tools = UsefulTools()
+def _restore_history(saved: tuple):  # type: ignore[type-arg]
+    if th._db_conn is not None:
+        th._db_conn.close()
+        th._db_conn = None
+    th._DB_PATH, th._db_conn, th._KISS_DIR = saved[0], saved[1], saved[2]
 
 
 class TestBaseBrowserPrinter:
@@ -133,33 +78,6 @@ class TestBaseBrowserPrinter:
         self.printer.remove_client(cq)
 
 
-class TestScanFiles:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestGitDiffAndMerge:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        subprocess.run(["git", "init"], cwd=self.tmpdir, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=self.tmpdir, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=self.tmpdir, capture_output=True,
-        )
-        Path(self.tmpdir, "file.txt").write_text("line1\nline2\nline3\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=self.tmpdir, capture_output=True)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
 class TestScrollDelta:
     def test_all_directions(self) -> None:
         from kiss.agents.sorcar.web_use_tool import _SCROLL_DELTA
@@ -169,48 +87,6 @@ class TestScrollDelta:
         assert _SCROLL_DELTA["right"] == (300, 0)
         assert _SCROLL_DELTA["left"] == (-300, 0)
 
-
-class TestBrowserPrinterEdgeCases:
-    def setup_method(self) -> None:
-        self.printer = BaseBrowserPrinter()
-
-class TestSetupCodeServerAdditional:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestTaskHistoryAdditional:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.old = _redirect_history(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        _restore_history(*self.old)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestSorcarUtilities:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestSetupCodeServerReturn:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestScanFilesEdgeCases:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 class TestThemePresets:
     def test_all_presets_have_required_keys(self) -> None:
@@ -258,18 +134,6 @@ class TestWebUseToolBrowser:
         result = self.tool.scroll("down", 3)
         assert "Page:" in result
 
-class TestWebUseToolPersistentContext:
-    """Test persistent context path (user_data_dir set)."""
-
-    def setup_method(self) -> None:
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-        self.tmpdir = tempfile.mkdtemp()
-        self.tool = WebUseTool(user_data_dir=os.path.join(self.tmpdir, "profile"))
-
-    def teardown_method(self) -> None:
-        self.tool.close()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
 class TestWebUseToolResolveLocator:
     """Test _resolve_locator edge cases with real browser."""
 
@@ -294,41 +158,6 @@ class TestWebUseToolResolveLocator:
         self.tool.go_to_url("data:text/html,<h1>X</h1>")
         result = self.tool.screenshot("/dev/null/impossible/file.png")
         assert "Error" in result or "saved" in result.lower()
-
-
-class TestBrowserUiBranches:
-    """Cover remaining branches in browser_ui.py."""
-
-    def setup_method(self) -> None:
-        self.printer = BaseBrowserPrinter()
-
-class TestUsefulToolsBranches:
-    """Cover remaining branches in useful_tools.py."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestCodeServerBranches:
-    """Cover remaining branches in code_server.py."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestWebUseToolBranches:
-    """Cover remaining branches in web_use_tool.py."""
-
-    def setup_method(self) -> None:
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-        self.tool = WebUseTool(user_data_dir=None)
-
-    def teardown_method(self) -> None:
-        self.tool.close()
 
 
 class TestCodeServerBranchesR2:
@@ -372,15 +201,6 @@ class TestCodeServerBranchesR2:
         )
         assert isinstance(result, (dict, type(None)))
 
-
-class TestUsefulToolsBranchesR2:
-    """Cover remaining useful_tools.py branches."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 class TestWebUseToolBranchesR2:
     """Cover remaining web_use_tool.py branches."""
@@ -631,40 +451,6 @@ class TestExtractCommandNames:
         names = _extract_command_names("echo 'unclosed")
         assert isinstance(names, list)
 
-class TestUsefulTools:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.tools = UsefulTools()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestTaskHistoryBranch:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self._orig_history_file = th.HISTORY_FILE
-        self._orig_model_usage_file = th.MODEL_USAGE_FILE
-        self._orig_file_usage_file = th.FILE_USAGE_FILE
-        self._orig_kiss_dir = th._KISS_DIR
-        self._orig_events_dir = th._CHAT_EVENTS_DIR
-        th._KISS_DIR = Path(self.tmpdir)
-        th.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
-        th._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        th.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
-        th.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
-        th._history_cache = None
-
-    def teardown_method(self) -> None:
-        th.HISTORY_FILE = self._orig_history_file
-        th._CHAT_EVENTS_DIR = self._orig_events_dir
-        th.MODEL_USAGE_FILE = self._orig_model_usage_file
-        th.FILE_USAGE_FILE = self._orig_file_usage_file
-        th._KISS_DIR = self._orig_kiss_dir
-        th._history_cache = None
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
 class TestCoalesceEvents:
 
     def test_no_merge_missing_text(self) -> None:
@@ -674,88 +460,6 @@ class TestCoalesceEvents:
         ]
         result = _coalesce_events(events)
         assert len(result) == 2
-
-class TestScanFilesBranch:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestGitUtilities:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        subprocess.run(["git", "init"], cwd=self.tmpdir, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=self.tmpdir,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=self.tmpdir,
-            capture_output=True,
-        )
-        Path(self.tmpdir, "file.txt").write_text("line1\nline2\nline3\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=self.tmpdir, capture_output=True)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestSaveUntrackedBase:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.work_dir = os.path.join(self.tmpdir, "work")
-        os.makedirs(self.work_dir)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestCleanupMergeData:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestRestoreMergeFiles:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.work_dir = os.path.join(self.tmpdir, "work")
-        os.makedirs(self.work_dir)
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestPrepareMergeView:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        subprocess.run(["git", "init"], cwd=self.tmpdir, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "config", "user.email", "t@t.com"],
-            cwd=self.tmpdir,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "T"],
-            cwd=self.tmpdir,
-            capture_output=True,
-        )
-        Path(self.tmpdir, "file.txt").write_text("line1\nline2\nline3\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=self.tmpdir, capture_output=True)
-        self.data_dir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-
 
 class TestSetupCodeServer:
     def setup_method(self) -> None:
@@ -798,43 +502,6 @@ class TestSorcarConfig:
     def test_sorcar_config(self) -> None:
         cfg = SorcarConfig()
         assert isinstance(cfg.sorcar_agent, AgentConfig)
-
-
-class TestReadActiveFile:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestResolveTask:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-class TestSorcarAgentRunAttachments:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _try_run(self, **kwargs: object) -> None:
-        agent = SorcarAgent("test")
-        try:
-            agent.run(
-                prompt_template="test",
-                work_dir=self.tmpdir,
-                max_steps=0,
-                max_budget=0.0,
-                headless=True,
-                verbose=False,
-                **kwargs,  # type: ignore[arg-type]
-            )
-        except Exception:
-            pass
 
 
 class TestSorcarAgentMain:
@@ -894,33 +561,6 @@ class TestCodeServerEdgeCases:
             _cleanup_merge_data(self.tmpdir)
         finally:
             os.chmod(self.tmpdir, 0o755)
-
-
-class TestTaskHistoryEdgeCases:
-    """Cover remaining task_history.py branches."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self._orig_history_file = th.HISTORY_FILE
-        self._orig_model_usage_file = th.MODEL_USAGE_FILE
-        self._orig_file_usage_file = th.FILE_USAGE_FILE
-        self._orig_kiss_dir = th._KISS_DIR
-        self._orig_events_dir = th._CHAT_EVENTS_DIR
-        th._KISS_DIR = Path(self.tmpdir)
-        th.HISTORY_FILE = Path(self.tmpdir) / "task_history.jsonl"
-        th._CHAT_EVENTS_DIR = Path(self.tmpdir) / "chat_events"
-        th.MODEL_USAGE_FILE = Path(self.tmpdir) / "model_usage.json"
-        th.FILE_USAGE_FILE = Path(self.tmpdir) / "file_usage.json"
-        th._history_cache = None
-
-    def teardown_method(self) -> None:
-        th.HISTORY_FILE = self._orig_history_file
-        th._CHAT_EVENTS_DIR = self._orig_events_dir
-        th.MODEL_USAGE_FILE = self._orig_model_usage_file
-        th.FILE_USAGE_FILE = self._orig_file_usage_file
-        th._KISS_DIR = self._orig_kiss_dir
-        th._history_cache = None
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestWebUseToolEdgeCases:

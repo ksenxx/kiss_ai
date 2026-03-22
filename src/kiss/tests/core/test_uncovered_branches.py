@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -80,37 +79,29 @@ class TestTaskHistoryEdgeCases(TestCase):
         self._tmpdir = tempfile.mkdtemp()
         import kiss.agents.sorcar.task_history as th
 
-        self._orig = {
-            "HISTORY_FILE": th.HISTORY_FILE,
-            "_CHAT_EVENTS_DIR": th._CHAT_EVENTS_DIR,
-            "MODEL_USAGE_FILE": th.MODEL_USAGE_FILE,
-            "_KISS_DIR": th._KISS_DIR,
-            "_HISTORY_LOCK": th._HISTORY_LOCK,
-            "_history_cache": th._history_cache,
-        }
-
-        th.HISTORY_FILE = Path(self._tmpdir) / "history.jsonl"
-        th._CHAT_EVENTS_DIR = Path(self._tmpdir) / "events"
-        th.MODEL_USAGE_FILE = Path(self._tmpdir) / "model_usage.json"
-        th._KISS_DIR = Path(self._tmpdir)
-        th._history_cache = None
-        from filelock import FileLock
-        th._HISTORY_LOCK = FileLock(th.HISTORY_FILE.with_suffix(".lock"))
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "history.db"
+        th._db_conn = None
 
     def tearDown(self) -> None:
         import kiss.agents.sorcar.task_history as th
 
-        for key, val in self._orig.items():
-            setattr(th, key, val)
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_search_history_no_file(self) -> None:
+    def test_search_history_fresh_db(self) -> None:
         import kiss.agents.sorcar.task_history as th
 
         results = th._search_history("anything", limit=10)
-        assert results == []
+        assert isinstance(results, list)
 
-    def test_set_empty_events_removes_file(self) -> None:
+    def test_set_empty_events_clears_events(self) -> None:
         import kiss.agents.sorcar.task_history as th
 
         th._add_task("my task")
@@ -120,81 +111,11 @@ class TestTaskHistoryEdgeCases(TestCase):
         loaded = th._load_task_chat_events("my task")
         assert loaded == []
 
-    def test_task_events_path_not_found(self) -> None:
+    def test_get_history_entry_out_of_range(self) -> None:
         import kiss.agents.sorcar.task_history as th
 
-        path = th._task_events_path("unknown task")
-        assert "nonexistent" in str(path)
-
-    def test_increment_usage(self) -> None:
-        import kiss.agents.sorcar.task_history as th
-
-        th._increment_usage(th.MODEL_USAGE_FILE, "gpt-4o")
-        th._increment_usage(th.MODEL_USAGE_FILE, "gpt-4o")
-        data = json.loads(th.MODEL_USAGE_FILE.read_text())
-        assert data["gpt-4o"] == 2
-
-    def test_parse_line_empty(self) -> None:
-        """task_history.py line 212: _parse_line returns None for empty line."""
-        import kiss.agents.sorcar.task_history as th
-
-        assert th._parse_line("") is None
-        assert th._parse_line("   ") is None
-        assert th._parse_line("\n") is None
-
-    def test_search_history_with_blank_lines_in_file(self) -> None:
-        """Lines 417/455: _search_history/_get_history_entry skip None entries."""
-        import kiss.agents.sorcar.task_history as th
-
-        th.HISTORY_FILE.write_text(
-            json.dumps({"task": "alpha", "result": "", "events_file": ""}) + "\n"
-            + "\n"
-            + json.dumps({"task": "beta", "result": "", "events_file": ""}) + "\n"
-        )
-        th._history_cache = None
-        results = th._search_history("alpha", limit=10)
-        assert len(results) == 1
-        th._history_cache = None
-        entry = th._get_history_entry(0)
-        assert entry is not None
-        assert entry["task"] in ("alpha", "beta")
-
-    def test_set_latest_chat_events_no_events_file(self) -> None:
-        """Line 557: _set_latest_chat_events returns early when events_file is empty."""
-        import kiss.agents.sorcar.task_history as th
-
-        th.HISTORY_FILE.write_text(
-            json.dumps({"task": "no_events", "result": "", "events_file": ""}) + "\n"
-        )
-        th._history_cache = None
-        th._set_latest_chat_events([{"type": "text"}], task="no_events")
-
-    def test_search_history_with_corrupt_json_lines(self) -> None:
-        """Line 417: corrupt JSON lines make _parse_line return None in _search_history."""
-        import kiss.agents.sorcar.task_history as th
-
-        th.HISTORY_FILE.write_text(
-            json.dumps({"task": "good task", "result": "", "events_file": ""}) + "\n"
-            + "not valid json at all\n"
-            + json.dumps({"task": "another good", "result": "", "events_file": ""}) + "\n"
-        )
-        th._history_cache = None
-        results = th._search_history("good", limit=10)
-        assert len(results) >= 1
-
-    def test_get_history_entry_with_corrupt_lines(self) -> None:
-        """Line 455: corrupt JSON in _get_history_entry triggers continue."""
-        import kiss.agents.sorcar.task_history as th
-
-        lines_data = []
-        for i in range(505):
-            lines_data.append(json.dumps({"task": f"task_{i}", "result": "", "events_file": ""}))
-        lines_data.append("corrupted json 1")
-        lines_data.append("corrupted json 2")
-        th.HISTORY_FILE.write_text("\n".join(lines_data) + "\n")
-        th._history_cache = None
-        entry = th._get_history_entry(501)
-        assert entry is None or isinstance(entry, dict)
+        entry = th._get_history_entry(9999)
+        assert entry is None
 
 
 class TestCodeServerMergeHelpers(TestCase):

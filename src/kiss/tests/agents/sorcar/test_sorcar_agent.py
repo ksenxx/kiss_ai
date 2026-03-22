@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
-from kiss.agents.sorcar.sorcar import _clip_autocomplete_suggestion
+from kiss.agents.sorcar.shared_utils import clip_autocomplete_suggestion
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _build_arg_parser,
@@ -295,25 +295,28 @@ class TestSorcarBashStreaming:
 
 
 def test_clip_autocomplete_suggestion_rejects_sentence_like_completion() -> None:
-    suggestion = _clip_autocomplete_suggestion(
+    suggestion = clip_autocomplete_suggestion(
         "fix", " the failing test in parser now and then update docs too"
     )
     assert suggestion == ""
 
 
 def test_clip_autocomplete_suggestion_rejects_punctuation_boundary() -> None:
-    assert _clip_autocomplete_suggestion("fix", " the failing test. Then update docs") == ""
+    assert clip_autocomplete_suggestion("fix", " the failing test. Then update docs") == ""
 
 
 def test_clip_autocomplete_suggestion_strips_repeated_query_prefix() -> None:
-    assert _clip_autocomplete_suggestion("hello", "hello world again") == "world again"
+    assert clip_autocomplete_suggestion("hello", "hello world again") == "world again"
 
 
 class TestNoSyntaxErrors:
     def test_module_imports_and_no_redundant_imports(self) -> None:
         import kiss.agents.sorcar.sorcar as mod
 
-        expected = ("run_chatbot", "_read_active_file", "_clean_llm_output", "_model_vendor_order")
+        expected = ("run_chatbot", "_read_active_file")
         for attr in expected:
             assert hasattr(mod, attr)
         assert not hasattr(mod, "get_most_expensive_model")
+        import kiss.agents.sorcar.shared_utils as shared_mod
+        for attr in ("clean_llm_output", "model_vendor", "clip_autocomplete_suggestion"):
+            assert hasattr(shared_mod, attr)

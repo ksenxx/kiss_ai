@@ -44,10 +44,6 @@ SYSTEM_PROMPT = f"""
   to 'tee' and a fresh temporary file. Poll the tail of the temporary file
   every 10 seconds to check progress of the bash command.
 - Use go_to_url() for browser tool and internet search or testing an agent/app.
-- Look at `{_KISS_DIR}/task_history.jsonl` for task history and context.  Recent tasks
-  are appended to the file.  The file could be very large.
-  Pay more attention to the recent tasks over old tasks. Do not try to finish a
-  task from the task history. DO NOT WRITE/EDIT the task history.
 - If you don't know the context of a vague task, look at the latest tasks in the
   task history from latest to oldest to get the context.
 - Call finish(success=True, summary="detailed summary of what was accomplished

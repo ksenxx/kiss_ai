@@ -1,5 +1,7 @@
 """Tests for file usage tracking and @ file picker frequency sorting."""
 
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,20 +12,20 @@ class TestFileUsage(unittest.TestCase):
     """Tests for _load_file_usage / _record_file_usage persistence."""
 
     def setUp(self) -> None:
-        self._orig = task_history.FILE_USAGE_FILE
-        self._tmp = Path(__file__).parent / "_test_file_usage.json"
-        task_history.FILE_USAGE_FILE = self._tmp
-        if self._tmp.exists():
-            self._tmp.unlink()
+        self._tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (task_history._DB_PATH, task_history._db_conn, task_history._KISS_DIR)
+        task_history._KISS_DIR = kiss_dir
+        task_history._DB_PATH = kiss_dir / "history.db"
+        task_history._db_conn = None
 
     def tearDown(self) -> None:
-        task_history.FILE_USAGE_FILE = self._orig
-        if self._tmp.exists():
-            self._tmp.unlink()
-
-    def test_load_non_dict_json(self) -> None:
-        self._tmp.write_text("[1,2,3]")
-        assert task_history._load_file_usage() == {}
+        if task_history._db_conn is not None:
+            task_history._db_conn.close()
+            task_history._db_conn = None
+        (task_history._DB_PATH, task_history._db_conn, task_history._KISS_DIR) = self._saved
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_max_entries_reaccess_preserves_entry(self) -> None:
         """Re-accessing a file prevents it from being evicted."""

@@ -15,8 +15,6 @@ from googleapiclient.discovery import build
 
 from kiss.channels.gmail_agent import (
     GmailAgent,
-    _cli_ask_user_question,
-    _cli_wait_for_user,
     _credentials_path,
     _extract_attachments,
     _extract_body,
@@ -295,9 +293,6 @@ class TestGmailAgent:
 
 
 class TestCLIMain:
-    def test_main_is_callable(self) -> None:
-        assert callable(main)
-
     def test_main_missing_task_exits(self) -> None:
         import sys
 
@@ -310,7 +305,3 @@ class TestCLIMain:
             assert e.code == 2
         finally:
             sys.argv = original_argv
-
-    def test_cli_callbacks_are_callable(self) -> None:
-        assert callable(_cli_wait_for_user)
-        assert callable(_cli_ask_user_question)

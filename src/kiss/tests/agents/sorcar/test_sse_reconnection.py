@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import shutil
-import tempfile
 from pathlib import Path
 
 import kiss.agents.sorcar.task_history as th
@@ -12,22 +10,20 @@ from kiss.agents.sorcar import sorcar
 
 
 def _redirect_history(tmpdir: str):
-    old = (th.HISTORY_FILE, th.MODEL_USAGE_FILE,
-           th.FILE_USAGE_FILE, th._history_cache, th._KISS_DIR, th._CHAT_EVENTS_DIR)
+    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th.HISTORY_FILE = kiss_dir / "task_history.jsonl"
-    th._CHAT_EVENTS_DIR = kiss_dir / "chat_events"
-    th.MODEL_USAGE_FILE = kiss_dir / "model_usage.json"
-    th.FILE_USAGE_FILE = kiss_dir / "file_usage.json"
-    th._history_cache = None
+    th._DB_PATH = kiss_dir / "history.db"
+    th._db_conn = None
     return old
 
 
 def _restore_history(saved):
-    (th.HISTORY_FILE, th.MODEL_USAGE_FILE,
-     th.FILE_USAGE_FILE, th._history_cache, th._KISS_DIR, th._CHAT_EVENTS_DIR) = saved
+    if th._db_conn is not None:
+        th._db_conn.close()
+        th._db_conn = None
+    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
 class TestShutdownTimerDuration:
@@ -38,11 +34,3 @@ class TestShutdownTimerDuration:
         assert "Timer(120.0," not in source
 
 
-class TestSSEEventsEndpointIntegration:
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_history(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        _restore_history(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)

@@ -12,18 +12,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.server import (
-    VSCodeServer,
-    _model_vendor,
-)
+from kiss.agents.sorcar.shared_utils import model_vendor
+from kiss.agents.vscode.server import VSCodeServer
 
 
 def _model_vendor_name(name: str) -> str:
-    return _model_vendor(name)[0]
+    return model_vendor(name)[0]
 
 
 def _model_vendor_order(name: str) -> int:
-    return _model_vendor(name)[1]
+    return model_vendor(name)[1]
 
 
 class TestModelVendorOrder(unittest.TestCase):
@@ -307,7 +305,7 @@ class TestMainJsFilePicker(unittest.TestCase):
         assert "acIdx" in self.js
 
     def test_has_sel_class_toggling(self) -> None:
-        assert "updateACSel" in self.js
+        assert "updateSel" in self.js
         assert "'sel'" in self.js
 
     def test_has_get_at_ctx(self) -> None:
@@ -352,7 +350,7 @@ class TestMainJsModelPicker(unittest.TestCase):
 
     def test_has_keyboard_navigation(self) -> None:
         assert "modelDDIdx" in self.js
-        assert "updateModelSel" in self.js
+        assert "updateSel" in self.js
 
     def test_has_arrow_key_handling(self) -> None:
         # Check model search keydown handler

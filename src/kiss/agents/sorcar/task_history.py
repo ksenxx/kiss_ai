@@ -1,29 +1,20 @@
 """Task history, proposals, and model usage persistence.
 
-Task history is stored in JSONL format (one JSON object per line) for
-efficiency.  Chat events for each task are stored in separate files under
-``~/.kiss/chat_events/`` and loaded on demand, keeping memory usage low
-even with millions of tasks.
-
-The file stores entries in chronological order (oldest first, newest
-last).  New entries are appended to the end of the file, avoiding
-full-file rewrites.  A small in-memory cache (``_RECENT_CACHE_SIZE``
-entries, most-recent-first) avoids file I/O for the common case.
+All data is stored in a single SQLite database at ``~/.kiss/history.db``
+using WAL mode for concurrent access.  Four tables hold task history,
+chat events, model usage counters, and file usage counters.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import socket
+import sqlite3
+import threading
 import time
-import uuid
-from collections.abc import Callable, Iterator
 from pathlib import Path
-
-from filelock import FileLock
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +23,11 @@ def _log_exc() -> None:
     logger.debug("Exception caught", exc_info=True)
 
 _KISS_DIR = Path.home() / ".kiss"
-HISTORY_FILE = _KISS_DIR / "task_history.jsonl"
-_CHAT_EVENTS_DIR = _KISS_DIR / "chat_events"
+_DB_PATH = _KISS_DIR / "history.db"
 
-MODEL_USAGE_FILE = _KISS_DIR / "model_usage.json"
-MAX_HISTORY = 1_000_000
-
-# Only keep this many entries in memory for fast access
 _RECENT_CACHE_SIZE = 500
+
+_MAX_FILE_USAGE_ENTRIES = 1000
 
 
 def _ensure_kiss_dir() -> None:
@@ -116,276 +104,163 @@ SAMPLE_TASKS: list[_HistoryEntry] = [
 ]
 
 
-def _new_events_filename() -> str:
-    """Generate a unique non-existent filename for storing chat events.
+# ---------------------------------------------------------------------------
+# Database connection (singleton)
+# ---------------------------------------------------------------------------
 
-    Returns:
-        Filename string (e.g. ``evt_abcdef1234567890.json``).
+_db_conn: sqlite3.Connection | None = None
+_db_lock = threading.Lock()
+
+
+_DEDUP_SUBQUERY = "SELECT MAX(id) FROM task_history GROUP BY task"
+
+_HISTORY_SELECT = (
+    "SELECT id, timestamp, task, has_events, result "
+    "FROM task_history "
+    f"WHERE id IN ({_DEDUP_SUBQUERY}) "
+)
+
+_CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
+
+
+def _init_tables(conn: sqlite3.Connection) -> None:
+    """Create all tables and indexes if they do not exist."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS task_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            task TEXT NOT NULL,
+            has_events INTEGER DEFAULT 0,
+            result TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_th_timestamp
+            ON task_history(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_th_task
+            ON task_history(task);
+
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES task_history(id),
+            seq INTEGER NOT NULL,
+            event_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ev_task_id
+            ON events(task_id);
+
+        CREATE TABLE IF NOT EXISTS model_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model TEXT NOT NULL UNIQUE,
+            count INTEGER DEFAULT 0,
+            is_last INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS file_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL UNIQUE,
+            count INTEGER DEFAULT 0,
+            last_used REAL DEFAULT 0
+        );
+    """)
+
+
+def _get_db() -> sqlite3.Connection:
+    """Return the singleton database connection, creating it on first call.
+
+    Sets WAL journal mode, enables foreign keys, and creates tables
+    if they do not already exist.  Seeds sample tasks when the
+    task_history table is empty.
     """
-    while True:  # pragma: no branch – UUID collision is astronomically unlikely
-        name = f"evt_{uuid.uuid4().hex[:16]}.json"
-        if not (_CHAT_EVENTS_DIR / name).exists():  # pragma: no branch
-            return name
+    global _db_conn
+    if _db_conn is not None:
+        return _db_conn
+    with _db_lock:
+        if _db_conn is not None:
+            return _db_conn
+        _ensure_kiss_dir()
+        conn = sqlite3.connect(
+            str(_DB_PATH), check_same_thread=False, timeout=10,
+        )
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        _init_tables(conn)
+        # Seed inline (already holding _db_lock, so don't call the
+        # public _seed_sample_tasks which would re-acquire it).
+        row = conn.execute("SELECT COUNT(*) FROM task_history").fetchone()
+        if row[0] == 0:
+            t = time.time() - 86400
+            conn.executemany(
+                "INSERT INTO task_history (timestamp, task) VALUES (?, ?)",
+                [(t + i, str(s["task"])) for i, s in enumerate(SAMPLE_TASKS)],
+            )
+            conn.commit()
+        _db_conn = conn
+        return _db_conn
 
 
-def _task_events_path(task: str) -> Path:
-    """Return the file path for a task's chat events by looking up the history.
+# ---------------------------------------------------------------------------
+# Task history
+# ---------------------------------------------------------------------------
 
-    Searches the in-memory cache for the task's ``events_file`` field.
-    Returns a non-existent path if the task is not found.
+def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None:
+    """Return the row id of the most recent run of *task*, or the latest row."""
+    if task is not None:
+        row = db.execute(
+            "SELECT id FROM task_history WHERE task = ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (task,),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT id FROM task_history ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def _add_task(task: str) -> None:
+    """Append a task to the history. Thread-safe.
 
     Args:
         task: The task description string.
-
-    Returns:
-        Path to the chat events JSON file.
     """
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-        assert _history_cache is not None
-        for entry in _history_cache:
-            if entry["task"] == task:
-                filename = str(entry.get("events_file", ""))
-                if filename:
-                    return _CHAT_EVENTS_DIR / filename
-    return _CHAT_EVENTS_DIR / "nonexistent.json"
-
-
-# In-memory cache of the most recent entries (most-recent-first).
-_history_cache: list[_HistoryEntry] | None = None
-# Single cross-process + cross-thread lock for both the file and the in-memory cache.
-_HISTORY_LOCK = FileLock(HISTORY_FILE.with_suffix(".lock"))
-
-
-def _migrate_old_format() -> None:
-    """Migrate from old task_history.json to chronological JSONL.
-
-    The old JSON array stored entries most-recent-first.  We reverse
-    so the JSONL file is chronological (oldest first, newest last).
-    """
-    old_file = HISTORY_FILE.parent / "task_history.json"
-    if not old_file.exists():
-        return
-    try:
-        data = json.loads(old_file.read_text())
-        if not isinstance(data, list):
-            old_file.unlink(missing_ok=True)
-            return
-        _CHAT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-        seen: set[str] = set()
-        lines: list[str] = []
-        # Reverse: old format was most-recent-first, new is chronological
-        for item in reversed(data[:MAX_HISTORY]):
-            task = item.get("task", "")
-            if not task or task in seen:
-                continue
-            seen.add(task)
-            has_events = bool(item.get("chat_events"))
-            events_file = _new_events_filename()
-            if has_events:
-                (_CHAT_EVENTS_DIR / events_file).write_text(
-                    json.dumps(item["chat_events"])
-                )
-            lines.append(
-                json.dumps({
-                    "task": task,
-                    "has_events": has_events,
-                    "result": "",
-                    "events_file": events_file,
-                })
-            )
-        _ensure_kiss_dir()
-        HISTORY_FILE.write_text(
-            "\n".join(lines) + "\n" if lines else ""
+    db = _get_db()
+    with _db_lock:
+        db.execute(
+            "INSERT INTO task_history (timestamp, task) VALUES (?, ?)",
+            (time.time(), task),
         )
-        old_file.unlink(missing_ok=True)
-    except (json.JSONDecodeError, OSError):
-        _log_exc()
-
-
-def _parse_line(line: str) -> _HistoryEntry | None:
-    """Parse a JSONL line into a history entry or None on failure."""
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        item = json.loads(line)
-        task = item["task"]
-        return {
-            "task": task,
-            "has_events": bool(item.get("has_events")),
-            "result": item.get("result", ""),
-            "events_file": item.get("events_file", ""),
-        }
-    except (json.JSONDecodeError, KeyError):
-        return None
-
-
-def _iter_lines_reverse(path: Path) -> Iterator[str]:
-    """Yield non-empty lines from *path* in reverse order (last line first).
-
-    Reads the file in chunks from the end so only a small amount of data
-    is in memory at any time.
-
-    Args:
-        path: Path to the file to read.
-
-    Yields:
-        Stripped line strings, starting from the last line.
-    """
-    with path.open("rb") as f:
-        f.seek(0, 2)
-        pos = f.tell()
-        if pos == 0:
-            return
-        remaining = b""
-        chunk_size = 8192
-        while pos > 0:
-            read_size = min(chunk_size, pos)
-            pos -= read_size
-            f.seek(pos)
-            chunk = f.read(read_size) + remaining
-            parts = chunk.split(b"\n")
-            remaining = parts[0]
-            for part in reversed(parts[1:]):
-                stripped = part.strip()
-                if stripped:
-                    yield stripped.decode("utf-8")
-        if remaining.strip():  # pragma: no branch – files normally end with newline
-            yield remaining.strip().decode("utf-8")
-
-
-def _read_recent_entries(
-    limit: int,
-) -> list[_HistoryEntry]:
-    """Read the most recent *limit* unique entries, most-recent-first.
-
-    Reads the file from the end so only a small window is in memory.
-
-    Args:
-        limit: Maximum unique entries to return.
-
-    Returns:
-        List of entries, most-recent-first.
-    """
-    if not HISTORY_FILE.exists():
-        return []
-    seen: set[str] = set()
-    result: list[_HistoryEntry] = []
-    try:
-        for raw_line in _iter_lines_reverse(HISTORY_FILE):
-            entry = _parse_line(raw_line)
-            if entry is None:
-                continue
-            task_str = str(entry["task"])
-            if task_str in seen:
-                continue
-            seen.add(task_str)
-            result.append(entry)
-            if len(result) >= limit:
-                break
-    except OSError:  # pragma: no cover
-        _log_exc()
-    return result
-
-
-def _read_file_entries(
-    limit: int = 0,
-) -> list[_HistoryEntry]:
-    """Read all entries forward, dedup keeping last occurrence, most-recent-first.
-
-    Args:
-        limit: Maximum unique entries to return.  0 means all
-            (up to MAX_HISTORY).
-
-    Returns:
-        List of unique entries, most-recent-first.
-    """
-    if not HISTORY_FILE.exists():
-        return []
-    cap = limit if limit > 0 else MAX_HISTORY
-    entries: dict[str, _HistoryEntry] = {}
-    try:
-        with HISTORY_FILE.open() as f:
-            for raw_line in f:
-                entry = _parse_line(raw_line)
-                if entry is None:
-                    continue
-                key = str(entry["task"])
-                # Remove then re-insert so the key moves to the end
-                entries.pop(key, None)
-                entries[key] = entry
-    except OSError:  # pragma: no cover
-        _log_exc()
-    # Most-recent-first: reverse chronological order
-    all_entries = list(reversed(entries.values()))
-    return all_entries[:cap]
-
-
-def _seed_sample_tasks() -> None:
-    """Write SAMPLE_TASKS to history file on first run.  Must hold _HISTORY_LOCK."""
-    _ensure_kiss_dir()
-    _CHAT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-    with HISTORY_FILE.open("a") as f:
-        for sample in SAMPLE_TASKS:
-            entry: _HistoryEntry = {
-                "task": sample["task"],
-                "has_events": False,
-                "result": "",
-                "events_file": _new_events_filename(),
-            }
-            f.write(json.dumps(entry) + "\n")
-
-
-def _refresh_cache() -> list[_HistoryEntry]:
-    """Reload the recent cache from disk.  Must hold _HISTORY_LOCK."""
-    global _history_cache
-    _migrate_old_format()
-    entries = _read_recent_entries(_RECENT_CACHE_SIZE)
-    if not entries:
-        # First run after installation — persist sample tasks to disk
-        _seed_sample_tasks()
-        entries = _read_recent_entries(_RECENT_CACHE_SIZE)
-    _history_cache = entries
-    return _history_cache
+        db.commit()
 
 
 def _load_history(limit: int = 0) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
+    Deduplicates by task text, keeping only the most recent run of
+    each unique task string.
+
     Args:
         limit: Maximum number of entries to return.
-            0 returns all entries (up to MAX_HISTORY).
-            If limit <= _RECENT_CACHE_SIZE, served from the in-memory
-            cache without file I/O.
+            0 returns all unique entries.
 
     Returns:
-        List of history entries with 'task' and 'has_events' keys.
+        List of history entry dicts with ``id``, ``timestamp``,
+        ``task``, ``has_events``, and ``result`` keys.
     """
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-        assert _history_cache is not None
-        if limit <= 0:
-            # Caller wants all — full forward read, dedup, reverse
-            entries = _read_file_entries(limit=0)
-            return entries if entries else list(_history_cache)
-        if limit <= len(_history_cache):
-            return _history_cache[:limit]
-        # Need more than cache has — read from tail
-        entries = _read_recent_entries(limit)
-        return entries if entries else list(_history_cache)
-
+    db = _get_db()
+    sql = _HISTORY_SELECT + "ORDER BY timestamp DESC"
+    if limit > 0:
+        sql += " LIMIT ?"
+        rows = db.execute(sql, (limit,)).fetchall()
+    else:
+        rows = db.execute(sql).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _search_history(
     query: str, limit: int = 50
 ) -> list[_HistoryEntry]:
     """Search history entries by substring match. Thread-safe.
-
-    Reads from the end of the file so the most recent matches are
-    returned first, without loading all entries into memory.
 
     Args:
         query: Case-insensitive substring to match against task text.
@@ -396,78 +271,37 @@ def _search_history(
     """
     if not query:
         return _load_history(limit=limit)
-    q_lower = query.lower()
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-    if not HISTORY_FILE.exists():
-        return []
-    seen: set[str] = set()
-    results: list[_HistoryEntry] = []
-    try:
-        for raw_line in _iter_lines_reverse(HISTORY_FILE):
-            entry = _parse_line(raw_line)
-            if entry is None:
-                continue
-            task_str = str(entry["task"])
-            if task_str in seen:
-                continue
-            seen.add(task_str)
-            if q_lower in task_str.lower():
-                results.append(entry)
-                if len(results) >= limit:
-                    break
-    except OSError:  # pragma: no cover
-        _log_exc()
-    return results
+    db = _get_db()
+    rows = db.execute(
+        _HISTORY_SELECT + "AND task LIKE ? ORDER BY timestamp DESC LIMIT ?",
+        (f"%{query}%", limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _get_history_entry(idx: int) -> _HistoryEntry | None:
     """Get a single history entry by its index (0 = most recent). Thread-safe.
 
     Args:
-        idx: Zero-based index into the history list.
+        idx: Zero-based index into the deduplicated history list.
 
     Returns:
-        The entry, or None if index is out of range.
+        The entry dict, or ``None`` if the index is out of range.
     """
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-        assert _history_cache is not None
-        if 0 <= idx < len(_history_cache):
-            return _history_cache[idx]
-    # Beyond cache — read from tail of file
-    if not HISTORY_FILE.exists():
-        return None
-    seen: set[str] = set()
-    count = 0
-    try:
-        for raw_line in _iter_lines_reverse(HISTORY_FILE):
-            entry = _parse_line(raw_line)
-            if entry is None:
-                continue
-            task_str = str(entry["task"])
-            if task_str in seen:
-                continue
-            seen.add(task_str)
-            if count == idx:
-                return entry
-            count += 1
-    except OSError:  # pragma: no cover
-        _log_exc()
-    return None
-
+    db = _get_db()
+    row = db.execute(
+        _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
+        (idx,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def _load_task_chat_events(
     task: str,
 ) -> list[dict[str, object]]:
-    """Load chat events for a specific task from its dedicated file.
+    """Load chat events for a specific task.
 
-    Looks up the ``events_file`` from the task history entry via
-    :func:`_task_events_path`.  Returns an empty list if the task is
-    not found in the history or the file does not exist.
+    Returns the events for the most recent run of *task*.
 
     Args:
         task: The task description string.
@@ -475,51 +309,21 @@ def _load_task_chat_events(
     Returns:
         List of chat event dicts, or empty list if none stored.
     """
-    path = _task_events_path(task)
-    if path.exists():
+    db = _get_db()
+    task_id = _most_recent_task_id(db, task)
+    if task_id is None:
+        return []
+    rows = db.execute(
+        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
+        (task_id,),
+    ).fetchall()
+    result: list[dict[str, object]] = []
+    for r in rows:
         try:
-            data = json.loads(path.read_text())
-            if isinstance(data, list):
-                return data
-        except (json.JSONDecodeError, OSError):
+            result.append(json.loads(r["event_json"]))
+        except (json.JSONDecodeError, TypeError):
             _log_exc()
-    return []
-
-
-def _find_cache_entry(task: str | None) -> _HistoryEntry | None:
-    """Find a cache entry by task name or return the most recent entry.
-
-    Must be called with ``_HISTORY_LOCK`` held and cache initialised.
-
-    Args:
-        task: Task name to search for, or ``None`` for the most recent.
-
-    Returns:
-        The matching entry, or ``None`` if not found / cache empty.
-    """
-    if not _history_cache:
-        return None
-    if task:
-        for entry in _history_cache:
-            if entry["task"] == task:
-                return entry
-        return None
-    return _history_cache[0]
-
-
-def _append_entry_to_file(
-    task: str, has_events: bool, result: str, events_file: str,
-) -> None:
-    """Append an entry to the JSONL history file.  Must hold ``_HISTORY_LOCK``."""
-    _ensure_kiss_dir()
-    entry_dict: _HistoryEntry = {
-        "task": task,
-        "has_events": has_events,
-        "result": result,
-        "events_file": events_file,
-    }
-    with HISTORY_FILE.open("a") as f:
-        f.write(json.dumps(entry_dict) + "\n")
+    return result
 
 
 def _set_latest_chat_events(
@@ -527,129 +331,55 @@ def _set_latest_chat_events(
     task: str | None = None,
     result: str = "",
 ) -> None:
-    """Save chat events for a task to a separate file.
+    """Save chat events for a task.
 
-    Appends an updated entry to the history file (instead of
-    rewriting) so the dedup logic picks up the new has_events flag.
+    Updates the ``has_events`` and ``result`` columns of the target
+    task_history row and replaces all rows in the events table for
+    that task.
 
     Args:
         events: The chat events to store.
         task: If given, find the history entry by task name.
-              Otherwise update history[0].
+              Otherwise update the most recent entry.
         result: The task result text to store in the history entry.
     """
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-        entry = _find_cache_entry(task)
-        if entry is None:
-            return
-        entry["has_events"] = bool(events)
-        if task and result:
-            entry["result"] = result
-        elif not task:
-            entry.pop("result", None)
-        events_file = str(entry.get("events_file", ""))
-        _append_entry_to_file(
-            str(entry["task"]), bool(events), result, events_file,
-        )
-    # Write events to separate file outside the lock using atomic replace
-    if not events_file:
+    db = _get_db()
+    task_id = _most_recent_task_id(db, task)
+    if task_id is None:
         return
-    path = _CHAT_EVENTS_DIR / events_file
-    if events:
-        try:
-            _CHAT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-            _atomic_write_json(path, events)
-        except OSError:  # pragma: no cover
-            _log_exc()
-    else:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:  # pragma: no cover
-            _log_exc()
+    has_ev = 1 if events else 0
+    with _db_lock:
+        db.execute(
+            "UPDATE task_history SET has_events = ?, result = ? WHERE id = ?",
+            (has_ev, result, task_id),
+        )
+        db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
+        if events:
+            db.executemany(
+                "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
+                [(task_id, i, json.dumps(ev)) for i, ev in enumerate(events)],
+            )
+        db.commit()
 
 
-
-def _load_json_dict(path: Path) -> dict:
-    if path.exists():
-        try:
-            data = json.loads(path.read_text())
-            if isinstance(data, dict):
-                return data
-        except (json.JSONDecodeError, OSError):
-            _log_exc()
-    return {}
-
-
-def _int_values(raw: dict) -> dict[str, int]:
-    return {
-        str(k): int(v)
-        for k, v in raw.items()
-        if isinstance(v, (int, float))
-    }
-
-
-def _load_usage(path: Path) -> dict[str, int]:
-    return _int_values(_load_json_dict(path))
-
+# ---------------------------------------------------------------------------
+# Model usage
+# ---------------------------------------------------------------------------
 
 def _load_model_usage() -> dict[str, int]:
-    return _load_usage(MODEL_USAGE_FILE)
+    """Return model usage counts as ``{model_name: count}``."""
+    db = _get_db()
+    rows = db.execute("SELECT model, count FROM model_usage").fetchall()
+    return {r["model"]: r["count"] for r in rows}
 
 
 def _load_last_model() -> str:
-    last = _load_json_dict(MODEL_USAGE_FILE).get("_last")
-    return last if isinstance(last, str) else ""
-
-
-def _atomic_write_json(path: Path, data: object) -> None:
-    """Write *data* as JSON to *path* atomically (write-tmp-then-replace)."""
-    tmp = path.with_suffix(".tmp")
-    try:
-        _ensure_kiss_dir()
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, path)
-    except OSError:  # pragma: no cover
-        _log_exc()
-        tmp.unlink(missing_ok=True)
-
-
-def _update_json_locked(path: Path, fn: Callable[[dict[str, object]], None]) -> None:
-    """Read-modify-write a JSON dict file under a cross-process file lock.
-
-    Args:
-        path: Path to the JSON file.
-        fn: Mutator that receives the loaded dict and modifies it in-place.
-    """
-    try:
-        _ensure_kiss_dir()
-        with FileLock(path.with_suffix(".lock")):
-            data = _load_json_dict(path)
-            fn(data)
-            _atomic_write_json(path, data)
-    except OSError:  # pragma: no cover
-        _log_exc()
-
-
-def _increment_usage(
-    file_path: Path,
-    key: str,
-    extra: dict[str, object] | None = None,
-) -> None:
-    """Increment a usage counter in a JSON file and optionally set extra keys.
-
-    Args:
-        file_path: Path to the JSON usage file.
-        key: The key whose integer count to increment.
-        extra: Optional extra key-value pairs to merge into the file.
-    """
-    def _update(data: dict[str, object]) -> None:
-        data[key] = int(data.get(key, 0)) + 1  # type: ignore[call-overload]
-        if extra:
-            data.update(extra)
-
-    _update_json_locked(file_path, _update)
+    """Return the name of the most recently selected model, or ``""``."""
+    db = _get_db()
+    row = db.execute(
+        "SELECT model FROM model_usage WHERE is_last = 1 LIMIT 1"
+    ).fetchone()
+    return row["model"] if row else ""
 
 
 def _save_last_model(model: str) -> None:
@@ -658,77 +388,75 @@ def _save_last_model(model: str) -> None:
     Args:
         model: The model name to save as the last-selected model.
     """
-    _update_json_locked(MODEL_USAGE_FILE, lambda d: d.update({"_last": model}))
+    db = _get_db()
+    with _db_lock:
+        db.execute(_CLEAR_LAST_MODEL)
+        db.execute(
+            "INSERT INTO model_usage (model, count, is_last) VALUES (?, 0, 1) "
+            "ON CONFLICT(model) DO UPDATE SET is_last = 1",
+            (model,),
+        )
+        db.commit()
 
 
 def _record_model_usage(model: str) -> None:
-    _increment_usage(
-        MODEL_USAGE_FILE, model, extra={"_last": model}
-    )
+    """Increment a model's usage counter and mark it as last-used."""
+    db = _get_db()
+    with _db_lock:
+        db.execute(_CLEAR_LAST_MODEL)
+        db.execute(
+            "INSERT INTO model_usage (model, count, is_last) VALUES (?, 1, 1) "
+            "ON CONFLICT(model) DO UPDATE SET count = count + 1, is_last = 1",
+            (model,),
+        )
+        db.commit()
 
 
-FILE_USAGE_FILE = _KISS_DIR / "file_usage.json"
-_MAX_FILE_USAGE_ENTRIES = 1000
-
+# ---------------------------------------------------------------------------
+# File usage
+# ---------------------------------------------------------------------------
 
 def _load_file_usage() -> dict[str, int]:
-    return _load_usage(FILE_USAGE_FILE)
+    """Return file usage counts ordered oldest-first (by last_used).
+
+    The returned dict preserves insertion order so that callers can
+    derive recency from key position.
+    """
+    db = _get_db()
+    rows = db.execute(
+        "SELECT path, count FROM file_usage ORDER BY last_used ASC"
+    ).fetchall()
+    return {r["path"]: r["count"] for r in rows}
 
 
 def _record_file_usage(path: str) -> None:
     """Increment the access count for a file path.
 
-    Moves the key to the end of the JSON dict so that insertion order
-    reflects recency (most recently used file is last).  Keeps at most
-    ``_MAX_FILE_USAGE_ENTRIES`` entries, evicting the least recently
-    used (earliest in insertion order) when the limit is exceeded.
+    Updates the ``last_used`` timestamp for recency ordering and
+    evicts the least recently used entries when the table exceeds
+    ``_MAX_FILE_USAGE_ENTRIES`` rows.
     """
-    def _update(data: dict[str, object]) -> None:
-        old_val = data.pop(path, 0)
-        data[path] = int(old_val) + 1  # type: ignore[call-overload]
-        # Evict least recently used entries (front of dict) if over limit.
-        excess = len(data) - _MAX_FILE_USAGE_ENTRIES
-        if excess > 0:
-            for key in list(data)[:excess]:
-                del data[key]
-
-    _update_json_locked(FILE_USAGE_FILE, _update)
-
-
-def _add_task(task: str) -> None:
-    """Append a task to the history file. Thread-safe.
-
-    Appends one line to the end of the file.  Duplicate entries are
-    handled during reads (the last occurrence wins).
-
-    Args:
-        task: The task description string.
-    """
-    entry: _HistoryEntry = {
-        "task": task,
-        "has_events": False,
-        "result": "",
-        "events_file": _new_events_filename(),
-    }
-
-    with _HISTORY_LOCK:
-        if _history_cache is None:
-            _refresh_cache()
-        _ensure_kiss_dir()
-        with HISTORY_FILE.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-        # Update in-memory cache (most-recent-first)
-        assert _history_cache is not None
-        _history_cache[:] = [
-            e for e in _history_cache if e["task"] != task
-        ]
-        _history_cache.insert(0, entry)
-        if len(_history_cache) > _RECENT_CACHE_SIZE:
-            _history_cache[:] = (
-                _history_cache[:_RECENT_CACHE_SIZE]
+    db = _get_db()
+    now = time.time()
+    with _db_lock:
+        db.execute(
+            "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
+            "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
+            (path, now, now),
+        )
+        row = db.execute("SELECT COUNT(*) FROM file_usage").fetchone()
+        if row[0] > _MAX_FILE_USAGE_ENTRIES:
+            db.execute(
+                "DELETE FROM file_usage WHERE path NOT IN "
+                "(SELECT path FROM file_usage ORDER BY last_used DESC LIMIT ?)",
+                (_MAX_FILE_USAGE_ENTRIES,),
             )
+        db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Stale directory cleanup (unchanged)
+# ---------------------------------------------------------------------------
 
 def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
     """Remove the sorcar data directory if stale.
@@ -747,7 +475,6 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
     """
     threshold = time.time() - max_age_hours * 3600
     removed = 0
-    # Clean up legacy per-workdir cs-* directories and cs-port-* files
     for p in sorted(_KISS_DIR.glob("cs-port-*")):
         if p.is_file():
             try:
@@ -759,7 +486,6 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
             continue
         shutil.rmtree(d, ignore_errors=True)
         removed += 1
-    # Check the sorcar-data directory
     d = _KISS_DIR / "sorcar-data"
     if not d.is_dir():
         return removed
@@ -771,7 +497,7 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
             try:
                 port = int(_pf.read_text().strip())
                 with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                    return removed  # still in use
+                    return removed
             except (ConnectionRefusedError, OSError, ValueError):
                 pass
         shutil.rmtree(d, ignore_errors=True)
