@@ -40,39 +40,46 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const SorcarPanel_1 = require("./SorcarPanel");
-let sorcarProvider;
+let primaryProvider;
+let secondaryProvider;
+function getActiveProvider() {
+    return secondaryProvider ?? primaryProvider;
+}
 function activate(context) {
     console.log('KISS Sorcar extension activating...');
-    // Create the webview provider
-    sorcarProvider = new SorcarPanel_1.SorcarViewProvider(context.extensionUri);
-    // Register the webview provider for the sidebar view
-    context.subscriptions.push(vscode.window.registerWebviewViewProvider(SorcarPanel_1.SorcarViewProvider.viewType, sorcarProvider, {
-        webviewOptions: {
-            retainContextWhenHidden: true,
-        },
-    }));
+    // Check if VS Code supports secondary sidebar (1.98+)
+    const supportsSecondarySidebar = typeof vscode.ViewColumn !== 'undefined';
+    // Create and register the primary (activitybar) webview provider
+    primaryProvider = new SorcarPanel_1.SorcarViewProvider(context.extensionUri);
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider('kissSorcar.chatView', primaryProvider, { webviewOptions: { retainContextWhenHidden: true } }));
+    // Create and register the secondary sidebar webview provider
+    secondaryProvider = new SorcarPanel_1.SorcarViewProvider(context.extensionUri);
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider('kissSorcar.chatViewSecondary', secondaryProvider, { webviewOptions: { retainContextWhenHidden: true } }));
     // Register commands
     context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.openPanel', () => {
-        // Focus on the sorcar view
-        vscode.commands.executeCommand('kissSorcar.chatView.focus');
+        // Try secondary sidebar first, then fall back to primary
+        vscode.commands.executeCommand('kissSorcar.chatViewSecondary.focus').then(undefined, () => vscode.commands.executeCommand('kissSorcar.chatView.focus'));
     }));
     context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.newConversation', () => {
-        if (sorcarProvider) {
-            sorcarProvider.newConversation();
-        }
+        getActiveProvider()?.newConversation();
     }));
     context.subscriptions.push(vscode.commands.registerCommand('kissSorcar.stopTask', () => {
-        if (sorcarProvider) {
-            sorcarProvider.stopTask();
-        }
+        getActiveProvider()?.stopTask();
     }));
+    // Auto-open the chat view on startup
+    vscode.commands.executeCommand('setContext', 'kissSorcar:doesNotSupportSecondarySidebar', !supportsSecondarySidebar).then(() => {
+        const viewId = supportsSecondarySidebar
+            ? 'kissSorcar.chatViewSecondary.focus'
+            : 'kissSorcar.chatView.focus';
+        vscode.commands.executeCommand(viewId);
+    });
     console.log('KISS Sorcar extension activated');
 }
 function deactivate() {
-    if (sorcarProvider) {
-        sorcarProvider.dispose();
-        sorcarProvider = undefined;
-    }
+    primaryProvider?.dispose();
+    primaryProvider = undefined;
+    secondaryProvider?.dispose();
+    secondaryProvider = undefined;
     console.log('KISS Sorcar extension deactivated');
 }
 //# sourceMappingURL=extension.js.map
