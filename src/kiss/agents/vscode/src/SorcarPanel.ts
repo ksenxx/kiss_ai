@@ -7,8 +7,6 @@ import { AgentProcess } from './AgentProcess';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
 export class SorcarViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'kissSorcar.chatView';
-
   private _view?: vscode.WebviewView;
   private _agentProcess: AgentProcess;
   private _extensionUri: vscode.Uri;

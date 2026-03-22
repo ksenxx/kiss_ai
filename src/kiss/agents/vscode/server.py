@@ -40,34 +40,19 @@ _FAST_MODEL = "gemini-2.0-flash"
 _OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "codex", "computer-use")
 
 
-def _model_vendor_order(name: str) -> int:
-    """Return sort order for model vendor grouping (matches web Sorcar)."""
+def _model_vendor(name: str) -> tuple[str, int]:
+    """Return (vendor_display_name, sort_order) for a model name."""
     if name.startswith("claude-"):
-        return 0
-    if name.startswith(_OPENAI_PREFIXES):
-        return 1
-    if name.startswith("gemini-"):
-        return 2
-    if name.startswith("minimax-"):
-        return 3
-    if name.startswith("openrouter/"):
-        return 4
-    return 5
-
-
-def _model_vendor_name(name: str) -> str:
-    """Return vendor display name from model name (matches web Sorcar)."""
-    if name.startswith("claude-"):
-        return "Anthropic"
+        return "Anthropic", 0
     if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
-        return "OpenAI"
+        return "OpenAI", 1
     if name.startswith("gemini-"):
-        return "Gemini"
+        return "Gemini", 2
     if name.startswith("minimax-"):
-        return "MiniMax"
+        return "MiniMax", 3
     if name.startswith("openrouter/"):
-        return "OpenRouter"
-    return "Together AI"
+        return "OpenRouter", 4
+    return "Together AI", 5
 
 
 def _clean_llm_output(text: str) -> str:
@@ -285,6 +270,12 @@ class VSCodeServer:
         if self._stop_event:
             self._stop_event.set()
 
+    def _await_user_response(self) -> None:
+        """Block until the user sends a response."""
+        if self._user_answer_event:
+            self._user_answer_event.clear()
+            self._user_answer_event.wait()
+
     def _wait_for_user(self, instruction: str, url: str) -> None:
         """Callback for browser action prompts."""
         self.printer.broadcast({
@@ -292,9 +283,7 @@ class VSCodeServer:
             "instruction": instruction,
             "url": url,
         })
-        if self._user_answer_event:
-            self._user_answer_event.clear()
-            self._user_answer_event.wait()
+        self._await_user_response()
 
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions."""
@@ -302,9 +291,7 @@ class VSCodeServer:
             "type": "askUser",
             "question": question,
         })
-        if self._user_answer_event:
-            self._user_answer_event.clear()
-            self._user_answer_event.wait()
+        self._await_user_response()
         return self._user_answer
 
     def _get_models(self) -> None:
@@ -314,19 +301,20 @@ class VSCodeServer:
         for name in get_available_models():
             info = MODEL_INFO.get(name)
             if info and info.is_function_calling_supported:
+                vendor_name, vendor_order = _model_vendor(name)
                 models_list.append({
                     "name": name,
                     "inp": info.input_price_per_1M,
                     "out": info.output_price_per_1M,
                     "uses": usage.get(name, 0),
-                    "vendor": _model_vendor_name(name),
+                    "vendor": vendor_name,
+                    "_order": vendor_order,
                 })
         models_list.sort(
-            key=lambda m: (
-                _model_vendor_order(str(m["name"])),
-                -(float(m["inp"]) + float(m["out"])),
-            )
+            key=lambda m: (m["_order"], -(float(m["inp"]) + float(m["out"])))
         )
+        for m in models_list:
+            del m["_order"]
         self.printer.broadcast({
             "type": "models",
             "models": models_list,
