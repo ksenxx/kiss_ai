@@ -173,8 +173,14 @@ class RelentlessAgent(Base):
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
-                # Non-retryable model/API errors: return immediately
-                if exc.__cause__ is not None or not isinstance(exc, KISSError):
+                # Non-retryable errors: return immediately if the error has a
+                # chained cause, isn't a KISSError, or the executor never
+                # started (no steps executed means a setup/config failure).
+                if (
+                    exc.__cause__ is not None
+                    or not isinstance(exc, KISSError)
+                    or executor.step_count == 0
+                ):
                     self.budget_used += executor.budget_used
                     self.total_tokens_used += executor.total_tokens_used
                     error_result: str = yaml.dump(
