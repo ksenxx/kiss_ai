@@ -17,6 +17,15 @@
   let scrollRaf = 0;
   let acIdx = -1;
 
+  // History cycling state
+  let histCache = [];
+  let histIdx = -1;
+  let histSaved = '';
+
+  // Ghost text state
+  let ghostTimer = null;
+  let currentGhost = '';
+
   // Elements
   const O = document.getElementById('output');
   const welcome = document.getElementById('welcome');
@@ -24,6 +33,7 @@
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
   const uploadBtn = document.getElementById('upload-btn');
+  const clearBtn = document.getElementById('clear-btn');
   const modelBtn = document.getElementById('model-btn');
   const modelDropdown = document.getElementById('model-dropdown');
   const modelSearch = document.getElementById('model-search');
@@ -43,6 +53,9 @@
   const askUserQuestion = document.getElementById('ask-user-question');
   const askUserInput = document.getElementById('ask-user-input');
   const askUserSubmit = document.getElementById('ask-user-submit');
+  const waitSpinner = document.getElementById('wait-spinner');
+  const ghostOverlay = document.getElementById('ghost-overlay');
+  const inputContainer = document.getElementById('input-container');
 
   // Streaming state (mirrors browser handleOutputEvent)
   let state = mkS();
@@ -53,6 +66,7 @@
   let pendingUserMsg = null;
   let t0 = null;
   let timerIv = null;
+  let _spinnerTimer = null;
 
   function mkS() { return { thinkEl: null, txtEl: null, bashPanel: null, bashBuf: '', bashRaf: 0 }; }
 
@@ -63,6 +77,50 @@
     lastToolName = '';
     pendingPanel = false;
     _scrollLock = false;
+  }
+
+  // --- Spinner ---
+  function removeSpinner() {
+    if (_spinnerTimer) { clearTimeout(_spinnerTimer); _spinnerTimer = null; }
+    if (waitSpinner) waitSpinner.classList.remove('active');
+  }
+  function showSpinner() {
+    removeSpinner();
+    _spinnerTimer = setTimeout(function() {
+      _spinnerTimer = null;
+      if (waitSpinner) waitSpinner.classList.add('active');
+    }, 250);
+  }
+
+  // --- Ghost text ---
+  function clearGhost() {
+    currentGhost = '';
+    if (ghostOverlay) ghostOverlay.innerHTML = '';
+    if (ghostTimer) { clearTimeout(ghostTimer); ghostTimer = null; }
+  }
+
+  function updateGhost(suggestion) {
+    currentGhost = suggestion || '';
+    if (!ghostOverlay || !currentGhost) { clearGhost(); return; }
+    var val = inp.value;
+    ghostOverlay.innerHTML = '<span style="visibility:hidden">' + esc(val) + '</span>'
+      + '<span class="ghost-text">' + esc(currentGhost) + '</span>';
+  }
+
+  function requestGhost() {
+    clearGhost();
+    if (isRunning || !inp.value.trim()) return;
+    ghostTimer = setTimeout(function() {
+      ghostTimer = null;
+      vscode.postMessage({ type: 'complete', query: inp.value });
+    }, 300);
+  }
+
+  // --- File path detection (matches web Sorcar) ---
+  function looksLikeFilePath(s) {
+    if (s.startsWith('/') || s.startsWith('./') || s.startsWith('../') || s.startsWith('~/')) return true;
+    if (!/\s/.test(s) && (s.indexOf('/') >= 0 || /\.\w{1,10}$/.test(s))) return true;
+    return false;
   }
 
   // --- Shared rendering (ported from browser EVENT_HANDLER_JS) ---
@@ -80,7 +138,6 @@
     p.querySelector('.cnt').classList.toggle('hidden');
     el.querySelector('.arrow').classList.toggle('collapsed');
   }
-  // Expose globally for onclick handlers
   window.toggleTC = toggleTC;
   window.toggleThink = toggleThink;
 
@@ -340,6 +397,20 @@
     O.appendChild(um);
   }
 
+  // --- Clear chat ---
+  function doClearChat() {
+    O.innerHTML = '';
+    resetOutputState();
+    removeSpinner();
+    if (welcome) welcome.style.display = '';
+    vscode.postMessage({ type: 'getWelcomeSuggestions' });
+  }
+
+  // --- Refresh history ---
+  function refreshHistory() {
+    vscode.postMessage({ type: 'getHistory' });
+  }
+
   // --- Main event handler ---
   function handleEvent(ev) {
     var t = ev.type;
@@ -368,14 +439,12 @@
       addError(ev.text);
       break;
     case 'test_file_picker':
-      // Inject @ into input and show file picker with test data
       inp.value = '@';
       inp.selectionStart = inp.selectionEnd = 1;
       inp.focus();
       renderAutocomplete(ev.files || []);
       break;
     case 'test_model_picker':
-      // Load test models and open the model dropdown
       allModels = ev.models || [];
       if (ev.selected) { selectedModel = ev.selected; modelName.textContent = ev.selected; }
       modelDropdown.classList.add('open');
@@ -391,6 +460,39 @@
       resetOutputState();
       showUserMsg(pendingUserMsg);
       pendingUserMsg = null;
+      showSpinner();
+      break;
+    case 'clearChat':
+      doClearChat();
+      break;
+    case 'followup_suggestion': {
+      var fu = mkEl('div', 'followup-bar');
+      fu.title = ev.text;
+      fu.innerHTML = '<span class="fu-label">Suggested next</span>'
+        + '<span class="fu-text">' + esc(ev.text) + '</span>';
+      fu.addEventListener('click', function() {
+        inp.value = ev.text;
+        inp.focus();
+      });
+      O.appendChild(fu);
+      sb();
+      break;
+    }
+    case 'tasks_updated':
+      refreshHistory();
+      vscode.postMessage({ type: 'getWelcomeSuggestions' });
+      // Refresh histCache for input cycling
+      histCache = [];
+      histIdx = -1;
+      break;
+    case 'welcome_suggestions':
+      renderWelcomeSuggestions(ev.suggestions || []);
+      break;
+    case 'task_events':
+      replayTaskEvents(ev.events || []);
+      break;
+    case 'ghost':
+      updateGhost(ev.suggestion || '');
       break;
     case 'task_done': {
       var el = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
@@ -414,6 +516,7 @@
     }
     default:
       processOutputEvent(ev);
+      if (isRunning) showSpinner();
       break;
     }
     sb();
@@ -434,6 +537,7 @@
     isRunning = false;
     statusDot.classList.remove('running');
     stopTimer();
+    removeSpinner();
     statusText.textContent = label || 'Ready';
     sendBtn.style.display = 'flex';
     stopBtn.style.display = 'none';
@@ -448,6 +552,56 @@
     sb();
   }
 
+  // --- Welcome suggestions (dynamic) ---
+  function renderWelcomeSuggestions(suggestions) {
+    var container = document.getElementById('suggestions');
+    if (!container) return;
+    if (!suggestions || suggestions.length === 0) return;
+    container.innerHTML = '';
+    suggestions.forEach(function(s) {
+      var chip = document.createElement('div');
+      chip.className = 'suggestion-chip';
+      chip.dataset.prompt = s.text;
+      if (s.has_events) chip.dataset.hasEvents = 'true';
+      var displayText = s.text.length > 80 ? s.text.substring(0, 77) + '...' : s.text;
+      chip.innerHTML = '<span class="chip-label">Recent</span>' + esc(displayText);
+      chip.addEventListener('click', function() {
+        if (s.has_events) {
+          vscode.postMessage({ type: 'resumeSession', id: s.text });
+          if (welcome) welcome.style.display = 'none';
+        } else {
+          inp.value = s.text;
+          inp.focus();
+        }
+      });
+      container.appendChild(chip);
+    });
+    // Cache task strings for history cycling
+    histCache = suggestions.map(function(s) { return s.text; });
+    histIdx = -1;
+  }
+
+  // --- Task replay ---
+  function replayTaskEvents(events) {
+    O.innerHTML = '';
+    resetOutputState();
+    if (welcome) welcome.style.display = 'none';
+    events.forEach(function(ev) {
+      var t = ev.type;
+      if (t === 'task_done' || t === 'task_error' || t === 'task_stopped'
+        || t === 'followup_suggestion') {
+        handleEvent(ev);
+        return;
+      }
+      if (t === 'user_msg') {
+        showUserMsg({ text: ev.text, images: ev.images || [] });
+        return;
+      }
+      processOutputEvent(ev);
+    });
+    sb();
+  }
+
   // --- Init and event listeners ---
 
   function init() {
@@ -458,6 +612,7 @@
   function setupEventListeners() {
     sendBtn.addEventListener('click', sendMessage);
     inp.addEventListener('keydown', function(e) {
+      // Autocomplete navigation
       if (autocomplete.style.display === 'block') {
         var items = autocomplete.querySelectorAll('.ac-item');
         if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = Math.min(acIdx + 1, items.length - 1); updateACSel(items); return; }
@@ -466,16 +621,46 @@
         if (e.key === 'Enter' && acIdx >= 0) { e.preventDefault(); items[acIdx].click(); return; }
         if (e.key === 'Escape') { hideAC(); return; }
       }
+      // Ghost text accept
+      if (e.key === 'Tab' && currentGhost) {
+        e.preventDefault();
+        inp.value += currentGhost;
+        clearGhost();
+        inp.style.height = 'auto';
+        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+        return;
+      }
+      // History cycling (ArrowUp/Down when no autocomplete)
+      if (e.key === 'ArrowUp' && autocomplete.style.display !== 'block') {
+        if (histCache.length > 0 && (inp.value === '' || histIdx >= 0)) {
+          e.preventDefault();
+          if (histIdx < 0) histSaved = inp.value;
+          histIdx = Math.min(histIdx + 1, histCache.length - 1);
+          inp.value = histCache[histIdx];
+          return;
+        }
+      }
+      if (e.key === 'ArrowDown' && histIdx >= 0) {
+        e.preventDefault();
+        histIdx--;
+        inp.value = histIdx >= 0 ? histCache[histIdx] : histSaved;
+        return;
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
       }
+      // Any other key clears ghost
+      if (e.key !== 'Tab') clearGhost();
     });
     inp.addEventListener('input', function() {
       inp.style.height = 'auto';
       inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
       checkAutocomplete();
+      requestGhost();
+      histIdx = -1;
     });
+    inp.addEventListener('blur', function() { clearGhost(); });
     stopBtn.addEventListener('click', function() {
       vscode.postMessage({ type: 'stop' });
     });
@@ -487,6 +672,11 @@
       input.onchange = handleFileSelect;
       input.click();
     });
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function() {
+        doClearChat();
+      });
+    }
     modelBtn.addEventListener('click', function(e) {
       e.stopPropagation();
       if (modelDropdown.classList.contains('open')) { closeModelDD(); return; }
@@ -519,11 +709,17 @@
     historySearch.addEventListener('input', function() {
       vscode.postMessage({ type: 'getHistory', query: historySearch.value });
     });
-    // Click handler for file paths in tool call headers (matches web Sorcar)
+    // Click handler for file paths in tool call headers — parse :line suffix
     document.addEventListener('click', function(e) {
       var el = e.target.closest('[data-path]');
       if (el && el.dataset.path) {
-        vscode.postMessage({ type: 'openFile', path: el.dataset.path });
+        var raw = el.dataset.path;
+        var match = raw.match(/^(.+):(\d+)$/);
+        if (match) {
+          vscode.postMessage({ type: 'openFile', path: match[1], line: parseInt(match[2], 10) });
+        } else {
+          vscode.postMessage({ type: 'openFile', path: raw });
+        }
       }
     });
     document.querySelectorAll('.suggestion-chip').forEach(function(chip) {
@@ -538,14 +734,82 @@
       askUserModal.style.display = 'none';
       askUserInput.value = '';
     });
+
+    // Paste images/PDFs
+    inp.addEventListener('paste', function(e) {
+      var items = (e.clipboardData || {}).items;
+      if (!items) return;
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (item.kind === 'file' && (item.type.startsWith('image/') || item.type === 'application/pdf')) {
+          e.preventDefault();
+          var file = item.getAsFile();
+          if (file) readFileAsAttachment(file);
+        }
+      }
+    });
+
+    // Drag and drop
+    if (inputContainer) {
+      inputContainer.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        inputContainer.classList.add('drag-over');
+      });
+      inputContainer.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        inputContainer.classList.remove('drag-over');
+      });
+      inputContainer.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        inputContainer.classList.remove('drag-over');
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (!files) return;
+        Array.from(files).forEach(function(file) {
+          if (file.type.startsWith('image/') || file.type === 'application/pdf') {
+            readFileAsAttachment(file);
+          }
+        });
+      });
+    }
+
     window.addEventListener('message', function(event) {
       handleEvent(event.data);
     });
   }
 
+  function readFileAsAttachment(file) {
+    var reader = new FileReader();
+    reader.onload = function(event) {
+      attachments.push({
+        name: file.name,
+        type: file.type,
+        data: event.target.result.split(',')[1]
+      });
+      renderFileChips();
+    };
+    reader.readAsDataURL(file);
+  }
+
   function sendMessage() {
     var prompt = inp.value.trim();
     if (!prompt || isRunning) return;
+
+    // File path detection: @path shortcut or bare file path
+    var fileMatch = prompt.match(/^@(\S+)$/);
+    if (fileMatch) {
+      vscode.postMessage({ type: 'openFile', path: fileMatch[1] });
+      inp.value = '';
+      return;
+    }
+    if (looksLikeFilePath(prompt)) {
+      vscode.postMessage({ type: 'openFile', path: prompt });
+      inp.value = '';
+      return;
+    }
+
     vscode.postMessage({
       type: 'submit',
       prompt: prompt,
@@ -558,6 +822,8 @@
     inp.style.height = 'auto';
     attachments = [];
     renderFileChips();
+    clearGhost();
+    histIdx = -1;
     if (welcome) welcome.style.display = 'none';
   }
 
@@ -587,18 +853,7 @@
   function handleFileSelect(e) {
     var files = e.target.files;
     if (!files || files.length === 0) return;
-    Array.from(files).forEach(function(file) {
-      var reader = new FileReader();
-      reader.onload = function(event) {
-        attachments.push({
-          name: file.name,
-          type: file.type,
-          data: event.target.result.split(',')[1]
-        });
-        renderFileChips();
-      };
-      reader.readAsDataURL(file);
-    });
+    Array.from(files).forEach(function(file) { readFileAsAttachment(file); });
   }
 
   function renderFileChips() {
@@ -685,7 +940,12 @@
       div.className = 'sidebar-item';
       div.textContent = s.title || s.preview || 'Untitled';
       div.addEventListener('click', function() {
-        vscode.postMessage({ type: 'resumeSession', id: s.id });
+        if (s.has_events) {
+          vscode.postMessage({ type: 'resumeSession', id: s.id });
+        } else {
+          inp.value = s.preview || s.title || '';
+          inp.focus();
+        }
         closeSidebar();
       });
       historyList.appendChild(div);

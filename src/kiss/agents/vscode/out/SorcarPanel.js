@@ -84,16 +84,15 @@ class SorcarViewProvider {
     async _handleMessage(message) {
         switch (message.type) {
             case 'ready':
-                // Webview is ready, send initial state
                 this.sendToWebview({ type: 'status', running: this._isRunning });
                 this._agentProcess.sendCommand({ type: 'getModels' });
+                this._agentProcess.sendCommand({ type: 'getWelcomeSuggestions' });
                 break;
             case 'submit':
                 if (this._isRunning)
                     return;
                 this._isRunning = true;
                 this.sendToWebview({ type: 'status', running: true });
-                // Get active editor file
                 const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
                 const cmd = {
                     type: 'run',
@@ -143,6 +142,18 @@ class SorcarViewProvider {
                     }
                 }
                 break;
+            case 'clearChat':
+                this.sendToWebview({ type: 'clearChat' });
+                break;
+            case 'resumeSession':
+                this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id });
+                break;
+            case 'getWelcomeSuggestions':
+                this._agentProcess.sendCommand({ type: 'getWelcomeSuggestions' });
+                break;
+            case 'complete':
+                this._agentProcess.sendCommand({ type: 'complete', query: message.query });
+                break;
         }
     }
     sendToWebview(message) {
@@ -151,9 +162,9 @@ class SorcarViewProvider {
         }
     }
     newConversation() {
-        // Clear the chat and start fresh
+        this._isRunning = false;
         this.sendToWebview({ type: 'status', running: false });
-        // Webview will handle clearing its state
+        this.sendToWebview({ type: 'clearChat' });
     }
     stopTask() {
         this._agentProcess.stop();
@@ -163,7 +174,6 @@ class SorcarViewProvider {
     }
     _getHtmlContent(webview) {
         const nonce = this._getNonce();
-        // Get resource URIs
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'main.css'));
         const hljsCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight-github-dark.min.css'));
         const hljsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.min.js'));
@@ -183,7 +193,7 @@ class SorcarViewProvider {
   <div id="app">
     <header>
       <div class="header-left">
-        <span class="logo">✱ KISS Sorcar</span>
+        <span class="logo">\u2731 KISS Sorcar</span>
         <div class="status">
           <span class="dot" id="status-dot"></span>
           <span id="status-text">Ready</span>
@@ -222,6 +232,7 @@ class SorcarViewProvider {
         <div id="file-chips"></div>
         <div id="input-wrap">
           <div id="input-text-wrap">
+            <div id="ghost-overlay"></div>
             <textarea id="task-input" placeholder="Ask anything... (@ to mention files)" rows="1"></textarea>
           </div>
         </div>
@@ -234,6 +245,9 @@ class SorcarViewProvider {
             <button id="upload-btn" title="Attach files">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
+            <button id="clear-btn" title="Clear chat">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            </button>
             <button id="history-btn" title="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
@@ -245,6 +259,7 @@ class SorcarViewProvider {
             </div>
           </div>
           <div id="input-actions">
+            <span id="wait-spinner"></span>
             <button id="send-btn" title="Send">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
