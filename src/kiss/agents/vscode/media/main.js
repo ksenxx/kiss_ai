@@ -175,9 +175,10 @@
       }
       if (ev.description) h += '<span class="td"> ' + esc(ev.description) + '</span>';
       var b = '';
-      if (ev.command) b += '<pre><code>' + esc(ev.command) + '</code></pre>';
+      if (ev.command) b += '<pre><code class="language-bash">' + esc(ev.command) + '</code></pre>';
       if (ev.content) {
-        b += '<pre><code>' + esc(ev.content) + '</code></pre>';
+        var lc = ev.lang ? 'language-' + esc(ev.lang) : '';
+        b += '<pre><code class="' + lc + '">' + esc(ev.content) + '</code></pre>';
       }
       if (ev.old_string !== undefined && ev.new_string !== undefined) {
         b += renderDiff(ev.old_string, ev.new_string);
@@ -191,6 +192,7 @@
         + '<div class="tc-b' + (b ? '' : ' hide') + '">' + body + '</div>';
       target.appendChild(c);
       if (ev.command) { var bp = mkEl('div', 'bash-panel'); target.appendChild(bp); tState.bashPanel = bp; }
+      if (typeof hljs !== 'undefined') c.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
       break;
     }
     case 'tool_result': {
@@ -229,24 +231,35 @@
       if (ev.success === false) {
         rb += '<div style="color:var(--red);font-weight:700;font-size:14px;margin-bottom:10px">Status: FAILED</div>';
       }
-      var sum = (ev.summary || ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim();
-      rb += esc(sum);
+      var usePre = true;
+      if (ev.summary) {
+        var sum = (ev.summary || '').replace(/\n{3,}/g, '\n\n').trim();
+        if (typeof marked !== 'undefined') { rb += marked.parse(sum); usePre = false; }
+        else { rb += esc(sum); }
+      } else {
+        rb += esc((ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim());
+      }
       rc.innerHTML = '<div class="rc-h"><h3>Result</h3><div class="rs">'
         + '<span>Tokens <b>' + (ev.total_tokens || 0) + '</b></span>'
         + '<span>Cost <b>' + (ev.cost || 'N/A') + '</b></span>'
-        + '</div></div><div class="rc-body pre">' + rb + '</div>';
+        + '</div></div><div class="rc-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
+      if (typeof hljs !== 'undefined') rc.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
       target.appendChild(rc); break;
     }
     case 'system_prompt': {
       var sp = mkEl('div', 'ev system-prompt');
+      var spBody = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
       sp.innerHTML = '<div class="system-prompt-h">System Prompt</div>'
-        + '<div class="system-prompt-body">' + esc(ev.text || '') + '</div>';
+        + '<div class="system-prompt-body">' + spBody + '</div>';
+      if (typeof hljs !== 'undefined') sp.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
       target.appendChild(sp); break;
     }
     case 'prompt': {
       var pr = mkEl('div', 'ev prompt');
+      var pBody = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
       pr.innerHTML = '<div class="prompt-h">Prompt</div>'
-        + '<div class="prompt-body">' + esc(ev.text || '') + '</div>';
+        + '<div class="prompt-body">' + pBody + '</div>';
+      if (typeof hljs !== 'undefined') pr.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
       target.appendChild(pr); break;
     }
     case 'usage_info': {
@@ -505,6 +518,13 @@
     sidebarOverlay.addEventListener('click', closeSidebar);
     historySearch.addEventListener('input', function() {
       vscode.postMessage({ type: 'getHistory', query: historySearch.value });
+    });
+    // Click handler for file paths in tool call headers (matches web Sorcar)
+    document.addEventListener('click', function(e) {
+      var el = e.target.closest('[data-path]');
+      if (el && el.dataset.path) {
+        vscode.postMessage({ type: 'openFile', path: el.dataset.path });
+      }
     });
     document.querySelectorAll('.suggestion-chip').forEach(function(chip) {
       chip.addEventListener('click', function() {
