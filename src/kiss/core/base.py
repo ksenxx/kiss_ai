@@ -141,6 +141,13 @@ class Base:
             Base.agent_counter += 1
         self.base_dir = ""
         self.printer: Printer | None = None
+        self.model_name = ""
+        self.messages: list[dict[str, Any]] = []
+        self.function_map: dict[str, Any] = {}
+        self.run_start_timestamp = 0
+        self.budget_used = 0.0
+        self.total_tokens_used = 0
+        self.step_count = 0
 
     def set_printer(
         self,
