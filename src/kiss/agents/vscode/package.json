@@ -29,14 +29,6 @@
       {
         "command": "kissSorcar.stopTask",
         "title": "KISS: Stop Current Task"
-      },
-      {
-        "command": "kissSorcar.testFilePicker",
-        "title": "ZZTest: KISS File Picker Test"
-      },
-      {
-        "command": "kissSorcar.testModelPicker",
-        "title": "ZZTest: KISS Model Picker Test"
       }
     ],
     "viewsContainers": {
