@@ -68,6 +68,23 @@ header {
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 
+/* ── Task Panel ──────────────────────────────────────── */
+#task-panel {
+  flex-shrink: 0;
+  max-height: calc(var(--fs-md) * 1.6 * 3 + 12px);
+  overflow-y: auto;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: var(--fs-md);
+  color: var(--dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  display: none;
+}
+#task-panel.visible { display: block; }
+
 /* ── Output Area ────────────────────────────────────── */
 #output {
   flex: 1; overflow-y: auto; overflow-x: hidden;
