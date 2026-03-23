@@ -81,15 +81,7 @@ header{
   flex:1;overflow-y:auto;overflow-x:hidden;padding:32px 24px 24px;
   scroll-behavior:smooth;min-height:0;
 }
-.ev,.txt,.spinner,.empty-msg,.user-msg{max-width:820px;margin-left:auto;margin-right:auto}
-.user-msg{
-  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
-  border-radius:14px;padding:14px 20px;margin:20px auto 16px;
-  font-size:14.5px;line-height:1.6;color:rgba(255,255,255,0.95);
-}
-.user-msg-images{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
-.user-msg-img{max-width:300px;max-height:200px;border-radius:8px;
-object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
+.ev,.txt,.spinner,.empty-msg{max-width:820px;margin-left:auto;margin-right:auto}
 .txt{
   font-size:14.5px;line-height:1.75;color:rgba(255,255,255,0.92);padding:8px 14px;
   margin:6px auto;
@@ -586,12 +578,9 @@ object-fit:contain;border:1px solid rgba(255,255,255,0.1)}
 #assistant-panel .chip-label{font-size:9px;margin-bottom:2px}
 #assistant-panel #output{padding:14px 12px 12px}
 #assistant-panel .ev,#assistant-panel .txt,#assistant-panel .spinner,
-#assistant-panel .empty-msg,#assistant-panel .user-msg,
+#assistant-panel .empty-msg,
 #assistant-panel .llm-panel,#assistant-panel .bash-panel,
 #assistant-panel .followup-bar{max-width:none}
-#assistant-panel .user-msg{
-  font-size:11px;padding:10px 14px;margin:12px 0 10px;border-radius:10px;
-}
 #assistant-panel .txt{font-size:11px;padding:4px 10px}
 #assistant-panel .tn{font-size:11px}
 #assistant-panel .tp{font-size:11px}
@@ -683,11 +672,6 @@ body{background:var(--bg)}
 #assistant-panel .status{color:rgba(var(--fg-rgb),0.65)}
 #assistant-panel .dot{background:rgba(var(--fg-rgb),0.35)}
 #assistant-panel .dot.running{background:var(--green)}
-#assistant-panel .user-msg{
-  background:rgba(var(--fg-rgb),0.04);
-  border:1px solid rgba(var(--fg-rgb),0.08);
-  color:rgba(var(--fg-rgb),0.95);
-}
 #assistant-panel .txt{color:rgba(var(--fg-rgb),0.92)}
 #assistant-panel .think{
   border:1px solid rgba(var(--purple-rgb),0.15);
@@ -976,7 +960,7 @@ var scrollRaf=0,state=mkS();
 var acIdx=-1,t0=null,timerIv=null,evtSrc=null;
 var acTimer=null,histIdx=-1,histCache=[];
 var lastToolName='',llmPanel=null,pendingPanel=false;
-var pendingUserMsg=null;
+
 var llmPanelState=mkS();
 var ghostEl=document.getElementById('ghost-overlay');
 var ghostSuggest='',ghostTimer2=null,ghostAbort=null;
@@ -1194,7 +1178,6 @@ function handleEvent(ev){
   case'external_run':
     enterRunning();
     inp.value=ev.text||'';
-    pendingUserMsg={text:ev.text,images:[]};
     pendingFiles=[];renderFileChips();
     showSpinner();loadModels();
     break;
@@ -1220,7 +1203,6 @@ function handleEvent(ev){
     break};
   case'clear':
     O.innerHTML='';resetOutputState();
-    showUserMsg(pendingUserMsg);pendingUserMsg=null;
     showSpinner();break;
   case'user_browser_action':{
     var card=mkEl('div','ev user-action-card');
@@ -1387,21 +1369,7 @@ document.addEventListener('click',function(e){
   if(!document.getElementById('model-picker').contains(e.target))closeModelDD();
   if(!ac.contains(e.target)&&e.target!==inp)hideAC();
 });
-function showUserMsg(msg){
-  if(!msg)return;
-  var um=mkEl('div','user-msg');
-  var html='';
-  if(msg.images&&msg.images.length){
-    html+='<div class="user-msg-images">';
-    msg.images.forEach(function(url){
-      html+='<img src="'+url+'" class="user-msg-img">';
-    });
-    html+='</div>';
-  }
-  html+=esc(msg.text);
-  um.innerHTML=html;
-  O.appendChild(um);
-}
+
 function looksLikeFilePath(s){
   if(s.startsWith('/')||s.startsWith('./')||s.startsWith('../')||s.startsWith('~/'))return true;
   if(!/\s/.test(s)&&(s.indexOf('/')>=0||/\.\w{1,10}$/.test(s)))return true;
@@ -1409,9 +1377,6 @@ function looksLikeFilePath(s){
 }
 function doSubmitTask(task){
   enterRunning();
-  pendingUserMsg={text:task,images:pendingFiles.filter(function(f){
-    return f.mime_type.startsWith('image/');
-  }).map(function(f){return f.url})};
   var payload={task:task,model:selectedModel};
   if(pendingFiles.length>0){
     payload.attachments=pendingFiles.map(function(f){return{mime_type:f.mime_type,data:f.data}});
@@ -1742,7 +1707,6 @@ function replayTaskEvents(idx,txt){
   if(sidebar.classList.contains('open')){toggleSidebar();}
   O.innerHTML='';resetOutputState();
   suggestionsEl=null;
-  showUserMsg({text:txt,images:[]});
   fetch('/task-events?idx='+idx).then(function(r){return r.json()})
   .then(function(events){
     if(!Array.isArray(events))return;

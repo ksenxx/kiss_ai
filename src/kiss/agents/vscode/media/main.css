@@ -97,18 +97,6 @@ header {
 .ev { margin-bottom: 6px; animation: fadeIn .15s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
-/* User message */
-.user-msg {
-  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 10px; padding: 10px 14px; margin: 12px 0 10px;
-  font-size: var(--fs-base); line-height: 1.6; color: rgba(255,255,255,0.95);
-}
-.user-msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
-.user-msg-img {
-  max-width: 200px; max-height: 150px; border-radius: 6px;
-  object-fit: contain; border: 1px solid rgba(255,255,255,0.1);
-}
-
 /* Thinking blocks */
 .think {
   padding: 8px 12px; margin: 8px 0;

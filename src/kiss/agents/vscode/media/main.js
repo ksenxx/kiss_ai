@@ -72,7 +72,7 @@
   let llmPanel = null;
   let llmPanelState = mkS();
   let pendingPanel = false;
-  let pendingUserMsg = null;
+
   let t0 = null;
   let timerIv = null;
   let _spinnerTimer = null;
@@ -437,20 +437,7 @@
   }
   function stopTimer() { if (timerIv) { clearInterval(timerIv); timerIv = null; } }
 
-  // --- User message ---
-  function showUserMsg(msg) {
-    if (!msg) return;
-    var um = mkEl('div', 'user-msg');
-    var html = '';
-    if (msg.images && msg.images.length) {
-      html += '<div class="user-msg-images">';
-      msg.images.forEach(function(url) { html += '<img src="' + url + '" class="user-msg-img">'; });
-      html += '</div>';
-    }
-    html += esc(msg.text);
-    um.innerHTML = html;
-    O.appendChild(um);
-  }
+
 
   // --- Clear chat ---
   function doClearChat() {
@@ -511,14 +498,9 @@
       renderModelList('');
       modelSearch.focus();
       break;
-    case 'user_msg':
-      pendingUserMsg = { text: ev.text, images: ev.images || [] };
-      break;
     case 'clear':
       clearOutput();
       resetOutputState();
-      showUserMsg(pendingUserMsg);
-      pendingUserMsg = null;
       showSpinner();
       break;
     case 'clearChat':
@@ -691,10 +673,6 @@
       if (t === 'task_done' || t === 'task_error' || t === 'task_stopped'
         || t === 'followup_suggestion') {
         handleEvent(ev);
-        return;
-      }
-      if (t === 'user_msg') {
-        showUserMsg({ text: ev.text, images: ev.images || [] });
         return;
       }
       processOutputEvent(ev);

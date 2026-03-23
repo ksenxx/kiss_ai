@@ -95,11 +95,6 @@ class TestChatbotExternalRunHandler:
         er_block = CHATBOT_JS[er_idx:er_idx + 300]
         assert "btn.style.display='none'" in er_block
 
-    def test_external_run_sets_pending_user_msg(self) -> None:
-        idx = CHATBOT_JS.index("case'external_run':")
-        block = CHATBOT_JS[idx:idx + 500]
-        assert "pendingUserMsg={text:ev.text,images:[]}" in block
-
     def test_external_run_preserves_task_text(self) -> None:
         idx = CHATBOT_JS.index("case'external_run':")
         block = CHATBOT_JS[idx:idx + 500]
