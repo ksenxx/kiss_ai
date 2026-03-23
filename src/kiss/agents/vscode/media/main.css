@@ -451,13 +451,16 @@ header {
 }
 #upload-btn:hover { color: rgba(255,255,255,0.65); border-color: rgba(255,255,255,0.16); background: rgba(255,255,255,0.05); }
 #upload-btn svg { width: 11px; height: 11px; }
-#history-btn {
+#history-btn, #run-prompt-btn {
   background: none; border: none;
   color: rgba(255,255,255,0.3); cursor: pointer;
-  padding: 4px; transition: color 0.15s;
+  padding: 4px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center;
 }
 #history-btn:hover { color: rgba(255,255,255,0.6); }
+#run-prompt-btn:not(:disabled) { color: rgba(34,197,94,0.7); }
+#run-prompt-btn:not(:disabled):hover { color: rgba(34,197,94,0.9); }
+#run-prompt-btn:disabled { opacity: 0.15; cursor: not-allowed; }
 #model-dropdown {
   position: absolute; bottom: 100%; left: 0; min-width: 280px; max-width: 380px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;

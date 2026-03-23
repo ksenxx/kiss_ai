@@ -16,6 +16,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   private _mergeManager: MergeManager;
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
+  private _activeEditorDisposable?: vscode.Disposable;
 
   constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
@@ -31,6 +32,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       this._agentProcess.sendCommand({ type: 'mergeAction', action: 'accept' });
     });
 
+    // Track active editor changes to update run-prompt button
+    this._activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
+      this._sendActiveFileInfo();
+    });
+
     // Listen for agent events
     this._agentProcess.on('message', (msg: ToWebviewMessage) => {
       if (msg.type === 'merge_data') {
@@ -44,6 +50,9 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       this.sendToWebview(msg);
       if (msg.type === 'status') {
         this._isRunning = msg.running;
+        if (!msg.running) {
+          this._sendActiveFileInfo();
+        }
       }
     });
   }
@@ -89,12 +98,25 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     return process.cwd();
   }
 
+  private _sendActiveFileInfo(): void {
+    const editor = vscode.window.activeTextEditor;
+    const fpath = editor?.document.uri.fsPath || '';
+    const isPrompt = !!fpath && fpath.toLowerCase().endsWith('.md');
+    this.sendToWebview({
+      type: 'activeFileInfo',
+      isPrompt,
+      filename: isPrompt ? fpath.split('/').pop() || '' : '',
+      path: fpath,
+    } as ToWebviewMessage);
+  }
+
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
         this.sendToWebview({ type: 'status', running: this._isRunning });
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._agentProcess.sendCommand({ type: 'getWelcomeSuggestions' });
+        this._sendActiveFileInfo();
         break;
 
       case 'submit':
@@ -120,6 +142,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'selectModel':
+        this._selectedModel = message.model;
         this._agentProcess.sendCommand({ type: 'selectModel', model: message.model });
         break;
 
@@ -186,6 +209,25 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this.generateCommitMessage();
         break;
 
+      case 'runPrompt': {
+        if (this._isRunning) return;
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || !editor.document.uri.fsPath.toLowerCase().endsWith('.md')) return;
+        const content = editor.document.getText();
+        if (!content.trim()) return;
+        this._isRunning = true;
+        this.sendToWebview({ type: 'status', running: true });
+        const promptCmd: AgentCommand = {
+          type: 'run',
+          prompt: content,
+          model: this._selectedModel,
+          workDir: this._getWorkDir(),
+          activeFile: editor.document.uri.fsPath,
+        };
+        this._agentProcess.sendCommand(promptCmd);
+        break;
+      }
+
       case 'mergeAction': {
         const action = message.action;
         if (action === 'accept') {
@@ -231,6 +273,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this._activeEditorDisposable?.dispose();
     this._agentProcess.dispose();
     this._mergeManager.dispose();
     this._onCommitMessage.dispose();
@@ -310,6 +353,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
             <button id="history-btn" data-tooltip="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </button>
+            <button id="run-prompt-btn" data-tooltip="Run current file as prompt" disabled>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                <polygon points="5,3 19,12 5,21"/>
               </svg>
             </button>
             <div id="model-dropdown">

@@ -44,6 +44,7 @@
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
   const historyBtn = document.getElementById('history-btn');
+  const runPromptBtn = document.getElementById('run-prompt-btn');
   const sidebar = document.getElementById('sidebar');
   const sidebarOverlay = document.getElementById('sidebar-overlay');
   const sidebarClose = document.getElementById('sidebar-close');
@@ -543,6 +544,19 @@
       }
       updateGhost(ev.suggestion || '');
       break;
+    case 'activeFileInfo':
+      if (runPromptBtn) {
+        if (!isRunning && ev.isPrompt) {
+          runPromptBtn.disabled = false;
+          runPromptBtn.dataset.tooltip = 'Run prompt: ' + ev.filename;
+        } else {
+          runPromptBtn.disabled = true;
+          runPromptBtn.dataset.tooltip = ev.isPrompt
+            ? 'Run current file as prompt'
+            : 'Run current file as prompt (no prompt detected)';
+        }
+      }
+      break;
     case 'merge_data': {
       var mc = mkEl('div', 'ev merge-info');
       mc.innerHTML = '<div style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">'
@@ -598,6 +612,7 @@
     stopBtn.style.display = running ? 'flex' : 'none';
     sendBtn.disabled = running || isMerging;
     statusDot.classList.toggle('running', running);
+    if (runPromptBtn && running) runPromptBtn.disabled = true;
     updateInputDisabled();
     if (running) {
       startTimer();
@@ -814,6 +829,12 @@
         hideAC();
       }
     });
+    if (runPromptBtn) {
+      runPromptBtn.addEventListener('click', function() {
+        if (runPromptBtn.disabled || isRunning) return;
+        vscode.postMessage({ type: 'runPrompt' });
+      });
+    }
     historyBtn.addEventListener('click', function() {
       sidebar.classList.add('open');
       sidebarOverlay.classList.add('open');

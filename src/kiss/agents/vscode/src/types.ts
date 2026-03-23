@@ -37,7 +37,8 @@ export type FromWebviewMessage =
   | { type: 'complete'; query: string }
   | { type: 'mergeAction'; action: string }
   | { type: 'newChat' }
-  | { type: 'generateCommitMessage' };
+  | { type: 'generateCommitMessage' }
+  | { type: 'runPrompt' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -77,7 +78,8 @@ export type ToWebviewMessage =
   | { type: 'merge_data'; data: any; hunk_count: number }
   | { type: 'merge_started' }
   | { type: 'merge_ended' }
-  | { type: 'commitMessage'; message: string; error?: string };
+  | { type: 'commitMessage'; message: string; error?: string }
+  | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
