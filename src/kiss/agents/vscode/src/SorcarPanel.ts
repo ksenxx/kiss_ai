@@ -3,6 +3,8 @@
  */
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { AgentProcess } from './AgentProcess';
 import { MergeManager } from './MergeManager';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
@@ -119,8 +121,25 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._sendActiveFileInfo();
         break;
 
-      case 'submit':
+      case 'submit': {
         if (this._isRunning) return;
+
+        // If the prompt is just a file path that exists, open it in the editor
+        const trimmed = message.prompt.trim();
+        if (trimmed && !trimmed.includes('\n')) {
+          const resolved = trimmed.startsWith('~')
+            ? path.join(process.env.HOME || '', trimmed.slice(1))
+            : path.isAbsolute(trimmed)
+              ? trimmed
+              : path.join(this._getWorkDir(), trimmed);
+          if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+            const uri = vscode.Uri.file(resolved);
+            const doc = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(doc);
+            return;
+          }
+        }
+
         this._isRunning = true;
         this.sendToWebview({ type: 'status', running: true });
 
@@ -136,6 +155,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         };
         this._agentProcess.sendCommand(cmd);
         break;
+      }
 
       case 'stop':
         this._agentProcess.stop();
@@ -336,6 +356,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" placeholder="Ask anything... (@ to mention files)" rows="1"></textarea>
+            <button id="input-clear-btn" data-tooltip="Clear input" style="display:none;">&times;</button>
           </div>
         </div>
         <div id="input-footer">
