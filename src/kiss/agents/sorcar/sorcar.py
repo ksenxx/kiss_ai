@@ -968,62 +968,7 @@ def run_chatbot(
             return JSONResponse({"suggestion": ""})
 
         fast = clip_autocomplete_suggestion(query, _fast_complete(raw_query, query))
-        if fast:
-            return JSONResponse({"suggestion": fast})
-
-        def _generate() -> str:
-            history = _load_history(limit=20)
-            task_list = "\n".join(f"- {e['task']}" for e in history)
-            files_list = "\n".join(file_cache[:200])
-            active_path = _read_active_file(sorcar_data_dir)
-            active_content = ""
-            if active_path:
-                try:
-                    with open(active_path) as f:
-                        active_content = f.read(10000)
-                except OSError:
-                    pass
-            context_parts = [
-                "Past tasks:\n{task_list}",
-                "Files and folders:\n{files_list}",
-            ]
-            if active_content:
-                context_parts.append(
-                    "Active file ({active_path}):\n{active_content}"
-                )
-            agent = KISSAgent("Autocomplete")
-            try:
-                result = agent.run(
-                    model_name=FAST_MODEL,
-                    prompt_template=(
-                        "You are an inline autocomplete engine for a coding assistant. "
-                        "Given the user's partial input, their past task history, "
-                        "the list of files/folders in the project, and the content of "
-                        "the currently open file in the editor, "
-                        "predict the rest of the text the user is likely typing. "
-                        "Return ONLY the remaining text to insert, never repeating what the "
-                        "user already typed. Keep it concise but complete the thought. "
-                        "Return on a single line with no newline. If confidence is not high, "
-                        "return empty string.\n\n"
-                        + "\n\n".join(context_parts)
-                        + '\n\nPartial input: "{query}"\n\n'
-                    ),
-                    arguments={
-                        "task_list": task_list,
-                        "files_list": files_list,
-                        "active_path": active_path,
-                        "active_content": active_content,
-                        "query": query,
-                    },
-                    is_agentic=False,
-                )
-                return clip_autocomplete_suggestion(query, result)
-            except Exception:  # pragma: no cover – LLM API failure
-                _log_exc()
-                return ""
-
-        suggestion = await asyncio.to_thread(_generate)  # pragma: no branch
-        return JSONResponse({"suggestion": suggestion})
+        return JSONResponse({"suggestion": fast})
 
     async def models_endpoint(request: Request) -> JSONResponse:
         usage = _load_model_usage()

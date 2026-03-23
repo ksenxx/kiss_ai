@@ -456,70 +456,17 @@ class VSCodeServer:
         return ""
 
     def _complete(self, query: str) -> None:
-        """Ghost text autocomplete: generate a short continuation via LLM."""
+        """Ghost text autocomplete via fast local prefix matching."""
         raw_query = query
         query = query.strip()
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": ""})
             return
 
-        try:
-            # Fast local matching first (no LLM call)
-            fast = clip_autocomplete_suggestion(
-                query, self._fast_complete(raw_query, query)
-            )
-            if fast:
-                self.printer.broadcast({"type": "ghost", "suggestion": fast})
-                return
-
-            entries = _load_history(limit=20)
-            task_list = "\n".join(f"- {e.get('task', '')}" for e in entries)
-            files_list = "\n".join(self._file_cache[:200]) if self._file_cache else ""
-
-            # Read active editor file content
-            active_path = self._last_active_file
-            active_content = ""
-            if active_path:
-                try:
-                    with open(active_path) as f:
-                        active_content = f.read(10000)
-                except OSError:
-                    pass
-
-            context_parts = ["Past tasks:\n{task_list}", "Files and folders:\n{files_list}"]
-            if active_content:
-                context_parts.append("Active file ({active_path}):\n{active_content}")
-
-            agent = KISSAgent("Autocomplete")
-            raw = agent.run(
-                model_name=FAST_MODEL,
-                prompt_template=(
-                    "You are an inline autocomplete engine for a coding assistant. "
-                    "Given the user's partial input, their past task history, "
-                    "the list of files/folders in the project, and the content of "
-                    "the currently open file in the editor, "
-                    "predict the rest of the text the user is likely typing. "
-                    "Return ONLY the remaining text to insert, never repeating what the "
-                    "user already typed. Keep it concise but complete the thought. "
-                    "Return on a single line with no newline. If confidence is not high, "
-                    "return empty string.\n\n"
-                    + "\n\n".join(context_parts)
-                    + '\n\nPartial input: "{query}"\n\n'
-                ),
-                arguments={
-                    "task_list": task_list,
-                    "files_list": files_list,
-                    "active_path": active_path,
-                    "active_content": active_content,
-                    "query": query,
-                },
-                is_agentic=False,
-            )
-            suggestion = clip_autocomplete_suggestion(query, raw)
-            self.printer.broadcast({"type": "ghost", "suggestion": suggestion})
-        except Exception:
-            logger.debug("Autocomplete failed", exc_info=True)
-            self.printer.broadcast({"type": "ghost", "suggestion": ""})
+        fast = clip_autocomplete_suggestion(
+            query, self._fast_complete(raw_query, query)
+        )
+        self.printer.broadcast({"type": "ghost", "suggestion": fast})
 
     def _refresh_file_cache(self) -> None:
         """Refresh the file cache from disk."""
