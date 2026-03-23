@@ -84,6 +84,21 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.runSelection', () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      const sel = editor.document.getText(editor.selection);
+      if (!sel || !sel.trim()) {
+        vscode.window.showInformationMessage('No text selected');
+        return;
+      }
+      const provider = getActiveProvider();
+      if (!provider) return;
+      provider.submitTask(sel.trim());
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.stopTask', () => {
       getActiveProvider()?.stopTask();
     })
