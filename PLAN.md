@@ -4,7 +4,7 @@
 
 The web-based Sorcar uses `gemini-2.0-flash` (constant `FAST_MODEL` in `shared_utils.py`) as a lightweight, fast LLM for three auxiliary features that augment the main agent (which uses Claude or another expensive model for the core task). The VS Code extension already has **partial** implementations of these features but with key gaps. This plan details exactly what exists, what's missing, and how to bring the VS Code extension to parity.
 
----
+______________________________________________________________________
 
 ## How Gemini Flash 2.0 Is Used in Web Sorcar
 
@@ -13,18 +13,20 @@ All three features use `KISSAgent` with `is_agentic=False` (single prompt→resp
 ### Feature 1: Ghost Text Autocomplete (`/complete` endpoint)
 
 **Web flow:**
+
 1. User types in the chat input box. After 200ms debounce, JS calls `GET /complete?q=<partial>`.
-2. Server first tries **fast local matching** (`_fast_complete`):
+1. Server first tries **fast local matching** (`_fast_complete`):
    - Prefix-matches against recent task history strings.
    - Prefix-matches the last word against file paths in `file_cache`.
    - If found, clips it via `clip_autocomplete_suggestion()` and returns immediately (no LLM call).
-3. If no fast match, server calls **Gemini Flash 2.0** via `KISSAgent.run()`:
+1. If no fast match, server calls **Gemini Flash 2.0** via `KISSAgent.run()`:
    - System prompt: "You are an inline autocomplete engine..."
    - Context injected: past 20 tasks, up to 200 files, **active editor file content** (up to 10KB), and the partial query.
    - Result clipped by `clip_autocomplete_suggestion()` (max 4 words, stops at boundaries, suppresses low-confidence completions).
-4. Suggestion returned as `{"suggestion": "..."}`, displayed as ghost text in the input overlay.
+1. Suggestion returned as `{"suggestion": "..."}`, displayed as ghost text in the input overlay.
 
 **VS Code extension current state:**
+
 - `server.py` `_complete()` method exists and calls `KISSAgent` with `FAST_MODEL` ✅
 - But it does **NOT** have the fast local matching (`_fast_complete`) step ❌
 - It does **NOT** include the active editor file content in the context ❌
@@ -35,13 +37,15 @@ All three features use `KISSAgent` with `is_agentic=False` (single prompt→resp
 ### Feature 2: Follow-up Task Suggestion (`generate_followup_text`)
 
 **Web flow:**
+
 1. After `task_done`, server calls `generate_followup_text(task, result)` in a background thread.
-2. This function creates a `KISSAgent` with `FAST_MODEL` and prompts:
+1. This function creates a `KISSAgent` with `FAST_MODEL` and prompts:
    "A developer just completed this task: {task}. Result summary: {result}. Suggest ONE short follow-up task."
-3. Result is broadcast as `{"type": "followup_suggestion", "text": "..."}`.
-4. JS renders a clickable "Suggested next" bar that pre-fills the input.
+1. Result is broadcast as `{"type": "followup_suggestion", "text": "..."}`.
+1. JS renders a clickable "Suggested next" bar that pre-fills the input.
 
 **VS Code extension current state:**
+
 - `server.py` `_generate_followup()` calls `generate_followup_text()` from `shared_utils.py` in a background thread ✅
 - `main.js` handles `followup_suggestion` event and renders the bar ✅
 - `result` passed to `_generate_followup()` is just `prompt[:200]` instead of the actual agent result/summary ❌ (web passes the full result YAML summary)
@@ -49,16 +53,18 @@ All three features use `KISSAgent` with `is_agentic=False` (single prompt→resp
 ### Feature 3: Git Commit Message Generation (`_generate_commit_msg`)
 
 **Web flow:**
+
 1. `POST /commit` or `POST /generate-commit-message` calls `_generate_commit_msg(diff_text)`.
-2. Uses `KISSAgent` with `FAST_MODEL` to generate conventional commit messages from git diffs.
-3. For the SCM integration, the message is written to `pending-scm-message.json` for the VS Code extension to pick up.
+1. Uses `KISSAgent` with `FAST_MODEL` to generate conventional commit messages from git diffs.
+1. For the SCM integration, the message is written to `pending-scm-message.json` for the VS Code extension to pick up.
 
 **VS Code extension current state:**
+
 - The VS Code extension does **NOT** have commit message generation ❌
 - No `/commit` or `/generate-commit-message` equivalent commands ❌
 - The `server.py` has no integration with VS Code's SCM panel ❌
 
----
+______________________________________________________________________
 
 ## Implementation Plan
 
@@ -67,6 +73,7 @@ All three features use `KISSAgent` with `is_agentic=False` (single prompt→resp
 **File: `src/kiss/agents/vscode/server.py`**
 
 1. **Add `_fast_complete()` method** to `VSCodeServer`:
+
    ```python
    def _fast_complete(self, raw_query: str, query: str) -> str:
        """Local prefix matching against history and file paths."""
@@ -85,37 +92,43 @@ All three features use `KISSAgent` with `is_agentic=False` (single prompt→resp
        return ""
    ```
 
-2. **Update `_complete()` to use fast path first**, and enrich context:
+1. **Update `_complete()` to use fast path first**, and enrich context:
+
    - Call `_fast_complete()` first; if it produces a non-empty clipped suggestion, return immediately without calling the LLM.
    - Read the active editor file content from the command's `activeFile` (store `self._last_active_file` when a `run` command arrives).
    - Increase file list from 50 to 200.
    - Remove the 1000-char truncation on task_list (or make it 4000+ like web).
    - Add active file content to the prompt context (matching web's prompt exactly).
 
-3. **Store last active file path** — update `_run_task` to store `self._last_active_file = cmd.get("activeFile", "")`.
+1. **Store last active file path** — update `_run_task` to store `self._last_active_file = cmd.get("activeFile", "")`.
 
 **File: `src/kiss/agents/vscode/media/main.js`**
 
 4. **Add client-side ghost cache** to avoid redundant LLM calls:
+
    ```javascript
    var ghostCache = { q: '', s: '' };
    ```
-   In `requestGhost()`, before sending the `complete` message:
-   - Check if current input starts with `ghostCache.q` and `ghostCache.s` starts with the extra chars typed. If so, update ghost from cache without an LLM call.
-   In the `ghost` event handler, save `ghostCache = { q: inp.value, s: suggestion }`.
 
-5. **Don't request ghost when cursor isn't at end** — match web behavior:
+   In `requestGhost()`, before sending the `complete` message:
+
+   - Check if current input starts with `ghostCache.q` and `ghostCache.s` starts with the extra chars typed. If so, update ghost from cache without an LLM call.
+     In the `ghost` event handler, save `ghostCache = { q: inp.value, s: suggestion }`.
+
+1. **Don't request ghost when cursor isn't at end** — match web behavior:
+
    ```javascript
    if (inp.selectionStart < inp.value.length) { clearGhost(); return; }
    ```
 
-6. **Minimum query length check** — skip if less than 2 non-whitespace characters (matching web).
+1. **Minimum query length check** — skip if less than 2 non-whitespace characters (matching web).
 
 ### Phase 2: Fix Follow-up Suggestion Quality
 
 **File: `src/kiss/agents/vscode/server.py`**
 
 1. **Capture actual result summary from agent run** instead of using `prompt[:200]`:
+
    ```python
    # In _run_task, after agent.run() completes:
    import yaml
@@ -129,21 +142,24 @@ All three features use `KISSAgent` with `is_agentic=False` (single prompt→resp
    except Exception:
        result_summary = str(result)[:500]
    ```
+
    Pass this proper `result_summary` to `_generate_followup(prompt, result_summary)`.
 
-2. The `_generate_followup` method is already correct — it spawns a background thread and calls `generate_followup_text()` from `shared_utils.py` which uses `FAST_MODEL`.
+1. The `_generate_followup` method is already correct — it spawns a background thread and calls `generate_followup_text()` from `shared_utils.py` which uses `FAST_MODEL`.
 
 ### Phase 3: Add Git Commit Message Generation
 
 **File: `src/kiss/agents/vscode/server.py`**
 
 1. **Add `generateCommitMessage` command handler**:
+
    ```python
    elif cmd_type == "generateCommitMessage":
        threading.Thread(target=self._generate_commit_message, daemon=True).start()
    ```
 
-2. **Add `_generate_commit_message()` method**:
+1. **Add `_generate_commit_message()` method**:
+
    ```python
    def _generate_commit_message(self) -> None:
        from kiss.agents.sorcar.code_server import _capture_untracked, _git
@@ -207,11 +223,11 @@ All three features use `KISSAgent` with `is_agentic=False` (single prompt→resp
 ### Phase 4: Testing
 
 1. **Unit test `_fast_complete`** — verify prefix matching against history and file paths.
-2. **Unit test the enriched `_complete` method** — verify it returns fast path results and falls back to LLM.
-3. **Integration test follow-up** — verify actual result summary (not truncated prompt) is passed.
-4. **Integration test commit message** — verify `_generate_commit_message` produces output from diffs.
+1. **Unit test the enriched `_complete` method** — verify it returns fast path results and falls back to LLM.
+1. **Integration test follow-up** — verify actual result summary (not truncated prompt) is passed.
+1. **Integration test commit message** — verify `_generate_commit_message` produces output from diffs.
 
----
+______________________________________________________________________
 
 ## Summary of Changes by File
 

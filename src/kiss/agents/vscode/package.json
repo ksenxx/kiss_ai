@@ -66,6 +66,10 @@
       {
         "command": "kissSorcar.focusEditor",
         "title": "KISS: Focus Editor"
+      },
+      {
+        "command": "kissSorcar.runSelection",
+        "title": "KISS: Run Selection in Chat"
       }
     ],
     "menus": {
@@ -124,6 +128,11 @@
         "command": "kissSorcar.toggleFocus",
         "key": "cmd+d",
         "mac": "cmd+d"
+      },
+      {
+        "command": "kissSorcar.runSelection",
+        "key": "cmd+l",
+        "mac": "cmd+l"
       }
     ],
     "configuration": {
