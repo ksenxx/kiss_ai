@@ -17,44 +17,18 @@ def clean_llm_output(text: str) -> str:
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
-    """Return only a short, confident autocomplete continuation.
+    """Return the autocomplete continuation, stripped of the query prefix.
 
-    Keeps at most a few words, stops at strong sentence boundaries, and
-    suppresses low-confidence continuations that look too long or too weak.
+    Removes the query prefix if the LLM echoed it, strips surrounding
+    whitespace, and stops at newlines.
     """
     s = clean_llm_output(suggestion)
     if not s:
         return ""
     if s.lower().startswith(query.lower()):
-        s = s[len(query):]
-    s = s.lstrip()
-    if not s:
-        return ""
-    words: list[str] = []
-    hit_boundary = False
-    for token in s.split():
-        if any(mark in token for mark in ("\n", ":", ";", "!", "?")):
-            hit_boundary = True
-            break
-        if token.endswith((".", ",")):
-            clean = token.rstrip(".,")
-            if clean:
-                words.append(clean)
-            hit_boundary = True
-            break
-        words.append(token)
-        if len(words) >= 4:
-            break
-    clipped = " ".join(words).strip()
-    if len(words) < 1:
-        return ""
-    if hit_boundary:
-        return ""
-    if not clipped or len(clipped) > 40:
-        return ""
-    if s and len(s) > len(clipped) + 20:
-        return ""
-    return clipped
+        s = s[len(query) :]
+    s = s.split("\n")[0].strip()
+    return s
 
 
 def model_vendor(name: str) -> tuple[str, int]:

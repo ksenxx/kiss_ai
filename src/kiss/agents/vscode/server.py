@@ -502,10 +502,10 @@ class VSCodeServer:
                     "Given the user's partial input, their past task history, "
                     "the list of files/folders in the project, and the content of "
                     "the currently open file in the editor, "
-                    "predict only the next few words you are highly confident about. "
+                    "predict the rest of the text the user is likely typing. "
                     "Return ONLY the remaining text to insert, never repeating what the "
-                    "user already typed. Never complete a full sentence or paragraph. "
-                    "Return at most 4 words, with no newline. If confidence is not high, "
+                    "user already typed. Keep it concise but complete the thought. "
+                    "Return on a single line with no newline. If confidence is not high, "
                     "return empty string.\n\n"
                     + "\n\n".join(context_parts)
                     + '\n\nPartial input: "{query}"\n\n'

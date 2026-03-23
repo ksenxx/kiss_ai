@@ -181,6 +181,10 @@ def _get_db() -> sqlite3.Connection:
         if _db_conn is not None:
             return _db_conn
         _ensure_kiss_dir()
+        if not _DB_PATH.exists():
+            for suffix in ("-wal", "-shm"):
+                stale = _DB_PATH.with_name(_DB_PATH.name + suffix)
+                stale.unlink(missing_ok=True)
         conn = sqlite3.connect(
             str(_DB_PATH), check_same_thread=False, timeout=10,
         )

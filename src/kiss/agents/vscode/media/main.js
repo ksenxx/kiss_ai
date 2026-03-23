@@ -59,6 +59,9 @@
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
+  function syncClearBtn() {
+    if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
+  }
 
   // Merge state
   let isMerging = false;
@@ -495,7 +498,7 @@
       addError(ev.text);
       break;
     case 'test_file_picker':
-      inp.value = '@';
+      inp.value = '@'; syncClearBtn();
       inp.selectionStart = inp.selectionEnd = 1;
       inp.focus();
       renderAutocomplete(ev.files || []);
@@ -527,7 +530,7 @@
       fu.innerHTML = '<span class="fu-label">Suggested next</span>'
         + '<span class="fu-text">' + esc(ev.text) + '</span>';
       fu.addEventListener('click', function() {
-        inp.value = ev.text;
+        inp.value = ev.text; syncClearBtn();
         inp.focus();
       });
       O.appendChild(fu);
@@ -579,6 +582,7 @@
       isMerging = true;
       showMergeToolbar();
       updateInputDisabled();
+      sb();
       break;
     case 'merge_ended':
       isMerging = false;
@@ -662,7 +666,7 @@
           vscode.postMessage({ type: 'resumeSession', id: s.text });
           if (welcome) welcome.style.display = 'none';
         } else {
-          inp.value = s.text;
+          inp.value = s.text; syncClearBtn();
           inp.focus();
         }
       });
@@ -774,14 +778,14 @@
           e.preventDefault();
           if (histIdx < 0) histSaved = inp.value;
           histIdx = Math.min(histIdx + 1, histCache.length - 1);
-          inp.value = histCache[histIdx];
+          inp.value = histCache[histIdx]; syncClearBtn();
           return;
         }
       }
       if (e.key === 'ArrowDown' && histIdx >= 0) {
         e.preventDefault();
         histIdx--;
-        inp.value = histIdx >= 0 ? histCache[histIdx] : histSaved;
+        inp.value = histIdx >= 0 ? histCache[histIdx] : histSaved; syncClearBtn();
         return;
       }
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -797,7 +801,7 @@
       checkAutocomplete();
       requestGhost();
       histIdx = -1;
-      if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
+      syncClearBtn();
     });
     inp.addEventListener('blur', function() { clearGhost(); });
     stopBtn.addEventListener('click', function() {
@@ -952,12 +956,12 @@
     var fileMatch = prompt.match(/^@(\S+)$/);
     if (fileMatch) {
       vscode.postMessage({ type: 'openFile', path: fileMatch[1] });
-      inp.value = '';
+      inp.value = ''; syncClearBtn();
       return;
     }
     if (looksLikeFilePath(prompt)) {
       vscode.postMessage({ type: 'openFile', path: prompt });
-      inp.value = '';
+      inp.value = ''; syncClearBtn();
       return;
     }
 
@@ -1097,7 +1101,7 @@
         if (s.has_events) {
           vscode.postMessage({ type: 'resumeSession', id: s.id });
         } else {
-          inp.value = s.preview || s.title || '';
+          inp.value = s.preview || s.title || ''; syncClearBtn();
           inp.focus();
         }
         closeSidebar();
@@ -1208,7 +1212,7 @@
       var before = inp.value.substring(0, atCtx.start);
       var after = inp.value.substring(inp.selectionStart || inp.value.length);
       var sep = (!after || /^\s/.test(after)) ? '' : ' ';
-      inp.value = before + file + sep + after;
+      inp.value = before + file + sep + after; syncClearBtn();
       var np = before.length + file.length + sep.length;
       inp.setSelectionRange(np, np);
       vscode.postMessage({ type: 'recordFileUsage', path: file });

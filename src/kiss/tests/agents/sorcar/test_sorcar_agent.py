@@ -294,15 +294,18 @@ class TestSorcarBashStreaming:
         assert "line3" in sys_text
 
 
-def test_clip_autocomplete_suggestion_rejects_sentence_like_completion() -> None:
+def test_clip_autocomplete_suggestion_returns_full_text() -> None:
     suggestion = clip_autocomplete_suggestion(
         "fix", " the failing test in parser now and then update docs too"
     )
-    assert suggestion == ""
+    assert suggestion == "the failing test in parser now and then update docs too"
 
 
-def test_clip_autocomplete_suggestion_rejects_punctuation_boundary() -> None:
-    assert clip_autocomplete_suggestion("fix", " the failing test. Then update docs") == ""
+def test_clip_autocomplete_suggestion_stops_at_newline() -> None:
+    assert (
+        clip_autocomplete_suggestion("fix", " the failing test\nThen update docs")
+        == "the failing test"
+    )
 
 
 def test_clip_autocomplete_suggestion_strips_repeated_query_prefix() -> None:

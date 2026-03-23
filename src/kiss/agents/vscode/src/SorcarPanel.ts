@@ -356,7 +356,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input" placeholder="Ask anything... (@ to mention files)" rows="1"></textarea>
-            <button id="input-clear-btn" data-tooltip="Clear input" style="display:none;">&times;</button>
+            <button id="input-clear-btn" style="display:none;">&times;</button>
           </div>
         </div>
         <div id="input-footer">
