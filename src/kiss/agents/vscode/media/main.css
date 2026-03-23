@@ -358,21 +358,9 @@ header {
 }
 #clear-btn:hover { color: rgba(255,255,255,0.6); }
 
-/* Disabled state while agent is running */
-#input-container.disabled {
-  opacity: 0.45;
-  pointer-events: none;
-}
-/* Disabled state during merge review — allow clicks to show notification */
-#input-container.disabled-merge {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-#input-container.disabled-merge textarea,
-#input-container.disabled-merge button {
-  pointer-events: none;
-}
+/* Disabled state for textarea while agent is running or merge is active */
 #task-input:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
 }
 

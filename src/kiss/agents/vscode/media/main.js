@@ -571,12 +571,6 @@
   function updateInputDisabled() {
     var blocked = isRunning || isMerging;
     inp.disabled = blocked;
-    if (uploadBtn) uploadBtn.disabled = blocked;
-    if (modelBtn) modelBtn.disabled = blocked;
-    if (inputContainer) {
-      inputContainer.classList.toggle('disabled', isRunning && !isMerging);
-      inputContainer.classList.toggle('disabled-merge', isMerging);
-    }
     if (blocked) { clearGhost(); hideAC(); }
   }
 
@@ -832,17 +826,7 @@
       askUserInput.value = '';
     });
 
-    // Notify user when clicking on disabled input during merge
-    var _mergeClickShown = false;
-    if (inputContainer) {
-      inputContainer.addEventListener('click', function() {
-        if (isMerging && !_mergeClickShown) {
-          _mergeClickShown = true;
-          addError('Cannot send messages while merge review is in progress. Accept or reject all changes first.');
-          setTimeout(function() { _mergeClickShown = false; }, 3000);
-        }
-      });
-    }
+
 
     // Paste images/PDFs
     inp.addEventListener('paste', function(e) {
