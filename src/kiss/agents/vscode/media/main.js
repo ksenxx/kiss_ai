@@ -25,6 +25,7 @@
   // Ghost text state
   let ghostTimer = null;
   let currentGhost = '';
+  var ghostCache = { q: '', s: '' };
 
   // Elements
   const O = document.getElementById('output');
@@ -113,6 +114,19 @@
   function requestGhost() {
     clearGhost();
     if (isRunning || !inp.value.trim()) return;
+    // Don't request ghost when cursor isn't at end
+    if (inp.selectionStart < inp.value.length) return;
+    // Minimum query length check (2 non-whitespace chars)
+    if (inp.value.replace(/\s/g, '').length < 2) return;
+    // Check ghost cache for prefix reuse
+    var val = inp.value;
+    if (ghostCache.q && ghostCache.s && val.startsWith(ghostCache.q)) {
+      var extra = val.substring(ghostCache.q.length);
+      if (ghostCache.s.startsWith(extra)) {
+        updateGhost(ghostCache.s.substring(extra.length));
+        return;
+      }
+    }
     ghostTimer = setTimeout(function() {
       ghostTimer = null;
       vscode.postMessage({ type: 'complete', query: inp.value });
@@ -524,6 +538,9 @@
       replayTaskEvents(ev.events || []);
       break;
     case 'ghost':
+      if (ev.suggestion) {
+        ghostCache = { q: inp.value, s: ev.suggestion };
+      }
       updateGhost(ev.suggestion || '');
       break;
     case 'merge_data': {
