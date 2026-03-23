@@ -498,7 +498,7 @@
       break;
     case 'followup_suggestion': {
       var fu = mkEl('div', 'followup-bar');
-      fu.title = ev.text;
+      fu.dataset.tooltip = ev.text;
       fu.innerHTML = '<span class="fu-label">Suggested next</span>'
         + '<span class="fu-text">' + esc(ev.text) + '</span>';
       fu.addEventListener('click', function() {
@@ -1049,7 +1049,7 @@
       div.className = 'sidebar-item';
       var itemText = s.title || s.preview || 'Untitled';
       div.textContent = itemText;
-      div.dataset.tooltip = itemText;
+      div.dataset.tooltip = s.text || itemText;
       div.addEventListener('click', function() {
         if (s.has_events) {
           vscode.postMessage({ type: 'resumeSession', id: s.id });

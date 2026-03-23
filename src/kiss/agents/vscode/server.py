@@ -358,6 +358,7 @@ class VSCodeServer:
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task[:100],
+                "text": task,
                 "has_events": has_events,
             })
         self.printer.broadcast({"type": "history", "sessions": sessions})
