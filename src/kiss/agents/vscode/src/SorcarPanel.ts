@@ -14,6 +14,8 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   private _selectedModel: string;
   private _isRunning: boolean = false;
   private _mergeManager: MergeManager;
+  private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
+  public readonly onCommitMessage = this._onCommitMessage.event;
 
   constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
@@ -35,6 +37,9 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._mergeManager.openMerge((msg as any).data).catch((err) => {
           console.error('[SorcarPanel] merge open failed:', err);
         });
+      }
+      if (msg.type === 'commitMessage') {
+        this._onCommitMessage.fire(msg as any);
       }
       this.sendToWebview(msg);
       if (msg.type === 'status') {
@@ -177,6 +182,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({ type: 'complete', query: message.query });
         break;
 
+      case 'generateCommitMessage':
+        this._agentProcess.sendCommand({ type: 'generateCommitMessage' });
+        break;
+
       case 'mergeAction': {
         const action = message.action;
         if (action === 'accept') {
@@ -216,9 +225,15 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this._agentProcess.stop();
   }
 
+  public generateCommitMessage(): void {
+    this._agentProcess.start(this._getWorkDir());
+    this._agentProcess.sendCommand({ type: 'generateCommitMessage' });
+  }
+
   public dispose(): void {
     this._agentProcess.dispose();
     this._mergeManager.dispose();
+    this._onCommitMessage.dispose();
   }
 
   private _getHtmlContent(webview: vscode.Webview): string {

@@ -19,6 +19,7 @@ from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _cleanup_merge_data,
+    _git,
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
@@ -99,6 +100,7 @@ class VSCodeServer:
             or "claude-opus-4-6"
         )
         self._file_cache: list[str] = []
+        self._last_active_file: str = ""
         self._task_thread: threading.Thread | None = None
         self._merging = False
         self._remaining_hunks = 0
@@ -168,6 +170,10 @@ class VSCodeServer:
                 threading.Thread(
                     target=self._complete, args=(query,), daemon=True
                 ).start()
+        elif cmd_type == "generateCommitMessage":
+            threading.Thread(
+                target=self._generate_commit_message, daemon=True
+            ).start()
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
 
@@ -177,6 +183,7 @@ class VSCodeServer:
         model = cmd.get("model") or self._selected_model
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
+        self._last_active_file = active_file or ""
         raw_attachments = cmd.get("attachments", [])
 
         attachments: list[Attachment] | None = None
@@ -248,7 +255,7 @@ class VSCodeServer:
             )
             self.printer.broadcast({"type": "task_done"})
             _record_model_usage(model)
-            result_summary = prompt[:200]
+            result_summary = self._extract_result_summary() or prompt[:200]
             self._generate_followup(prompt, result_summary)
         except KeyboardInterrupt:
             self.printer.broadcast({"type": "task_stopped"})
@@ -412,36 +419,100 @@ class VSCodeServer:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _extract_result_summary(self) -> str:
+        """Extract result summary from the last recorded events."""
+        with self.printer._lock:
+            for events_list in self.printer._recordings.values():
+                for ev in reversed(events_list):
+                    if ev.get("type") == "result":
+                        summary = ev.get("summary") or ev.get("text") or ""
+                        return str(summary)[:500]
+        return ""
+
+    def _fast_complete(self, raw_query: str, query: str) -> str:
+        """Local prefix matching against history and file paths.
+
+        Args:
+            raw_query: The original unstripped query from the user.
+            query: The stripped query string.
+
+        Returns:
+            Continuation string if a fast match is found, empty string otherwise.
+        """
+        if not query:
+            return ""
+        query_lower = query.lower()
+        for entry in _load_history(limit=50):
+            task = str(entry.get("task", ""))
+            if task.lower().startswith(query_lower) and len(task) > len(query):
+                return task[len(query):]
+        words = raw_query.split()
+        last_word = words[-1] if words else ""
+        if last_word and len(last_word) >= 2:
+            lw_lower = last_word.lower()
+            for path in self._file_cache:
+                if path.lower().startswith(lw_lower) and len(path) > len(last_word):
+                    return path[len(last_word):]
+        return ""
+
     def _complete(self, query: str) -> None:
         """Ghost text autocomplete: generate a short continuation via LLM."""
+        raw_query = query
+        query = query.strip()
+        if not query or len(query) < 2:
+            self.printer.broadcast({"type": "ghost", "suggestion": ""})
+            return
+
         try:
+            # Fast local matching first (no LLM call)
+            fast = clip_autocomplete_suggestion(
+                query, self._fast_complete(raw_query, query)
+            )
+            if fast:
+                self.printer.broadcast({"type": "ghost", "suggestion": fast})
+                return
+
             entries = _load_history(limit=20)
-            task_list = "\n".join(
-                f"- {e.get('task', '')}" for e in entries
-            )[:1000]
+            task_list = "\n".join(f"- {e.get('task', '')}" for e in entries)
+            files_list = "\n".join(self._file_cache[:200]) if self._file_cache else ""
 
-            files_list = "\n".join(self._file_cache[:50]) if self._file_cache else ""
+            # Read active editor file content
+            active_path = self._last_active_file
+            active_content = ""
+            if active_path:
+                try:
+                    with open(active_path) as f:
+                        active_content = f.read(10000)
+                except OSError:
+                    pass
 
-            context_parts = []
-            if task_list:
-                context_parts.append(f"Recent tasks:\n{task_list}")
-            if files_list:
-                context_parts.append(f"Project files:\n{files_list}")
+            context_parts = ["Past tasks:\n{task_list}", "Files and folders:\n{files_list}"]
+            if active_content:
+                context_parts.append("Active file ({active_path}):\n{active_content}")
 
             agent = KISSAgent("Autocomplete")
             raw = agent.run(
                 model_name=FAST_MODEL,
                 prompt_template=(
                     "You are an inline autocomplete engine for a coding assistant. "
-                    "Given the user's partial input and context, "
+                    "Given the user's partial input, their past task history, "
+                    "the list of files/folders in the project, and the content of "
+                    "the currently open file in the editor, "
                     "predict only the next few words you are highly confident about. "
                     "Return ONLY the remaining text to insert, never repeating what the "
-                    "user already typed. Return at most 4 words. If confidence is not high, "
+                    "user already typed. Never complete a full sentence or paragraph. "
+                    "Return at most 4 words, with no newline. If confidence is not high, "
                     "return empty string.\n\n"
                     + "\n\n".join(context_parts)
                     + '\n\nPartial input: "{query}"\n\n'
                 ),
-                arguments={"query": query},
+                arguments={
+                    "task_list": task_list,
+                    "files_list": files_list,
+                    "active_path": active_path,
+                    "active_content": active_content,
+                    "query": query,
+                },
                 is_agentic=False,
             )
             suggestion = clip_autocomplete_suggestion(query, raw)
@@ -463,6 +534,48 @@ class VSCodeServer:
         usage = _load_file_usage()
         ranked = rank_file_suggestions(self._file_cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
+
+    def _generate_commit_message(self) -> None:
+        """Generate a git commit message from current changes."""
+        try:
+            diff_result = _git(self.work_dir, "diff")
+            cached_result = _git(self.work_dir, "diff", "--cached")
+            diff_text = (diff_result.stdout + cached_result.stdout).strip()
+            untracked = "\n".join(sorted(_capture_untracked(self.work_dir)))
+            if not diff_text and not untracked:
+                self.printer.broadcast({
+                    "type": "commitMessage",
+                    "message": "",
+                    "error": "No changes detected",
+                })
+                return
+            context_parts: list[str] = []
+            if diff_text:
+                context_parts.append(f"Diff:\n{diff_text[:4000]}")
+            if untracked:
+                context_parts.append(f"New untracked files:\n{untracked[:500]}")
+            agent = KISSAgent("Commit Message Generator")
+            raw = agent.run(
+                model_name=FAST_MODEL,
+                prompt_template=(
+                    "Generate a nicely markdown formatted, informative git commit message for "
+                    "these changes. Use conventional commit format with a clear subject "
+                    "line (type: description) and optionally a body with bullet points "
+                    "for multiple changes. Return ONLY the commit message text, no "
+                    "quotes or markdown fences.\n\n{context}"
+                ),
+                arguments={"context": "\n\n".join(context_parts)},
+                is_agentic=False,
+            )
+            msg = raw.strip().strip('"').strip("'")
+            self.printer.broadcast({"type": "commitMessage", "message": msg})
+        except Exception:
+            logger.debug("Commit message generation failed", exc_info=True)
+            self.printer.broadcast({
+                "type": "commitMessage",
+                "message": "",
+                "error": "Failed to generate",
+            })
 
 
 def main() -> None:

@@ -13,7 +13,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "*"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -53,8 +53,22 @@
       {
         "command": "kissSorcar.rejectAll",
         "title": "KISS: Reject All Changes"
+      },
+      {
+        "command": "kissSorcar.generateCommitMessage",
+        "title": "KISS: Generate Commit Message",
+        "icon": "$(sparkle)"
       }
     ],
+    "menus": {
+      "scm/inputBox": [
+        {
+          "command": "kissSorcar.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -112,7 +126,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package --no-dependencies"
+    "package": "vsce package --no-dependencies --allow-star-activation"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

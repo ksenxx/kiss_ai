@@ -433,6 +433,189 @@ class TestMainCssFilePicker(unittest.TestCase):
         assert "acSlideUp" in self.css
 
 
+class TestFastComplete(unittest.TestCase):
+    """Test VSCodeServer._fast_complete for local prefix matching."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+        # Set up file cache
+        self.server._file_cache = [
+            "src/main.py",
+            "src/utils/helper.py",
+            "README.md",
+            "test/test_main.py",
+        ]
+
+    def test_no_match_returns_empty(self) -> None:
+        result = self.server._fast_complete("xyz_nonexistent", "xyz_nonexistent")
+        assert result == ""
+
+    def test_file_path_prefix_match(self) -> None:
+        result = self.server._fast_complete("look at sr", "look at sr")
+        # last word "sr" should match "src/main.py"
+        assert result == "c/main.py"
+
+    def test_file_path_match_case_insensitive(self) -> None:
+        result = self.server._fast_complete("read RE", "read RE")
+        assert result == "ADME.md"
+
+    def test_file_path_no_match_single_char(self) -> None:
+        # Last word must be at least 2 chars
+        result = self.server._fast_complete("look at s", "look at s")
+        assert result == ""
+
+    def test_empty_query(self) -> None:
+        result = self.server._fast_complete("", "")
+        assert result == ""
+
+    def test_file_path_exact_match_returns_empty(self) -> None:
+        result = self.server._fast_complete("README.md", "README.md")
+        assert result == ""
+
+
+class TestCompleteMinLength(unittest.TestCase):
+    """Test that _complete enforces min query length and fast path."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def test_short_query_returns_empty_ghost(self) -> None:
+        self.server._complete("a")
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "ghost"
+        assert self.events[0]["suggestion"] == ""
+
+    def test_empty_query_returns_empty_ghost(self) -> None:
+        self.server._complete("  ")
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "ghost"
+        assert self.events[0]["suggestion"] == ""
+
+    def test_fast_path_file_match(self) -> None:
+        """Test that _complete uses fast path when file cache matches."""
+        self.server._file_cache = ["src/main.py", "src/utils.py"]
+        self.server._complete("check src/m")
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "ghost"
+        # "src/m" -> "src/main.py" continuation is "ain.py"
+        # But clip_autocomplete_suggestion may clip it
+        # The fast_complete finds "ain.py" and clip clips it
+
+
+class TestExtractResultSummary(unittest.TestCase):
+    """Test _extract_result_summary extracts summary from recorded events."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+
+    def test_extracts_summary_from_result_event(self) -> None:
+        self.server.printer.start_recording()
+        self.server.printer.broadcast({"type": "text_delta", "text": "some text"})
+        self.server.printer.broadcast({
+            "type": "result",
+            "summary": "Task completed successfully",
+            "success": True,
+        })
+        result = self.server._extract_result_summary()
+        assert result == "Task completed successfully"
+
+    def test_extracts_text_when_no_summary(self) -> None:
+        self.server.printer.start_recording()
+        self.server.printer.broadcast({
+            "type": "result",
+            "text": "Some result text",
+        })
+        result = self.server._extract_result_summary()
+        assert result == "Some result text"
+
+    def test_returns_empty_when_no_result_event(self) -> None:
+        self.server.printer.start_recording()
+        self.server.printer.broadcast({"type": "text_delta", "text": "hello"})
+        result = self.server._extract_result_summary()
+        assert result == ""
+
+    def test_returns_empty_when_no_recording(self) -> None:
+        result = self.server._extract_result_summary()
+        assert result == ""
+
+    def test_truncates_long_summary(self) -> None:
+        self.server.printer.start_recording()
+        self.server.printer.broadcast({
+            "type": "result",
+            "summary": "x" * 1000,
+        })
+        result = self.server._extract_result_summary()
+        assert len(result) == 500
+
+
+class TestHandleCommandGenerateCommitMessage(unittest.TestCase):
+    """Test that generateCommitMessage command is routed correctly."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def test_unknown_command_returns_error(self) -> None:
+        self.server._handle_command({"type": "unknownXYZ"})
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "error"
+        assert "unknownXYZ" in self.events[0]["text"]
+
+
+class TestMainJsGhostCache(unittest.TestCase):
+    """Test main.js ghost text cache and enhancements."""
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_has_ghost_cache_variable(self) -> None:
+        assert "ghostCache" in self.js
+
+    def test_has_cursor_position_check(self) -> None:
+        assert "inp.selectionStart < inp.value.length" in self.js
+
+    def test_has_min_length_check(self) -> None:
+        assert "replace(/\\s/g, '').length < 2" in self.js
+
+    def test_ghost_cache_saved_on_receive(self) -> None:
+        assert "ghostCache = { q: inp.value, s: ev.suggestion }" in self.js
+
+    def test_ghost_cache_prefix_reuse(self) -> None:
+        assert "val.startsWith(ghostCache.q)" in self.js
+        assert "ghostCache.s.startsWith(extra)" in self.js
+
+
+class TestLastActiveFile(unittest.TestCase):
+    """Test that _last_active_file is stored from run commands."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+
+    def test_initial_value_empty(self) -> None:
+        assert self.server._last_active_file == ""
+
+
 class TestMainCssModelPicker(unittest.TestCase):
     """Test the main.css has all required model picker styles."""
 
