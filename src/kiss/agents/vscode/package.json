@@ -61,7 +61,11 @@
       },
       {
         "command": "kissSorcar.toggleFocus",
-        "title": "KISS: Toggle Focus Between Chat and Editor"
+        "title": "KISS: Focus Chat"
+      },
+      {
+        "command": "kissSorcar.focusEditor",
+        "title": "KISS: Focus Editor"
       }
     ],
     "menus": {
@@ -118,8 +122,8 @@
       },
       {
         "command": "kissSorcar.toggleFocus",
-        "key": "cmd+k",
-        "mac": "cmd+k"
+        "key": "cmd+d",
+        "mac": "cmd+d"
       }
     ],
     "configuration": {

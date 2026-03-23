@@ -248,6 +248,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
       }
 
+      case 'focusEditor':
+        vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        break;
+
       case 'mergeAction': {
         const action = message.action;
         if (action === 'accept') {
@@ -268,6 +272,13 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
       }
     }
+  }
+
+  public async focusChatInput(): Promise<void> {
+    if (!this._view) return;
+    this._view.show(false);
+    await new Promise(r => setTimeout(r, 150));
+    this._view?.webview.postMessage({ type: 'focusInput' });
   }
 
   public sendToWebview(message: ToWebviewMessage): void {

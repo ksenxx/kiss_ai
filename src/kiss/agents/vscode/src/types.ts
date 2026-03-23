@@ -38,7 +38,8 @@ export type FromWebviewMessage =
   | { type: 'mergeAction'; action: string }
   | { type: 'newChat' }
   | { type: 'generateCommitMessage' }
-  | { type: 'runPrompt' };
+  | { type: 'runPrompt' }
+  | { type: 'focusEditor' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =

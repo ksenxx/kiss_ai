@@ -550,6 +550,11 @@
     case 'task_events':
       replayTaskEvents(ev.events || []);
       break;
+    case 'focusInput':
+      inp.focus();
+      setTimeout(function() { inp.focus(); }, 100);
+      setTimeout(function() { inp.focus(); }, 300);
+      break;
     case 'ghost':
       if (ev.suggestion) {
         ghostCache = { q: inp.value, s: ev.suggestion };
@@ -753,6 +758,12 @@
 
   function setupEventListeners() {
     sendBtn.addEventListener('click', sendMessage);
+    document.addEventListener('keydown', function(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'd' && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        vscode.postMessage({ type: 'focusEditor' });
+      }
+    });
     inp.addEventListener('keydown', function(e) {
       // Autocomplete navigation
       if (autocomplete.style.display === 'block') {
