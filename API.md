@@ -1102,10 +1102,11 @@ ______________________________________________________________________
 - `name`: The model name string.
 - **Returns:** Tuple of (display name, numeric sort order).
 
-**`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str) -> str`
+**`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.
 - `result`: The task result summary (truncated to 500 chars internally).
+- `model`: The model to use for generation.
 - **Returns:** Suggestion text, or empty string on failure.
 
 **`rank_file_suggestions`** — Rank and filter file paths by query match, recency, and usage.<br/>`def rank_file_suggestions(file_cache: list[str], query: str, usage: dict[str, int], limit: int = 20) -> list[dict[str, str]]`

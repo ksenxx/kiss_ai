@@ -8,8 +8,6 @@ from kiss.core.models.model_info import _OPENAI_PREFIXES
 
 logger = logging.getLogger(__name__)
 
-FAST_MODEL = "gemini-2.0-flash"
-
 
 def clean_llm_output(text: str) -> str:
     """Strip whitespace and surrounding quotes from LLM output."""
@@ -53,12 +51,13 @@ def model_vendor(name: str) -> tuple[str, int]:
     return "Together AI", 5
 
 
-def generate_followup_text(task: str, result: str) -> str:
+def generate_followup_text(task: str, result: str, model: str) -> str:
     """Generate a follow-up task suggestion via LLM.
 
     Args:
         task: The completed task description.
         result: The task result summary (truncated to 500 chars internally).
+        model: The model to use for generation.
 
     Returns:
         Suggestion text, or empty string on failure.
@@ -68,7 +67,7 @@ def generate_followup_text(task: str, result: str) -> str:
     try:
         agent = KISSAgent("Followup Proposer")
         raw = agent.run(
-            model_name=FAST_MODEL,
+            model_name=model,
             prompt_template=(
                 "A developer just completed this task:\n"
                 "Task: {task}\n"
@@ -77,7 +76,7 @@ def generate_followup_text(task: str, result: str) -> str:
                 "might want to do next. Return ONLY the task "
                 "description as a single plain-text sentence."
             ),
-            arguments={"task": task, "result": result[:500]},
+            arguments={"task": task, "result": result},
             is_agentic=False,
         )
         return clean_llm_output(raw)

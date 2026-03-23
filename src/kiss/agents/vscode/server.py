@@ -26,7 +26,6 @@ from kiss.agents.sorcar.code_server import (
     _snapshot_files,
 )
 from kiss.agents.sorcar.shared_utils import (
-    FAST_MODEL,
     clip_autocomplete_suggestion,
     generate_followup_text,
     model_vendor,
@@ -172,8 +171,9 @@ class VSCodeServer:
                     target=self._complete, args=(query,), daemon=True
                 ).start()
         elif cmd_type == "generateCommitMessage":
+            model = cmd.get("model") or self._selected_model
             threading.Thread(
-                target=self._generate_commit_message, daemon=True
+                target=self._generate_commit_message, args=(model,), daemon=True
             ).start()
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
@@ -252,7 +252,7 @@ class VSCodeServer:
             )
             self.printer.broadcast({"type": "task_done"})
             _record_model_usage(model)
-            result_summary = self._extract_result_summary() or prompt[:200]
+            result_summary = self._extract_result_summary() or "No summary available"
             self._generate_followup(prompt, result_summary)
         except KeyboardInterrupt:
             self.printer.broadcast({"type": "task_stopped"})
@@ -377,7 +377,7 @@ class VSCodeServer:
                 "id": task,
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
-                "preview": task[:100],
+                "preview": task,
                 "text": task,
                 "has_events": has_events,
             })
@@ -410,7 +410,7 @@ class VSCodeServer:
     def _generate_followup(self, task: str, result: str) -> None:
         """Generate a follow-up suggestion using LLM after task completion."""
         def _run() -> None:
-            suggestion = generate_followup_text(task, result)
+            suggestion = generate_followup_text(task, result, self._selected_model)
             if suggestion:
                 self.printer.broadcast({
                     "type": "followup_suggestion",
@@ -426,14 +426,13 @@ class VSCodeServer:
                 for ev in reversed(events_list):
                     if ev.get("type") == "result":
                         summary = ev.get("summary") or ev.get("text") or ""
-                        return str(summary)[:500]
+                        return str(summary)
         return ""
 
-    def _fast_complete(self, raw_query: str, query: str) -> str:
-        """Local prefix matching against history and file paths.
+    def _fast_complete(self, query: str) -> str:
+        """Local prefix matching against history.
 
         Args:
-            raw_query: The original unstripped query from the user.
             query: The stripped query string.
 
         Returns:
@@ -442,29 +441,21 @@ class VSCodeServer:
         if not query:
             return ""
         query_lower = query.lower()
-        for entry in _load_history(limit=50):
+        for entry in _load_history(limit=1000):
             task = str(entry.get("task", ""))
             if task.lower().startswith(query_lower) and len(task) > len(query):
                 return task[len(query):]
-        words = raw_query.split()
-        last_word = words[-1] if words else ""
-        if last_word and len(last_word) >= 2:
-            lw_lower = last_word.lower()
-            for path in self._file_cache:
-                if path.lower().startswith(lw_lower) and len(path) > len(last_word):
-                    return path[len(last_word):]
         return ""
 
     def _complete(self, query: str) -> None:
         """Ghost text autocomplete via fast local prefix matching."""
-        raw_query = query
         query = query.strip()
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": ""})
             return
 
         fast = clip_autocomplete_suggestion(
-            query, self._fast_complete(raw_query, query)
+            query, self._fast_complete(query)
         )
         self.printer.broadcast({"type": "ghost", "suggestion": fast})
 
@@ -482,7 +473,7 @@ class VSCodeServer:
         ranked = rank_file_suggestions(self._file_cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
 
-    def _generate_commit_message(self) -> None:
+    def _generate_commit_message(self, model: str) -> None:
         """Generate a git commit message from current changes."""
         try:
             diff_result = _git(self.work_dir, "diff")
@@ -498,12 +489,12 @@ class VSCodeServer:
                 return
             context_parts: list[str] = []
             if diff_text:
-                context_parts.append(f"Diff:\n{diff_text[:4000]}")
+                context_parts.append(f"Diff:\n{diff_text}")
             if untracked:
                 context_parts.append(f"New untracked files:\n{untracked[:500]}")
             agent = KISSAgent("Commit Message Generator")
             raw = agent.run(
-                model_name=FAST_MODEL,
+                model_name=model,
                 prompt_template=(
                     "Generate a nicely markdown formatted, informative git commit message for "
                     "these changes. Use conventional commit format with a clear subject "

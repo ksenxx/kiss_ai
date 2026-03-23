@@ -127,11 +127,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         // If the prompt is just a file path that exists, open it in the editor
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
-          const resolved = trimmed.startsWith('~')
-            ? path.join(process.env.HOME || '', trimmed.slice(1))
-            : path.isAbsolute(trimmed)
-              ? trimmed
-              : path.join(this._getWorkDir(), trimmed);
+          const resolved = path.resolve(this._getWorkDir(), trimmed);
           if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
@@ -194,13 +190,16 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
       case 'openFile':
         if (message.path) {
-          const uri = vscode.Uri.file(message.path);
-          const doc = await vscode.workspace.openTextDocument(uri);
-          const editor = await vscode.window.showTextDocument(doc);
-          if (message.line !== undefined && message.line > 0) {
-            const pos = new vscode.Position(message.line - 1, 0);
-            editor.selection = new vscode.Selection(pos, pos);
-            editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+          const filePath = path.resolve(this._getWorkDir(), message.path);
+          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+            const uri = vscode.Uri.file(filePath);
+            const doc = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(doc);
+            if (message.line !== undefined && message.line > 0) {
+              const pos = new vscode.Position(message.line - 1, 0);
+              editor.selection = new vscode.Selection(pos, pos);
+              editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+            }
           }
         }
         break;
@@ -316,7 +315,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   public generateCommitMessage(): void {
     this._agentProcess.start(this._getWorkDir());
-    this._agentProcess.sendCommand({ type: 'generateCommitMessage' });
+    this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
   }
 
   public dispose(): void {

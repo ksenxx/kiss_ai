@@ -36,7 +36,6 @@ from kiss.agents.sorcar.code_server import (
     _snapshot_files,
 )
 from kiss.agents.sorcar.shared_utils import (
-    FAST_MODEL,
     clean_llm_output,
     clip_autocomplete_suggestion,
     generate_followup_text,
@@ -74,7 +73,7 @@ logger = logging.getLogger(__name__)
 def _log_exc() -> None:
     logger.debug("Exception caught", exc_info=True)
 
-_INTERNAL_MODELS = frozenset({FAST_MODEL})
+
 
 
 class _StopRequested(BaseException):
@@ -100,7 +99,7 @@ def _read_active_file(sorcar_data_dir: str) -> str:
     return ""
 
 
-def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
+def _generate_commit_msg(diff_text: str, *, model: str, detailed: bool = False) -> str:
     if detailed:
         prompt = (
             "Generate a nicely markdown formatted, informative git commit message for "
@@ -117,7 +116,7 @@ def _generate_commit_msg(diff_text: str, *, detailed: bool = False) -> str:
     agent = KISSAgent("Commit Message Generator")
     try:
         raw = agent.run(
-            model_name=FAST_MODEL,
+            model_name=model,
             prompt_template=prompt,
             arguments={"context": diff_text},
             is_agentic=False,
@@ -164,7 +163,7 @@ def run_chatbot(
     user_question_event: threading.Event | None = None
     user_question_answer: str = ""
     last = _load_last_model()
-    selected_model = last if last and last not in _INTERNAL_MODELS else default_model
+    selected_model = last if last else default_model
 
     # Clean up stale code-server data directories synchronously at startup
     _cleanup_stale_cs_dirs()
@@ -405,7 +404,7 @@ def run_chatbot(
 
     def generate_followup(task: str, result: str) -> None:
         try:
-            suggestion = generate_followup_text(task, result)
+            suggestion = generate_followup_text(task, result, selected_model)
             if suggestion:  # pragma: no branch – LLM always returns non-empty
                 printer.broadcast(
                     {
@@ -1104,7 +1103,7 @@ def run_chatbot(
                 if not diff_stat.stdout.strip():
                     return {"error": "No changes to commit"}
                 diff_detail = _git(actual_work_dir, "diff", "--cached")
-                message = _generate_commit_msg(diff_detail.stdout)
+                message = _generate_commit_msg(diff_detail.stdout, model=selected_model)
                 commit_env = {
                     **os.environ,
                     "GIT_COMMITTER_NAME": "KISS Sorcar",
@@ -1151,7 +1150,9 @@ def run_chatbot(
                     context_parts.append(f"Diff:\n{diff_text[:4000]}")
                 if untracked_files:  # pragma: no branch
                     context_parts.append(f"New untracked files:\n{untracked_files[:500]}")
-                msg = _generate_commit_msg("\n\n".join(context_parts), detailed=True)
+                msg = _generate_commit_msg(
+                    "\n\n".join(context_parts), model=selected_model, detailed=True,
+                )
                 scm_pending = os.path.join(sorcar_data_dir, "pending-scm-message.json")
                 with open(scm_pending, "w") as f:
                     json.dump({"message": msg}, f)

@@ -444,38 +444,13 @@ class TestFastComplete(unittest.TestCase):
             self.events.append(event)
 
         self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
-        # Set up file cache
-        self.server._file_cache = [
-            "src/main.py",
-            "src/utils/helper.py",
-            "README.md",
-            "test/test_main.py",
-        ]
 
     def test_no_match_returns_empty(self) -> None:
-        result = self.server._fast_complete("xyz_nonexistent", "xyz_nonexistent")
-        assert result == ""
-
-    def test_file_path_prefix_match(self) -> None:
-        result = self.server._fast_complete("look at sr", "look at sr")
-        # last word "sr" should match "src/main.py"
-        assert result == "c/main.py"
-
-    def test_file_path_match_case_insensitive(self) -> None:
-        result = self.server._fast_complete("read RE", "read RE")
-        assert result == "ADME.md"
-
-    def test_file_path_no_match_single_char(self) -> None:
-        # Last word must be at least 2 chars
-        result = self.server._fast_complete("look at s", "look at s")
+        result = self.server._fast_complete("xyz_nonexistent")
         assert result == ""
 
     def test_empty_query(self) -> None:
-        result = self.server._fast_complete("", "")
-        assert result == ""
-
-    def test_file_path_exact_match_returns_empty(self) -> None:
-        result = self.server._fast_complete("README.md", "README.md")
+        result = self.server._fast_complete("")
         assert result == ""
 
 
