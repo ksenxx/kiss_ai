@@ -359,11 +359,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   <div id="app">
     <header>
       <div class="header-left">
-        <span class="logo">\u2731 KISS Sorcar</span>
-        <div class="status">
-          <span class="dot" id="status-dot"></span>
-          <span id="status-text">Ready</span>
-        </div>
+        <span class="logo">\u2731 KISS Sorcar <span class="version">${this._getVersion()}</span></span>
+      </div>
+      <div class="status">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">Ready</span>
       </div>
     </header>
 
@@ -453,6 +453,19 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
+  }
+
+  private _getVersion(): string {
+    try {
+      const kissRoot = this._agentProcess.findKissProject();
+      if (kissRoot) {
+        const versionFile = path.join(kissRoot, 'src', 'kiss', '_version.py');
+        const content = fs.readFileSync(versionFile, 'utf-8');
+        const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
+        if (match) return match[1];
+      }
+    } catch { /* ignore */ }
+    return '';
   }
 
   private _getNonce(): string {

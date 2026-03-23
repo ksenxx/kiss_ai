@@ -58,6 +58,7 @@ header {
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .logo { font-size: var(--fs-base); font-weight: 600; color: var(--accent); }
+.version { font-size: inherit; font-weight: 400; opacity: 0.6; }
 .status { display: flex; align-items: center; gap: 6px; font-size: var(--fs-base); color: var(--dim); }
 .dot {
   width: 7px; height: 7px; border-radius: 50%;
