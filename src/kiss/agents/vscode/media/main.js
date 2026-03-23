@@ -58,6 +58,7 @@
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
+  const inputClearBtn = document.getElementById('input-clear-btn');
 
   // Merge state
   let isMerging = false;
@@ -82,6 +83,11 @@
     lastToolName = '';
     pendingPanel = false;
     _scrollLock = false;
+  }
+
+  function clearOutput() {
+    if (welcome && welcome.parentNode === O) O.removeChild(welcome);
+    O.innerHTML = '';
   }
 
   // --- Spinner ---
@@ -445,10 +451,13 @@
 
   // --- Clear chat ---
   function doClearChat() {
-    O.innerHTML = '';
+    clearOutput();
     resetOutputState();
     removeSpinner();
-    if (welcome) welcome.style.display = '';
+    if (welcome) {
+      welcome.style.display = '';
+      O.appendChild(welcome);
+    }
     vscode.postMessage({ type: 'newChat' });
     vscode.postMessage({ type: 'getWelcomeSuggestions' });
   }
@@ -503,7 +512,7 @@
       pendingUserMsg = { text: ev.text, images: ev.images || [] };
       break;
     case 'clear':
-      O.innerHTML = '';
+      clearOutput();
       resetOutputState();
       showUserMsg(pendingUserMsg);
       pendingUserMsg = null;
@@ -666,9 +675,8 @@
 
   // --- Task replay ---
   function replayTaskEvents(events) {
-    O.innerHTML = '';
+    clearOutput();
     resetOutputState();
-    if (welcome) welcome.style.display = 'none';
     events.forEach(function(ev) {
       var t = ev.type;
       if (t === 'task_done' || t === 'task_error' || t === 'task_stopped'
@@ -789,6 +797,7 @@
       checkAutocomplete();
       requestGhost();
       histIdx = -1;
+      if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
     });
     inp.addEventListener('blur', function() { clearGhost(); });
     stopBtn.addEventListener('click', function() {
@@ -805,6 +814,16 @@
     if (clearBtn) {
       clearBtn.addEventListener('click', function() {
         doClearChat();
+      });
+    }
+    if (inputClearBtn) {
+      inputClearBtn.addEventListener('click', function() {
+        inp.value = '';
+        inp.style.height = 'auto';
+        inputClearBtn.style.display = 'none';
+        clearGhost();
+        hideAC();
+        inp.focus();
       });
     }
     modelBtn.addEventListener('click', function(e) {
@@ -956,6 +975,7 @@
     renderFileChips();
     clearGhost();
     histIdx = -1;
+    if (inputClearBtn) inputClearBtn.style.display = 'none';
     if (welcome) welcome.style.display = 'none';
   }
 

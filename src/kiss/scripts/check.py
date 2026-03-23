@@ -104,9 +104,6 @@ def clean_build_artifacts() -> None:
     dirs_to_remove = [
         "dist",
         "build",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
         "*.egg-info",
         ".claude",
         "artifacts",

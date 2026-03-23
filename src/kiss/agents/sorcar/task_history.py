@@ -385,6 +385,25 @@ def _set_latest_chat_events(
         db.commit()
 
 
+def _load_task_chat_id(task: str) -> str:
+    """Return the chat_id for the most recent run of *task*, or ``""``.
+
+    Args:
+        task: The task description string.
+
+    Returns:
+        The chat_id string, or empty string if not found.
+    """
+    db = _get_db()
+    task_id = _most_recent_task_id(db, task)
+    if task_id is None:
+        return ""
+    row = db.execute(
+        "SELECT chat_id FROM task_history WHERE id = ?", (task_id,)
+    ).fetchone()
+    return row["chat_id"] if row and row["chat_id"] else ""
+
+
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 

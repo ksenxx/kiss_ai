@@ -39,6 +39,7 @@ from kiss.agents.sorcar.task_history import (
     _generate_chat_id,
     _load_chat_context,
     _load_file_usage,
+    _load_task_chat_id,
     _load_history,
     _load_last_model,
     _load_model_usage,
@@ -392,6 +393,9 @@ class VSCodeServer:
         if not events:
             self.printer.broadcast({"type": "error", "text": "No recorded events for this session"})
             return
+        chat_id = _load_task_chat_id(task)
+        if chat_id:
+            self._chat_id = chat_id
         self.printer.broadcast({"type": "task_events", "events": events})
 
     def _get_welcome_suggestions(self) -> None:

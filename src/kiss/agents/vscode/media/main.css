@@ -400,8 +400,20 @@ header {
   width: 100%; background: transparent; border: none; color: var(--fg);
   font-family: inherit; font-size: var(--fs-base); line-height: 1.5;
   resize: none; outline: none; min-height: 4.5em; max-height: 200px;
+  padding-right: 18px;
 }
 #task-input::placeholder { color: rgba(255,255,255,0.35); }
+
+/* Input clear (X) button */
+#input-clear-btn {
+  position: absolute; top: 4px; right: 4px; z-index: 10;
+  background: none; border: none; color: rgba(255,255,255,0.35);
+  font-size: 12px; line-height: 1; cursor: pointer;
+  width: 11px; height: 11px; border-radius: 3px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+#input-clear-btn:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.08); }
 
 #input-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
 
