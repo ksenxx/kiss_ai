@@ -59,6 +59,20 @@
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
+  const taskPanel = document.getElementById('task-panel');
+
+  function setTaskText(text) {
+    if (!taskPanel) return;
+    var t = (text || '').trim();
+    if (t) {
+      taskPanel.textContent = t;
+      taskPanel.classList.add('visible');
+    } else {
+      taskPanel.textContent = '';
+      taskPanel.classList.remove('visible');
+    }
+  }
+
   function syncClearBtn() {
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
   }
@@ -373,6 +387,8 @@
         + '<div class="prompt-body">' + pBody + '</div>';
       hlBlock(pr);
       target.appendChild(pr); break;
+      // Task is shown in the fixed panel; skip rendering prompt in chat output
+      break;
     }
     case 'usage_info': {
       var u = mkEl('div', 'ev usage');
@@ -444,6 +460,7 @@
     clearOutput();
     resetOutputState();
     removeSpinner();
+    setTaskText('');
     if (welcome) {
       welcome.style.display = '';
       O.appendChild(welcome);
@@ -650,6 +667,7 @@
       chip.innerHTML = '<span class="chip-label">Recent</span>' + esc(displayText);
       chip.addEventListener('click', function() {
         if (s.has_events) {
+          setTaskText(s.text);
           vscode.postMessage({ type: 'resumeSession', id: s.text });
           if (welcome) welcome.style.display = 'none';
         } else {
@@ -954,6 +972,7 @@
       return;
     }
 
+    setTaskText(prompt);
     vscode.postMessage({
       type: 'submit',
       prompt: prompt,
@@ -1088,6 +1107,7 @@
       div.dataset.tooltip = s.text || itemText;
       div.addEventListener('click', function() {
         if (s.has_events) {
+          setTaskText(s.preview || s.title || '');
           vscode.postMessage({ type: 'resumeSession', id: s.id });
         } else {
           inp.value = s.preview || s.title || ''; syncClearBtn();

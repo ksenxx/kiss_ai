@@ -367,6 +367,8 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       </div>
     </header>
 
+    <div id="task-panel"></div>
+
     <div id="output">
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
