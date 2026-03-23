@@ -274,6 +274,22 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  public submitTask(prompt: string): void {
+    if (this._isRunning || !prompt.trim()) return;
+    this._agentProcess.start(this._getWorkDir());
+    this._isRunning = true;
+    this.sendToWebview({ type: 'status', running: true });
+    const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const cmd: AgentCommand = {
+      type: 'run',
+      prompt: prompt.trim(),
+      model: this._selectedModel,
+      workDir: this._getWorkDir(),
+      activeFile,
+    };
+    this._agentProcess.sendCommand(cmd);
+  }
+
   public async focusChatInput(): Promise<void> {
     if (!this._view) return;
     this._view.show(false);

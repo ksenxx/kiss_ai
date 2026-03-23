@@ -1095,7 +1095,7 @@ ______________________________________________________________________
 
 **`clean_llm_output`** — Strip whitespace and surrounding quotes from LLM output.<br/>`def clean_llm_output(text: str) -> str`
 
-**`clip_autocomplete_suggestion`** — Return only a short, confident autocomplete continuation. Keeps at most a few words, stops at strong sentence boundaries, and suppresses low-confidence continuations that look too long or too weak.<br/>`def clip_autocomplete_suggestion(query: str, suggestion: str) -> str`
+**`clip_autocomplete_suggestion`** — Return the autocomplete continuation, stripped of the query prefix. Removes the query prefix if the LLM echoed it, strips surrounding whitespace, and stops at newlines.<br/>`def clip_autocomplete_suggestion(query: str, suggestion: str) -> str`
 
 **`model_vendor`** — Return (vendor_display_name, sort_order) for a model name.<br/>`def model_vendor(name: str) -> tuple[str, int]`
 
