@@ -239,7 +239,7 @@ class VSCodeServer:
                 if entry.get("result"):
                     parts.append(f"### Result {i}\n{entry['result']}")
             parts.append("---\n")
-            agent_prompt = "\n\n".join(parts) + "# Task\n\n" + prompt
+            agent_prompt = "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt
 
         self.printer.start_recording()
         result_summary = ""
