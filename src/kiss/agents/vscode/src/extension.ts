@@ -24,16 +24,6 @@ export function activate(context: vscode.ExtensionContext): void {
   // Check if VS Code supports secondary sidebar (1.98+)
   const supportsSecondarySidebar = typeof vscode.ViewColumn !== 'undefined';
 
-  // Detect Copilot Chat so we can conditionally show/hide our SCM button.
-  // When Copilot Chat is installed we take over its sparkle command instead
-  // of adding a second button.
-  const copilotChatInstalled = !!vscode.extensions.getExtension('github.copilot-chat');
-  vscode.commands.executeCommand(
-    'setContext',
-    'kissSorcar:copilotChatInstalled',
-    copilotChatInstalled
-  );
-
   mergeManager = new MergeManager();
   context.subscriptions.push({ dispose: () => mergeManager?.dispose() });
 

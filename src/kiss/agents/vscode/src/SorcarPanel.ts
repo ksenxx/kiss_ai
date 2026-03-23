@@ -183,7 +183,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'generateCommitMessage':
-        this._agentProcess.sendCommand({ type: 'generateCommitMessage' });
+        this.generateCommitMessage();
         break;
 
       case 'mergeAction': {
