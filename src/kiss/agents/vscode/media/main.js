@@ -1000,7 +1000,7 @@
   function showWaitForUser(instruction, url) {
     var div = mkEl('div', 'ev user-action-card');
     div.innerHTML =
-      '<div style="border:2px solid var(--yellow);border-radius:8px;padding:14px;margin:8px 0;background:rgba(210,153,34,.08)">'
+      '<div style="border:2px solid var(--yellow);border-radius:8px;padding:14px;margin:8px 0;background:color-mix(in srgb, var(--yellow) 8%, transparent)">'
       + '<div style="font-weight:600;color:var(--yellow);margin-bottom:6px">\u23F8\uFE0F User Action Required</div>'
       + '<div style="margin-bottom:10px">' + esc(instruction || '') + '</div>'
       + '<button id="wait-user-done-btn" style="padding:6px 16px;background:var(--green);color:#000;'
