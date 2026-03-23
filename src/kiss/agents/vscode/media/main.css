@@ -776,6 +776,16 @@ header {
 code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
 .hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }
 
+/* ── Custom tooltips (native title doesn't work in VS Code webviews) ── */
+#custom-tooltip {
+  position: fixed; z-index: 10000; background: var(--bg2); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  font-size: var(--fs-sm); line-height: 1.4; white-space: pre-wrap;
+  word-break: break-word; max-width: 350px; pointer-events: none;
+  opacity: 0; transition: opacity 0.15s; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+#custom-tooltip.visible { opacity: 1; }
+
 /* ── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

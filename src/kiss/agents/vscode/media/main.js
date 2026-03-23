@@ -129,6 +129,30 @@
   // --- Shared rendering (ported from browser EVENT_HANDLER_JS) ---
 
   function esc(t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+
+  // --- Custom tooltip (native title doesn't work in VS Code webviews) ---
+  var tooltipEl = document.createElement('div');
+  tooltipEl.id = 'custom-tooltip';
+  document.body.appendChild(tooltipEl);
+  var tooltipTimer = null;
+  document.addEventListener('mouseover', function(e) {
+    var target = e.target.closest('[data-tooltip]');
+    if (!target) return;
+    clearTimeout(tooltipTimer);
+    tooltipTimer = setTimeout(function() {
+      tooltipEl.textContent = target.dataset.tooltip;
+      var rect = target.getBoundingClientRect();
+      tooltipEl.style.left = rect.left + 'px';
+      tooltipEl.style.top = (rect.bottom + 4) + 'px';
+      tooltipEl.classList.add('visible');
+    }, 400);
+  });
+  document.addEventListener('mouseout', function(e) {
+    var target = e.target.closest('[data-tooltip]');
+    if (!target) return;
+    clearTimeout(tooltipTimer);
+    tooltipEl.classList.remove('visible');
+  });
   function mkEl(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
 
   function hlBlock(el) {
@@ -592,6 +616,7 @@
     suggestions.forEach(function(s) {
       var chip = document.createElement('div');
       chip.className = 'suggestion-chip';
+      chip.dataset.tooltip = s.text;
       chip.dataset.prompt = s.text;
       if (s.has_events) chip.dataset.hasEvents = 'true';
       var displayText = s.text.length > 80 ? s.text.substring(0, 77) + '...' : s.text;
@@ -1022,7 +1047,9 @@
     sessions.forEach(function(s) {
       var div = document.createElement('div');
       div.className = 'sidebar-item';
-      div.textContent = s.title || s.preview || 'Untitled';
+      var itemText = s.title || s.preview || 'Untitled';
+      div.textContent = itemText;
+      div.dataset.tooltip = itemText;
       div.addEventListener('click', function() {
         if (s.has_events) {
           vscode.postMessage({ type: 'resumeSession', id: s.id });
