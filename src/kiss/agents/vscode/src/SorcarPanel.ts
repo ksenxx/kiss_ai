@@ -161,6 +161,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this.sendToWebview({ type: 'clearChat' });
         break;
 
+      case 'newChat':
+        this._agentProcess.sendCommand({ type: 'newChat' });
+        break;
+
       case 'resumeSession':
         this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id });
         break;
@@ -203,6 +207,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   public newConversation(): void {
     this._isRunning = false;
+    this._agentProcess.sendCommand({ type: 'newChat' });
     this.sendToWebview({ type: 'status', running: false });
     this.sendToWebview({ type: 'clearChat' });
   }

@@ -35,7 +35,8 @@ export type FromWebviewMessage =
   | { type: 'clearChat' }
   | { type: 'getWelcomeSuggestions' }
   | { type: 'complete'; query: string }
-  | { type: 'mergeAction'; action: string };
+  | { type: 'mergeAction'; action: string }
+  | { type: 'newChat' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -78,7 +79,7 @@ export type ToWebviewMessage =
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'complete' | 'mergeAction' | 'refreshFiles';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat';
   prompt?: string;
   model?: string;
   workDir?: string;

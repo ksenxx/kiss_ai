@@ -14,6 +14,7 @@ import socket
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -131,12 +132,15 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             timestamp REAL NOT NULL,
             task TEXT NOT NULL,
             has_events INTEGER DEFAULT 0,
-            result TEXT DEFAULT ''
+            result TEXT DEFAULT '',
+            chat_id TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_th_timestamp
             ON task_history(timestamp);
         CREATE INDEX IF NOT EXISTS idx_th_task
             ON task_history(task);
+        CREATE INDEX IF NOT EXISTS idx_th_chat_id
+            ON task_history(chat_id);
 
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,17 +222,36 @@ def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None
     return row["id"] if row else None
 
 
-def _add_task(task: str) -> None:
+def _generate_chat_id() -> str:
+    """Generate a unique hex chat session ID. Thread-safe.
+
+    Produces a 32-character lowercase hex string via UUID4 and verifies
+    it does not already exist in the task_history table before returning.
+    """
+    db = _get_db()
+    with _db_lock:
+        while True:
+            candidate = uuid.uuid4().hex
+            row = db.execute(
+                "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1",
+                (candidate,),
+            ).fetchone()
+            if row is None:
+                return candidate
+
+
+def _add_task(task: str, chat_id: str = "") -> None:
     """Append a task to the history. Thread-safe.
 
     Args:
         task: The task description string.
+        chat_id: Chat session identifier to associate this task with.
     """
     db = _get_db()
     with _db_lock:
         db.execute(
-            "INSERT INTO task_history (timestamp, task) VALUES (?, ?)",
-            (time.time(), task),
+            "INSERT INTO task_history (timestamp, task, chat_id) VALUES (?, ?, ?)",
+            (time.time(), task, chat_id),
         )
         db.commit()
 
@@ -360,6 +383,27 @@ def _set_latest_chat_events(
                 [(task_id, i, json.dumps(ev)) for i, ev in enumerate(events)],
             )
         db.commit()
+
+
+def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
+    """Load all tasks and results for a chat session in chronological order.
+
+    Args:
+        chat_id: The chat session identifier.
+
+    Returns:
+        List of dicts with ``task`` and ``result`` keys, ordered by
+        timestamp ascending (oldest first).
+    """
+    if not chat_id:
+        return []
+    db = _get_db()
+    rows = db.execute(
+        "SELECT task, result FROM task_history "
+        "WHERE chat_id = ? ORDER BY timestamp ASC",
+        (chat_id,),
+    ).fetchall()
+    return [{"task": r["task"], "result": r["result"]} for r in rows]
 
 
 # ---------------------------------------------------------------------------
