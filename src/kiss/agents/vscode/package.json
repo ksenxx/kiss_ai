@@ -58,6 +58,10 @@
         "command": "kissSorcar.generateCommitMessage",
         "title": "KISS: Generate Commit Message",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "kissSorcar.toggleFocus",
+        "title": "KISS: Toggle Focus Between Chat and Editor"
       }
     ],
     "menus": {
@@ -106,6 +110,18 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "kissSorcar.newConversation",
+        "key": "cmd+t",
+        "mac": "cmd+t"
+      },
+      {
+        "command": "kissSorcar.toggleFocus",
+        "key": "cmd+k",
+        "mac": "cmd+k"
+      }
+    ],
     "configuration": {
       "title": "KISS Sorcar",
       "properties": {

@@ -57,8 +57,22 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  let chatHasFocus = false;
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.toggleFocus', () => {
+      if (chatHasFocus) {
+        chatHasFocus = false;
+        vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+      } else {
+        chatHasFocus = true;
+        vscode.commands.executeCommand('kissSorcar.openPanel');
+      }
+    })
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', () => {
+      vscode.commands.executeCommand('kissSorcar.openPanel');
       getActiveProvider()?.newConversation();
     })
   );
