@@ -539,9 +539,6 @@
     case 'tasks_updated':
       refreshHistory();
       vscode.postMessage({ type: 'getWelcomeSuggestions' });
-      // Refresh histCache for input cycling
-      histCache = [];
-      histIdx = -1;
       break;
     case 'welcome_suggestions':
       renderWelcomeSuggestions(ev.suggestions || []);
@@ -656,6 +653,9 @@
     var container = document.getElementById('suggestions');
     if (!container) return;
     container.innerHTML = '';
+    // Always update histCache for arrow-key cycling, even when suggestions is empty
+    histCache = (suggestions || []).map(function(s) { return s.text; });
+    histIdx = -1;
     if (!suggestions || suggestions.length === 0) return;
     suggestions.forEach(function(s) {
       var chip = document.createElement('div');
@@ -677,9 +677,6 @@
       });
       container.appendChild(chip);
     });
-    // Cache task strings for history cycling
-    histCache = suggestions.map(function(s) { return s.text; });
-    histIdx = -1;
   }
 
   // --- Task replay ---
@@ -781,7 +778,7 @@
       }
       // History cycling (ArrowUp/Down when no autocomplete)
       if (e.key === 'ArrowUp' && autocomplete.style.display !== 'block') {
-        if (histCache.length > 0 && (inp.value === '' || histIdx >= 0)) {
+        if (histCache.length > 0) {
           e.preventDefault();
           if (histIdx < 0) histSaved = inp.value;
           histIdx = Math.min(histIdx + 1, histCache.length - 1);

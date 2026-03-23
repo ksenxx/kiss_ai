@@ -71,14 +71,14 @@ header {
 /* ── Task Panel ──────────────────────────────────────── */
 #task-panel {
   flex-shrink: 0;
-  max-height: calc(var(--vscode-editor-font-size) * 1.6 * 3 + 12px);
+  max-height: calc(var(--vscode-editor-font-size) * 1.2 * 1.6 * 3 + 12px);
   overflow-y: auto;
   margin: 8px 10px 0;
   padding: 8px 12px;
   border: 2px solid rgba(88,166,255,0.25);
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 4%, transparent);
-  font-size: var(--vscode-editor-font-size);
+  font-size: calc(var(--vscode-editor-font-size) * 1.2);
   color: var(--fg);
   white-space: pre-wrap;
   word-break: break-word;
