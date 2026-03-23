@@ -34,4 +34,5 @@ playwright-browsers/
 bin/
 env.sh
 node_modules/
+src/kiss/agents/vscode/out/
 
