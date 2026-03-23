@@ -282,17 +282,17 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         </div>
         <div id="input-footer">
           <div id="model-picker">
-            <button id="model-btn">
+            <button id="model-btn" data-tooltip="Select model">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
               <span id="model-name">claude-opus-4-6</span>
             </button>
-            <button id="upload-btn" title="Attach files">
+            <button id="upload-btn" data-tooltip="Attach files">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button id="clear-btn" title="Clear chat">
+            <button id="clear-btn" data-tooltip="Clear chat">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
             </button>
-            <button id="history-btn" title="Task history">
+            <button id="history-btn" data-tooltip="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
@@ -304,10 +304,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           </div>
           <div id="input-actions">
             <span id="wait-spinner"></span>
-            <button id="send-btn" title="Send">
+            <button id="send-btn" data-tooltip="Send message">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
-            <button id="stop-btn" title="Stop" style="display:none;">
+            <button id="stop-btn" data-tooltip="Stop agent" style="display:none;">
               <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
             </button>
           </div>
@@ -316,7 +316,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div id="sidebar">
-      <button id="sidebar-close">&times;</button>
+      <button id="sidebar-close" data-tooltip="Close sidebar">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">Recent Conversations</div>
         <input type="text" id="history-search" placeholder="Search history...">
@@ -332,7 +332,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         <div class="modal-title">Agent needs your input</div>
         <div id="ask-user-question"></div>
         <textarea id="ask-user-input" placeholder="Your answer..."></textarea>
-        <button id="ask-user-submit">Submit</button>
+        <button id="ask-user-submit" data-tooltip="Submit answer">Submit</button>
       </div>
     </div>
   </div>
