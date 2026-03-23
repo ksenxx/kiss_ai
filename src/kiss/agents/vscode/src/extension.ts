@@ -24,6 +24,16 @@ export function activate(context: vscode.ExtensionContext): void {
   // Check if VS Code supports secondary sidebar (1.98+)
   const supportsSecondarySidebar = typeof vscode.ViewColumn !== 'undefined';
 
+  // Detect Copilot Chat so we can conditionally show/hide our SCM button.
+  // When Copilot Chat is installed we take over its sparkle command instead
+  // of adding a second button.
+  const copilotChatInstalled = !!vscode.extensions.getExtension('github.copilot-chat');
+  vscode.commands.executeCommand(
+    'setContext',
+    'kissSorcar:copilotChatInstalled',
+    copilotChatInstalled
+  );
+
   mergeManager = new MergeManager();
   context.subscriptions.push({ dispose: () => mergeManager?.dispose() });
 
@@ -68,6 +78,64 @@ export function activate(context: vscode.ExtensionContext): void {
       getActiveProvider()?.stopTask();
     })
   );
+
+  // Commit message generation — sets the Git SCM input box
+  const setScmMessage = async (message: string) => {
+    try {
+      const gitExt = vscode.extensions.getExtension('vscode.git');
+      if (gitExt) {
+        const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
+        const api = git.getAPI(1);
+        if (api.repositories.length > 0) {
+          api.repositories[0].inputBox.value = message;
+          vscode.commands.executeCommand('workbench.view.scm');
+        }
+      }
+    } catch (err) {
+      console.error('[kissSorcar] Failed to set SCM message:', err);
+    }
+  };
+
+  // Listen for commitMessage events from both providers
+  for (const provider of [primaryProvider, secondaryProvider]) {
+    if (provider) {
+      context.subscriptions.push(
+        provider.onCommitMessage((ev) => {
+          if (ev.error) {
+            vscode.window.showWarningMessage(`Commit message: ${ev.error}`);
+          } else if (ev.message) {
+            setScmMessage(ev.message);
+          }
+        })
+      );
+    }
+  }
+
+  const triggerCommitMessageGeneration = () => {
+    const provider = getActiveProvider();
+    if (!provider) return;
+    provider.generateCommitMessage();
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.generateCommitMessage', triggerCommitMessageGeneration)
+  );
+
+  // Try to take over common commit-message commands so the SCM sparkle
+  // button uses Gemini instead of Copilot.  registerCommand throws if the
+  // command is already registered, so we silently ignore failures.
+  for (const cmdId of [
+    'github.copilot.git.generateCommitMessage',
+    'git.generateCommitMessage',
+  ]) {
+    try {
+      context.subscriptions.push(
+        vscode.commands.registerCommand(cmdId, triggerCommitMessageGeneration)
+      );
+    } catch {
+      // Already registered by another extension — ignored
+    }
+  }
 
   // Merge commands
   context.subscriptions.push(
