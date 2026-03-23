@@ -225,10 +225,6 @@ class VSCodeServer:
         self.printer.broadcast({"type": "tasks_updated"})
 
         self.printer.broadcast({"type": "status", "running": True})
-        user_msg_event: dict[str, Any] = {"type": "user_msg", "text": prompt}
-        if image_urls:
-            user_msg_event["images"] = image_urls
-        self.printer.broadcast(user_msg_event)
         self.printer.broadcast({"type": "clear"})
 
         agent_prompt = prompt

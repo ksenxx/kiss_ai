@@ -252,7 +252,6 @@ class TestChatbotJSSyntax:
         replay_js = CHATBOT_JS[start:end]
         assert "/task-events" in replay_js
         assert "processOutputEvent" in replay_js
-        assert "showUserMsg" in replay_js
 
     def test_replay_task_events_does_not_open_sidebar(self) -> None:
         """Verify replayTaskEvents only closes sidebar if open, not toggles."""
