@@ -434,6 +434,7 @@
     resetOutputState();
     removeSpinner();
     if (welcome) welcome.style.display = '';
+    vscode.postMessage({ type: 'newChat' });
     vscode.postMessage({ type: 'getWelcomeSuggestions' });
   }
 

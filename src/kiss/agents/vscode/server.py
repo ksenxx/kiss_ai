@@ -35,6 +35,8 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_history import (
     _KISS_DIR,
     _add_task,
+    _generate_chat_id,
+    _load_chat_context,
     _load_file_usage,
     _load_history,
     _load_last_model,
@@ -100,6 +102,7 @@ class VSCodeServer:
         self._task_thread: threading.Thread | None = None
         self._merging = False
         self._remaining_hunks = 0
+        self._chat_id = _generate_chat_id()
         self._sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
         os.makedirs(self._sorcar_data_dir, exist_ok=True)
 
@@ -157,6 +160,8 @@ class VSCodeServer:
             self._get_welcome_suggestions()
         elif cmd_type == "mergeAction":
             self._handle_merge_action(cmd.get("action", ""))
+        elif cmd_type == "newChat":
+            self._chat_id = _generate_chat_id()
         elif cmd_type == "complete":
             query = cmd.get("query", "")
             if query:
@@ -207,7 +212,8 @@ class VSCodeServer:
         )
         _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
 
-        _add_task(prompt)
+        chat_context = _load_chat_context(self._chat_id)
+        _add_task(prompt, chat_id=self._chat_id)
         self.printer.broadcast({"type": "tasks_updated"})
 
         self.printer.broadcast({"type": "status", "running": True})
@@ -217,11 +223,21 @@ class VSCodeServer:
         self.printer.broadcast(user_msg_event)
         self.printer.broadcast({"type": "clear"})
 
+        agent_prompt = prompt
+        if chat_context:
+            parts = ["## Previous tasks and results from the chat session for reference\n"]
+            for i, entry in enumerate(chat_context, 1):
+                parts.append(f"### Task {i}\n{entry['task']}")
+                if entry.get("result"):
+                    parts.append(f"### Result {i}\n{entry['result']}")
+            parts.append("---\n")
+            agent_prompt = "\n\n".join(parts) + prompt
+
         self.printer.start_recording()
         result_summary = ""
         try:
             self.agent.run(
-                prompt_template=prompt,
+                prompt_template=agent_prompt,
                 model_name=model,
                 work_dir=work_dir,
                 printer=self.printer,

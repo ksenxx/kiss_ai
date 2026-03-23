@@ -162,6 +162,9 @@ class SorcarViewProvider {
             case 'clearChat':
                 this.sendToWebview({ type: 'clearChat' });
                 break;
+            case 'newChat':
+                this._agentProcess.sendCommand({ type: 'newChat' });
+                break;
             case 'resumeSession':
                 this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id });
                 break;
@@ -204,6 +207,7 @@ class SorcarViewProvider {
     }
     newConversation() {
         this._isRunning = false;
+        this._agentProcess.sendCommand({ type: 'newChat' });
         this.sendToWebview({ type: 'status', running: false });
         this.sendToWebview({ type: 'clearChat' });
     }
