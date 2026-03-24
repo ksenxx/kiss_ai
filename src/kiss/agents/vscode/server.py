@@ -98,7 +98,6 @@ class VSCodeServer:
         self._last_active_file: str = ""
         self._task_thread: threading.Thread | None = None
         self._merging = False
-        self._remaining_hunks = 0
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -174,7 +173,6 @@ class VSCodeServer:
         raw_attachments = cmd.get("attachments", [])
 
         attachments: list[Attachment] | None = None
-        image_urls: list[str] = []
         if raw_attachments:
             attachments = []
             for att in raw_attachments:
@@ -182,8 +180,6 @@ class VSCodeServer:
                 mime = att.get("mimeType", "application/octet-stream")
                 data = base64.b64decode(data_b64)
                 attachments.append(Attachment(data=data, mime_type=mime))
-                if mime.startswith("image/"):
-                    image_urls.append(f"data:{mime};base64,{data_b64}")
 
         if self._merging:
             self.printer.broadcast(
@@ -249,7 +245,7 @@ class VSCodeServer:
                 )
                 if merge_result.get("status") == "opened":
                     self._merging = True
-                    self._remaining_hunks = merge_result.get("hunk_count", 0)
+                    hunk_count = merge_result.get("hunk_count", 0)
                     merge_json = os.path.join(merge_dir, "pending-merge.json")
                     if os.path.exists(merge_json):
                         with open(merge_json) as f:
@@ -257,7 +253,7 @@ class VSCodeServer:
                         self.printer.broadcast({
                             "type": "merge_data",
                             "data": merge_data,
-                            "hunk_count": self._remaining_hunks,
+                            "hunk_count": hunk_count,
                         })
                     self.printer.broadcast({"type": "merge_started"})
             except Exception:
@@ -265,18 +261,18 @@ class VSCodeServer:
             self._refresh_file_cache()
 
     def _handle_merge_action(self, action: str) -> None:
-        """Handle merge accept/reject actions from the extension."""
-        if action in ("all-done", "accept-all", "reject-all"):
+        """Handle merge accept/reject actions from the extension.
+
+        Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
+        actions are tracked on the TypeScript side; the Python server
+        only needs to know when the entire merge session is finished.
+        """
+        if action == "all-done":
             self._finish_merge()
-        elif action in ("accept", "reject"):
-            self._remaining_hunks = max(0, self._remaining_hunks - 1)
-            if self._remaining_hunks == 0:
-                self._finish_merge()
 
     def _finish_merge(self) -> None:
         """End the merge session: reset state, notify clients, clean up data."""
         self._merging = False
-        self._remaining_hunks = 0
         self.printer.broadcast({"type": "merge_ended"})
         _cleanup_merge_data(str(_merge_data_dir()))
 
@@ -402,7 +398,6 @@ class VSCodeServer:
             if total_hunks == 0:
                 return
             self._merging = True
-            self._remaining_hunks = total_hunks
             self.printer.broadcast({
                 "type": "merge_data",
                 "data": merge_data,

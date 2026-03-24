@@ -1332,42 +1332,26 @@ class TestVSCodeServerBranches:
         # New chat should generate a new chat_id
         assert server.agent.chat_id != old_chat_id
 
-    def test_handle_merge_action_accept(self):
+    def test_handle_merge_action_accept_ignored(self):
+        """Individual accept/reject actions are tracked on the TS side only."""
         server, events = self._make_server()
         server._merging = True
-        server._remaining_hunks = 3
         server._handle_command({"type": "mergeAction", "action": "accept"})
-        assert server._remaining_hunks == 2
-        assert server._merging is True
+        assert server._merging is True  # no change
 
-    def test_handle_merge_action_reject(self):
+    def test_handle_merge_action_reject_ignored(self):
+        """Individual accept/reject actions are tracked on the TS side only."""
         server, events = self._make_server()
         server._merging = True
-        server._remaining_hunks = 1
         server._handle_command({"type": "mergeAction", "action": "reject"})
-        assert server._merging is False
-        assert any(e.get("type") == "merge_ended" for e in events)
-
-    def test_handle_merge_action_accept_all(self):
-        server, events = self._make_server()
-        server._merging = True
-        server._remaining_hunks = 5
-        server._handle_command({"type": "mergeAction", "action": "accept-all"})
-        assert server._merging is False
-
-    def test_handle_merge_action_reject_all(self):
-        server, events = self._make_server()
-        server._merging = True
-        server._remaining_hunks = 5
-        server._handle_command({"type": "mergeAction", "action": "reject-all"})
-        assert server._merging is False
+        assert server._merging is True  # no change
 
     def test_handle_merge_action_all_done(self):
         server, events = self._make_server()
         server._merging = True
-        server._remaining_hunks = 5
         server._handle_command({"type": "mergeAction", "action": "all-done"})
         assert server._merging is False
+        assert any(e.get("type") == "merge_ended" for e in events)
 
     def test_replay_session_no_events(self):
         server, events = self._make_server()
@@ -2224,10 +2208,8 @@ class TestVSCodeServerMoreBranches:
         """Unknown merge action should not change state."""
         server, events = self._make_server()
         server._merging = True
-        server._remaining_hunks = 5
         server._handle_merge_action("unknown_action")
         assert server._merging is True
-        assert server._remaining_hunks == 5
 
     def test_generate_followup_empty(self):
         """_generate_followup when generate_followup_text returns empty."""
@@ -2278,7 +2260,7 @@ class TestVSCodeServerMoreBranches:
                 ],
             })
             # The run will fail because no API key, but we exercised the
-            # attachment parsing and image_urls branch
+            # attachment parsing branch
             types = [e.get("type") for e in events]
             assert "status" in types  # started
             # It should have gone past attachments parsing into agent.run

@@ -60,7 +60,6 @@ export type ToWebviewMessage =
   | { type: 'task_done' }
   | { type: 'task_error'; text: string }
   | { type: 'task_stopped' }
-  | { type: 'user_msg'; text: string; images?: string[] }
   // UI events
   | { type: 'status'; running: boolean }
   | { type: 'models'; models: Array<{name: string; inp: number; out: number; uses: number; vendor: string}>; selected: string }

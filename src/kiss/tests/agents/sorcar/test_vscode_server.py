@@ -629,7 +629,6 @@ class TestRestorePendingMerge(unittest.TestCase):
             self.merge_json.unlink()
         self.server._restore_pending_merge()
         assert not self.server._merging
-        assert self.server._remaining_hunks == 0
         merge_events = [e for e in self.events if e["type"] in ("merge_data", "merge_started")]
         assert len(merge_events) == 0
 
@@ -659,7 +658,6 @@ class TestRestorePendingMerge(unittest.TestCase):
         self.server._restore_pending_merge()
 
         assert self.server._merging is True
-        assert self.server._remaining_hunks == 3
 
         merge_data_evts = [e for e in self.events if e["type"] == "merge_data"]
         assert len(merge_data_evts) == 1

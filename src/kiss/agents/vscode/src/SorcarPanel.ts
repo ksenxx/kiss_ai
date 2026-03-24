@@ -28,10 +28,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
     this._mergeManager.on('allDone', () => {
       this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
-      this.sendToWebview({ type: 'merge_ended' } as ToWebviewMessage);
-    });
-    this._mergeManager.on('hunkProcessed', () => {
-      this._agentProcess.sendCommand({ type: 'mergeAction', action: 'accept' });
     });
 
     // Track active editor changes to update run-prompt button
@@ -148,6 +144,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
       case 'submit': {
         if (this._isRunning) return;
+        this._agentProcess.start(this._getWorkDir());
 
         // If the prompt is just a file path that exists, open it in the editor
         const trimmed = message.prompt.trim();
@@ -254,15 +251,13 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       case 'mergeAction': {
         const action = message.action;
         if (action === 'accept') {
-          this._mergeManager.acceptChange();
+          await this._mergeManager.acceptChange();
         } else if (action === 'reject') {
-          this._mergeManager.rejectChange();
+          await this._mergeManager.rejectChange();
         } else if (action === 'accept-all') {
-          this._mergeManager.acceptAll();
-          this._agentProcess.sendCommand({ type: 'mergeAction', action: 'accept-all' });
+          await this._mergeManager.acceptAll();
         } else if (action === 'reject-all') {
-          this._mergeManager.rejectAll();
-          this._agentProcess.sendCommand({ type: 'mergeAction', action: 'reject-all' });
+          await this._mergeManager.rejectAll();
         } else if (action === 'next') {
           this._mergeManager.nextChange();
         } else if (action === 'prev') {
