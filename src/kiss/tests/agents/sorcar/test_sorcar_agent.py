@@ -7,8 +7,6 @@ import queue
 from pathlib import Path
 from typing import Any, cast
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-from kiss.agents.vscode.helpers import clip_autocomplete_suggestion
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _build_arg_parser,
@@ -17,6 +15,8 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.helpers import clip_autocomplete_suggestion
 from kiss.core.models.model import Attachment
 
 

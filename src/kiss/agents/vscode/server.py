@@ -15,6 +15,20 @@ import sys
 import threading
 from typing import Any
 
+from kiss.agents.sorcar.persistence import (
+    SAMPLE_TASKS,
+    _load_file_usage,
+    _load_history,
+    _load_last_model,
+    _load_model_usage,
+    _load_task_chat_events,
+    _record_file_usage,
+    _record_model_usage,
+    _save_last_model,
+    _search_history,
+    _set_latest_chat_events,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
@@ -32,19 +46,6 @@ from kiss.agents.vscode.helpers import (
     generate_followup_text,
     model_vendor,
     rank_file_suggestions,
-)
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.agents.sorcar.persistence import (
-    _load_file_usage,
-    _load_history,
-    _load_last_model,
-    _load_model_usage,
-    _load_task_chat_events,
-    _record_file_usage,
-    _record_model_usage,
-    _save_last_model,
-    _search_history,
-    _set_latest_chat_events,
 )
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import Attachment
@@ -425,16 +426,8 @@ class VSCodeServer:
             logger.debug("Failed to restore pending merge", exc_info=True)
 
     def _get_welcome_suggestions(self) -> None:
-        """Send recent tasks as welcome screen suggestions."""
-        entries = _load_history(limit=10)
-        suggestions = []
-        for entry in entries:
-            task = str(entry.get("task", ""))
-            if task:
-                suggestions.append({
-                    "text": task,
-                    "has_events": bool(entry.get("has_events", False)),
-                })
+        """Send sample tasks as welcome screen suggestions."""
+        suggestions = [{"text": str(s["task"])} for s in SAMPLE_TASKS]
         self.printer.broadcast({"type": "welcome_suggestions", "suggestions": suggestions})
 
     def _generate_followup(self, task: str, result: str) -> None:

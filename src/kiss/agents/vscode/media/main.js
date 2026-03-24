@@ -656,20 +656,11 @@
     suggestions.forEach(function(s) {
       var chip = document.createElement('div');
       chip.className = 'suggestion-chip';
-      chip.dataset.tooltip = s.text;
       chip.dataset.prompt = s.text;
-      if (s.has_events) chip.dataset.hasEvents = 'true';
-      var displayText = s.text.length > 80 ? s.text.substring(0, 77) + '...' : s.text;
-      chip.innerHTML = '<span class="chip-label">Recent</span>' + esc(displayText);
+      chip.innerHTML = '<span class="chip-label">Suggested</span>' + esc(s.text);
       chip.addEventListener('click', function() {
-        if (s.has_events) {
-          setTaskText(s.text);
-          vscode.postMessage({ type: 'resumeSession', id: s.text });
-          if (welcome) welcome.style.display = 'none';
-        } else {
-          inp.value = s.text; syncClearBtn();
-          inp.focus();
-        }
+        inp.value = s.text; syncClearBtn();
+        inp.focus();
       });
       container.appendChild(chip);
     });

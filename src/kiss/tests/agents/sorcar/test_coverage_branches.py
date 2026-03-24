@@ -10,7 +10,6 @@ import asyncio
 import json
 import os
 import queue
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -21,34 +20,6 @@ from types import SimpleNamespace
 import pytest
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.vscode.browser_ui import (
-    BaseBrowserPrinter,
-    _coalesce_events,
-)
-from kiss.agents.vscode.diff_merge import (
-    _agent_file_hunks,
-    _capture_untracked,
-    _cleanup_merge_data,
-    _diff_files,
-    _file_as_new_hunks,
-    _git,
-    _hunk_to_dict,
-    _load_gitignore_dirs,
-    _merge_data_dir,
-    _parse_diff_hunks,
-    _parse_hunk_line,
-    _prepare_merge_view,
-    _save_untracked_base,
-    _scan_files,
-    _snapshot_files,
-    _untracked_base_dir,
-)
-from kiss.agents.vscode.helpers import (
-    clean_llm_output,
-    clip_autocomplete_suggestion,
-    model_vendor,
-    rank_file_suggestions,
-)
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _build_arg_parser,
@@ -70,8 +41,32 @@ from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
     _number_interactive_elements,
 )
+from kiss.agents.vscode.browser_ui import (
+    BaseBrowserPrinter,
+    _coalesce_events,
+)
+from kiss.agents.vscode.diff_merge import (
+    _agent_file_hunks,
+    _capture_untracked,
+    _cleanup_merge_data,
+    _diff_files,
+    _file_as_new_hunks,
+    _hunk_to_dict,
+    _parse_diff_hunks,
+    _parse_hunk_line,
+    _prepare_merge_view,
+    _save_untracked_base,
+    _scan_files,
+    _snapshot_files,
+    _untracked_base_dir,
+)
+from kiss.agents.vscode.helpers import (
+    clean_llm_output,
+    clip_autocomplete_suggestion,
+    model_vendor,
+    rank_file_suggestions,
+)
 from kiss.agents.vscode.server import VSCodePrinter, VSCodeServer
-
 
 # ---------------------------------------------------------------------------
 # browser_ui.py coverage
@@ -601,7 +596,10 @@ class TestCodeServerBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "tracked.txt").write_text("tracked\n")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
@@ -628,7 +626,10 @@ class TestCodeServerBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "f.txt").write_text("content\n")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
@@ -649,7 +650,10 @@ class TestCodeServerBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "f.txt").write_text("content\n")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
@@ -1172,7 +1176,7 @@ class TestTaskHistoryBranches:
                 # Make it old
                 old_time = time.time() - 48 * 3600
                 os.utime(sorcar_data, (old_time, old_time))
-                removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
+                th._cleanup_stale_cs_dirs(max_age_hours=24)
                 assert sorcar_data.exists()
             finally:
                 sock.close()
@@ -1424,6 +1428,7 @@ class TestVSCodeServerBranches:
 
         def set_it():
             time.sleep(0.1)
+            assert server._user_answer_event is not None
             server._user_answer_event.set()
 
         t = threading.Thread(target=set_it, daemon=True)
@@ -1442,6 +1447,7 @@ class TestVSCodeServerBranches:
 
         def answer():
             time.sleep(0.1)
+            assert server._user_answer_event is not None
             server._user_answer_event.set()
 
         t = threading.Thread(target=answer, daemon=True)
@@ -1458,6 +1464,7 @@ class TestVSCodeServerBranches:
 
         def answer():
             time.sleep(0.1)
+            assert server._user_answer_event is not None
             server._user_answer_event.set()
 
         t = threading.Thread(target=answer, daemon=True)
@@ -1523,7 +1530,10 @@ class TestVSCodeServerBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "f.txt").write_text("content\n")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
@@ -1587,7 +1597,10 @@ class TestVSCodeServerBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "f.txt").write_text("content\n")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
@@ -1628,7 +1641,7 @@ class TestVSCodePrinter:
 def http_server():
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    FORM = b"""<!DOCTYPE html>
+    form_html = b"""<!DOCTYPE html>
 <html><head><title>Test</title></head>
 <body>
   <h1>Test</h1>
@@ -1638,14 +1651,14 @@ def http_server():
   <div style="height:5000px"></div>
 </body></html>"""
 
-    SECOND = b"""<!DOCTYPE html>
+    second_html = b"""<!DOCTYPE html>
 <html><head><title>Second</title></head>
 <body><h1>Second Page</h1><a href="/">Back</a></body></html>"""
 
-    EMPTY = b"""<!DOCTYPE html>
+    empty_html = b"""<!DOCTYPE html>
 <html><head><title>Empty</title></head><body></body></html>"""
 
-    MULTI = b"""<!DOCTYPE html>
+    multi_html = b"""<!DOCTYPE html>
 <html><head><title>Multi</title></head>
 <body>
   <button>Submit</button>
@@ -1655,14 +1668,17 @@ def http_server():
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            pages = {"/": FORM, "/second": SECOND, "/empty": EMPTY, "/multi": MULTI}
-            content = pages.get(self.path, FORM)
+            pages = {
+                "/": form_html, "/second": second_html,
+                "/empty": empty_html, "/multi": multi_html,
+            }
+            content = pages.get(self.path, form_html)
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(content)
 
-        def log_message(self, *args):
+        def log_message(self, format: str, /, *args: object) -> None:  # type: ignore[override]
             return
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -1873,7 +1889,8 @@ class TestBrowserPrinterStreamEvent:
         cq: queue.Queue = queue.Queue()
         p._client_queue = cq
         # parse_stream_event expects an object with .event attribute
-        wrapper = SimpleNamespace(event={"type": "content_block_start", "content_block": {"type": "text"}})
+        evt = {"type": "content_block_start", "content_block": {"type": "text"}}
+        wrapper = SimpleNamespace(event=evt)
         result = p.print(wrapper, type="stream_event")
         assert isinstance(result, str)
 
@@ -2014,7 +2031,10 @@ class TestUsefulToolsMoreBranches:
         with tempfile.TemporaryDirectory() as d:
             pid_file = Path(d) / "kbi_pid_s"
             script = Path(d) / "kbi_script_s.sh"
-            script.write_text(f"#!/bin/bash\necho $$ > {pid_file}\nwhile true; do echo x; sleep 0.1; done\n")
+            script.write_text(
+                f"#!/bin/bash\necho $$ > {pid_file}\n"
+                "while true; do echo x; sleep 0.1; done\n"
+            )
             script.chmod(0o755)
 
             child_pid = None
@@ -2115,7 +2135,10 @@ class TestCodeServerMoreBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "f.txt").write_text("content\n")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
@@ -2139,7 +2162,10 @@ class TestCodeServerMoreBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "tracked.txt").write_text("tracked\n")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
@@ -2270,7 +2296,7 @@ class TestVSCodeServerMoreBranches:
         # or return empty, so no followup_suggestion event
         server._generate_followup("test task", "test result")
         time.sleep(1)
-        followup = [e for e in events if e["type"] == "followup_suggestion"]
+        [e for e in events if e["type"] == "followup_suggestion"]
         # May or may not have a suggestion depending on API availability
         # But the test exercises the branch
 
@@ -2291,7 +2317,10 @@ class TestVSCodeServerMoreBranches:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
             subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
             subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
             Path(repo, "f.txt").write_text("x")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
