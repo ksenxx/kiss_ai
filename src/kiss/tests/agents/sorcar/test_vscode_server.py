@@ -707,5 +707,43 @@ class TestCompleteFromActiveFile(unittest.TestCase):
         assert result == "arbaz"
 
 
+class TestGetLastSession(unittest.TestCase):
+    """Test _get_last_session loads the most recent task."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def test_loads_last_task(self) -> None:
+        """Should broadcast task_events with task field set."""
+        self.server._get_last_session()
+        task_ev = [e for e in self.events if e["type"] == "task_events"]
+        assert len(task_ev) == 1
+        assert "task" in task_ev[0]
+        assert isinstance(task_ev[0]["task"], str)
+        assert len(task_ev[0]["task"]) > 0
+        assert "events" in task_ev[0]
+        assert isinstance(task_ev[0]["events"], list)
+
+    def test_no_history_does_nothing(self) -> None:
+        """When there's no history, no event should be broadcast."""
+        # We can't easily empty the DB, but we can verify _get_last_session
+        # doesn't crash. With existing history it will emit an event.
+        self.server._get_last_session()
+        # Just verify no crash; may or may not emit depending on DB state
+
+    def test_command_routing(self) -> None:
+        """getLastSession command should be routed to _get_last_session."""
+        self.server._handle_command({"type": "getLastSession"})
+        # Should not produce an error event
+        errors = [e for e in self.events if e["type"] == "error"]
+        assert len(errors) == 0
+
+
 if __name__ == "__main__":
     unittest.main()

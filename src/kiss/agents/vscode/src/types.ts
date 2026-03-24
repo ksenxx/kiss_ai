@@ -74,7 +74,7 @@ export type ToWebviewMessage =
   | { type: 'followup_suggestion'; text: string }
   | { type: 'tasks_updated' }
   | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
-  | { type: 'task_events'; events: any[] }
+  | { type: 'task_events'; events: any[]; task?: string }
   | { type: 'ghost'; suggestion: string }
   | { type: 'merge_data'; data: any; hunk_count: number }
   | { type: 'merge_started' }
@@ -85,7 +85,7 @@ export type ToWebviewMessage =
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'getLastSession' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage';
   prompt?: string;
   model?: string;
   workDir?: string;
