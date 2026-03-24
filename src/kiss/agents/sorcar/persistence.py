@@ -1,4 +1,4 @@
-"""Task history, proposals, and model usage persistence.
+"""SQLite persistence for task history, chat events, model and file usage.
 
 All data is stored in a single SQLite database at ``~/.kiss/history.db``
 using WAL mode for concurrent access.  Four tables hold task history,

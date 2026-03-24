@@ -400,7 +400,7 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.core.models.gemini_model",
         "kiss.core.printer",
         "kiss.core.print_to_console",
-        "kiss.agents.sorcar.browser_ui",
+        "kiss.agents.vscode.browser_ui",
         "kiss.agents.sorcar.useful_tools",
         "kiss.agents.sorcar.web_use_tool",
         "kiss.core.utils",

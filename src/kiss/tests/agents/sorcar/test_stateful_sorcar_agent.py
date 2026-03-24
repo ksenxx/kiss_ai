@@ -7,10 +7,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
-import kiss.agents.sorcar.task_history as th
+import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.agents.sorcar.task_history import _load_last_chat_id
+from kiss.agents.sorcar.persistence import _load_last_chat_id
 
 
 def _redirect(tmpdir: str) -> tuple:

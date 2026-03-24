@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import kiss.agents.sorcar.task_history as th
+import kiss.agents.sorcar.persistence as th
 
 
 def _redirect(tmpdir: str):

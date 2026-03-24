@@ -9,7 +9,7 @@ import queue
 import unittest
 from types import SimpleNamespace
 
-from kiss.agents.sorcar.browser_ui import (
+from kiss.agents.vscode.browser_ui import (
     _DISPLAY_EVENT_TYPES,
     BaseBrowserPrinter,
     _coalesce_events,

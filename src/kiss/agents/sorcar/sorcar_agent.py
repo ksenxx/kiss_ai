@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.task_history import _load_last_model, _save_last_model
+from kiss.agents.sorcar.persistence import _load_last_model, _save_last_model
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core import config as config_module
