@@ -100,6 +100,16 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     return process.cwd();
   }
 
+  private _sendWelcomeSuggestions(): void {
+    const jsonPath = path.join(this._extensionUri.fsPath, 'SAMPLE_TASKS.json');
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+      this.sendToWebview({ type: 'welcome_suggestions', suggestions: data } as ToWebviewMessage);
+    } catch {
+      this.sendToWebview({ type: 'welcome_suggestions', suggestions: [] } as ToWebviewMessage);
+    }
+  }
+
   private _sendActiveFileInfo(): void {
     const editor = vscode.window.activeTextEditor;
     const fpath = editor?.document.uri.fsPath || '';
@@ -117,7 +127,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       case 'ready':
         this.sendToWebview({ type: 'status', running: this._isRunning });
         this._agentProcess.sendCommand({ type: 'getModels' });
-        this._agentProcess.sendCommand({ type: 'getWelcomeSuggestions' });
+        this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getLastSession' });
         this._sendActiveFileInfo();
         break;
@@ -218,7 +228,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'getWelcomeSuggestions':
-        this._agentProcess.sendCommand({ type: 'getWelcomeSuggestions' });
+        this._sendWelcomeSuggestions();
         break;
 
       case 'complete':
@@ -387,7 +397,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     <div id="output">
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
-        <p>Your AI coding assistant. Ask me anything about your code!</p>
+        <p>Your AI assistant. Ask me anything!</p>
         <div id="suggestions"></div>
       </div>
     </div>
