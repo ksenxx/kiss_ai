@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar import task_history
+from kiss.agents.sorcar import persistence
 
 
 class TestFileUsage(unittest.TestCase):
@@ -15,35 +15,35 @@ class TestFileUsage(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (task_history._DB_PATH, task_history._db_conn, task_history._KISS_DIR)
-        task_history._KISS_DIR = kiss_dir
-        task_history._DB_PATH = kiss_dir / "history.db"
-        task_history._db_conn = None
+        self._saved = (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR)
+        persistence._KISS_DIR = kiss_dir
+        persistence._DB_PATH = kiss_dir / "history.db"
+        persistence._db_conn = None
 
     def tearDown(self) -> None:
-        if task_history._db_conn is not None:
-            task_history._db_conn.close()
-            task_history._db_conn = None
-        (task_history._DB_PATH, task_history._db_conn, task_history._KISS_DIR) = self._saved
+        if persistence._db_conn is not None:
+            persistence._db_conn.close()
+            persistence._db_conn = None
+        (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR) = self._saved
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_max_entries_reaccess_preserves_entry(self) -> None:
         """Re-accessing a file prevents it from being evicted."""
-        orig_max = task_history._MAX_FILE_USAGE_ENTRIES
-        task_history._MAX_FILE_USAGE_ENTRIES = 3
+        orig_max = persistence._MAX_FILE_USAGE_ENTRIES
+        persistence._MAX_FILE_USAGE_ENTRIES = 3
         try:
-            task_history._record_file_usage("a.py")
-            task_history._record_file_usage("b.py")
-            task_history._record_file_usage("c.py")
-            task_history._record_file_usage("a.py")
-            task_history._record_file_usage("d.py")
-            usage = task_history._load_file_usage()
+            persistence._record_file_usage("a.py")
+            persistence._record_file_usage("b.py")
+            persistence._record_file_usage("c.py")
+            persistence._record_file_usage("a.py")
+            persistence._record_file_usage("d.py")
+            usage = persistence._load_file_usage()
             assert len(usage) == 3
             assert "b.py" not in usage
             assert set(usage.keys()) == {"c.py", "a.py", "d.py"}
             assert usage["a.py"] == 2
         finally:
-            task_history._MAX_FILE_USAGE_ENTRIES = orig_max
+            persistence._MAX_FILE_USAGE_ENTRIES = orig_max
 
 def _end_dist(text: str, q: str) -> int:
     """Distance from end of path to end of rightmost query match."""

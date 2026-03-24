@@ -43,7 +43,7 @@ from kiss.core.utils import (
 class TestUtilsFunctions(TestCase):
     def test_read_project_file(self) -> None:
         from kiss.core.utils import read_project_file
-        content = read_project_file("src/kiss/__init__.py")
+        content = read_project_file("kiss/__init__.py")
         assert len(content) > 0
 
 
@@ -151,7 +151,7 @@ class TestKISSAgentErrors(TestCase):
 
 class TestTaskHistory(TestCase):
     def setUp(self) -> None:
-        from kiss.agents.sorcar import task_history as th
+        from kiss.agents.sorcar import persistence as th
         self.th = th
         self.tmpdir = Path(tempfile.mkdtemp())
         kiss_dir = self.tmpdir / ".kiss"
@@ -162,7 +162,7 @@ class TestTaskHistory(TestCase):
         th._db_conn = None
 
     def tearDown(self) -> None:
-        from kiss.agents.sorcar import task_history as th
+        from kiss.agents.sorcar import persistence as th
 
         if th._db_conn is not None:
             th._db_conn.close()
@@ -206,7 +206,7 @@ class TestUsefulTools(TestCase):
 
 class TestMultiPrinter(TestCase):
     def test_multi_printer(self) -> None:
-        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
         from kiss.core.printer import MultiPrinter
         p1 = BaseBrowserPrinter()
         p2 = BaseBrowserPrinter()
@@ -218,7 +218,7 @@ class TestMultiPrinter(TestCase):
         assert not cq2.empty()
 
     def test_multi_printer_token_callback(self) -> None:
-        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
         from kiss.core.printer import MultiPrinter
         p1 = BaseBrowserPrinter()
         p2 = BaseBrowserPrinter()
@@ -230,7 +230,7 @@ class TestMultiPrinter(TestCase):
         assert not cq2.empty()
 
     def test_multi_printer_reset(self) -> None:
-        from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
         from kiss.core.printer import MultiPrinter
         p1 = BaseBrowserPrinter()
         mp = MultiPrinter([p1])
@@ -241,7 +241,7 @@ class TestMultiPrinter(TestCase):
 
 class TestCodeServerHelpers(TestCase):
     def test_snapshot_files(self) -> None:
-        from kiss.agents.sorcar.code_server import _snapshot_files
+        from kiss.agents.vscode.diff_merge import _snapshot_files
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "a.txt").write_text("hello")
             result = _snapshot_files(tmpdir, {"a.txt", "missing.txt"})
@@ -251,7 +251,7 @@ class TestCodeServerHelpers(TestCase):
 
 class TestTaskHistoryExtra(TestCase):
     def setUp(self) -> None:
-        from kiss.agents.sorcar import task_history as th
+        from kiss.agents.sorcar import persistence as th
         self.th = th
         self.tmpdir = Path(tempfile.mkdtemp())
         kiss_dir = self.tmpdir / ".kiss"
@@ -262,7 +262,7 @@ class TestTaskHistoryExtra(TestCase):
         th._db_conn = None
 
     def tearDown(self) -> None:
-        from kiss.agents.sorcar import task_history as th
+        from kiss.agents.sorcar import persistence as th
 
         if th._db_conn is not None:
             th._db_conn.close()

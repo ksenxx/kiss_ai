@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from kiss.agents.sorcar.code_server import (
+from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,
     _parse_diff_hunks,

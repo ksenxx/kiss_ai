@@ -77,7 +77,7 @@ class TestTextBasedToolsParsing(TestCase):
 class TestTaskHistoryEdgeCases(TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        import kiss.agents.sorcar.task_history as th
+        import kiss.agents.sorcar.persistence as th
 
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -87,7 +87,7 @@ class TestTaskHistoryEdgeCases(TestCase):
         th._db_conn = None
 
     def tearDown(self) -> None:
-        import kiss.agents.sorcar.task_history as th
+        import kiss.agents.sorcar.persistence as th
 
         if th._db_conn is not None:
             th._db_conn.close()
@@ -96,13 +96,13 @@ class TestTaskHistoryEdgeCases(TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_search_history_fresh_db(self) -> None:
-        import kiss.agents.sorcar.task_history as th
+        import kiss.agents.sorcar.persistence as th
 
         results = th._search_history("anything", limit=10)
         assert isinstance(results, list)
 
     def test_set_empty_events_clears_events(self) -> None:
-        import kiss.agents.sorcar.task_history as th
+        import kiss.agents.sorcar.persistence as th
 
         th._add_task("my task")
         events: list[dict[str, object]] = [{"type": "text", "data": "hello"}]
@@ -112,7 +112,7 @@ class TestTaskHistoryEdgeCases(TestCase):
         assert loaded == []
 
     def test_get_history_entry_out_of_range(self) -> None:
-        import kiss.agents.sorcar.task_history as th
+        import kiss.agents.sorcar.persistence as th
 
         entry = th._get_history_entry(9999)
         assert entry is None

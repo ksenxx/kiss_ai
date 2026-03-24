@@ -20,12 +20,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from kiss.agents.sorcar import task_history as th
-from kiss.agents.sorcar.browser_ui import (
+from kiss.agents.sorcar import persistence as th
+from kiss.agents.vscode.browser_ui import (
     BaseBrowserPrinter,
     _coalesce_events,
 )
-from kiss.agents.sorcar.code_server import (
+from kiss.agents.vscode.diff_merge import (
     _agent_file_hunks,
     _capture_untracked,
     _cleanup_merge_data,
@@ -43,7 +43,7 @@ from kiss.agents.sorcar.code_server import (
     _snapshot_files,
     _untracked_base_dir,
 )
-from kiss.agents.sorcar.shared_utils import (
+from kiss.agents.vscode.helpers import (
     clean_llm_output,
     clip_autocomplete_suggestion,
     model_vendor,
@@ -475,7 +475,7 @@ class TestCoalesceEventsBranches:
 
 
 # ---------------------------------------------------------------------------
-# code_server.py coverage
+# diff_merge.py coverage
 # ---------------------------------------------------------------------------
 
 
@@ -698,7 +698,7 @@ class TestScanFilesBranches:
 
 
 # ---------------------------------------------------------------------------
-# shared_utils.py coverage
+# helpers.py coverage
 # ---------------------------------------------------------------------------
 
 
@@ -1045,12 +1045,12 @@ class TestSorcarAgentBranches:
 
 
 # ---------------------------------------------------------------------------
-# task_history.py coverage
+# persistence.py coverage
 # ---------------------------------------------------------------------------
 
 
 class TestTaskHistoryBranches:
-    """Cover specific uncovered branches in task_history."""
+    """Cover specific uncovered branches in persistence."""
 
     def _fresh_db(self, tmp_path):
         """Switch to a fresh DB in tmp_path, return cleanup callback."""
@@ -2064,7 +2064,7 @@ class TestUsefulToolsMoreBranches:
 
 
 # ---------------------------------------------------------------------------
-# Additional shared_utils.py branches
+# Additional helpers.py branches
 # ---------------------------------------------------------------------------
 
 
@@ -2095,7 +2095,7 @@ class TestRankFileSuggestionsNoMatch:
 
 
 # ---------------------------------------------------------------------------
-# Additional code_server.py branches
+# Additional diff_merge.py branches
 # ---------------------------------------------------------------------------
 
 

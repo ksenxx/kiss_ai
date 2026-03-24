@@ -15,8 +15,8 @@ import sys
 import threading
 from typing import Any
 
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
-from kiss.agents.sorcar.code_server import (
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,
     _git,
@@ -26,7 +26,7 @@ from kiss.agents.sorcar.code_server import (
     _save_untracked_base,
     _snapshot_files,
 )
-from kiss.agents.sorcar.shared_utils import (
+from kiss.agents.vscode.helpers import (
     clean_llm_output,
     clip_autocomplete_suggestion,
     generate_followup_text,
@@ -34,7 +34,7 @@ from kiss.agents.sorcar.shared_utils import (
     rank_file_suggestions,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.agents.sorcar.task_history import (
+from kiss.agents.sorcar.persistence import (
     _load_file_usage,
     _load_history,
     _load_last_model,
@@ -502,7 +502,7 @@ class VSCodeServer:
 
     def _refresh_file_cache(self) -> None:
         """Refresh the file cache from disk."""
-        from kiss.agents.sorcar.code_server import _scan_files
+        from kiss.agents.vscode.diff_merge import _scan_files
 
         self._file_cache = _scan_files(self.work_dir)
 

@@ -1,4 +1,4 @@
-"""Shared utilities for Sorcar agent backends (chatbot UI and VS Code)."""
+"""Helper utilities for Sorcar agent backends (autocomplete, model info, file ranking)."""
 
 from __future__ import annotations
 

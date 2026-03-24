@@ -11,7 +11,7 @@ import io
 import queue
 from types import SimpleNamespace
 
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
 

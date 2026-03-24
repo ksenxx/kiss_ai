@@ -7,8 +7,8 @@ import queue
 from pathlib import Path
 from typing import Any, cast
 
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
-from kiss.agents.sorcar.shared_utils import clip_autocomplete_suggestion
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.helpers import clip_autocomplete_suggestion
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _build_arg_parser,

@@ -21,7 +21,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_ask_user_question,
     cli_wait_for_user,
 )
-from kiss.agents.sorcar.task_history import (
+from kiss.agents.sorcar.persistence import (
     _add_task,
     _generate_chat_id,
     _load_chat_context,
@@ -100,7 +100,7 @@ class StatefulSorcarAgent(SorcarAgent):
 
         Only the result summary is persisted here.  Callers that record
         chat events (e.g. the VS Code server) should additionally call
-        :func:`~kiss.agents.sorcar.task_history._set_latest_chat_events`
+        :func:`~kiss.agents.sorcar.persistence._set_latest_chat_events`
         to persist the full event stream.
 
         Args:

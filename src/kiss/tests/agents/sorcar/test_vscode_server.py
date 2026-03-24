@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.shared_utils import model_vendor
+from kiss.agents.vscode.helpers import model_vendor
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -217,7 +217,7 @@ class TestGetFiles(unittest.TestCase):
 
     def test_frequent_files_sorted_first(self) -> None:
         """Files with usage > 0 should appear before files with no usage."""
-        from kiss.agents.sorcar.task_history import _record_file_usage
+        from kiss.agents.sorcar.persistence import _record_file_usage
 
         # Record usage for one file
         _record_file_usage("src/main.py")

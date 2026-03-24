@@ -1,10 +1,10 @@
-"""Tests for _load_gitignore_dirs and _scan_files in code_server."""
+"""Tests for _load_gitignore_dirs and _scan_files in diff_merge."""
 
 import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.code_server import _load_gitignore_dirs, _scan_files
+from kiss.agents.vscode.diff_merge import _load_gitignore_dirs, _scan_files
 
 
 class TestLoadGitignoreDirs(unittest.TestCase):

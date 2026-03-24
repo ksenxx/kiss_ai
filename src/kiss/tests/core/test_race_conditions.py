@@ -13,7 +13,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from kiss.agents.sorcar.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.core.base import Base
 
 
@@ -60,7 +60,7 @@ class TestGlobalBudgetThreadSafety:
 
 def _worker_record_model_usage(db_dir: str, model: str, n: int) -> None:
     """Child-process worker: record model usage *n* times via SQLite."""
-    import kiss.agents.sorcar.task_history as th
+    import kiss.agents.sorcar.persistence as th
 
     kiss_dir = Path(db_dir)
     th._KISS_DIR = kiss_dir
@@ -98,7 +98,7 @@ class TestCrossProcessRecordModelUsage:
         for p in procs:
             p.join()
 
-        import kiss.agents.sorcar.task_history as th
+        import kiss.agents.sorcar.persistence as th
         saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._KISS_DIR = Path(kiss_dir)
         th._DB_PATH = Path(kiss_dir) / "history.db"
@@ -115,7 +115,7 @@ class TestCrossProcessRecordModelUsage:
 
 def _worker_save_last_model(db_dir: str, model: str, n: int) -> None:
     """Child-process worker: call _save_last_model *n* times via SQLite."""
-    import kiss.agents.sorcar.task_history as th
+    import kiss.agents.sorcar.persistence as th
 
     kiss_dir = Path(db_dir)
     th._KISS_DIR = kiss_dir
@@ -151,7 +151,7 @@ class TestCrossProcessSaveLastModel:
         for p in procs:
             p.join()
 
-        import kiss.agents.sorcar.task_history as th
+        import kiss.agents.sorcar.persistence as th
         saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._KISS_DIR = Path(kiss_dir)
         th._DB_PATH = Path(kiss_dir) / "history.db"
