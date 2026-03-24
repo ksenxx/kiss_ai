@@ -742,5 +742,132 @@ class TestGetLastSession(unittest.TestCase):
         assert len(errors) == 0
 
 
+class TestRestorePendingMerge(unittest.TestCase):
+    """Test _restore_pending_merge restores merge state from disk."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+        from kiss.agents.vscode.diff_merge import _merge_data_dir
+
+        self.merge_dir = _merge_data_dir()
+        self.merge_json = self.merge_dir / "pending-merge.json"
+        # Clean up any existing merge data
+        self._had_merge = self.merge_json.is_file()
+        if self._had_merge:
+            self._saved = self.merge_json.read_text()
+
+    def tearDown(self) -> None:
+        if self._had_merge:
+            self.merge_json.parent.mkdir(parents=True, exist_ok=True)
+            self.merge_json.write_text(self._saved)
+        elif self.merge_json.is_file():
+            self.merge_json.unlink()
+
+    def _write_merge_json(self, data: object) -> None:
+        self.merge_dir.mkdir(parents=True, exist_ok=True)
+        import json
+
+        self.merge_json.write_text(json.dumps(data))
+
+    def test_no_file_does_nothing(self) -> None:
+        """No pending-merge.json → no events, no state change."""
+        if self.merge_json.is_file():
+            self.merge_json.unlink()
+        self.server._restore_pending_merge()
+        assert not self.server._merging
+        assert self.server._remaining_hunks == 0
+        merge_events = [e for e in self.events if e["type"] in ("merge_data", "merge_started")]
+        assert len(merge_events) == 0
+
+    def test_restores_merge_state(self) -> None:
+        """Valid pending-merge.json → sends merge_data + merge_started, sets state."""
+        merge_data = {
+            "branch": "HEAD",
+            "files": [
+                {
+                    "name": "a.py",
+                    "base": "/tmp/base/a.py",
+                    "current": "/tmp/cur/a.py",
+                    "hunks": [
+                        {"bs": 0, "bc": 2, "cs": 0, "cc": 3},
+                        {"bs": 5, "bc": 1, "cs": 6, "cc": 1},
+                    ],
+                },
+                {
+                    "name": "b.py",
+                    "base": "/tmp/base/b.py",
+                    "current": "/tmp/cur/b.py",
+                    "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 5}],
+                },
+            ],
+        }
+        self._write_merge_json(merge_data)
+        self.server._restore_pending_merge()
+
+        assert self.server._merging is True
+        assert self.server._remaining_hunks == 3
+
+        merge_data_evts = [e for e in self.events if e["type"] == "merge_data"]
+        assert len(merge_data_evts) == 1
+        assert merge_data_evts[0]["hunk_count"] == 3
+        assert merge_data_evts[0]["data"]["files"][0]["name"] == "a.py"
+
+        merge_started_evts = [e for e in self.events if e["type"] == "merge_started"]
+        assert len(merge_started_evts) == 1
+
+    def test_empty_files_ignored(self) -> None:
+        """pending-merge.json with empty files list → no events."""
+        self._write_merge_json({"branch": "HEAD", "files": []})
+        self.server._restore_pending_merge()
+        assert not self.server._merging
+        assert len([e for e in self.events if e["type"] == "merge_data"]) == 0
+
+    def test_zero_hunks_ignored(self) -> None:
+        """Files present but all with empty hunk lists → no events."""
+        self._write_merge_json({
+            "branch": "HEAD",
+            "files": [{"name": "a.py", "base": "/x", "current": "/y", "hunks": []}],
+        })
+        self.server._restore_pending_merge()
+        assert not self.server._merging
+
+    def test_invalid_json_does_not_crash(self) -> None:
+        """Corrupt pending-merge.json → silent failure, no crash."""
+        self.merge_dir.mkdir(parents=True, exist_ok=True)
+        self.merge_json.write_text("not valid json{{{")
+        self.server._restore_pending_merge()
+        assert not self.server._merging
+        assert len(self.events) == 0
+
+    def test_get_last_session_also_restores_merge(self) -> None:
+        """_get_last_session should call _restore_pending_merge."""
+        merge_data = {
+            "branch": "HEAD",
+            "files": [
+                {
+                    "name": "c.py",
+                    "base": "/tmp/base/c.py",
+                    "current": "/tmp/cur/c.py",
+                    "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}],
+                }
+            ],
+        }
+        self._write_merge_json(merge_data)
+        self.server._get_last_session()
+
+        assert self.server._merging is True
+        merge_data_evts = [e for e in self.events if e["type"] == "merge_data"]
+        assert len(merge_data_evts) == 1
+        merge_started_evts = [e for e in self.events if e["type"] == "merge_started"]
+        assert len(merge_started_evts) == 1
+
+
 if __name__ == "__main__":
     unittest.main()
