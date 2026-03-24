@@ -79,6 +79,7 @@ export type ToWebviewMessage =
   | { type: 'merge_data'; data: any; hunk_count: number }
   | { type: 'merge_started' }
   | { type: 'merge_ended' }
+  | { type: 'commitMessageStarted' }
   | { type: 'commitMessage'; message: string; error?: string }
   | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string };
 
