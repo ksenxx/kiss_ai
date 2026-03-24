@@ -268,14 +268,18 @@ export class MergeManager extends EventEmitter {
       });
   }
 
-  async acceptAll(): Promise<void> {
+  private async _resolveAll(
+    countProp: 'oc' | 'nc',
+    startProp: 'os' | 'ns',
+    label: string
+  ): Promise<void> {
     try {
       for (const fp of Object.keys(this._ms)) {
         const s = this._ms[fp];
         const ed = await this._getOrOpenEditor(fp);
         for (let i = s.hunks.length - 1; i >= 0; i--) {
-          if (s.hunks[i].oc > 0) {
-            await this._delLines(ed, s.hunks[i].os, s.hunks[i].oc);
+          if (s.hunks[i][countProp] > 0) {
+            await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
           }
         }
         ed.setDecorations(this._redDeco, []);
@@ -285,31 +289,17 @@ export class MergeManager extends EventEmitter {
       this._ms = {};
       this._curHunk = null;
       await vscode.workspace.saveAll(false);
-      vscode.window.showInformationMessage('All changes accepted.');
+      vscode.window.showInformationMessage(label);
       this.emit('allDone');
     }
   }
 
+  async acceptAll(): Promise<void> {
+    await this._resolveAll('oc', 'os', 'All changes accepted.');
+  }
+
   async rejectAll(): Promise<void> {
-    try {
-      for (const fp of Object.keys(this._ms)) {
-        const s = this._ms[fp];
-        const ed = await this._getOrOpenEditor(fp);
-        for (let i = s.hunks.length - 1; i >= 0; i--) {
-          if (s.hunks[i].nc > 0) {
-            await this._delLines(ed, s.hunks[i].ns, s.hunks[i].nc);
-          }
-        }
-        ed.setDecorations(this._redDeco, []);
-        ed.setDecorations(this._blueDeco, []);
-      }
-    } finally {
-      this._ms = {};
-      this._curHunk = null;
-      await vscode.workspace.saveAll(false);
-      vscode.window.showInformationMessage('All changes rejected.');
-      this.emit('allDone');
-    }
+    await this._resolveAll('nc', 'ns', 'All changes rejected.');
   }
 
   private _checkAllDone(): void {

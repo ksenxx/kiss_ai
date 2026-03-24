@@ -32,7 +32,6 @@ export type FromWebviewMessage =
   | { type: 'recordFileUsage'; path: string }
   | { type: 'ready' }
   | { type: 'resumeSession'; id: string }
-  | { type: 'clearChat' }
   | { type: 'getWelcomeSuggestions' }
   | { type: 'mergeAction'; action: string }
   | { type: 'newChat' }
@@ -82,7 +81,7 @@ export type ToWebviewMessage =
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getWelcomeSuggestions' | 'getLastSession' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage';
   prompt?: string;
   model?: string;
   workDir?: string;

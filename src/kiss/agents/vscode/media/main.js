@@ -345,8 +345,6 @@
         + '<div class="prompt-body">' + pBody + '</div>';
       hlBlock(pr);
       target.appendChild(pr); break;
-      // Task is shown in the fixed panel; skip rendering prompt in chat output
-      break;
     }
     case 'usage_info': {
       var u = mkEl('div', 'ev usage');
@@ -414,7 +412,7 @@
 
 
   // --- Clear chat ---
-  function doClearChat() {
+  function resetChatUI() {
     clearOutput();
     resetOutputState();
     removeSpinner();
@@ -423,6 +421,10 @@
       welcome.style.display = '';
       O.appendChild(welcome);
     }
+  }
+
+  function doClearChat() {
+    resetChatUI();
     vscode.postMessage({ type: 'newChat' });
     vscode.postMessage({ type: 'getWelcomeSuggestions' });
   }
@@ -479,7 +481,8 @@
       showSpinner();
       break;
     case 'clearChat':
-      doClearChat();
+      resetChatUI();
+      vscode.postMessage({ type: 'getWelcomeSuggestions' });
       break;
     case 'followup_suggestion': {
       var fu = mkEl('div', 'followup-bar');

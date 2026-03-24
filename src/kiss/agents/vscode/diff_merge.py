@@ -161,8 +161,7 @@ def _untracked_base_dir() -> Path:
     Returns:
         Path to the untracked-base directory.
     """
-    artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
-    return artifact_dir.parent.parent / "merge_dir" / "untracked-base"
+    return _merge_data_dir() / "untracked-base"
 
 
 def _merge_data_dir() -> Path:
