@@ -122,6 +122,41 @@ class TestTaskHistory:
         assert len(results) == 2
         assert results[0]["task"] == "task1"
 
+    def test_prefix_match_task_basic(self):
+        th._add_task("fix the bug in parser")
+        time.sleep(0.001)
+        th._add_task("fix the tests")
+        assert th._prefix_match_task("fix the t") == "fix the tests"
+        assert th._prefix_match_task("fix the b") == "fix the bug in parser"
+        assert th._prefix_match_task("nonexistent") == ""
+
+    def test_prefix_match_task_case_insensitive(self):
+        th._add_task("Add new feature")
+        assert th._prefix_match_task("add") == "Add new feature"
+        assert th._prefix_match_task("ADD") == "Add new feature"
+
+    def test_prefix_match_task_returns_most_recent(self):
+        th._add_task("deploy version 1")
+        time.sleep(0.01)
+        th._add_task("deploy version 2")
+        assert th._prefix_match_task("deploy") == "deploy version 2"
+
+    def test_prefix_match_task_empty_query(self):
+        th._add_task("anything")
+        assert th._prefix_match_task("") == ""
+
+    def test_prefix_match_task_exact_match_excluded(self):
+        th._add_task("exact")
+        # Exact match should NOT be returned (nothing to complete)
+        assert th._prefix_match_task("exact") == ""
+
+    def test_prefix_match_task_wildcards_escaped(self):
+        th._add_task("100% done")
+        th._add_task("some_thing here")
+        # '%' and '_' in query should be treated as literals
+        assert th._prefix_match_task("100%") == "100% done"
+        assert th._prefix_match_task("some_") == "some_thing here"
+
     def test_load_history_has_chat_id(self):
         th._add_task("t1", chat_id="abc123")
         entries = th._load_history(limit=1)

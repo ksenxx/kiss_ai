@@ -873,5 +873,315 @@ class TestRestorePendingMerge(unittest.TestCase):
         assert len(merge_started_evts) == 1
 
 
+class TestCompleteFromActiveFile(unittest.TestCase):
+    """Test chained identifier extraction and matching from active file content."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def test_single_word_match(self) -> None:
+        """Single word identifier matching still works."""
+        self.server._last_active_content = "def calculate_total(): pass"
+        result = self.server._complete_from_active_file("fix the calc")
+        assert result == "ulate_total"
+
+    def test_chain_match_self_method(self) -> None:
+        """Chained identifier like self.method is matched."""
+        self.server._last_active_content = "self.method_name()\nself.other()"
+        result = self.server._complete_from_active_file("call self.me")
+        assert result == "thod_name"
+
+    def test_chain_match_dotted_path(self) -> None:
+        """Multi-level chained identifier like os.path.join is matched."""
+        self.server._last_active_content = "import os\nos.path.join('/a', 'b')"
+        result = self.server._complete_from_active_file("use os.path.j")
+        assert result == "oin"
+
+    def test_trailing_dot_match(self) -> None:
+        """Trailing dot (e.g. 'self.') matches chains starting with 'self.'."""
+        self.server._last_active_content = "self.method_name()\nself.attribute = 1"
+        result = self.server._complete_from_active_file("call self.")
+        # Should match the longest chain starting with "self."
+        assert result in ("method_name", "attribute")
+        # Specifically, "self.method_name" (len 16) > "self.attribute" (len 14)
+        assert result == "method_name"
+
+    def test_case_insensitive_match(self) -> None:
+        """Matching is case-insensitive."""
+        self.server._last_active_content = "MyClassName = 1"
+        result = self.server._complete_from_active_file("use myclass")
+        assert result == "Name"
+
+    def test_no_match_returns_empty(self) -> None:
+        """No matching word returns empty string."""
+        self.server._last_active_content = "def foo(): pass"
+        result = self.server._complete_from_active_file("bar")
+        assert result == ""
+
+    def test_no_content_no_path_returns_empty(self) -> None:
+        """No content and no path returns empty."""
+        self.server._last_active_content = ""
+        self.server._last_active_file = ""
+        result = self.server._complete_from_active_file("test")
+        assert result == ""
+
+    def test_fallback_to_disk_read(self) -> None:
+        """Falls back to disk read when no content stored."""
+        self.server._last_active_content = ""
+        tmpfile = os.path.join(tempfile.mkdtemp(), "test.py")
+        with open(tmpfile, "w") as f:
+            f.write("def some_function(): pass")
+        self.server._last_active_file = tmpfile
+        result = self.server._complete_from_active_file("some_fun")
+        assert result == "ction"
+        os.unlink(tmpfile)
+
+    def test_disk_read_oserror(self) -> None:
+        """OSError on disk read returns empty."""
+        self.server._last_active_content = ""
+        self.server._last_active_file = "/nonexistent/path/file.py"
+        result = self.server._complete_from_active_file("test")
+        assert result == ""
+
+    def test_short_partial_returns_empty(self) -> None:
+        """Partial token shorter than 2 chars returns empty."""
+        self.server._last_active_content = "def foo(): pass"
+        result = self.server._complete_from_active_file("x")
+        assert result == ""
+
+    def test_no_trailing_token_returns_empty(self) -> None:
+        """Query with no trailing identifier returns empty."""
+        self.server._last_active_content = "def foo(): pass"
+        result = self.server._complete_from_active_file("   ")
+        assert result == ""
+
+    def test_longest_match_wins(self) -> None:
+        """Among multiple matches, the longest suffix is returned."""
+        self.server._last_active_content = "foo\nfoobar\nfoobarbaz"
+        result = self.server._complete_from_active_file("type fo")
+        # foobarbaz (len 9) > foobar (len 6) > foo (len 3)
+        assert result == "obarbaz"
+
+    def test_both_words_and_chains_in_candidates(self) -> None:
+        """Both single words and chains are available as candidates."""
+        self.server._last_active_content = "self.method\nmethod_standalone"
+        # "meth" should match both "method_standalone" and "self.method"
+        # But "meth" won't match "self.method" as prefix since "self.method" starts with "self."
+        # It should match "method_standalone" (single word)
+        result = self.server._complete_from_active_file("call meth")
+        assert result == "od_standalone"
+
+    def test_chain_prefix_beats_word(self) -> None:
+        """Chain match is preferred when it produces a longer suffix."""
+        self.server._last_active_content = "self.method_name\nself.m"
+        result = self.server._complete_from_active_file("use self.m")
+        # "self.method_name" starts with "self.m", suffix = "ethod_name" (len 10)
+        # "self.m" — too short (len == partial len)
+        assert result == "ethod_name"
+
+
+class TestCompleteRaceCondition(unittest.TestCase):
+    """Test that the sequence counter prevents stale results from broadcasting."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+        self.server._last_active_content = "calculate_total = 1"
+
+    def test_stale_seq_skips_broadcast(self) -> None:
+        """A complete call with an old seq number should not broadcast."""
+        # Simulate: seq 0 starts, then seq 1 arrives (making seq 0 stale)
+        self.server._complete_seq_latest = 5
+        self.server._complete("calc", seq=3)  # stale
+        assert len(self.events) == 0
+
+    def test_current_seq_broadcasts(self) -> None:
+        """A complete call with the current seq number should broadcast."""
+        self.server._complete_seq_latest = 5
+        self.server._complete("calc", seq=5)
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "ghost"
+
+    def test_negative_seq_always_broadcasts(self) -> None:
+        """seq=-1 (default) always broadcasts (for backward compat)."""
+        self.server._complete("calc")
+        assert len(self.events) == 1
+
+    def test_concurrent_calls_only_latest_broadcasts(self) -> None:
+        """Simulate multiple rapid calls; only latest seq should broadcast."""
+        import threading
+
+        barrier = threading.Barrier(3)
+
+        def slow_complete(query: str, seq: int) -> None:
+            barrier.wait()
+            self.server._complete(query, seq=seq)
+
+        self.server._complete_seq_latest = 2  # latest is seq=2
+
+        threads = [
+            threading.Thread(target=slow_complete, args=("calc", 0)),
+            threading.Thread(target=slow_complete, args=("calc", 1)),
+            threading.Thread(target=slow_complete, args=("calc", 2)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        ghost_events = [e for e in self.events if e["type"] == "ghost"]
+        # Only seq=2 should broadcast
+        assert len(ghost_events) == 1
+
+    def test_handle_command_increments_seq(self) -> None:
+        """Each complete command increments the seq counter."""
+        self.server._handle_command({"type": "complete", "query": "test1"})
+        seq1 = self.server._complete_seq_latest
+        self.server._handle_command({"type": "complete", "query": "test2"})
+        seq2 = self.server._complete_seq_latest
+        assert seq2 == seq1 + 1
+
+    def test_active_content_stored_from_command(self) -> None:
+        """activeFileContent from command is stored on the server."""
+        self.server._handle_command({
+            "type": "complete",
+            "query": "test",
+            "activeFileContent": "def hello(): pass",
+        })
+        assert self.server._last_active_content == "def hello(): pass"
+
+
+class TestCompleteIntegration(unittest.TestCase):
+    """End-to-end tests for _complete with various query patterns."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def test_short_query_returns_empty(self) -> None:
+        """Query shorter than 2 chars after stripping returns empty ghost."""
+        self.server._complete("a")
+        assert len(self.events) == 1
+        assert self.events[0]["suggestion"] == ""
+
+    def test_empty_query_returns_empty(self) -> None:
+        """Empty query returns empty ghost."""
+        self.server._complete("")
+        assert len(self.events) == 1
+        assert self.events[0]["suggestion"] == ""
+
+    def test_complete_with_file_content(self) -> None:
+        """Complete uses stored file content for matching."""
+        self.server._last_active_content = "def my_awesome_function(): pass"
+        self.server._complete("call my_awe")
+        assert len(self.events) == 1
+        assert self.events[0]["suggestion"] == "some_function"
+
+    def test_complete_chain_from_content(self) -> None:
+        """Complete matches chained identifiers from stored content."""
+        self.server._last_active_content = "self.important_method(x)"
+        self.server._complete("use self.imp")
+        assert len(self.events) == 1
+        assert self.events[0]["suggestion"] == "ortant_method"
+
+
+class TestGetInputHistory(unittest.TestCase):
+    """Test _get_input_history returns deduplicated, recent task strings."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def test_returns_input_history_event(self) -> None:
+        """Should broadcast an inputHistory event with a tasks list."""
+        self.server._get_input_history()
+        assert len(self.events) == 1
+        ev = self.events[0]
+        assert ev["type"] == "inputHistory"
+        assert isinstance(ev["tasks"], list)
+
+    def test_tasks_are_strings(self) -> None:
+        """All entries in the tasks list should be non-empty strings."""
+        self.server._get_input_history()
+        for task in self.events[0]["tasks"]:
+            assert isinstance(task, str)
+            assert len(task.strip()) > 0
+
+    def test_tasks_are_deduplicated(self) -> None:
+        """No duplicate task strings should appear in the list."""
+        self.server._get_input_history()
+        tasks = self.events[0]["tasks"]
+        assert len(tasks) == len(set(tasks))
+
+    def test_command_routing(self) -> None:
+        """getInputHistory command should be routed to _get_input_history."""
+        self.server._handle_command({"type": "getInputHistory"})
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "inputHistory"
+
+
+class TestMainJsInputHistory(unittest.TestCase):
+    """Test that main.js handles inputHistory events and request patterns."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_handles_input_history_event(self) -> None:
+        """main.js should have a case for 'inputHistory'."""
+        assert "case 'inputHistory':" in self._js
+
+    def test_sets_hist_cache_from_tasks(self) -> None:
+        """inputHistory handler should set histCache from ev.tasks."""
+        assert "histCache = ev.tasks" in self._js
+
+    def test_does_not_set_hist_cache_from_welcome(self) -> None:
+        """renderWelcomeSuggestions should NOT set histCache anymore."""
+        # Find the renderWelcomeSuggestions function body
+        idx = self._js.index("function renderWelcomeSuggestions")
+        # Find the next function definition to bound the search
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "histCache" not in body
+
+    def test_requests_input_history_on_tasks_updated(self) -> None:
+        """tasks_updated handler should request getInputHistory."""
+        idx = self._js.index("case 'tasks_updated':")
+        # Check within next 200 chars
+        snippet = self._js[idx:idx + 300]
+        assert "getInputHistory" in snippet
+
+    def test_optimistic_hist_cache_in_send_message(self) -> None:
+        """sendMessage should unshift prompt into histCache before posting."""
+        idx = self._js.index("function sendMessage()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "histCache.unshift(prompt)" in body
+
+
 if __name__ == "__main__":
     unittest.main()
