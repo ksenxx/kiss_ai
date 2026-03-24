@@ -315,6 +315,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   public generateCommitMessage(): void {
     this._agentProcess.start(this._getWorkDir());
+    this.sendToWebview({ type: 'commitMessageStarted' } as ToWebviewMessage);
     this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
   }
 
@@ -365,6 +366,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         <span id="status-text">Ready</span>
       </div>
     </header>
+
+    <div id="commit-msg-bar" style="display:none;">
+      <span class="commit-msg-spinner"></span>
+      <span>Generating commit message…</span>
+    </div>
 
     <div id="task-panel"></div>
 

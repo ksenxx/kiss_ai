@@ -68,6 +68,29 @@ header {
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 
+/* ── Commit Message Bar ─────────────────────────────── */
+#commit-msg-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-base);
+  color: var(--accent);
+  font-weight: 500;
+}
+.commit-msg-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ── Task Panel ──────────────────────────────────────── */
 #task-panel {
   flex-shrink: 0;
