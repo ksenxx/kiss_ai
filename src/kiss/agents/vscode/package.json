@@ -135,6 +135,9 @@
         "mac": "cmd+l"
       }
     ],
+    "configurationDefaults": {
+      "workbench.notifications.position": "top-right"
+    },
     "configuration": {
       "title": "KISS Sorcar",
       "properties": {
