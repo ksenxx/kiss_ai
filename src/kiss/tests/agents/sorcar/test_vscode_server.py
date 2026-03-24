@@ -490,6 +490,53 @@ class TestHandleCommandGenerateCommitMessage(unittest.TestCase):
         assert "unknownXYZ" in self.events[0]["text"]
 
 
+class TestGetHistory(unittest.TestCase):
+    """Test _get_history sends paginated history with offset/generation."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def test_history_event_structure(self) -> None:
+        self.server._get_history(None)
+        assert len(self.events) == 1
+        ev = self.events[0]
+        assert ev["type"] == "history"
+        assert "sessions" in ev
+        assert "offset" in ev
+        assert "generation" in ev
+        assert isinstance(ev["sessions"], list)
+
+    def test_history_offset_echoed(self) -> None:
+        self.server._get_history(None, offset=10, generation=3)
+        ev = self.events[0]
+        assert ev["offset"] == 10
+        assert ev["generation"] == 3
+
+    def test_history_sessions_have_chat_id(self) -> None:
+        self.server._get_history(None)
+        ev = self.events[0]
+        for s in ev["sessions"]:
+            assert "chat_id" in s
+
+    def test_getHistory_command_routing(self) -> None:
+        self.server._handle_command({"type": "getHistory", "offset": 5, "generation": 2})
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "history"
+        assert self.events[0]["offset"] == 5
+        assert self.events[0]["generation"] == 2
+
+    def test_getHistory_with_query(self) -> None:
+        self.server._get_history("nonexistent_xyz_query_123")
+        ev = self.events[0]
+        assert ev["sessions"] == []
+
+
 class TestLastActiveFile(unittest.TestCase):
     """Test that _last_active_file is stored from run commands."""
 
@@ -521,6 +568,118 @@ class TestMainJsHistoryCycling(unittest.TestCase):
     def test_no_hist_saved(self) -> None:
         """histSaved is no longer needed since cycling only starts from empty."""
         assert "histSaved" not in self.js
+
+
+class TestMainJsInfiniteScroll(unittest.TestCase):
+    """Test main.js has infinite scroll and chat_id color code."""
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_has_history_offset_state(self) -> None:
+        assert "historyOffset" in self.js
+
+    def test_has_history_loading_state(self) -> None:
+        assert "historyLoading" in self.js
+
+    def test_has_history_has_more_state(self) -> None:
+        assert "historyHasMore" in self.js
+
+    def test_has_history_generation_counter(self) -> None:
+        assert "historyGeneration" in self.js
+
+    def test_has_scroll_listener(self) -> None:
+        assert "historyList.addEventListener('scroll'" in self.js or \
+               'historyList.addEventListener("scroll"' in self.js
+
+    def test_has_loading_indicator(self) -> None:
+        assert "sidebar-loading" in self.js
+        assert "Loading..." in self.js
+
+    def test_has_chat_id_bg_color_function(self) -> None:
+        assert "chatIdBgColor" in self.js
+
+    def test_chat_id_bg_uses_hsl(self) -> None:
+        assert "hsl(" in self.js
+        assert "40%" in self.js
+        assert "92%" in self.js
+
+    def test_chat_id_bg_colors_are_light(self) -> None:
+        """Verify the chatIdBgColor function produces light colors for all chat_ids.
+
+        Reimplements the JS djb2 hash + HSL logic in Python and checks that
+        the minimum RGB channel is >= 220 (i.e., clearly light/pastel) for
+        a wide range of chat_id strings.
+        """
+        import colorsys
+        import ctypes
+
+        def chat_id_bg_rgb(chat_id: str) -> tuple[int, int, int]:
+            h = 5381
+            for ch in chat_id:
+                h = ((h << 5) + h) + ord(ch)
+                h = ctypes.c_int32(h).value  # JS |= 0
+            hue = abs(h) % 360
+            # HSL(hue, 40%, 92%) -> RGB
+            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.92, 0.40)
+            return (round(r * 255), round(g * 255), round(b * 255))
+
+        test_ids = [
+            "abc123", "xyz789", "chat-001", "chat-002", "session-1",
+            "a", "test", "550e8400-e29b-41d4-a716-446655440000",
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479", "z",
+        ]
+        for cid in test_ids:
+            r, g, b = chat_id_bg_rgb(cid)
+            assert min(r, g, b) >= 220, (
+                f"chat_id={cid!r} produced dark color rgb({r},{g},{b})"
+            )
+
+    def test_sidebar_escape_closes(self) -> None:
+        assert "'Escape'" in self.js
+        assert "closeSidebar" in self.js
+
+    def test_render_history_accepts_offset(self) -> None:
+        assert "renderHistory(sessions, offset, generation)" in self.js or \
+               "function renderHistory" in self.js
+
+
+class TestMainCssInfiniteScroll(unittest.TestCase):
+    """Test main.css has infinite scroll and wider sidebar styles."""
+
+    css: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.css = (base / "vscode" / "media" / "main.css").read_text()
+
+    def test_sidebar_width_420(self) -> None:
+        assert "420px" in self.css
+
+    def test_sidebar_overflow_hidden(self) -> None:
+        # Sidebar should have overflow: hidden (not auto) so #history-list scrolls
+        idx = self.css.index("#sidebar")
+        block = self.css[idx : idx + 500]
+        assert "overflow: hidden" in block or "overflow:hidden" in block
+
+    def test_history_list_scrollable(self) -> None:
+        assert "#history-list" in self.css
+        idx = self.css.index("#history-list")
+        block = self.css[idx : idx + 200]
+        assert "overflow-y: auto" in block or "overflow-y:auto" in block
+
+    def test_sidebar_loading_style(self) -> None:
+        assert ".sidebar-loading" in self.css
+
+    def test_sidebar_item_black_text(self) -> None:
+        idx = self.css.index(".sidebar-item")
+        block = self.css[idx : idx + 300]
+        assert "#000" in block
 
 
 class TestMainCssModelPicker(unittest.TestCase):

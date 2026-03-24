@@ -16,6 +16,7 @@ export interface SessionInfo {
   timestamp: number;
   preview: string;
   has_events?: boolean;
+  chat_id?: string;
 }
 
 /** Messages from webview to extension */
@@ -24,7 +25,7 @@ export type FromWebviewMessage =
   | { type: 'stop' }
   | { type: 'selectModel'; model: string }
   | { type: 'getModels' }
-  | { type: 'getHistory'; query?: string }
+  | { type: 'getHistory'; query?: string; offset?: number; generation?: number }
   | { type: 'getFiles'; prefix: string }
   | { type: 'userAnswer'; answer: string }
   | { type: 'userActionDone' }
@@ -33,6 +34,7 @@ export type FromWebviewMessage =
   | { type: 'ready' }
   | { type: 'resumeSession'; id: string }
   | { type: 'getWelcomeSuggestions' }
+  | { type: 'complete'; query: string }
   | { type: 'mergeAction'; action: string }
   | { type: 'newChat' }
   | { type: 'generateCommitMessage' }
@@ -63,7 +65,7 @@ export type ToWebviewMessage =
   // UI events
   | { type: 'status'; running: boolean }
   | { type: 'models'; models: Array<{name: string; inp: number; out: number; uses: number; vendor: string}>; selected: string }
-  | { type: 'history'; sessions: SessionInfo[] }
+  | { type: 'history'; sessions: SessionInfo[]; offset?: number; generation?: number }
   | { type: 'files'; files: Array<{type: string; text: string}> }
   | { type: 'askUser'; question: string }
   | { type: 'waitForUser'; instruction: string; url: string }
@@ -72,6 +74,7 @@ export type ToWebviewMessage =
   | { type: 'tasks_updated' }
   | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
   | { type: 'task_events'; events: any[]; task?: string }
+  | { type: 'ghost'; suggestion: string; query: string }
   | { type: 'merge_data'; data: any; hunk_count: number }
   | { type: 'merge_started' }
   | { type: 'merge_ended' }
@@ -80,13 +83,15 @@ export type ToWebviewMessage =
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage';
   prompt?: string;
   model?: string;
   workDir?: string;
   activeFile?: string;
   attachments?: Attachment[];
   query?: string;
+  offset?: number;
+  generation?: number;
   prefix?: string;
   answer?: string;
   path?: string;

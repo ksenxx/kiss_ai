@@ -92,6 +92,41 @@ class TestTaskHistory:
         entries = th._load_history()
         assert len(entries) == 0
 
+    def test_load_history_offset(self):
+        for i in range(5):
+            th._add_task(f"t{i}")
+            time.sleep(0.001)
+        # Most recent first: t4, t3, t2, t1, t0
+        page1 = th._load_history(limit=2, offset=0)
+        page2 = th._load_history(limit=2, offset=2)
+        page3 = th._load_history(limit=2, offset=4)
+        assert [e["task"] for e in page1] == ["t4", "t3"]
+        assert [e["task"] for e in page2] == ["t2", "t1"]
+        assert [e["task"] for e in page3] == ["t0"]
+
+    def test_search_history_offset(self):
+        for i in range(5):
+            th._add_task(f"item {i}")
+            time.sleep(0.001)
+        # Search all with "item", most recent first: item 4..0
+        page1 = th._search_history("item", limit=2, offset=0)
+        page2 = th._search_history("item", limit=2, offset=2)
+        assert [e["task"] for e in page1] == ["item 4", "item 3"]
+        assert [e["task"] for e in page2] == ["item 2", "item 1"]
+
+    def test_search_empty_query_with_offset(self):
+        for i in range(3):
+            th._add_task(f"task{i}")
+            time.sleep(0.001)
+        results = th._search_history("", limit=2, offset=1)
+        assert len(results) == 2
+        assert results[0]["task"] == "task1"
+
+    def test_load_history_has_chat_id(self):
+        th._add_task("t1", chat_id="abc123")
+        entries = th._load_history(limit=1)
+        assert entries[0]["chat_id"] == "abc123"
+
 
 class TestChatEvents:
     def setup_method(self):
