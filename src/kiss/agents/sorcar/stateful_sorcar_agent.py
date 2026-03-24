@@ -1,0 +1,193 @@
+"""Stateful Sorcar agent with chat-session persistence.
+
+Subclasses :class:`SorcarAgent` to add multi-turn chat-session state
+management — the same workflow that the VS Code extension performs in
+``VSCodeServer._run_task()``, but as a standalone reusable Python agent.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.task_history import (
+    _add_task,
+    _generate_chat_id,
+    _load_chat_context,
+    _load_last_chat_id,
+    _load_task_chat_id,
+    _set_latest_chat_events,
+)
+
+
+class StatefulSorcarAgent(SorcarAgent):
+    """SorcarAgent with chat-session state management.
+
+    Maintains a ``chat_id`` and automatically loads prior chat context,
+    persists tasks and results to ``history.db``, and augments prompts
+    with previous session context — replicating the stateful workflow
+    from the VS Code extension as a standalone reusable agent.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self._chat_id = _generate_chat_id()
+
+    @property
+    def chat_id(self) -> str:
+        """Return the current chat session ID."""
+        return self._chat_id
+
+    def new_chat(self) -> None:
+        """Reset to a new chat session (equivalent to VS Code 'Clear')."""
+        self._chat_id = _generate_chat_id()
+
+    def resume_chat(self, task: str) -> None:
+        """Resume a previous chat session by looking up the task's chat_id.
+
+        If the task has an associated ``chat_id`` in history, subsequent
+        ``run()`` calls will continue that session.
+
+        Args:
+            task: The task description string to look up.
+        """
+        chat_id = _load_task_chat_id(task)
+        if chat_id:
+            self._chat_id = chat_id
+
+    def run(  # type: ignore[override]
+        self,
+        prompt_template: str = "",
+        **kwargs: Any,
+    ) -> str:
+        """Run the agent with chat-session context management.
+
+        Loads prior chat context, persists the new task, augments the
+        prompt with previous tasks/results, runs the underlying agent,
+        and saves the result back to history.
+
+        Args:
+            prompt_template: The task prompt.
+            **kwargs: All other arguments forwarded to ``SorcarAgent.run()``.
+
+        Returns:
+            YAML string with 'success' and 'summary' keys.
+        """
+        chat_context = _load_chat_context(self._chat_id)
+        _add_task(prompt_template, chat_id=self._chat_id)
+
+        agent_prompt = prompt_template
+        if chat_context:
+            parts = ["## Previous tasks and results from the chat session for reference\n"]
+            for i, entry in enumerate(chat_context, 1):
+                parts.append(f"### Task {i}\n{entry['task']}")
+                if entry.get("result"):
+                    parts.append(f"### Result {i}\n{entry['result']}")
+            parts.append("---\n")
+            agent_prompt = "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt_template
+
+        result_summary = ""
+        try:
+            result = super().run(prompt_template=agent_prompt, **kwargs)
+            result_yaml = yaml.safe_load(result)
+            result_summary = result_yaml.get("summary", "") if result_yaml else ""
+            return result
+        except Exception as e:
+            result_summary = f"Task failed: {e}"
+            raise
+        finally:
+            _set_latest_chat_events([], task=prompt_template, result=result_summary)
+
+
+def main() -> None:  # pragma: no cover – CLI entry point requires API
+    """Run StatefulSorcarAgent from the command line with chat persistence."""
+    import time as time_mod
+
+    if len(sys.argv) <= 1:
+        print(
+            "Usage: stateful_sorcar_agent [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-c CHAT_ID] [-r]"
+        )
+        sys.exit(1)
+
+    parser = _build_arg_parser()
+    parser.add_argument(
+        "-c", "--chat-id", type=str, default=None,
+        help="Resume an existing chat session by ID",
+    )
+    parser.add_argument(
+        "-r", "--reset", action="store_true",
+        help="Reset chat_id to a new one (start fresh session)",
+    )
+    parser.add_argument(
+        "-l", "--last", action="store_true",
+        help="Resume the most recent chat session (uses last task's chat_id)",
+    )
+    args = parser.parse_args()
+
+    agent = StatefulSorcarAgent("Stateful Sorcar Agent")
+
+    if args.reset:
+        pass  # keep the fresh auto-generated chat_id
+    elif args.last:
+        last_id = _load_last_chat_id()
+        if last_id:
+            agent._chat_id = last_id
+        else:
+            print("Warning: no previous chat session found, starting new session")
+    elif args.chat_id:
+        agent._chat_id = args.chat_id
+
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
+    try:
+        result = agent.run(**run_kwargs)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
+
+    print("FINAL RESULT:")
+    result_data = yaml.safe_load(result)
+    print("Completed successfully: " + str(result_data["success"]))
+    print(result_data["summary"])
+    print("Work directory was: " + work_dir)
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Cost: ${agent.budget_used:.4f}")
+    print(f"Total tokens: {agent.total_tokens_used}")
+    print(f"Chat ID: {agent.chat_id}")
+
+
+if __name__ == "__main__":
+    main()
