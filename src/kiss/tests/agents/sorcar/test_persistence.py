@@ -88,9 +88,9 @@ class TestTaskHistory:
         entries = th._load_history(limit=3)
         assert len(entries) == 3
 
-    def test_seed_sample_tasks(self):
+    def test_empty_db_on_first_creation(self):
         entries = th._load_history()
-        assert len(entries) == len(th.SAMPLE_TASKS)
+        assert len(entries) == 0
 
 
 class TestChatEvents:

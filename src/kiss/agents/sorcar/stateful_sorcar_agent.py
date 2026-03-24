@@ -14,13 +14,6 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _generate_chat_id,
@@ -28,6 +21,13 @@ from kiss.agents.sorcar.persistence import (
     _load_last_chat_id,
     _load_task_chat_id,
     _save_task_result,
+)
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
 )
 
 

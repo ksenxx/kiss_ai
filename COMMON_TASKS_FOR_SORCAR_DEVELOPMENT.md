@@ -4,7 +4,7 @@ Select a task below in sorcar editor and press cmd/ctrl-L to run the task in the
 
 ## increase test coverage
 
-can you write integration tests with no mocks or test doubles or fakes to achieve 100% branch coverage of the files under src/kiss/agents/vscode/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Fix tests or code if some tests fail.  Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles or fakes. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 3 tries.
+can you write integration tests with no mocks or test doubles or fakes to achieve 100% branch coverage of the files under src/kiss/agents/vscode/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Fix tests or code if some tests fail. Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles or fakes. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 3 tries.
 
 ## code review
 
@@ -70,5 +70,4 @@ You MUST check whether you can run a sample task in the VSCode extension. Launch
 
 in the vscode extension you have to add a major feature. You need to add a new column, called chat_id as a text field storing a unique hex code for an agent chat session, to task_history table of the history database. When the user clicks the Clear button in the chatbox, you should create a new chat_id which is not present in the table. Then when a task is added, add the task to the task_history table as before, but add the new chat_id to row of the task_history table. When a task is submitted to the agent, append the tasks and results with the same chat_id in chronological order to the prompt and then run the sorcar agent and telling the agent that "## Previous tasks and results from the chat session for reference"
 
-
-can you create a stateful_sorcar_agent.py in src/kiss/agents/sorcar/ extending SorcarAgent such that it reads the previous tasks with the same chat_id from history.db, creates a prompt with previous tasks and results with the same chat_id, saves the new task and results in the history.db.  Basically, the workflow of the agent MUST be exactly the same as the workflow with the SorcarAgent in the vscode extension.  Do not create the file yet, but create a plan in PLAN.md to create the file. 
+can you create a stateful_sorcar_agent.py in src/kiss/agents/sorcar/ extending SorcarAgent such that it reads the previous tasks with the same chat_id from history.db, creates a prompt with previous tasks and results with the same chat_id, saves the new task and results in the history.db. Basically, the workflow of the agent MUST be exactly the same as the workflow with the SorcarAgent in the vscode extension. Do not create the file yet, but create a plan in PLAN.md to create the file.

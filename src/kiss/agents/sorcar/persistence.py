@@ -36,68 +36,68 @@ def _ensure_kiss_dir() -> None:
 _HistoryEntry = dict[str, object]
 
 SAMPLE_TASKS: list[_HistoryEntry] = [
-    {"task": "run 'uv run check' and fix"},
+    {"task": "Can create a plan in PLAN.md for the following task: "},
     {
         "task": (
-            "plan a trip to Yosemite over the weekend based on"
-            " warnings and hotel availability, create an html"
-            " report, and show it to me."
+            "I see probable issues in PLAN.md. Please fix them."
         ),
     },
     {
         "task": (
-            "find the cheapest afternoon non-stop flight from"
-            " SFO to NYC around April 15, create an html"
-            " report, and show it to me."
+            "Can you please use src/kiss/channels/slack_channel.py to authenticate with Slack?"
         ),
     },
     {
         "task": (
-            "implement and validate results from the research"
-            " paper https://arxiv.org/pdf/2505.10961 using relentless_coding_agent and kiss_agent"
+            "Can you please find the cheapest non-stop flight from"
+            " SFO to JFK around April 15 by searching various websites?"
         ),
     },
     {
         "task": (
-            "can you use src/kiss/scripts/redundancy_analyzer.py"
-            " to get rid of redundant test methods?  Make sure"
-            " that you don't decrease the overall branch coverage"
-            " after removing the redundant test methods."
+            "Can you please use /path/to/SKILL.md to do the following task:"
         ),
     },
     {
         "task": (
-            "can you write integration tests (possibly"
-            " running 'uv run sorcar') with no mocks or test"
-            " doubles to achieve 100% branch coverage of the"
-            " project files? Please check the branch coverage"
-            " first for the existing tests with the coverage"
-            " tool.  Then try to reach uncovered branches by"
-            " crafting integration tests without any mocks, test"
-            " doubles. You MUST repeat the task until you get"
-            " 100% branch coverage or you cannot increase branch"
-            " coverage after 10 tries."
+            "Can you please work on the following task: ..."
+            " Use internet search as extensively to solve the task."
         ),
     },
     {
         "task": (
-            "find redundancy, duplication, AI slop, lack of"
-            " elegant abstractions, and inconsistencies in the"
-            " code of the project, and fix them. Make sure that"
-            " you test every change by writing and running"
-            " integration tests with no mocks or test doubles to"
-            " achieve 100% branch coverage. Do not change any"
-            " functionality or UI. Make that existing tests pass."
+            "Can you please fix the following bug: ..."
+            " Perform extensive internet search to find relevant information."
         ),
     },
     {
         "task": (
-            "can you please work hard and carefully to precisly"
-            " detect all actual race conditions in"
-            " the project? You can add"
-            " random delays within 0.1 seconds before racing"
-            " events to reliably trigger a race condition to"
-            " confirm a race condition."
+            """Can you run the command <<command>>
+in the background so that you can monitor the output in real time,
+and correct the code in the working directory if needed?
+
+If you observe any repeated errors in the output or the command is not able
+to complete successfully, please fix the code and run the
+command again.  Repeat the process until the command can finish successfully.
+
+Run the command again
+and monitor its output in real time. You can add diagnostic code which will print
+metrics, such as running time and cost,information at finer level of granularity.
+Check for opportunities to optimize the code
+on the basis of the metrics information---you need to minimize the metrics.
+If you discover any opportunities to minimize the metrics based on the code
+and the command output, optimize the code and run the command again.
+Note down the ideas you used to optimize the code and the metrics you achieved in a file,
+so that you can use the file to not repeat ideas that have already been tried and failed.
+You can also use the file to combine ideas that have been successful in the past.
+Repeat the process.  Do not forget to remove the diagnostic
+code after the optimization is complete."""
+        ),
+    },
+    {
+        "task": (
+            "Can you please implement and validate results from the research"
+            " paper https://arxiv.org/pdf/2505.10961 using the SorcarAgent"
         ),
     },
 ]
@@ -169,8 +169,7 @@ def _get_db() -> sqlite3.Connection:
     """Return the singleton database connection, creating it on first call.
 
     Sets WAL journal mode, enables foreign keys, and creates tables
-    if they do not already exist.  Seeds sample tasks when the
-    task_history table is empty.
+    if they do not already exist.
     """
     global _db_conn
     if _db_conn is not None:
@@ -191,16 +190,6 @@ def _get_db() -> sqlite3.Connection:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         _init_tables(conn)
-        # Seed inline (already holding _db_lock, so don't call the
-        # public _seed_sample_tasks which would re-acquire it).
-        row = conn.execute("SELECT COUNT(*) FROM task_history").fetchone()
-        if row[0] == 0:
-            t = time.time() - 86400
-            conn.executemany(
-                "INSERT INTO task_history (timestamp, task) VALUES (?, ?)",
-                [(t + i, str(s["task"])) for i, s in enumerate(SAMPLE_TASKS)],
-            )
-            conn.commit()
         _db_conn = conn
         return _db_conn
 
