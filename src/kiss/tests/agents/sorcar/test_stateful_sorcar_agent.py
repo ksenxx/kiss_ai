@@ -258,6 +258,29 @@ class TestStatefulSorcarAgent:
         th._add_task("bare task", chat_id="")
         assert _load_last_chat_id() == ""
 
+    def test_build_chat_prompt_no_context(self) -> None:
+        agent = StatefulSorcarAgent("test")
+        result = agent.build_chat_prompt("do something")
+        assert result == "do something"
+
+    def test_build_chat_prompt_with_context(self) -> None:
+        agent = StatefulSorcarAgent("test")
+        th._add_task("prior task", chat_id=agent.chat_id)
+        th._set_latest_chat_events([], task="prior task", result="prior result")
+        result = agent.build_chat_prompt("new task")
+        assert "## Previous tasks and results from the chat session for reference" in result
+        assert "### Task 1\nprior task" in result
+        assert "### Result 1\nprior result" in result
+        assert "# Task (work on it now)\n\nnew task" in result
+
+    def test_build_chat_prompt_no_result_entry(self) -> None:
+        agent = StatefulSorcarAgent("test")
+        th._add_task("bare task", chat_id=agent.chat_id)
+        result = agent.build_chat_prompt("follow up")
+        assert "### Task 1\nbare task" in result
+        assert "### Result 1" not in result
+        assert "# Task (work on it now)\n\nfollow up" in result
+
     def test_new_chat_clears_context(self) -> None:
         agent = StatefulSorcarAgent("test")
         captured: dict[str, Any] = {}

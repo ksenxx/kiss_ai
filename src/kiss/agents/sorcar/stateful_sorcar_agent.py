@@ -27,7 +27,7 @@ from kiss.agents.sorcar.task_history import (
     _load_chat_context,
     _load_last_chat_id,
     _load_task_chat_id,
-    _set_latest_chat_events,
+    _save_task_result,
 )
 
 
@@ -66,6 +66,27 @@ class StatefulSorcarAgent(SorcarAgent):
         if chat_id:
             self._chat_id = chat_id
 
+    def build_chat_prompt(self, prompt: str) -> str:
+        """Load chat context and augment prompt with previous tasks/results.
+
+        Args:
+            prompt: The original task prompt.
+
+        Returns:
+            The augmented prompt with chat history prepended, or the
+            original prompt if no prior context exists.
+        """
+        chat_context = _load_chat_context(self._chat_id)
+        if not chat_context:
+            return prompt
+        parts = ["## Previous tasks and results from the chat session for reference\n"]
+        for i, entry in enumerate(chat_context, 1):
+            parts.append(f"### Task {i}\n{entry['task']}")
+            if entry.get("result"):
+                parts.append(f"### Result {i}\n{entry['result']}")
+        parts.append("---\n")
+        return "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt
+
     def run(  # type: ignore[override]
         self,
         prompt_template: str = "",
@@ -77,6 +98,11 @@ class StatefulSorcarAgent(SorcarAgent):
         prompt with previous tasks/results, runs the underlying agent,
         and saves the result back to history.
 
+        Only the result summary is persisted here.  Callers that record
+        chat events (e.g. the VS Code server) should additionally call
+        :func:`~kiss.agents.sorcar.task_history._set_latest_chat_events`
+        to persist the full event stream.
+
         Args:
             prompt_template: The task prompt.
             **kwargs: All other arguments forwarded to ``SorcarAgent.run()``.
@@ -84,18 +110,8 @@ class StatefulSorcarAgent(SorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        chat_context = _load_chat_context(self._chat_id)
+        agent_prompt = self.build_chat_prompt(prompt_template)
         _add_task(prompt_template, chat_id=self._chat_id)
-
-        agent_prompt = prompt_template
-        if chat_context:
-            parts = ["## Previous tasks and results from the chat session for reference\n"]
-            for i, entry in enumerate(chat_context, 1):
-                parts.append(f"### Task {i}\n{entry['task']}")
-                if entry.get("result"):
-                    parts.append(f"### Result {i}\n{entry['result']}")
-            parts.append("---\n")
-            agent_prompt = "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt_template
 
         result_summary = ""
         try:
@@ -107,7 +123,7 @@ class StatefulSorcarAgent(SorcarAgent):
             result_summary = f"Task failed: {e}"
             raise
         finally:
-            _set_latest_chat_events([], task=prompt_template, result=result_summary)
+            _save_task_result(prompt_template, result_summary)
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API

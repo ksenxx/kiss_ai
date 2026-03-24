@@ -33,17 +33,13 @@ from kiss.agents.sorcar.shared_utils import (
     model_vendor,
     rank_file_suggestions,
 )
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.agents.sorcar.task_history import (
-    _add_task,
-    _generate_chat_id,
-    _load_chat_context,
     _load_file_usage,
     _load_history,
     _load_last_model,
     _load_model_usage,
     _load_task_chat_events,
-    _load_task_chat_id,
     _record_file_usage,
     _record_model_usage,
     _save_last_model,
@@ -88,7 +84,7 @@ class VSCodeServer:
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        self.agent = SorcarAgent("Sorcar VS Code")
+        self.agent = StatefulSorcarAgent("Sorcar VS Code")
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         self._stop_event: threading.Event | None = None
         self._user_answer_event: threading.Event | None = None
@@ -104,7 +100,6 @@ class VSCodeServer:
         self._task_thread: threading.Thread | None = None
         self._merging = False
         self._remaining_hunks = 0
-        self._chat_id = _generate_chat_id()
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -161,7 +156,7 @@ class VSCodeServer:
         elif cmd_type == "mergeAction":
             self._handle_merge_action(cmd.get("action", ""))
         elif cmd_type == "newChat":
-            self._chat_id = _generate_chat_id()
+            self.agent.new_chat()
         elif cmd_type == "complete":
             query = cmd.get("query", "")
             active_file = cmd.get("activeFile")
@@ -221,28 +216,14 @@ class VSCodeServer:
         )
         _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
 
-        chat_context = _load_chat_context(self._chat_id)
-        _add_task(prompt, chat_id=self._chat_id)
-        self.printer.broadcast({"type": "tasks_updated"})
-
         self.printer.broadcast({"type": "status", "running": True})
         self.printer.broadcast({"type": "clear"})
-
-        agent_prompt = prompt
-        if chat_context:
-            parts = ["## Previous tasks and results from the chat session for reference\n"]
-            for i, entry in enumerate(chat_context, 1):
-                parts.append(f"### Task {i}\n{entry['task']}")
-                if entry.get("result"):
-                    parts.append(f"### Result {i}\n{entry['result']}")
-            parts.append("---\n")
-            agent_prompt = "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt
 
         self.printer.start_recording()
         result_summary = ""
         try:
             self.agent.run(
-                prompt_template=agent_prompt,
+                prompt_template=prompt,
                 model_name=model,
                 work_dir=work_dir,
                 printer=self.printer,
@@ -262,6 +243,7 @@ class VSCodeServer:
         finally:
             chat_events = self.printer.stop_recording()
             _set_latest_chat_events(chat_events, task=prompt, result=result_summary)
+            self.printer.broadcast({"type": "tasks_updated"})
             self.printer.broadcast({"type": "status", "running": False})
             self.printer.reset()
             self._stop_event = None
@@ -391,9 +373,7 @@ class VSCodeServer:
         if not events:
             self.printer.broadcast({"type": "error", "text": "No recorded events for this session"})
             return
-        chat_id = _load_task_chat_id(task)
-        if chat_id:
-            self._chat_id = chat_id
+        self.agent.resume_chat(task)
         self.printer.broadcast({"type": "task_events", "events": events})
 
     def _get_welcome_suggestions(self) -> None:

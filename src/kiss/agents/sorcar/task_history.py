@@ -353,6 +353,32 @@ def _load_task_chat_events(
     return result
 
 
+def _save_task_result(
+    task: str,
+    result: str,
+) -> None:
+    """Save just the result summary for a task (no event table changes).
+
+    Updates only the ``result`` column of the target task_history row.
+    Use :func:`_set_latest_chat_events` when you also need to persist
+    chat events.
+
+    Args:
+        task: The task description string to look up.
+        result: The task result text to store in the history entry.
+    """
+    db = _get_db()
+    task_id = _most_recent_task_id(db, task)
+    if task_id is None:
+        return
+    with _db_lock:
+        db.execute(
+            "UPDATE task_history SET result = ? WHERE id = ?",
+            (result, task_id),
+        )
+        db.commit()
+
+
 def _set_latest_chat_events(
     events: list[dict[str, object]],
     task: str | None = None,

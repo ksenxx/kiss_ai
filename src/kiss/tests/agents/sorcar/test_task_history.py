@@ -134,6 +134,16 @@ class TestChatEvents:
         th._set_latest_chat_events([], task="t")
         assert th._load_task_chat_events("t") == []
 
+    def test_save_task_result_updates_result(self):
+        th._add_task("my task")
+        th._save_task_result("my task", "done!")
+        entry = th._load_history(limit=1)[0]
+        assert entry["result"] == "done!"
+
+    def test_save_task_result_no_matching_task(self):
+        th._save_task_result("nonexistent", "result")
+        # Should not raise; just returns early
+
 
 class TestModelUsage:
     def setup_method(self):
