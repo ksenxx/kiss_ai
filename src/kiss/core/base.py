@@ -31,8 +31,6 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 
 yaml.add_representer(str, _str_presenter)
 
-_KISS_DIR = Path().home() / ".kiss"
-
 _artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
 
 SYSTEM_PROMPT = f"""
