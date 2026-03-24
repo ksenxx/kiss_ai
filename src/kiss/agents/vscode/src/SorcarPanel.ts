@@ -221,7 +221,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'complete':
-        this._agentProcess.sendCommand({ type: 'complete', query: message.query });
+        this._agentProcess.sendCommand({
+          type: 'complete',
+          query: message.query,
+          activeFile: vscode.window.activeTextEditor?.document.uri.fsPath,
+        });
         break;
 
       case 'generateCommitMessage':

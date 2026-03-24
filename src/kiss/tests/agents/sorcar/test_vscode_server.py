@@ -472,12 +472,14 @@ class TestCompleteMinLength(unittest.TestCase):
         assert len(self.events) == 1
         assert self.events[0]["type"] == "ghost"
         assert self.events[0]["suggestion"] == ""
+        assert self.events[0]["query"] == "a"
 
     def test_empty_query_returns_empty_ghost(self) -> None:
         self.server._complete("  ")
         assert len(self.events) == 1
         assert self.events[0]["type"] == "ghost"
         assert self.events[0]["suggestion"] == ""
+        assert self.events[0]["query"] == ""
 
     def test_fast_path_file_match(self) -> None:
         """Test that _complete uses fast path when file cache matches."""
@@ -485,6 +487,7 @@ class TestCompleteMinLength(unittest.TestCase):
         self.server._complete("check src/m")
         assert len(self.events) == 1
         assert self.events[0]["type"] == "ghost"
+        assert self.events[0]["query"] == "check src/m"
         # "src/m" -> "src/main.py" continuation is "ain.py"
         # But clip_autocomplete_suggestion may clip it
         # The fast_complete finds "ain.py" and clip clips it
@@ -556,21 +559,14 @@ class TestMainJsGhostCache(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls.js = (base / "vscode" / "media" / "main.js").read_text()
 
-    def test_has_ghost_cache_variable(self) -> None:
-        assert "ghostCache" in self.js
-
     def test_has_cursor_position_check(self) -> None:
         assert "inp.selectionStart < inp.value.length" in self.js
 
     def test_has_min_length_check(self) -> None:
         assert "replace(/\\s/g, '').length < 2" in self.js
 
-    def test_ghost_cache_saved_on_receive(self) -> None:
-        assert "ghostCache = { q: inp.value, s: ev.suggestion }" in self.js
-
-    def test_ghost_cache_prefix_reuse(self) -> None:
-        assert "val.startsWith(ghostCache.q)" in self.js
-        assert "ghostCache.s.startsWith(extra)" in self.js
+    def test_ghost_staleness_check_uses_server_query(self) -> None:
+        assert "ev.query === inp.value" in self.js
 
 
 class TestLastActiveFile(unittest.TestCase):
@@ -700,6 +696,7 @@ class TestCompleteFromActiveFile(unittest.TestCase):
         assert len(self.events) == 1
         assert self.events[0]["type"] == "ghost"
         assert "omProcessor" in self.events[0]["suggestion"]
+        assert self.events[0]["query"] == "MyCust"
 
     def test_picks_longest_match(self) -> None:
         fpath = os.path.join(self.tmpdir, "sample.py")
