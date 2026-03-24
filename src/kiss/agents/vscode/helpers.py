@@ -14,6 +14,21 @@ def clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'")
 
 
+def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
+    """Return the autocomplete continuation, stripped of the query prefix.
+
+    Removes the query prefix if the LLM echoed it, strips surrounding
+    whitespace, and stops at newlines.
+    """
+    s = clean_llm_output(suggestion)
+    if not s:
+        return ""
+    if s.lower().startswith(query.lower()):
+        s = s[len(query) :]
+    s = s.split("\n")[0].strip()
+    return s
+
+
 def model_vendor(name: str) -> tuple[str, int]:
     """Return (vendor_display_name, sort_order) for a model name.
 

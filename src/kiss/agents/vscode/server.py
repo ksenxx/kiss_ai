@@ -41,6 +41,7 @@ from kiss.agents.vscode.diff_merge import (
 )
 from kiss.agents.vscode.helpers import (
     clean_llm_output,
+    clip_autocomplete_suggestion,
     generate_followup_text,
     model_vendor,
     rank_file_suggestions,
@@ -132,7 +133,7 @@ class VSCodeServer:
             self._selected_model = model
             _save_last_model(model)
         elif cmd_type == "getHistory":
-            self._get_history(cmd.get("query"))
+            self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
         elif cmd_type == "getFiles":
             self._get_files(cmd.get("prefix", ""))
         elif cmd_type == "refreshFiles":
@@ -155,6 +156,15 @@ class VSCodeServer:
             self._get_last_session()
         elif cmd_type == "newChat":
             self.agent.new_chat()
+        elif cmd_type == "complete":
+            query = cmd.get("query", "")
+            active_file = cmd.get("activeFile")
+            if active_file:
+                self._last_active_file = active_file
+            if query:
+                threading.Thread(
+                    target=self._complete, args=(query,), daemon=True
+                ).start()
         elif cmd_type == "generateCommitMessage":
             model = cmd.get("model") or self._selected_model
             threading.Thread(
@@ -332,12 +342,12 @@ class VSCodeServer:
             "selected": self._selected_model,
         })
 
-    def _get_history(self, query: str | None) -> None:
-        """Send conversation history."""
+    def _get_history(self, query: str | None, offset: int = 0, generation: int = 0) -> None:
+        """Send conversation history with pagination support."""
         if query:
-            entries = _search_history(query, limit=20)
+            entries = _search_history(query, limit=50, offset=offset)
         else:
-            entries = _load_history(limit=20)
+            entries = _load_history(limit=50, offset=offset)
 
         sessions = []
         for entry in entries:
@@ -350,8 +360,9 @@ class VSCodeServer:
                 "preview": task,
                 "text": task,
                 "has_events": has_events,
+                "chat_id": entry.get("chat_id", ""),
             })
-        self.printer.broadcast({"type": "history", "sessions": sessions})
+        self.printer.broadcast({"type": "history", "sessions": sessions, "offset": offset, "generation": generation})
 
     def _replay_session(self, task: str) -> None:
         """Replay recorded chat events for a previous task."""
@@ -428,6 +439,81 @@ class VSCodeServer:
                         summary = ev.get("summary") or ev.get("text") or ""
                         return str(summary)
         return ""
+
+    def _fast_complete(self, query: str) -> str:
+        """Local prefix matching against history and active file words.
+
+        Checks task history first, then falls back to matching
+        identifiers/words from the currently active editor file.
+
+        Args:
+            query: The stripped query string (guaranteed non-empty, len >= 2
+                by the caller ``_complete``).
+
+        Returns:
+            Continuation string if a match is found, empty string otherwise.
+        """
+        query_lower = query.lower()
+        # Try history match first
+        for entry in _load_history(limit=1000):
+            task = str(entry.get("task", ""))
+            if task.lower().startswith(query_lower) and len(task) > len(query):
+                return task[len(query):]
+        # Fall back to word/identifier matching from the active file
+        return self._complete_from_active_file(query)
+
+    def _complete_from_active_file(self, query: str) -> str:
+        """Complete the last word of *query* using words from the active file.
+
+        Reads the active editor file, extracts all identifier-like tokens
+        (alphanumeric + underscores, length >= 3), and finds the longest
+        match whose prefix matches the last partial word the user is typing.
+
+        Args:
+            query: The full query string from the chat input.
+
+        Returns:
+            The remaining suffix to append, or empty string if no match.
+        """
+        import re
+
+        active_path = self._last_active_file
+        if not active_path:
+            return ""
+        try:
+            with open(active_path) as f:
+                content = f.read(50000)
+        except OSError:
+            return ""
+        # Extract the last partial word from the query
+        m = re.search(r"(\w+)$", query)
+        if not m:
+            return ""
+        partial = m.group(1)
+        if len(partial) < 2:
+            return ""
+        partial_lower = partial.lower()
+        # Extract unique words/identifiers from file (length >= 3)
+        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
+        best = ""
+        for word in words:
+            if word.lower().startswith(partial_lower) and len(word) > len(partial):
+                suffix = word[len(partial):]
+                if not best or len(word) > len(partial) + len(best):
+                    best = suffix
+        return best
+
+    def _complete(self, query: str) -> None:
+        """Ghost text autocomplete via fast local prefix matching."""
+        query = query.strip()
+        if not query or len(query) < 2:
+            self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
+            return
+
+        fast = clip_autocomplete_suggestion(
+            query, self._fast_complete(query)
+        )
+        self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
 
     def _refresh_file_cache(self) -> None:
         """Refresh the file cache from disk."""

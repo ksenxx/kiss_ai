@@ -21,6 +21,16 @@
   let histCache = [];
   let histIdx = -1;
 
+  // Ghost text state
+  let ghostTimer = null;
+  let currentGhost = '';
+
+  // Infinite scroll state for history sidebar
+  var historyOffset = 0;
+  var historyLoading = false;
+  var historyHasMore = true;
+  var historyGeneration = 0;
+
 
   // Elements
   const O = document.getElementById('output');
@@ -51,6 +61,7 @@
   const askUserInput = document.getElementById('ask-user-input');
   const askUserSubmit = document.getElementById('ask-user-submit');
   const waitSpinner = document.getElementById('wait-spinner');
+  const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const taskPanel = document.getElementById('task-panel');
@@ -113,6 +124,34 @@
       _spinnerTimer = null;
       if (waitSpinner) waitSpinner.classList.add('active');
     }, 250);
+  }
+
+  // --- Ghost text ---
+  function clearGhost() {
+    currentGhost = '';
+    if (ghostOverlay) ghostOverlay.innerHTML = '';
+    if (ghostTimer) { clearTimeout(ghostTimer); ghostTimer = null; }
+  }
+
+  function updateGhost(suggestion) {
+    currentGhost = suggestion || '';
+    if (!ghostOverlay || !currentGhost) { clearGhost(); return; }
+    var val = inp.value;
+    ghostOverlay.innerHTML = '<span style="visibility:hidden">' + esc(val) + '</span>'
+      + '<span class="ghost-text">' + esc(currentGhost) + '</span>';
+  }
+
+  function requestGhost() {
+    clearGhost();
+    if (isRunning || !inp.value.trim()) return;
+    // Don't request ghost when cursor isn't at end
+    if (inp.selectionStart < inp.value.length) return;
+    // Minimum query length check (2 non-whitespace chars)
+    if (inp.value.replace(/\s/g, '').length < 2) return;
+    ghostTimer = setTimeout(function() {
+      ghostTimer = null;
+      vscode.postMessage({ type: 'complete', query: inp.value });
+    }, 300);
   }
 
   // --- File path detection (matches web Sorcar) ---
@@ -431,7 +470,13 @@
 
   // --- Refresh history ---
   function refreshHistory() {
-    vscode.postMessage({ type: 'getHistory' });
+    if (sidebar.classList.contains('open')) {
+      historyOffset = 0;
+      historyHasMore = true;
+      historyLoading = false;
+      historyGeneration++;
+      vscode.postMessage({ type: 'getHistory', query: historySearch.value, generation: historyGeneration });
+    }
   }
 
   // --- Main event handler ---
@@ -447,7 +492,7 @@
       renderModelList('');
       break;
     case 'history':
-      renderHistory(ev.sessions || []);
+      renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
       break;
     case 'files':
       renderAutocomplete(ev.files || []);
@@ -516,6 +561,11 @@
       setTimeout(function() { inp.focus(); }, 100);
       setTimeout(function() { inp.focus(); }, 300);
       break;
+    case 'ghost':
+      if (ev.suggestion && ev.query === inp.value) {
+        updateGhost(ev.suggestion);
+      }
+      break;
     case 'activeFileInfo':
       if (runPromptBtn) {
         if (!isRunning && ev.isPrompt) {
@@ -578,7 +628,7 @@
   function updateInputDisabled() {
     var blocked = isRunning || isMerging;
     inp.disabled = blocked;
-    if (blocked) { hideAC(); }
+    if (blocked) { clearGhost(); hideAC(); }
   }
 
   function setRunningState(running) {
@@ -708,6 +758,10 @@
         e.preventDefault();
         vscode.postMessage({ type: 'focusEditor' });
       }
+      if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+        e.preventDefault();
+        closeSidebar();
+      }
     });
     inp.addEventListener('keydown', function(e) {
       // Autocomplete navigation
@@ -718,6 +772,15 @@
         if (e.key === 'Tab') { e.preventDefault(); var ti = acIdx >= 0 ? acIdx : 0; if (items[ti]) items[ti].click(); return; }
         if (e.key === 'Enter' && acIdx >= 0) { e.preventDefault(); items[acIdx].click(); return; }
         if (e.key === 'Escape') { hideAC(); return; }
+      }
+      // Ghost text accept
+      if (e.key === 'Tab' && currentGhost) {
+        e.preventDefault();
+        inp.value += currentGhost;
+        clearGhost();
+        inp.style.height = 'auto';
+        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+        return;
       }
       // History cycling (ArrowUp/Down only when textbox is empty and no autocomplete)
       if (e.key === 'ArrowUp' && autocomplete.style.display !== 'block') {
@@ -738,14 +801,18 @@
         e.preventDefault();
         sendMessage();
       }
+      // Any other key clears ghost
+      if (e.key !== 'Tab') clearGhost();
     });
     inp.addEventListener('input', function() {
       inp.style.height = 'auto';
       inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
       checkAutocomplete();
+      requestGhost();
       histIdx = -1;
       syncClearBtn();
     });
+    inp.addEventListener('blur', function() { clearGhost(); });
     stopBtn.addEventListener('click', function() {
       vscode.postMessage({ type: 'stop' });
     });
@@ -767,6 +834,7 @@
         inp.value = '';
         inp.style.height = 'auto';
         inputClearBtn.style.display = 'none';
+        clearGhost();
         hideAC();
         inp.focus();
       });
@@ -800,14 +868,34 @@
       });
     }
     historyBtn.addEventListener('click', function() {
+      historyOffset = 0;
+      historyHasMore = true;
+      historyLoading = false;
+      historyGeneration++;
       sidebar.classList.add('open');
       sidebarOverlay.classList.add('open');
-      vscode.postMessage({ type: 'getHistory' });
+      vscode.postMessage({ type: 'getHistory', generation: historyGeneration });
     });
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
     historySearch.addEventListener('input', function() {
-      vscode.postMessage({ type: 'getHistory', query: historySearch.value });
+      historyOffset = 0;
+      historyHasMore = true;
+      historyLoading = false;
+      historyGeneration++;
+      vscode.postMessage({ type: 'getHistory', query: historySearch.value, generation: historyGeneration });
+    });
+    historyList.addEventListener('scroll', function() {
+      if (historyLoading || !historyHasMore) return;
+      if (historyList.scrollTop + historyList.clientHeight >= historyList.scrollHeight - 50) {
+        historyLoading = true;
+        var loader = document.createElement('div');
+        loader.className = 'sidebar-loading';
+        loader.id = 'history-loader';
+        loader.textContent = 'Loading...';
+        historyList.appendChild(loader);
+        vscode.postMessage({ type: 'getHistory', query: historySearch.value, offset: historyOffset, generation: historyGeneration });
+      }
     });
     // Click handler for file paths in tool call headers — parse :line suffix
     document.addEventListener('click', function(e) {
@@ -919,6 +1007,7 @@
     inp.style.height = 'auto';
     attachments = [];
     renderFileChips();
+    clearGhost();
     histIdx = -1;
     if (inputClearBtn) inputClearBtn.style.display = 'none';
     if (welcome) welcome.style.display = 'none';
@@ -1026,18 +1115,41 @@
     if (idx >= 0) items[idx].scrollIntoView({ block: 'nearest' });
   }
 
-  function renderHistory(sessions) {
-    if (sessions.length === 0) {
-      historyList.innerHTML = '<div class="sidebar-empty">No conversations yet</div>';
-      return;
+  function chatIdBgColor(chatId) {
+    if (!chatId) return 'transparent';
+    var hash = 5381;
+    for (var i = 0; i < chatId.length; i++) {
+      hash = ((hash << 5) + hash) + chatId.charCodeAt(i);
+      hash |= 0;
     }
-    historyList.innerHTML = '';
+    var hue = Math.abs(hash) % 360;
+    return 'hsl(' + hue + ', 40%, 92%)';
+  }
+
+  function renderHistory(sessions, offset, generation) {
+    if (generation !== historyGeneration) return;
+
+    historyLoading = false;
+    var loader = document.getElementById('history-loader');
+    if (loader) loader.remove();
+
+    if (offset === 0) {
+      if (sessions.length === 0) {
+        historyList.innerHTML = '<div class="sidebar-empty">No conversations yet</div>';
+        historyHasMore = false;
+        return;
+      }
+      historyList.innerHTML = '';
+    }
+
     sessions.forEach(function(s) {
       var div = document.createElement('div');
       div.className = 'sidebar-item';
       var itemText = s.title || s.preview || 'Untitled';
       div.textContent = itemText;
       div.dataset.tooltip = s.text || itemText;
+      div.style.backgroundColor = chatIdBgColor(s.chat_id);
+      div.style.color = '#000';
       div.addEventListener('click', function() {
         if (s.has_events) {
           setTaskText(s.preview || s.title || '');
@@ -1050,6 +1162,11 @@
       });
       historyList.appendChild(div);
     });
+
+    historyOffset += sessions.length;
+    if (sessions.length < 50) {
+      historyHasMore = false;
+    }
   }
 
   function closeSidebar() {

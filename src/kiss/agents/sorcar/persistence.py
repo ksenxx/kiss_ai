@@ -45,7 +45,7 @@ _db_lock = threading.Lock()
 
 
 _HISTORY_SELECT = (
-    "SELECT id, timestamp, task, has_events, result "
+    "SELECT id, timestamp, task, has_events, result, chat_id "
     "FROM task_history "
 )
 
@@ -177,45 +177,47 @@ def _add_task(task: str, chat_id: str = "") -> None:
         db.commit()
 
 
-def _load_history(limit: int = 0) -> list[_HistoryEntry]:
+def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
     Args:
         limit: Maximum number of entries to return.
             0 returns all entries.
+        offset: Number of entries to skip before returning results.
 
     Returns:
         List of history entry dicts with ``id``, ``timestamp``,
-        ``task``, ``has_events``, and ``result`` keys.
+        ``task``, ``has_events``, ``result``, and ``chat_id`` keys.
     """
     db = _get_db()
     sql = _HISTORY_SELECT + "ORDER BY timestamp DESC"
     if limit > 0:
-        sql += " LIMIT ?"
-        rows = db.execute(sql, (limit,)).fetchall()
+        sql += " LIMIT ? OFFSET ?"
+        rows = db.execute(sql, (limit, offset)).fetchall()
     else:
         rows = db.execute(sql).fetchall()
     return [dict(r) for r in rows]
 
 
 def _search_history(
-    query: str, limit: int = 50
+    query: str, limit: int = 50, offset: int = 0
 ) -> list[_HistoryEntry]:
     """Search history entries by substring match. Thread-safe.
 
     Args:
         query: Case-insensitive substring to match against task text.
         limit: Maximum number of matching entries to return.
+        offset: Number of entries to skip before returning results.
 
     Returns:
         List of matching entries, most-recent-first.
     """
     if not query:
-        return _load_history(limit=limit)
+        return _load_history(limit=limit, offset=offset)
     db = _get_db()
     rows = db.execute(
-        _HISTORY_SELECT + "WHERE task LIKE ? ORDER BY timestamp DESC LIMIT ?",
-        (f"%{query}%", limit),
+        _HISTORY_SELECT + "WHERE task LIKE ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        (f"%{query}%", limit, offset),
     ).fetchall()
     return [dict(r) for r in rows]
 
