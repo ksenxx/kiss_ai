@@ -44,12 +44,9 @@ _db_conn: sqlite3.Connection | None = None
 _db_lock = threading.Lock()
 
 
-_DEDUP_SUBQUERY = "SELECT MAX(id) FROM task_history GROUP BY task"
-
 _HISTORY_SELECT = (
     "SELECT id, timestamp, task, has_events, result "
     "FROM task_history "
-    f"WHERE id IN ({_DEDUP_SUBQUERY}) "
 )
 
 _CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
@@ -183,12 +180,9 @@ def _add_task(task: str, chat_id: str = "") -> None:
 def _load_history(limit: int = 0) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
-    Deduplicates by task text, keeping only the most recent run of
-    each unique task string.
-
     Args:
         limit: Maximum number of entries to return.
-            0 returns all unique entries.
+            0 returns all entries.
 
     Returns:
         List of history entry dicts with ``id``, ``timestamp``,
@@ -220,7 +214,7 @@ def _search_history(
         return _load_history(limit=limit)
     db = _get_db()
     rows = db.execute(
-        _HISTORY_SELECT + "AND task LIKE ? ORDER BY timestamp DESC LIMIT ?",
+        _HISTORY_SELECT + "WHERE task LIKE ? ORDER BY timestamp DESC LIMIT ?",
         (f"%{query}%", limit),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -230,7 +224,7 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
     """Get a single history entry by its index (0 = most recent). Thread-safe.
 
     Args:
-        idx: Zero-based index into the deduplicated history list.
+        idx: Zero-based index into the history list.
 
     Returns:
         The entry dict, or ``None`` if the index is out of range.

@@ -1,4 +1,4 @@
-"""Tests for task history: SQLite storage, dedup, events, model/file usage, cleanup."""
+"""Tests for task history: SQLite storage, events, model/file usage, cleanup."""
 
 import shutil
 import tempfile
@@ -43,7 +43,7 @@ class TestTaskHistory:
         tasks = [e["task"] for e in entries]
         assert "my task" in tasks
 
-    def test_dedup_keeps_latest(self):
+    def test_duplicate_tasks_all_kept(self):
         th._add_task("dup")
         time.sleep(0.01)
         th._add_task("unique")
@@ -51,7 +51,7 @@ class TestTaskHistory:
         th._add_task("dup")
         entries = th._load_history()
         tasks = [e["task"] for e in entries]
-        assert tasks.count("dup") == 1
+        assert tasks.count("dup") == 2
         assert tasks[0] == "dup"
 
     def test_search_history(self):
