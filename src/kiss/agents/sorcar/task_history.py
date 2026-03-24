@@ -26,8 +26,6 @@ def _log_exc() -> None:
 _KISS_DIR = Path.home() / ".kiss"
 _DB_PATH = _KISS_DIR / "history.db"
 
-_RECENT_CACHE_SIZE = 500
-
 _MAX_FILE_USAGE_ENTRIES = 1000
 
 
