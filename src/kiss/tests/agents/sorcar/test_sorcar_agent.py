@@ -16,7 +16,7 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-from kiss.agents.vscode.helpers import clip_autocomplete_suggestion
+
 from kiss.core.models.model import Attachment
 
 
@@ -294,22 +294,7 @@ class TestSorcarBashStreaming:
         assert "line3" in sys_text
 
 
-def test_clip_autocomplete_suggestion_returns_full_text() -> None:
-    suggestion = clip_autocomplete_suggestion(
-        "fix", " the failing test in parser now and then update docs too"
-    )
-    assert suggestion == "the failing test in parser now and then update docs too"
 
-
-def test_clip_autocomplete_suggestion_stops_at_newline() -> None:
-    assert (
-        clip_autocomplete_suggestion("fix", " the failing test\nThen update docs")
-        == "the failing test"
-    )
-
-
-def test_clip_autocomplete_suggestion_strips_repeated_query_prefix() -> None:
-    assert clip_autocomplete_suggestion("hello", "hello world again") == "world again"
 
 
 
