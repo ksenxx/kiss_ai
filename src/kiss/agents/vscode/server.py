@@ -430,22 +430,68 @@ class VSCodeServer:
         return ""
 
     def _fast_complete(self, query: str) -> str:
-        """Local prefix matching against history.
+        """Local prefix matching against history and active file words.
+
+        Checks task history first, then falls back to matching
+        identifiers/words from the currently active editor file.
 
         Args:
             query: The stripped query string.
 
         Returns:
-            Continuation string if a fast match is found, empty string otherwise.
+            Continuation string if a match is found, empty string otherwise.
         """
         if not query:
             return ""
         query_lower = query.lower()
+        # Try history match first
         for entry in _load_history(limit=1000):
             task = str(entry.get("task", ""))
             if task.lower().startswith(query_lower) and len(task) > len(query):
                 return task[len(query):]
-        return ""
+        # Fall back to word/identifier matching from the active file
+        return self._complete_from_active_file(query)
+
+    def _complete_from_active_file(self, query: str) -> str:
+        """Complete the last word of *query* using words from the active file.
+
+        Reads the active editor file, extracts all identifier-like tokens
+        (alphanumeric + underscores, length >= 3), and finds the longest
+        match whose prefix matches the last partial word the user is typing.
+
+        Args:
+            query: The full query string from the chat input.
+
+        Returns:
+            The remaining suffix to append, or empty string if no match.
+        """
+        import re
+
+        active_path = self._last_active_file
+        if not active_path:
+            return ""
+        try:
+            with open(active_path) as f:
+                content = f.read(50000)
+        except OSError:
+            return ""
+        # Extract the last partial word from the query
+        m = re.search(r"(\w+)$", query)
+        if not m:
+            return ""
+        partial = m.group(1)
+        if len(partial) < 2:
+            return ""
+        partial_lower = partial.lower()
+        # Extract unique words/identifiers from file (length >= 3)
+        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
+        best = ""
+        for word in words:
+            if word.lower().startswith(partial_lower) and len(word) > len(partial):
+                suffix = word[len(partial):]
+                if not best or len(word) > len(partial) + len(best):
+                    best = suffix
+        return best
 
     def _complete(self, query: str) -> None:
         """Ghost text autocomplete via fast local prefix matching."""

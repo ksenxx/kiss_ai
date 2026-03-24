@@ -7,6 +7,7 @@ in main.js.
 No mocks — uses real functions from the server module.
 """
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -631,6 +632,82 @@ class TestMainCssModelPicker(unittest.TestCase):
 
     def test_has_model_cost(self) -> None:
         assert ".model-cost" in self.css
+
+
+class TestCompleteFromActiveFile(unittest.TestCase):
+    """Test _complete_from_active_file extracts words from the active file."""
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_no_active_file_returns_empty(self) -> None:
+        self.server._last_active_file = ""
+        assert self.server._complete_from_active_file("hel") == ""
+
+    def test_nonexistent_file_returns_empty(self) -> None:
+        self.server._last_active_file = "/nonexistent/path.py"
+        assert self.server._complete_from_active_file("hel") == ""
+
+    def test_matches_identifier_from_file(self) -> None:
+        fpath = os.path.join(self.tmpdir, "sample.py")
+        with open(fpath, "w") as f:
+            f.write("def calculate_total(items):\n    return sum(items)\n")
+        self.server._last_active_file = fpath
+        result = self.server._complete_from_active_file("calc")
+        assert result == "ulate_total"
+
+    def test_no_match_returns_empty(self) -> None:
+        fpath = os.path.join(self.tmpdir, "sample.py")
+        with open(fpath, "w") as f:
+            f.write("def hello():\n    pass\n")
+        self.server._last_active_file = fpath
+        result = self.server._complete_from_active_file("xyz")
+        assert result == ""
+
+    def test_short_partial_returns_empty(self) -> None:
+        fpath = os.path.join(self.tmpdir, "sample.py")
+        with open(fpath, "w") as f:
+            f.write("def hello():\n    pass\n")
+        self.server._last_active_file = fpath
+        result = self.server._complete_from_active_file("x")
+        assert result == ""
+
+    def test_query_without_trailing_word_returns_empty(self) -> None:
+        fpath = os.path.join(self.tmpdir, "sample.py")
+        with open(fpath, "w") as f:
+            f.write("def hello():\n    pass\n")
+        self.server._last_active_file = fpath
+        result = self.server._complete_from_active_file("fix ")
+        assert result == ""
+
+    def test_complete_ghost_uses_active_file(self) -> None:
+        """Integration: _complete falls through to active file words."""
+        fpath = os.path.join(self.tmpdir, "sample.py")
+        with open(fpath, "w") as f:
+            f.write("class MyCustomProcessor:\n    pass\n")
+        self.server._last_active_file = fpath
+        self.server._complete("MyCust")
+        assert len(self.events) == 1
+        assert self.events[0]["type"] == "ghost"
+        assert "omProcessor" in self.events[0]["suggestion"]
+
+    def test_picks_longest_match(self) -> None:
+        fpath = os.path.join(self.tmpdir, "sample.py")
+        with open(fpath, "w") as f:
+            f.write("foo foobar foobarbaz\n")
+        self.server._last_active_file = fpath
+        result = self.server._complete_from_active_file("foob")
+        assert result == "arbaz"
 
 
 if __name__ == "__main__":
