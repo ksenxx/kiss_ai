@@ -62,7 +62,6 @@ from kiss.agents.vscode.diff_merge import (
 )
 from kiss.agents.vscode.helpers import (
     clean_llm_output,
-    clip_autocomplete_suggestion,
     model_vendor,
     rank_file_suggestions,
 )
@@ -710,17 +709,6 @@ class TestSharedUtilsBranches:
     def test_clean_llm_output(self):
         assert clean_llm_output('  "hello"  ') == "hello"
         assert clean_llm_output("  'world'  ") == "world"
-
-    def test_clip_autocomplete_empty(self):
-        assert clip_autocomplete_suggestion("q", "") == ""
-
-    def test_clip_autocomplete_echos_query(self):
-        result = clip_autocomplete_suggestion("hello", "hello world")
-        assert result == "world"
-
-    def test_clip_autocomplete_multiline(self):
-        result = clip_autocomplete_suggestion("q", "first\nsecond")
-        assert result == "first"
 
     def test_model_vendor_all(self):
         assert model_vendor("claude-x")[0] == "Anthropic"
