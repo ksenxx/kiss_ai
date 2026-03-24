@@ -142,7 +142,7 @@ def _merge_data_dir() -> Path:
     """Return the per-project directory for merge state files.
 
     Uses ``{cwd}/.kiss.artifacts/merge_dir/`` so merge-temp,
-    merge-current, and pending-merge.json live per-project alongside
+    untracked-base, and pending-merge.json live per-project alongside
     other artifacts.
 
     Returns:
@@ -180,26 +180,14 @@ def _save_untracked_base(
 
 
 def _cleanup_merge_data(data_dir: str) -> None:
-    """Remove temporary merge directories and manifest after merge completes.
-
-    Cleans up merge-temp, merge-current, untracked-base, and pending-merge.json.
+    """Remove the entire merge data directory after merge completes.
 
     Args:
-        data_dir: Code-server data directory (merge-temp lives here).
+        data_dir: Merge data directory to remove.
     """
-    for dirname in ("merge-temp", "merge-current"):
-        d = Path(data_dir) / dirname
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-    base_dir = _untracked_base_dir()
-    if base_dir.exists():
-        shutil.rmtree(base_dir, ignore_errors=True)
-    manifest = Path(data_dir) / "pending-merge.json"
-    if manifest.exists():
-        try:
-            manifest.unlink()
-        except OSError:
-            _log_exc()
+    d = Path(data_dir)
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, int]]:
@@ -368,17 +356,6 @@ def _prepare_merge_view(
         )
     if not manifest_files:
         return {"error": "No changes"}
-    # Save current file copies (new lines only) for restoration on ungraceful close
-    current_dir = Path(data_dir) / "merge-current"
-    if current_dir.exists():
-        shutil.rmtree(current_dir)
-    for mf in manifest_files:
-        src = Path(mf["current"])
-        if src.is_file():  # pragma: no branch – current file always exists
-            dest = current_dir / mf["name"]
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-
     manifest = Path(data_dir) / "pending-merge.json"
     manifest.write_text(
         json.dumps(

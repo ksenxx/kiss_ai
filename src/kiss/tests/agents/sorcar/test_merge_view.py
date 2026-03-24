@@ -8,6 +8,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.code_server import (
     _capture_untracked,
+    _cleanup_merge_data,
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
@@ -114,3 +115,24 @@ class TestMergeViewExcludesPreExistingDiffs:
             h = hunks[0]
             assert h["bc"] == 0
             assert h["cc"] == 1
+
+
+class TestCleanupMergeData:
+    def test_removes_entire_merge_dir(self) -> None:
+        """_cleanup_merge_data removes the entire directory and all contents."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.join(tmpdir, "merge_dir")
+            os.makedirs(os.path.join(data_dir, "merge-temp"))
+            os.makedirs(os.path.join(data_dir, "untracked-base"))
+            Path(data_dir, "pending-merge.json").write_text("{}")
+            Path(data_dir, "merge-temp", "f.txt").write_text("x")
+
+            _cleanup_merge_data(data_dir)
+            assert not os.path.exists(data_dir)
+
+    def test_noop_when_dir_missing(self) -> None:
+        """_cleanup_merge_data is a no-op when directory doesn't exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.join(tmpdir, "nonexistent")
+            _cleanup_merge_data(data_dir)  # should not raise
+            assert not os.path.exists(data_dir)
