@@ -26,19 +26,13 @@
     - [`kiss.agents.sorcar`](#kissagentssorcar)
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
-      - [`kiss.agents.sorcar.sorcar`](#kissagentssorcarsorcar)
       - [`kiss.agents.sorcar.config`](#kissagentssorcarconfig)
     - [`kiss.agents.gepa`](#kissagentsgepa)
       - [`kiss.agents.gepa.config`](#kissagentsgepaconfig)
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
-    - [`kiss.agents.autoresearch`](#kissagentsautoresearch)
-      - [`kiss.agents.autoresearch.autoresearch_agent`](#kissagentsautoresearchautoresearch_agent)
-      - [`kiss.agents.autoresearch.config`](#kissagentsautoresearchconfig)
-    - [`kiss.agents.claw`](#kissagentsclaw)
-      - [`kiss.agents.claw.background_agent`](#kissagentsclawbackground_agent)
-      - [`kiss.agents.sorcar.shared_utils`](#kissagentssorcarshared_utils)
+    - [`kiss.agents.sorcar.shared_utils`](#kissagentssorcarshared_utils)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.channels`](#kisschannels)
@@ -491,10 +485,6 @@ ______________________________________________________________________
 
   - `token`: The text token to broadcast.
 
-**`find_free_port`** — Find and return an available TCP port on localhost.<br/>`def find_free_port() -> int`
-
-- **Returns:** int: A free port number.
-
 ______________________________________________________________________
 
 #### `kiss.agents.sorcar.useful_tools` — *Useful tools for agents: file editing and bash execution.*
@@ -795,18 +785,6 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.sorcar.sorcar` — *Browser-based chatbot for RelentlessAgent-based agents.*
-
-**`run_chatbot`** — Run a browser-based chatbot UI for any RelentlessAgent-based agent.<br/>`def run_chatbot(agent_factory: Callable[[str], RelentlessAgent], title: str = 'KISS Sorcar', work_dir: str | None = None, default_model: str = 'claude-opus-4-6', agent_kwargs: dict[str, Any] | None = None) -> None`
-
-- `agent_factory`: Callable that takes a name string and returns a RelentlessAgent instance.
-- `title`: Title displayed in the browser tab.
-- `work_dir`: Working directory for the agent. Defaults to current directory.
-- `default_model`: Default LLM model name for the model selector.
-- `agent_kwargs`: Additional keyword arguments passed to agent.run().
-
-______________________________________________________________________
-
 #### `kiss.agents.sorcar.config` — *Configuration for the Assistant Agent.*
 
 ##### `class AgentConfig(BaseModel)`
@@ -1038,56 +1016,6 @@ from kiss.docker import DockerManager
   - **Returns:** The host port mapped to the container port, or None if not mapped.
 
 - **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
-
-______________________________________________________________________
-
-#### `kiss.agents.autoresearch` — *Autoresearch agent for autonomous ML experiment iteration.*
-
-______________________________________________________________________
-
-#### `kiss.agents.autoresearch.autoresearch_agent` — *Autoresearch agent for autonomous ML experiment iteration.*
-
-##### `class AutoresearchAgent(RelentlessAgent)` — Agent that autonomously runs ML experiments following a program file.
-
-**Constructor:** `AutoresearchAgent(name: str) -> None`
-
-- **run** — Run the autoresearch agent. The agent reads the program file for instructions, then autonomously iterates: modify train.py, run experiments, evaluate, keep/discard.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, program_file: str | None = None) -> str`
-  - `model_name`: LLM model to use. Defaults to config value.
-  - `prompt_template`: Task prompt. If empty, reads from program_file.
-  - `arguments`: Dictionary of values to fill prompt_template placeholders.
-  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
-  - `max_budget`: Maximum budget in USD. Defaults to config value.
-  - `work_dir`: Working directory containing the autoresearch repo.
-  - `printer`: Printer instance for output display.
-  - `max_sub_sessions`: Maximum continuation sub-sessions.
-  - `docker_image`: Docker image name to run tools inside a container.
-  - `verbose`: Whether to print output to console.
-  - `program_file`: Path to program.md file. Defaults to program.md in work_dir.
-  - **Returns:** YAML string with 'success' and 'summary' keys.
-
-______________________________________________________________________
-
-#### `kiss.agents.autoresearch.config` — *Configuration for the Autoresearch Agent.*
-
-##### `class AutoresearchAgentConfig(BaseModel)`
-
-##### `class AutoresearchConfig(BaseModel)`
-
-______________________________________________________________________
-
-#### `kiss.agents.claw`
-
-______________________________________________________________________
-
-#### `kiss.agents.claw.background_agent` — *Background agent that listens for tasks on a messaging channel.*
-
-**`stop_background_agent`** — Stop a running background agent instance. Reads the PID file, sends SIGTERM to the process, and cleans up lock/PID files.<br/>`def stop_background_agent() -> bool`
-
-- **Returns:** True if a running instance was stopped, False otherwise.
-
-**`run_background_agent`** — Main loop: poll channel for tasks from user, run them, post results. Only one instance can run at a time. If another instance is already running, this function prints a message and returns immediately.<br/>`def run_background_agent(work_dir: str | None = None) -> None`
-
-- `work_dir`: Working directory for agent tasks. Defaults to a temp dir.
 
 ______________________________________________________________________
 
