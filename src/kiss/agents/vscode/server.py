@@ -379,16 +379,50 @@ class VSCodeServer:
         self.printer.broadcast({"type": "task_events", "events": events})
 
     def _get_last_session(self) -> None:
-        """Load the most recent task from history and replay its events."""
+        """Load the most recent task from history and replay its events.
+
+        Also restores any pending merge session from disk so that
+        merge-diff buttons reappear after a VS Code restart.
+        """
         entries = _load_history(limit=1)
-        if not entries:
+        if entries:
+            task = str(entries[0].get("task", ""))
+            if task:
+                events = _load_task_chat_events(task)
+                self.agent.resume_chat(task)
+                self.printer.broadcast({"type": "task_events", "events": events, "task": task})
+        self._restore_pending_merge()
+
+    def _restore_pending_merge(self) -> None:
+        """Restore a pending merge session from disk if one exists.
+
+        Reads ``pending-merge.json`` from the merge data directory and
+        sends ``merge_data`` and ``merge_started`` events so the VS Code
+        extension re-opens the merge view with decorations and the
+        webview shows the accept/reject toolbar.
+        """
+        merge_json = _merge_data_dir() / "pending-merge.json"
+        if not merge_json.is_file():
             return
-        task = str(entries[0].get("task", ""))
-        if not task:
-            return
-        events = _load_task_chat_events(task)
-        self.agent.resume_chat(task)
-        self.printer.broadcast({"type": "task_events", "events": events, "task": task})
+        try:
+            with open(merge_json) as f:
+                merge_data = json.load(f)
+            files = merge_data.get("files", [])
+            if not files:
+                return
+            total_hunks = sum(len(f.get("hunks", [])) for f in files)
+            if total_hunks == 0:
+                return
+            self._merging = True
+            self._remaining_hunks = total_hunks
+            self.printer.broadcast({
+                "type": "merge_data",
+                "data": merge_data,
+                "hunk_count": total_hunks,
+            })
+            self.printer.broadcast({"type": "merge_started"})
+        except (OSError, json.JSONDecodeError, KeyError):
+            logger.debug("Failed to restore pending merge", exc_info=True)
 
     def _get_welcome_suggestions(self) -> None:
         """Send recent tasks as welcome screen suggestions."""
