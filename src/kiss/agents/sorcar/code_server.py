@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -21,33 +20,61 @@ def _log_exc() -> None:
     logger.debug("Exception caught", exc_info=True)
 
 
+def _load_gitignore_dirs(work_dir: str) -> set[str]:
+    """Load directory names and paths to skip from .gitignore.
+
+    Parses .gitignore for entries without glob characters and returns
+    them as a set.  Entries may be simple names (e.g. ``node_modules``)
+    or paths (e.g. ``src/generated``).  Always includes ``.git``.
+
+    Args:
+        work_dir: Repository root containing .gitignore.
+
+    Returns:
+        Set of directory names/paths to skip during file scanning.
+    """
+    skip = {".git"}
+    try:
+        gitignore = Path(work_dir) / ".gitignore"
+        for raw_line in gitignore.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("!"):
+                continue
+            # Strip trailing slash (directory marker)
+            name = line.rstrip("/")
+            # Only use names/paths — skip glob patterns
+            if "*" in name or "?" in name:
+                continue
+            skip.add(name)
+    except OSError:
+        _log_exc()
+    return skip
+
+
 def _scan_files(work_dir: str) -> list[str]:
     paths: list[str] = []
-    skip = {
-        ".git",
-        "__pycache__",
-        "node_modules",
-        ".venv",
-        "venv",
-        ".tox",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".pytest_cache",
-    }
+    skip = _load_gitignore_dirs(work_dir)
+    wd = Path(work_dir)
     try:
-        for root, dirs, files in os.walk(work_dir):
-            depth = os.path.relpath(root, work_dir).count(os.sep)
-            if depth > 3:
+        for root, dirs, files in wd.walk():
+            rel_root = root.relative_to(wd)
+            if len(rel_root.parts) - 1 > 3:
                 dirs.clear()
                 continue
-            dirs[:] = sorted(d for d in dirs if d not in skip and not d.startswith("."))
+            dirs[:] = sorted(
+                d
+                for d in dirs
+                if d not in skip
+                and not d.startswith(".")
+                and str(rel_root / d) not in skip
+            )
             for name in sorted(files):
-                paths.append(os.path.relpath(os.path.join(root, name), work_dir))
+                paths.append(str(rel_root / name))
                 if len(paths) >= 2000:
                     return paths
             for d in dirs:
-                paths.append(os.path.relpath(os.path.join(root, d), work_dir) + "/")
-    except OSError:  # pragma: no cover — os.walk swallows all OSErrors internally
+                paths.append(str(rel_root / d) + "/")
+    except OSError:  # pragma: no cover — Path.walk swallows OSErrors internally
         _log_exc()
     return paths
 
