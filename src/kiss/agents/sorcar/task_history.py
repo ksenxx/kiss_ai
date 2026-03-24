@@ -405,7 +405,7 @@ def _set_latest_chat_events(
             (has_ev, result, task_id),
         )
         db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
-        if events:
+        if has_ev:
             db.executemany(
                 "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
                 [(task_id, i, json.dumps(ev)) for i, ev in enumerate(events)],
