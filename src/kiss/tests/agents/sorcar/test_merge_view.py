@@ -1,4 +1,4 @@
-"""Tests for merge view: restore on close, second-change exclusion of pre-existing diffs."""
+"""Tests for merge view: deleted file exclusion and pre-existing diff exclusion."""
 
 import json
 import os
@@ -10,7 +10,6 @@ from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _parse_diff_hunks,
     _prepare_merge_view,
-    _restore_merge_files,
     _save_untracked_base,
     _snapshot_files,
 )
@@ -26,40 +25,6 @@ def _create_git_repo(tmpdir: str) -> str:
     subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
     return repo
-
-
-class TestRestoreMergeFiles:
-    def test_restore_handles_subdirectory_files(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo = _create_git_repo(tmpdir)
-            data_dir = os.path.join(tmpdir, "data")
-            os.makedirs(data_dir)
-
-            os.makedirs(os.path.join(repo, "sub"))
-            Path(repo, "sub", "file.txt").write_text("original\n")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "add sub"], cwd=repo, capture_output=True)
-
-            pre_hunks = _parse_diff_hunks(repo)
-            pre_untracked = _capture_untracked(repo)
-            pre_hashes = _snapshot_files(repo, set(pre_hunks.keys()) | pre_untracked)
-
-            agent_content = "modified\n"
-            Path(repo, "sub", "file.txt").write_text(agent_content)
-
-            _prepare_merge_view(repo, data_dir, pre_hunks, pre_untracked, pre_hashes)
-
-            Path(repo, "sub", "file.txt").write_text("original\nmodified\n")
-
-            hunk_count = _restore_merge_files(data_dir, repo)
-
-            assert Path(repo, "sub", "file.txt").read_text() == agent_content
-            assert hunk_count >= 1
-            manifest = Path(data_dir) / "pending-merge.json"
-            assert manifest.exists()
-            data = json.loads(manifest.read_text())
-            assert len(data["files"]) == 1
-            assert data["files"][0]["name"] == str(Path("sub", "file.txt"))
 
 
 class TestMergeViewDeletedFiles:
@@ -104,81 +69,6 @@ class TestMergeViewDeletedFiles:
             names = [f["name"] for f in manifest["files"]]
             assert "example.md" not in names
             assert "keep.txt" in names
-
-
-class TestPendingMergeOnRestart:
-    """Simulate the restart scenario where merge-current was already cleaned
-    up by _cleanup but pending-merge.json still exists."""
-
-    def test_pending_merge_json_detected_after_restore_returns_zero(self) -> None:
-        """When merge-current is gone but pending-merge.json exists with hunks,
-        the startup code should detect the merge state."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = os.path.join(tmpdir, "data")
-            os.makedirs(data_dir)
-            repo = _create_git_repo(tmpdir)
-
-            # _restore_merge_files returns 0 when merge-current doesn't exist
-            assert _restore_merge_files(data_dir, repo) == 0
-
-            # Simulate what _cleanup leaves behind: pending-merge.json with hunks
-            manifest = {
-                "branch": "HEAD",
-                "files": [
-                    {
-                        "name": "example.md",
-                        "base": "/tmp/base",
-                        "current": "/tmp/current",
-                        "hunks": [
-                            {"bs": 1, "bc": 1, "cs": 1, "cc": 2},
-                            {"bs": 5, "bc": 0, "cs": 6, "cc": 3},
-                        ],
-                    }
-                ],
-            }
-            Path(data_dir, "pending-merge.json").write_text(json.dumps(manifest))
-
-            # This is the logic from the fix in sorcar.py startup:
-            recovered = _restore_merge_files(data_dir, repo)
-            assert recovered == 0  # merge-current doesn't exist
-            pending_merge_path = Path(data_dir) / "pending-merge.json"
-            assert pending_merge_path.exists()
-            pm_data = json.loads(pending_merge_path.read_text())
-            recovered = sum(
-                len(f.get("hunks", [])) for f in pm_data.get("files", [])
-            )
-            assert recovered == 2  # 2 hunks from the manifest
-
-    def test_no_false_positive_without_pending_merge(self) -> None:
-        """When neither merge-current nor pending-merge.json exist, recovered is 0."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = os.path.join(tmpdir, "data")
-            os.makedirs(data_dir)
-            repo = _create_git_repo(tmpdir)
-
-            recovered = _restore_merge_files(data_dir, repo)
-            assert recovered == 0
-            assert not Path(data_dir, "pending-merge.json").exists()
-
-    def test_empty_pending_merge_no_hunks(self) -> None:
-        """pending-merge.json with empty files list should yield 0 hunks."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = os.path.join(tmpdir, "data")
-            os.makedirs(data_dir)
-            repo = _create_git_repo(tmpdir)
-
-            Path(data_dir, "pending-merge.json").write_text(
-                json.dumps({"branch": "HEAD", "files": []})
-            )
-            recovered = _restore_merge_files(data_dir, repo)
-            assert recovered == 0
-            pm_data = json.loads(
-                Path(data_dir, "pending-merge.json").read_text()
-            )
-            total = sum(
-                len(f.get("hunks", [])) for f in pm_data.get("files", [])
-            )
-            assert total == 0
 
 
 class TestMergeViewExcludesPreExistingDiffs:

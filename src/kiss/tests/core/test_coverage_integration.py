@@ -193,15 +193,6 @@ class TestTaskHistory(TestCase):
         assert not cs_dir.exists() or True
 
 
-class TestSorcarHelpers(TestCase):
-    def test_atomic_write_text(self) -> None:
-        from kiss.agents.sorcar.sorcar import _atomic_write_text
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test.txt"
-            _atomic_write_text(path, "hello")
-            assert path.read_text() == "hello"
-
-
 class TestUsefulTools(TestCase):
     def test_write_and_read(self) -> None:
         from kiss.agents.sorcar.useful_tools import UsefulTools
@@ -212,13 +203,6 @@ class TestUsefulTools(TestCase):
             assert "Successfully" in result
             assert tools.Read(path) == "hello world"
 
-
-class TestBrowserUI(TestCase):
-
-    def test_find_free_port(self) -> None:
-        from kiss.agents.sorcar.browser_ui import find_free_port
-        port = find_free_port()
-        assert 1000 < port < 65536
 
 class TestMultiPrinter(TestCase):
     def test_multi_printer(self) -> None:
@@ -264,19 +248,6 @@ class TestCodeServerHelpers(TestCase):
             assert "a.txt" in result
             assert "missing.txt" not in result
             assert result["a.txt"] == hashlib.md5(b"hello").hexdigest()
-
-    def test_restore_merge_files(self) -> None:
-        from kiss.agents.sorcar.code_server import _restore_merge_files
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "data"
-            data_dir.mkdir()
-            work_dir = Path(tmpdir) / "work"
-            work_dir.mkdir()
-            current_dir = data_dir / "merge-current"
-            current_dir.mkdir()
-            (current_dir / "test.txt").write_text("restored")
-            _restore_merge_files(str(data_dir), str(work_dir))
-            assert (work_dir / "test.txt").read_text() == "restored"
 
 class TestTaskHistoryExtra(TestCase):
     def setUp(self) -> None:

@@ -118,16 +118,6 @@ class TestTaskHistoryEdgeCases(TestCase):
         assert entry is None
 
 
-class TestCodeServerMergeHelpers(TestCase):
-    def test_restore_merge_files_no_data(self) -> None:
-        from kiss.agents.sorcar.code_server import _restore_merge_files
-
-        td = Path(tempfile.mkdtemp())
-        result = _restore_merge_files(str(td), str(td))
-        assert result == 0
-        shutil.rmtree(td, ignore_errors=True)
-
-
 class TestModelStr(TestCase):
     def test_model_str_gemini(self) -> None:
         """GeminiModel inherits Model.__str__ (line 172) — no override."""
