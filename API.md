@@ -33,6 +33,7 @@
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
     - [`kiss.agents.sorcar.shared_utils`](#kissagentssorcarshared_utils)
+    - [`kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentssorcarstateful_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.channels`](#kisschannels)
@@ -1044,6 +1045,33 @@ ______________________________________________________________________
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
+
+______________________________________________________________________
+
+#### `kiss.agents.sorcar.stateful_sorcar_agent` — *Stateful Sorcar agent with chat-session persistence.*
+
+##### `class StatefulSorcarAgent(SorcarAgent)` — SorcarAgent with chat-session state management.
+
+**Constructor:** `StatefulSorcarAgent(name: str) -> None`
+
+- **chat_id** — Return the current chat session ID.<br/>`chat_id() -> str` *(property)*
+
+- **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear').<br/>`new_chat() -> None`
+
+- **resume_chat** — Resume a previous chat session by looking up the task's chat_id. If the task has an associated `chat_id` in history, subsequent `run()` calls will continue that session.<br/>`resume_chat(task: str) -> None`
+
+  - `task`: The task description string to look up.
+
+- **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
+
+  - `prompt`: The original task prompt.
+  - **Returns:** The augmented prompt with chat history prepended, or the original prompt if no prior context exists.
+
+- **run** — Run the agent with chat-session context management. Loads prior chat context, persists the new task, augments the prompt with previous tasks/results, runs the underlying agent, and saves the result back to history.<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+
+  - `prompt_template`: The task prompt.
+  - `**kwargs`: All other arguments forwarded to `SorcarAgent.run()`.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ______________________________________________________________________
 
