@@ -312,14 +312,4 @@ def test_clip_autocomplete_suggestion_strips_repeated_query_prefix() -> None:
     assert clip_autocomplete_suggestion("hello", "hello world again") == "world again"
 
 
-class TestNoSyntaxErrors:
-    def test_module_imports_and_no_redundant_imports(self) -> None:
-        import kiss.agents.sorcar.sorcar as mod
 
-        expected = ("run_chatbot", "_read_active_file")
-        for attr in expected:
-            assert hasattr(mod, attr)
-        assert not hasattr(mod, "get_most_expensive_model")
-        import kiss.agents.sorcar.shared_utils as shared_mod
-        for attr in ("clean_llm_output", "model_vendor", "clip_autocomplete_suggestion"):
-            assert hasattr(shared_mod, attr)

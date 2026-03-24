@@ -20,6 +20,7 @@ from kiss.agents.sorcar.code_server import (
     _capture_untracked,
     _cleanup_merge_data,
     _git,
+    _merge_data_dir,
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
@@ -105,8 +106,6 @@ class VSCodeServer:
         self._merging = False
         self._remaining_hunks = 0
         self._chat_id = _generate_chat_id()
-        self._sorcar_data_dir = str(_KISS_DIR / "sorcar-data")
-        os.makedirs(self._sorcar_data_dir, exist_ok=True)
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -266,9 +265,10 @@ class VSCodeServer:
             self._stop_event = None
             self._user_answer_event = None
             try:
+                merge_dir = str(_merge_data_dir())
                 merge_result = _prepare_merge_view(
                     work_dir,
-                    self._sorcar_data_dir,
+                    merge_dir,
                     pre_hunks,
                     pre_untracked,
                     pre_file_hashes,
@@ -276,7 +276,7 @@ class VSCodeServer:
                 if merge_result.get("status") == "opened":
                     self._merging = True
                     self._remaining_hunks = merge_result.get("hunk_count", 0)
-                    merge_json = os.path.join(self._sorcar_data_dir, "pending-merge.json")
+                    merge_json = os.path.join(merge_dir, "pending-merge.json")
                     if os.path.exists(merge_json):
                         with open(merge_json) as f:
                             merge_data = json.load(f)
@@ -304,7 +304,7 @@ class VSCodeServer:
         self._merging = False
         self._remaining_hunks = 0
         self.printer.broadcast({"type": "merge_ended"})
-        _cleanup_merge_data(self._sorcar_data_dir)
+        _cleanup_merge_data(str(_merge_data_dir()))
 
     def _stop_task(self) -> None:
         """Signal the agent to stop."""

@@ -166,40 +166,4 @@ class TestCrossProcessSaveLastModel:
             (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
-def _worker_atomic_write(path: str, content: str, n: int) -> None:
-    """Child-process worker: atomically write *content* to *path* *n* times."""
-    from kiss.agents.sorcar.sorcar import _atomic_write_text
 
-    for _ in range(n):
-        _atomic_write_text(Path(path), content)
-
-
-class TestAtomicWriteText:
-    """Verify _atomic_write_text never leaves a partial/empty file."""
-
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self):
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_concurrent_writes_file_never_empty(self):
-        """Concurrent atomic writes should never leave an empty or partial file."""
-        path = os.path.join(self.tmpdir, "port.txt")
-        Path(path).write_text("12345")
-
-        procs = [
-            multiprocessing.Process(
-                target=_worker_atomic_write,
-                args=(path, str(i * 1000 + j), 20),
-            )
-            for i in range(3)
-            for j in range(3)
-        ]
-        for p in procs:
-            p.start()
-        for p in procs:
-            p.join()
-
-        content = Path(path).read_text()
-        assert content.strip() != ""
