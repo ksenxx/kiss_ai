@@ -434,62 +434,6 @@ class TestMainCssFilePicker(unittest.TestCase):
         assert "acSlideUp" in self.css
 
 
-class TestFastComplete(unittest.TestCase):
-    """Test VSCodeServer._fast_complete for local prefix matching."""
-
-    def setUp(self) -> None:
-        self.server = VSCodeServer()
-        self.events: list[dict] = []
-
-        def capture_broadcast(event: dict) -> None:
-            self.events.append(event)
-
-        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
-
-    def test_no_match_returns_empty(self) -> None:
-        result = self.server._fast_complete("xyz_nonexistent")
-        assert result == ""
-
-
-
-class TestCompleteMinLength(unittest.TestCase):
-    """Test that _complete enforces min query length and fast path."""
-
-    def setUp(self) -> None:
-        self.server = VSCodeServer()
-        self.events: list[dict] = []
-
-        def capture_broadcast(event: dict) -> None:
-            self.events.append(event)
-
-        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
-
-    def test_short_query_returns_empty_ghost(self) -> None:
-        self.server._complete("a")
-        assert len(self.events) == 1
-        assert self.events[0]["type"] == "ghost"
-        assert self.events[0]["suggestion"] == ""
-        assert self.events[0]["query"] == "a"
-
-    def test_empty_query_returns_empty_ghost(self) -> None:
-        self.server._complete("  ")
-        assert len(self.events) == 1
-        assert self.events[0]["type"] == "ghost"
-        assert self.events[0]["suggestion"] == ""
-        assert self.events[0]["query"] == ""
-
-    def test_fast_path_file_match(self) -> None:
-        """Test that _complete uses fast path when file cache matches."""
-        self.server._file_cache = ["src/main.py", "src/utils.py"]
-        self.server._complete("check src/m")
-        assert len(self.events) == 1
-        assert self.events[0]["type"] == "ghost"
-        assert self.events[0]["query"] == "check src/m"
-        # "src/m" -> "src/main.py" continuation is "ain.py"
-        # But clip_autocomplete_suggestion may clip it
-        # The fast_complete finds "ain.py" and clip clips it
-
-
 class TestExtractResultSummary(unittest.TestCase):
     """Test _extract_result_summary extracts summary from recorded events."""
 
@@ -544,26 +488,6 @@ class TestHandleCommandGenerateCommitMessage(unittest.TestCase):
         assert len(self.events) == 1
         assert self.events[0]["type"] == "error"
         assert "unknownXYZ" in self.events[0]["text"]
-
-
-class TestMainJsGhostCache(unittest.TestCase):
-    """Test main.js ghost text cache and enhancements."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        cls.js = (base / "vscode" / "media" / "main.js").read_text()
-
-    def test_has_cursor_position_check(self) -> None:
-        assert "inp.selectionStart < inp.value.length" in self.js
-
-    def test_has_min_length_check(self) -> None:
-        assert "replace(/\\s/g, '').length < 2" in self.js
-
-    def test_ghost_staleness_check_uses_server_query(self) -> None:
-        assert "ev.query === inp.value" in self.js
 
 
 class TestLastActiveFile(unittest.TestCase):
@@ -625,83 +549,6 @@ class TestMainCssModelPicker(unittest.TestCase):
 
     def test_has_model_cost(self) -> None:
         assert ".model-cost" in self.css
-
-
-class TestCompleteFromActiveFile(unittest.TestCase):
-    """Test _complete_from_active_file extracts words from the active file."""
-
-    def setUp(self) -> None:
-        self.server = VSCodeServer()
-        self.events: list[dict] = []
-
-        def capture_broadcast(event: dict) -> None:
-            self.events.append(event)
-
-        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
-        self.tmpdir = tempfile.mkdtemp()
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_no_active_file_returns_empty(self) -> None:
-        self.server._last_active_file = ""
-        assert self.server._complete_from_active_file("hel") == ""
-
-    def test_nonexistent_file_returns_empty(self) -> None:
-        self.server._last_active_file = "/nonexistent/path.py"
-        assert self.server._complete_from_active_file("hel") == ""
-
-    def test_matches_identifier_from_file(self) -> None:
-        fpath = os.path.join(self.tmpdir, "sample.py")
-        with open(fpath, "w") as f:
-            f.write("def calculate_total(items):\n    return sum(items)\n")
-        self.server._last_active_file = fpath
-        result = self.server._complete_from_active_file("calc")
-        assert result == "ulate_total"
-
-    def test_no_match_returns_empty(self) -> None:
-        fpath = os.path.join(self.tmpdir, "sample.py")
-        with open(fpath, "w") as f:
-            f.write("def hello():\n    pass\n")
-        self.server._last_active_file = fpath
-        result = self.server._complete_from_active_file("xyz")
-        assert result == ""
-
-    def test_short_partial_returns_empty(self) -> None:
-        fpath = os.path.join(self.tmpdir, "sample.py")
-        with open(fpath, "w") as f:
-            f.write("def hello():\n    pass\n")
-        self.server._last_active_file = fpath
-        result = self.server._complete_from_active_file("x")
-        assert result == ""
-
-    def test_query_without_trailing_word_returns_empty(self) -> None:
-        fpath = os.path.join(self.tmpdir, "sample.py")
-        with open(fpath, "w") as f:
-            f.write("def hello():\n    pass\n")
-        self.server._last_active_file = fpath
-        result = self.server._complete_from_active_file("fix ")
-        assert result == ""
-
-    def test_complete_ghost_uses_active_file(self) -> None:
-        """Integration: _complete falls through to active file words."""
-        fpath = os.path.join(self.tmpdir, "sample.py")
-        with open(fpath, "w") as f:
-            f.write("class MyCustomProcessor:\n    pass\n")
-        self.server._last_active_file = fpath
-        self.server._complete("MyCust")
-        assert len(self.events) == 1
-        assert self.events[0]["type"] == "ghost"
-        assert "omProcessor" in self.events[0]["suggestion"]
-        assert self.events[0]["query"] == "MyCust"
-
-    def test_picks_longest_match(self) -> None:
-        fpath = os.path.join(self.tmpdir, "sample.py")
-        with open(fpath, "w") as f:
-            f.write("foo foobar foobarbaz\n")
-        self.server._last_active_file = fpath
-        result = self.server._complete_from_active_file("foob")
-        assert result == "arbaz"
 
 
 class TestGetLastSession(unittest.TestCase):

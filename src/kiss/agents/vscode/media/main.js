@@ -22,10 +22,6 @@
   let histIdx = -1;
 
 
-  // Ghost text state
-  let ghostTimer = null;
-  let currentGhost = '';
-
   // Elements
   const O = document.getElementById('output');
   const welcome = document.getElementById('welcome');
@@ -55,7 +51,6 @@
   const askUserInput = document.getElementById('ask-user-input');
   const askUserSubmit = document.getElementById('ask-user-submit');
   const waitSpinner = document.getElementById('wait-spinner');
-  const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const taskPanel = document.getElementById('task-panel');
@@ -118,34 +113,6 @@
       _spinnerTimer = null;
       if (waitSpinner) waitSpinner.classList.add('active');
     }, 250);
-  }
-
-  // --- Ghost text ---
-  function clearGhost() {
-    currentGhost = '';
-    if (ghostOverlay) ghostOverlay.innerHTML = '';
-    if (ghostTimer) { clearTimeout(ghostTimer); ghostTimer = null; }
-  }
-
-  function updateGhost(suggestion) {
-    currentGhost = suggestion || '';
-    if (!ghostOverlay || !currentGhost) { clearGhost(); return; }
-    var val = inp.value;
-    ghostOverlay.innerHTML = '<span style="visibility:hidden">' + esc(val) + '</span>'
-      + '<span class="ghost-text">' + esc(currentGhost) + '</span>';
-  }
-
-  function requestGhost() {
-    clearGhost();
-    if (isRunning || !inp.value.trim()) return;
-    // Don't request ghost when cursor isn't at end
-    if (inp.selectionStart < inp.value.length) return;
-    // Minimum query length check (2 non-whitespace chars)
-    if (inp.value.replace(/\s/g, '').length < 2) return;
-    ghostTimer = setTimeout(function() {
-      ghostTimer = null;
-      vscode.postMessage({ type: 'complete', query: inp.value });
-    }, 300);
   }
 
   // --- File path detection (matches web Sorcar) ---
@@ -546,11 +513,6 @@
       setTimeout(function() { inp.focus(); }, 100);
       setTimeout(function() { inp.focus(); }, 300);
       break;
-    case 'ghost':
-      if (ev.suggestion && ev.query === inp.value) {
-        updateGhost(ev.suggestion);
-      }
-      break;
     case 'activeFileInfo':
       if (runPromptBtn) {
         if (!isRunning && ev.isPrompt) {
@@ -613,7 +575,7 @@
   function updateInputDisabled() {
     var blocked = isRunning || isMerging;
     inp.disabled = blocked;
-    if (blocked) { clearGhost(); hideAC(); }
+    if (blocked) { hideAC(); }
   }
 
   function setRunningState(running) {
@@ -754,15 +716,6 @@
         if (e.key === 'Enter' && acIdx >= 0) { e.preventDefault(); items[acIdx].click(); return; }
         if (e.key === 'Escape') { hideAC(); return; }
       }
-      // Ghost text accept
-      if (e.key === 'Tab' && currentGhost) {
-        e.preventDefault();
-        inp.value += currentGhost;
-        clearGhost();
-        inp.style.height = 'auto';
-        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
-        return;
-      }
       // History cycling (ArrowUp/Down only when textbox is empty and no autocomplete)
       if (e.key === 'ArrowUp' && autocomplete.style.display !== 'block') {
         if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
@@ -782,18 +735,14 @@
         e.preventDefault();
         sendMessage();
       }
-      // Any other key clears ghost
-      if (e.key !== 'Tab') clearGhost();
     });
     inp.addEventListener('input', function() {
       inp.style.height = 'auto';
       inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
       checkAutocomplete();
-      requestGhost();
       histIdx = -1;
       syncClearBtn();
     });
-    inp.addEventListener('blur', function() { clearGhost(); });
     stopBtn.addEventListener('click', function() {
       vscode.postMessage({ type: 'stop' });
     });
@@ -815,7 +764,6 @@
         inp.value = '';
         inp.style.height = 'auto';
         inputClearBtn.style.display = 'none';
-        clearGhost();
         hideAC();
         inp.focus();
       });
@@ -968,7 +916,6 @@
     inp.style.height = 'auto';
     attachments = [];
     renderFileChips();
-    clearGhost();
     histIdx = -1;
     if (inputClearBtn) inputClearBtn.style.display = 'none';
     if (welcome) welcome.style.display = 'none';

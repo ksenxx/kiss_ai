@@ -346,17 +346,6 @@ header {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* Ghost text overlay */
-#ghost-overlay {
-  position: absolute; top: 0; left: 0; right: 0;
-  pointer-events: none; white-space: pre-wrap; word-break: break-word;
-  font-family: inherit; font-size: var(--fs-base); line-height: 1.5;
-  color: transparent; padding: 0; min-height: 4.5em;
-}
-#ghost-overlay .ghost-text {
-  color: color-mix(in srgb, var(--fg) 50%, transparent);
-}
-
 /* Clear button */
 #clear-btn {
   background: none; border: none;
