@@ -122,6 +122,20 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     } as ToWebviewMessage);
   }
 
+  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
+    this._isRunning = true;
+    this.sendToWebview({ type: 'status', running: true });
+    const cmd: AgentCommand = {
+      type: 'run',
+      prompt,
+      model,
+      workDir: this._getWorkDir(),
+      activeFile,
+      attachments,
+    };
+    this._agentProcess.sendCommand(cmd);
+  }
+
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
@@ -147,20 +161,12 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           }
         }
 
-        this._isRunning = true;
-        this.sendToWebview({ type: 'status', running: true });
-
-        const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
-
-        const cmd: AgentCommand = {
-          type: 'run',
-          prompt: message.prompt,
-          model: message.model,
-          workDir: this._getWorkDir(),
-          activeFile: activeFile,
-          attachments: message.attachments,
-        };
-        this._agentProcess.sendCommand(cmd);
+        this._startTask(
+          message.prompt,
+          message.model,
+          vscode.window.activeTextEditor?.document.uri.fsPath,
+          message.attachments,
+        );
         break;
       }
 
@@ -215,10 +221,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         }
         break;
 
-      case 'clearChat':
-        this.sendToWebview({ type: 'clearChat' });
-        break;
-
       case 'newChat':
         this._agentProcess.sendCommand({ type: 'newChat' });
         break;
@@ -241,16 +243,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         if (!editor || !editor.document.uri.fsPath.toLowerCase().endsWith('.md')) return;
         const content = editor.document.getText();
         if (!content.trim()) return;
-        this._isRunning = true;
-        this.sendToWebview({ type: 'status', running: true });
-        const promptCmd: AgentCommand = {
-          type: 'run',
-          prompt: content,
-          model: this._selectedModel,
-          workDir: this._getWorkDir(),
-          activeFile: editor.document.uri.fsPath,
-        };
-        this._agentProcess.sendCommand(promptCmd);
+        this._startTask(content, this._selectedModel, editor.document.uri.fsPath);
         break;
       }
 
@@ -283,17 +276,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   public submitTask(prompt: string): void {
     if (this._isRunning || !prompt.trim()) return;
     this._agentProcess.start(this._getWorkDir());
-    this._isRunning = true;
-    this.sendToWebview({ type: 'status', running: true });
-    const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
-    const cmd: AgentCommand = {
-      type: 'run',
-      prompt: prompt.trim(),
-      model: this._selectedModel,
-      workDir: this._getWorkDir(),
-      activeFile,
-    };
-    this._agentProcess.sendCommand(cmd);
+    this._startTask(
+      prompt.trim(),
+      this._selectedModel,
+      vscode.window.activeTextEditor?.document.uri.fsPath,
+    );
   }
 
   public async focusChatInput(): Promise<void> {

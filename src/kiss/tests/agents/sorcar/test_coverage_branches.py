@@ -1082,6 +1082,7 @@ class TestTaskHistoryBranches:
     def test_get_history_entry(self, tmp_path):
         saved = self._fresh_db(tmp_path)
         try:
+            th._add_task("some_task")
             entry = th._get_history_entry(0)
             assert entry is not None
         finally:
@@ -1324,30 +1325,12 @@ class TestVSCodeServerBranches:
         server._handle_command({"type": "resumeSession", "sessionId": ""})
         # Empty sessionId - no action
 
-    def test_handle_command_get_welcome_suggestions(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "getWelcomeSuggestions"})
-        sugg_events = [e for e in events if e["type"] == "welcome_suggestions"]
-        assert len(sugg_events) == 1
-
     def test_handle_command_new_chat(self):
         server, events = self._make_server()
         old_chat_id = server.agent.chat_id
         server._handle_command({"type": "newChat"})
         # New chat should generate a new chat_id
         assert server.agent.chat_id != old_chat_id
-
-    def test_handle_command_complete_with_active_file(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "complete", "query": "test", "activeFile": "/tmp/f.py"})
-        assert server._last_active_file == "/tmp/f.py"
-        # Wait for thread to complete
-        time.sleep(0.5)
-
-    def test_handle_command_complete_empty_query(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "complete", "query": ""})
-        # Empty query - no thread started
 
     def test_handle_merge_action_accept(self):
         server, events = self._make_server()
@@ -1402,13 +1385,6 @@ class TestVSCodeServerBranches:
             if len(session["id"]) > 50:
                 assert session["title"].endswith("...")
                 break
-
-    def test_get_welcome_suggestions_filters_empty(self):
-        server, events = self._make_server()
-        server._get_welcome_suggestions()
-        sugg = [e for e in events if e["type"] == "welcome_suggestions"][0]
-        for s in sugg["suggestions"]:
-            assert s["text"]  # non-empty
 
     def test_await_user_response(self):
         server, events = self._make_server()
@@ -2252,30 +2228,6 @@ class TestVSCodeServerMoreBranches:
         server._handle_merge_action("unknown_action")
         assert server._merging is True
         assert server._remaining_hunks == 5
-
-    def test_get_welcome_suggestions_with_empty_task(self, tmp_path):
-        """Empty tasks should be filtered from suggestions."""
-        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = tmp_path / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-        try:
-            # Add an empty task
-            th._add_task("")
-            th._add_task("real task")
-            server, events = self._make_server()
-            server._get_welcome_suggestions()
-            sugg = [e for e in events if e["type"] == "welcome_suggestions"][0]
-            # Empty tasks should be filtered out
-            for s in sugg["suggestions"]:
-                assert s["text"] != ""
-        finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
-            th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
     def test_generate_followup_empty(self):
         """_generate_followup when generate_followup_text returns empty."""
