@@ -1116,7 +1116,7 @@
   }
 
   function chatIdBgColor(chatId) {
-    if (!chatId) return 'transparent';
+    if (!chatId) return 'hsl(0, 0%, 92%)';
     var hash = 5381;
     for (var i = 0; i < chatId.length; i++) {
       hash = ((hash << 5) + hash) + chatId.charCodeAt(i);
@@ -1148,7 +1148,7 @@
       var itemText = s.title || s.preview || 'Untitled';
       div.textContent = itemText;
       div.dataset.tooltip = s.text || itemText;
-      div.style.backgroundColor = chatIdBgColor(s.chat_id);
+      div.style.backgroundColor = chatIdBgColor(s.chat_id || String(s.id));
       div.style.color = '#000';
       div.addEventListener('click', function() {
         if (s.has_events) {
