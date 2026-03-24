@@ -26,24 +26,28 @@ The web-based Sorcar UI (`sorcar.py` + `chatbot_ui.py`) runs a Starlette/uvicorn
 ### Step 1: Delete web-only files
 
 Delete these files entirely:
+
 - `src/kiss/agents/sorcar/sorcar.py` — the entire web chatbot UI server
 - `src/kiss/agents/sorcar/chatbot_ui.py` — HTML/CSS/JS templates for web UI (nothing outside sorcar.py imports from it)
 
 ### Step 2: Clean up `browser_ui.py`
 
 `browser_ui.py` contains:
+
 1. `BaseBrowserPrinter` — **KEEP** (used by vscode `VSCodePrinter`, and tests)
-2. `_DISPLAY_EVENT_TYPES`, `_coalesce_events()` — **KEEP** (used by `BaseBrowserPrinter.stop_recording()`)
-3. `find_free_port()` — **DELETE** (only used by deleted `sorcar.py`; no non-test consumers remain)
-4. `BASE_CSS`, `OUTPUT_CSS`, `EVENT_HANDLER_JS`, `HTML_HEAD` — **DELETE** (only imported by deleted `chatbot_ui.py` and `sorcar.py`)
+1. `_DISPLAY_EVENT_TYPES`, `_coalesce_events()` — **KEEP** (used by `BaseBrowserPrinter.stop_recording()`)
+1. `find_free_port()` — **DELETE** (only used by deleted `sorcar.py`; no non-test consumers remain)
+1. `BASE_CSS`, `OUTPUT_CSS`, `EVENT_HANDLER_JS`, `HTML_HEAD` — **DELETE** (only imported by deleted `chatbot_ui.py` and `sorcar.py`)
 
 ### Step 3: Clean up `code_server.py`
 
 Functions used by vscode `server.py` (all **KEEP**):
+
 - `_capture_untracked`, `_cleanup_merge_data`, `_git`, `_merge_data_dir`, `_parse_diff_hunks`, `_prepare_merge_view`, `_save_untracked_base`, `_snapshot_files`
 - `_scan_files` (imported inside a method)
 
 Functions/constants only used by deleted `sorcar.py` or by `_setup_code_server` itself:
+
 - `_setup_code_server()` — **DELETE** (only called from deleted `sorcar.py`)
 - `_CS_SETTINGS` — **DELETE** (only used by `_setup_code_server`)
 - `_CS_STATE_ENTRIES` — **DELETE** (only used by `_setup_code_server`)
@@ -51,11 +55,13 @@ Functions/constants only used by deleted `sorcar.py` or by `_setup_code_server` 
 - `_log_exc()` — **KEEP** (used by 7+ remaining functions in code_server.py)
 
 Functions only used by deleted `sorcar.py` and tests:
+
 - `_restore_merge_files()` — **DELETE** (only production consumer was deleted `sorcar.py`; remaining uses are only in tests)
 
 ### Step 4: Update `pyproject.toml`
 
 Remove:
+
 - The `[project.scripts]` entry: `sorcar = "kiss.agents.sorcar.sorcar:main"`
 - The `[project.optional-dependencies]` `sorcar` group: BUT `playwright>=1.40.0` is still needed by `web_use_tool.py` (which is kept). Either:
   - Move `playwright>=1.40.0` to another deps group (e.g. main deps or a new group), **or**
@@ -72,12 +78,14 @@ No changes needed — it only imports `config` which is retained.
 #### Tests under `src/kiss/tests/agents/sorcar/` that import from deleted files:
 
 These test files import from `sorcar.py` (the deleted web UI) and should be **DELETED**:
+
 - `test_sorcar_integration.py` — imports `run_chatbot` from `sorcar.py`
 - `test_sorcar_cs_integ.py` — imports `run_chatbot` from `sorcar.py`
 - `test_sorcar_race_conditions.py` — imports from `sorcar.py`
 - `test_stop_agent_thread.py` — imports `_StopRequested` from `sorcar.py`
 
 These test files import from `chatbot_ui.py` (the deleted templates) and should be **DELETED**:
+
 - `test_chatbot_ui.py` — tests chatbot UI rendering
 - `test_vscode_panel.py` — imports `chatbot_ui` module directly
 - `test_chat_history_events.py` — imports `CHATBOT_JS`
@@ -89,14 +97,17 @@ These test files import from `chatbot_ui.py` (the deleted templates) and should 
 - `test_code_server.py` — imports `CHATBOT_JS`
 
 These test helper files import from deleted `sorcar.py` and should be **DELETED**:
+
 - `_sorcar_test_server.py` — imports `sorcar` module
 - `_sorcar_test_server_with_cov.py` — wraps `_sorcar_test_server.py`
 - `_sorcar_merge_test_server.py` — likely imports sorcar module
 
 This test file imports `sorcar` module directly and should be **DELETED**:
+
 - `test_sse_reconnection.py` — imports `from kiss.agents.sorcar import sorcar`
 
 These test files do NOT import from deleted files and should be **KEPT**:
+
 - `test_sorcar_agent.py` — tests `SorcarAgent` (kept)
 - `test_task_history.py` — tests `task_history` (kept)
 - `test_useful_tools.py` — tests `UsefulTools` (kept)
@@ -111,6 +122,7 @@ These test files do NOT import from deleted files and should be **KEPT**:
 - `integration_test_*.py` — all import from kept files (`SorcarAgent`, `WebUseTool`) → **KEEP**
 
 #### Tests under `src/kiss/tests/core/` that need updating:
+
 - `test_coverage_integration.py` — remove test `test_atomic_write_text` (imports `_atomic_write_text` from deleted `sorcar.py`); remove test `test_find_free_port` (imports deleted `find_free_port`); remove test `test_restore_merge_files` (imports deleted `_restore_merge_files`); keep tests for `task_history`, `UsefulTools`, `BaseBrowserPrinter`, `_snapshot_files`
 - `test_race_conditions.py` — remove test that imports `_atomic_write_text` from deleted `sorcar.py`; keep `BaseBrowserPrinter` tests
 - `test_uncovered_branches.py` — **EDIT**: remove `test_restore_merge_files_no_data` (imports deleted `_restore_merge_files`); keep all other tests
@@ -119,6 +131,7 @@ These test files do NOT import from deleted files and should be **KEPT**:
 ### Step 7: Verify no remaining dead code
 
 After all deletions, grep for any remaining imports of deleted symbols:
+
 - `from kiss.agents.sorcar.sorcar import ...`
 - `from kiss.agents.sorcar.chatbot_ui import ...`
 - `from kiss.agents.sorcar.browser_ui import find_free_port`

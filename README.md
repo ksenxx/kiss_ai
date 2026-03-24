@@ -455,13 +455,6 @@ kiss/
 │   │   │   ├── multi_agent.py
 │   │   │   ├── config.py
 │   │   │   └── README.md
-│   │   ├── autoresearch/           # Autoresearch agent for autonomous ML experiments
-│   │   │   ├── autoresearch_agent.py
-│   │   │   ├── config.py
-│   │   │   ├── program.md              # Agent instructions for experimentation loop
-│   │   │   └── README.md
-│   │   ├── claw/                    # Background agent for Slack-based task execution
-│   │   │   └── background_agent.py     # Slack-driven background agent
 │   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
 │   ├── core/            # Core framework components
 │   │   ├── base.py            # Base class with common functionality
@@ -505,8 +498,7 @@ kiss/
 │   │   ├── test_ask_user_question.py
 │   │   ├── test_assistant_multi_session.py
 │   │   ├── test_assistant_redundancies.py
-│   │   ├── test_autoresearch.py
-│   │   ├── test_background_agent.py
+
 │   │   ├── test_branch_coverage_integration.py
 │   │   ├── test_browser_close_shutdown.py
 │   │   ├── test_chat_history_events.py
