@@ -16,7 +16,6 @@ import threading
 from typing import Any
 
 from kiss.agents.sorcar.persistence import (
-    SAMPLE_TASKS,
     _load_file_usage,
     _load_history,
     _load_last_model,
@@ -152,8 +151,6 @@ class VSCodeServer:
             task = cmd.get("sessionId", "")
             if task:
                 self._replay_session(task)
-        elif cmd_type == "getWelcomeSuggestions":
-            self._get_welcome_suggestions()
         elif cmd_type == "mergeAction":
             self._handle_merge_action(cmd.get("action", ""))
         elif cmd_type == "getLastSession":
@@ -424,11 +421,6 @@ class VSCodeServer:
             self.printer.broadcast({"type": "merge_started"})
         except (OSError, json.JSONDecodeError, KeyError):
             logger.debug("Failed to restore pending merge", exc_info=True)
-
-    def _get_welcome_suggestions(self) -> None:
-        """Send sample tasks as welcome screen suggestions."""
-        suggestions = [{"text": str(s["task"])} for s in SAMPLE_TASKS]
-        self.printer.broadcast({"type": "welcome_suggestions", "suggestions": suggestions})
 
     def _generate_followup(self, task: str, result: str) -> None:
         """Generate a follow-up suggestion using LLM after task completion."""
