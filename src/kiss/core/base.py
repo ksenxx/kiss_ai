@@ -91,6 +91,7 @@ SYSTEM_PROMPT = f"""
 - For deep research, you must visit and read at least 50 websites
 
 ## Self-Improvement Loop
+- Read the lessons in `{_artifact_dir.parent.parent}/LESSONS.md` at the start of each task.
 - Just before finishing an agent task, update `{_artifact_dir.parent.parent}/LESSONS.md`
   with instructions and rules and intelligence for yourself ONLY IF you have learned any
   major lessons (from mistakes) or intelligence about the project or in general during
@@ -99,7 +100,6 @@ SYSTEM_PROMPT = f"""
   applicable to the current state of the project. Also compact the lessons you have learned
   into concise instructions if the list of lessons get too long.
 - The lessons MUST NOT be specific to a task, but about agent behavior.
-- Review lessons when the agent starts
 
 ## After you have implemented the task, aggresively and carefully simplify and clean up the code
  - Remove unnecessary conditional checks

@@ -35,7 +35,6 @@ from kiss.agents.sorcar.shared_utils import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_history import (
-    _KISS_DIR,
     _add_task,
     _generate_chat_id,
     _load_chat_context,
