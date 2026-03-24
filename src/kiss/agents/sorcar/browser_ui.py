@@ -120,6 +120,14 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
         return _coalesce_events(filtered)
 
+    def _record_event(self, event: dict[str, Any]) -> None:
+        """Append event to all active per-thread recordings.
+
+        Must be called with ``self._lock`` held.
+        """
+        for events_list in self._recordings.values():
+            events_list.append(event)
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send an SSE event dict to the connected client.
 
@@ -129,8 +137,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             event: The event dictionary to broadcast.
         """
         with self._lock:
-            for events_list in self._recordings.values():
-                events_list.append(event)
+            self._record_event(event)
             if self._client_queue is not None:
                 self._client_queue.put(event)
 

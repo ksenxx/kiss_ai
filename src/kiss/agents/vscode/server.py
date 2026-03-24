@@ -27,6 +27,7 @@ from kiss.agents.sorcar.code_server import (
     _snapshot_files,
 )
 from kiss.agents.sorcar.shared_utils import (
+    clean_llm_output,
     clip_autocomplete_suggestion,
     generate_followup_text,
     model_vendor,
@@ -77,8 +78,7 @@ class VSCodePrinter(BaseBrowserPrinter):
             event: The event dictionary to emit.
         """
         with self._lock:
-            for events_list in self._recordings.values():
-                events_list.append(event)
+            self._record_event(event)
         with self._stdout_lock:
             sys.stdout.write(json.dumps(event) + "\n")
             sys.stdout.flush()
@@ -505,7 +505,7 @@ class VSCodeServer:
                 arguments={"context": "\n\n".join(context_parts)},
                 is_agentic=False,
             )
-            msg = raw.strip().strip('"').strip("'")
+            msg = clean_llm_output(raw)
             self.printer.broadcast({"type": "commitMessage", "message": msg})
         except Exception:
             logger.debug("Commit message generation failed", exc_info=True)
