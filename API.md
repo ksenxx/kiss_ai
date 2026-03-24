@@ -16,7 +16,7 @@
       - [`kiss.core.models.gemini_model`](#kisscoremodelsgemini_model)
     - [`kiss.core.printer`](#kisscoreprinter)
     - [`kiss.core.print_to_console`](#kisscoreprint_to_console)
-      - [`kiss.agents.sorcar.browser_ui`](#kissagentssorcarbrowser_ui)
+      - [`kiss.agents.vscode.browser_ui`](#kissagentsvscodebrowser_ui)
       - [`kiss.agents.sorcar.useful_tools`](#kissagentssorcaruseful_tools)
       - [`kiss.agents.sorcar.web_use_tool`](#kissagentssorcarweb_use_tool)
     - [`kiss.core.utils`](#kisscoreutils)
@@ -32,9 +32,9 @@
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
       - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
-    - [`kiss.agents.sorcar.shared_utils`](#kissagentssorcarshared_utils)
     - [`kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentssorcarstateful_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
+      - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
@@ -447,7 +447,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.sorcar.browser_ui` — *Shared browser UI components for KISS agent viewers.*
+#### `kiss.agents.vscode.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
 ##### `class BaseBrowserPrinter(StreamEventParser, Printer)`
 
@@ -954,23 +954,9 @@ from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve, SimpleRAG
   - `filter_fn`: Optional filter function that takes a document dict and returns bool.
   - **Returns:** List of dictionaries containing: - "id": Document ID - "text": Document text - "metadata": Document metadata - "score": Similarity score (higher is better for cosine, lower for L2)
 
-- **delete_documents** — Delete documents from the collection by their IDs.<br/>`delete_documents(document_ids: list[str]) -> None`
-
-  - `document_ids`: List of document IDs to delete.
-  - **Returns:** None.
-
 - **get_collection_stats** — Get statistics about the collection.<br/>`get_collection_stats() -> dict[str, Any]`
 
   - **Returns:** Dictionary containing collection statistics.
-
-- **clear_collection** — Clear all documents from the collection.<br/>`clear_collection() -> None`
-
-  - **Returns:** None.
-
-- **get_document** — Get a document by its ID.<br/>`get_document(document_id: str) -> dict[str, Any] | None`
-
-  - `document_id`: Document ID to retrieve.
-  - **Returns:** Document dictionary or None if not found.
 
 ______________________________________________________________________
 
@@ -1020,7 +1006,38 @@ from kiss.docker import DockerManager
 
 ______________________________________________________________________
 
-#### `kiss.agents.sorcar.shared_utils` — *Shared utilities for Sorcar agent backends (chatbot UI and VS Code).*
+#### `kiss.agents.sorcar.stateful_sorcar_agent` — *Stateful Sorcar agent with chat-session persistence.*
+
+##### `class StatefulSorcarAgent(SorcarAgent)` — SorcarAgent with chat-session state management.
+
+**Constructor:** `StatefulSorcarAgent(name: str) -> None`
+
+- **chat_id** — Return the current chat session ID.<br/>`chat_id() -> str` *(property)*
+
+- **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear').<br/>`new_chat() -> None`
+
+- **resume_chat** — Resume a previous chat session by looking up the task's chat_id. If the task has an associated `chat_id` in history, subsequent `run()` calls will continue that session.<br/>`resume_chat(task: str) -> None`
+
+  - `task`: The task description string to look up.
+
+- **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
+
+  - `prompt`: The original task prompt.
+  - **Returns:** The augmented prompt with chat history prepended, or the original prompt if no prior context exists.
+
+- **run** — Run the agent with chat-session context management. Loads prior chat context, persists the new task, augments the prompt with previous tasks/results, runs the underlying agent, and saves the result back to history. Only the result summary is persisted here. Callers that record chat events (e.g. the VS Code server) should additionally call :func:`~kiss.agents.sorcar.persistence._set_latest_chat_events` to persist the full event stream.<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+
+  - `prompt_template`: The task prompt.
+  - `**kwargs`: All other arguments forwarded to `SorcarAgent.run()`.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode` — *KISS Sorcar VS Code Extension backend.*
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.helpers` — *Helper utilities for Sorcar agent backends (autocomplete, model info, file ranking).*
 
 **`clean_llm_output`** — Strip whitespace and surrounding quotes from LLM output.<br/>`def clean_llm_output(text: str) -> str`
 
@@ -1045,37 +1062,6 @@ ______________________________________________________________________
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
-
-______________________________________________________________________
-
-#### `kiss.agents.sorcar.stateful_sorcar_agent` — *Stateful Sorcar agent with chat-session persistence.*
-
-##### `class StatefulSorcarAgent(SorcarAgent)` — SorcarAgent with chat-session state management.
-
-**Constructor:** `StatefulSorcarAgent(name: str) -> None`
-
-- **chat_id** — Return the current chat session ID.<br/>`chat_id() -> str` *(property)*
-
-- **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear').<br/>`new_chat() -> None`
-
-- **resume_chat** — Resume a previous chat session by looking up the task's chat_id. If the task has an associated `chat_id` in history, subsequent `run()` calls will continue that session.<br/>`resume_chat(task: str) -> None`
-
-  - `task`: The task description string to look up.
-
-- **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
-
-  - `prompt`: The original task prompt.
-  - **Returns:** The augmented prompt with chat history prepended, or the original prompt if no prior context exists.
-
-- **run** — Run the agent with chat-session context management. Loads prior chat context, persists the new task, augments the prompt with previous tasks/results, runs the underlying agent, and saves the result back to history.<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
-
-  - `prompt_template`: The task prompt.
-  - `**kwargs`: All other arguments forwarded to `SorcarAgent.run()`.
-  - **Returns:** YAML string with 'success' and 'summary' keys.
-
-______________________________________________________________________
-
-#### `kiss.agents.vscode` — *KISS Sorcar VS Code Extension backend.*
 
 ______________________________________________________________________
 

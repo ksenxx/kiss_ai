@@ -59,7 +59,7 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const taskPanel = document.getElementById('task-panel');
-  const commitMsgBar = document.getElementById('commit-msg-bar');
+
 
   function setTaskText(text) {
     if (!taskPanel) return;
@@ -584,11 +584,7 @@
       hideMergeToolbar();
       updateInputDisabled();
       break;
-    case 'commitMessageStarted':
-      if (commitMsgBar) commitMsgBar.style.display = 'flex';
-      break;
     case 'commitMessage':
-      if (commitMsgBar) commitMsgBar.style.display = 'none';
       break;
     case 'task_done': {
       var el = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;

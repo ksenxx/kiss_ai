@@ -318,10 +318,20 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this._agentProcess.stop();
   }
 
-  public generateCommitMessage(): void {
+  /**
+   * Generate a commit message. Returns a Promise that resolves when the message
+   * is received (or an error occurs). Accepts a CancellationToken so the VS Code
+   * SCM sparkle button can show a stop/cancel button while generation is in progress.
+   */
+  public generateCommitMessage(token?: vscode.CancellationToken): Promise<void> {
     this._agentProcess.start(this._getWorkDir());
-    this.sendToWebview({ type: 'commitMessageStarted' } as ToWebviewMessage);
     this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
+
+    return new Promise<void>((resolve) => {
+      const done = () => { disposable.dispose(); resolve(); };
+      const disposable = this._onCommitMessage.event(() => done());
+      token?.onCancellationRequested(() => done());
+    });
   }
 
   public dispose(): void {
@@ -371,11 +381,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         <span id="status-text">Ready</span>
       </div>
     </header>
-
-    <div id="commit-msg-bar" style="display:none;">
-      <span class="commit-msg-spinner"></span>
-      <span>Generating commit message…</span>
-    </div>
 
     <div id="task-panel"></div>
 

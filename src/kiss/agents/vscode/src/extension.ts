@@ -136,10 +136,16 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  const triggerCommitMessageGeneration = () => {
+  // VS Code SCM passes (rootUri, context, cancellationToken) to scm/inputBox commands.
+  // Returning a Promise makes the sparkle button show a stop/cancel button while pending.
+  const triggerCommitMessageGeneration = (
+    _rootUri?: unknown,
+    _context?: unknown,
+    token?: vscode.CancellationToken
+  ): Thenable<void> | void => {
     const provider = getActiveProvider();
     if (!provider) return;
-    provider.generateCommitMessage();
+    return provider.generateCommitMessage(token);
   };
 
   context.subscriptions.push(
