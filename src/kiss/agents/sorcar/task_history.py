@@ -408,6 +408,19 @@ def _load_task_chat_id(task: str) -> str:
     return row["chat_id"] if row and row["chat_id"] else ""
 
 
+def _load_last_chat_id() -> str:
+    """Return the chat_id of the most recently added task, or ``""``.
+
+    Useful for resuming the last CLI session without manually tracking
+    the chat_id.
+    """
+    db = _get_db()
+    row = db.execute(
+        "SELECT chat_id FROM task_history ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    return row["chat_id"] if row and row["chat_id"] else ""
+
+
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
