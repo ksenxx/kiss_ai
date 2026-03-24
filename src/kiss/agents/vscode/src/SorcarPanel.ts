@@ -118,6 +118,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this.sendToWebview({ type: 'status', running: this._isRunning });
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._agentProcess.sendCommand({ type: 'getWelcomeSuggestions' });
+        this._agentProcess.sendCommand({ type: 'getLastSession' });
         this._sendActiveFileInfo();
         break;
 

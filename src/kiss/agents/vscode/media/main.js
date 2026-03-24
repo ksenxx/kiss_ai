@@ -535,6 +535,10 @@
       renderWelcomeSuggestions(ev.suggestions || []);
       break;
     case 'task_events':
+      if (ev.task) {
+        setTaskText(ev.task);
+        if (welcome) welcome.style.display = 'none';
+      }
       replayTaskEvents(ev.events || []);
       break;
     case 'focusInput':

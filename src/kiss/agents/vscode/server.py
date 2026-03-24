@@ -155,6 +155,8 @@ class VSCodeServer:
             self._get_welcome_suggestions()
         elif cmd_type == "mergeAction":
             self._handle_merge_action(cmd.get("action", ""))
+        elif cmd_type == "getLastSession":
+            self._get_last_session()
         elif cmd_type == "newChat":
             self.agent.new_chat()
         elif cmd_type == "complete":
@@ -375,6 +377,18 @@ class VSCodeServer:
             return
         self.agent.resume_chat(task)
         self.printer.broadcast({"type": "task_events", "events": events})
+
+    def _get_last_session(self) -> None:
+        """Load the most recent task from history and replay its events."""
+        entries = _load_history(limit=1)
+        if not entries:
+            return
+        task = str(entries[0].get("task", ""))
+        if not task:
+            return
+        events = _load_task_chat_events(task)
+        self.agent.resume_chat(task)
+        self.printer.broadcast({"type": "task_events", "events": events, "task": task})
 
     def _get_welcome_suggestions(self) -> None:
         """Send recent tasks as welcome screen suggestions."""
