@@ -117,6 +117,57 @@ class TestMergeViewExcludesPreExistingDiffs:
             assert h["cc"] == 1
 
 
+class TestMergeViewAgentModifiesPreExistingHunk:
+    """Bug: hunk filtering drops agent changes overlapping pre-existing hunks."""
+
+    def test_agent_modifies_same_lines_as_pre_existing_change(self) -> None:
+        """When the agent modifies lines already changed (no saved base), hunks must not vanish.
+
+        Scenario (no saved base → falls through to hunk-coordinate filtering):
+        - HEAD:      line 1 / line 2 / line 3
+        - Pre-task:  line 1 / MODIFIED line 2 / line 3  (pre-existing change)
+        - Agent:     line 1 / AGENT line 2 / extra / line 3  (agent edits same range + adds line)
+
+        Pre-task hunk vs HEAD:  @@ -2 +2 @@  → (2,1,2,1)
+        Post-task hunk vs HEAD: @@ -2 +2,2 @@ → (2,1,2,2)
+
+        Old-side (2,1) matches pre-existing, but new-side count changed 1→2.
+        The current code filters by (old_start, old_count) only, so it
+        incorrectly drops the post-task hunk.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _create_git_repo(tmpdir)
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+
+            # Create pre-existing change (modify line 2)
+            Path(repo, "example.md").write_text("line 1\nMODIFIED line 2\nline 3\n")
+            pre_hunks = _parse_diff_hunks(repo)
+            pre_untracked = _capture_untracked(repo)
+            pre_hashes = _snapshot_files(
+                repo, set(pre_hunks.keys()) | pre_untracked
+            )
+            # Deliberately do NOT call _save_untracked_base to exercise the
+            # hunk-coordinate filtering fallback (simulates file > 2MB or
+            # base not saved).
+
+            # Agent modifies the same line AND adds a new line in the same region
+            Path(repo, "example.md").write_text(
+                "line 1\nAGENT line 2\nextra line\nline 3\n"
+            )
+
+            result = _prepare_merge_view(
+                repo, data_dir, pre_hunks, pre_untracked, pre_hashes
+            )
+            # The agent clearly changed the file — the merge view must show hunks
+            assert result.get("status") == "opened", (
+                f"Expected 'opened', got {result!r} — agent changes were dropped"
+            )
+            manifest = json.loads(Path(data_dir, "pending-merge.json").read_text())
+            hunks = manifest["files"][0]["hunks"]
+            assert len(hunks) >= 1, "Agent hunk was incorrectly filtered out"
+
+
 class TestCleanupMergeData:
     def test_removes_entire_merge_dir(self) -> None:
         """_cleanup_merge_data removes the entire directory and all contents."""

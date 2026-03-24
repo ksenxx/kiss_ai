@@ -304,8 +304,12 @@ def _agent_file_hunks(
     if saved_base.is_file():
         return [_hunk_to_dict(*h) for h in _diff_files(str(saved_base), str(fpath))]
     if post_file_hunks is not None:
-        pre = {(bs, bc) for bs, bc, _, _ in pre_hunks.get(fname, [])}
-        return [_hunk_to_dict(*h) for h in post_file_hunks if (h[0], h[1]) not in pre]
+        pre = {(bs, bc, cc) for bs, bc, _, cc in pre_hunks.get(fname, [])}
+        return [
+            _hunk_to_dict(*h)
+            for h in post_file_hunks
+            if (h[0], h[1], h[3]) not in pre
+        ]
     return _file_as_new_hunks(fpath)
 
 
