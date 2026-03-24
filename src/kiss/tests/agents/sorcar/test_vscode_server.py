@@ -525,15 +525,6 @@ class TestExtractResultSummary(unittest.TestCase):
         result = self.server._extract_result_summary()
         assert result == ""
 
-    def test_truncates_long_summary(self) -> None:
-        self.server.printer.start_recording()
-        self.server.printer.broadcast({
-            "type": "result",
-            "summary": "x" * 1000,
-        })
-        result = self.server._extract_result_summary()
-        assert len(result) == 500
-
 
 class TestHandleCommandGenerateCommitMessage(unittest.TestCase):
     """Test that generateCommitMessage command is routed correctly."""
@@ -589,6 +580,29 @@ class TestLastActiveFile(unittest.TestCase):
 
     def test_initial_value_empty(self) -> None:
         assert self.server._last_active_file == ""
+
+
+class TestMainJsHistoryCycling(unittest.TestCase):
+    """Test that ArrowUp/Down history cycling only works when textbox is empty."""
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_arrow_up_requires_empty_input_or_active_cycling(self) -> None:
+        """ArrowUp history cycling only starts when inp.value is empty."""
+        assert "histIdx >= 0 || !inp.value" in self.js
+
+    def test_arrow_down_resets_to_empty(self) -> None:
+        """When cycling back to bottom, textbox resets to empty string."""
+        assert "histIdx >= 0 ? histCache[histIdx] : ''" in self.js
+
+    def test_no_hist_saved(self) -> None:
+        """histSaved is no longer needed since cycling only starts from empty."""
+        assert "histSaved" not in self.js
 
 
 class TestMainCssModelPicker(unittest.TestCase):

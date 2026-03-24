@@ -20,7 +20,7 @@
   // History cycling state
   let histCache = [];
   let histIdx = -1;
-  let histSaved = '';
+
 
   // Ghost text state
   let ghostTimer = null;
@@ -776,11 +776,10 @@
         inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
         return;
       }
-      // History cycling (ArrowUp/Down when no autocomplete)
+      // History cycling (ArrowUp/Down only when textbox is empty and no autocomplete)
       if (e.key === 'ArrowUp' && autocomplete.style.display !== 'block') {
-        if (histCache.length > 0) {
+        if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
           e.preventDefault();
-          if (histIdx < 0) histSaved = inp.value;
           histIdx = Math.min(histIdx + 1, histCache.length - 1);
           inp.value = histCache[histIdx]; syncClearBtn();
           return;
@@ -789,7 +788,7 @@
       if (e.key === 'ArrowDown' && histIdx >= 0) {
         e.preventDefault();
         histIdx--;
-        inp.value = histIdx >= 0 ? histCache[histIdx] : histSaved; syncClearBtn();
+        inp.value = histIdx >= 0 ? histCache[histIdx] : ''; syncClearBtn();
         return;
       }
       if (e.key === 'Enter' && !e.shiftKey) {
