@@ -39,7 +39,8 @@ export type FromWebviewMessage =
   | { type: 'newChat' }
   | { type: 'generateCommitMessage' }
   | { type: 'runPrompt' }
-  | { type: 'focusEditor' };
+  | { type: 'focusEditor' }
+  | { type: 'getInputHistory' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -79,11 +80,12 @@ export type ToWebviewMessage =
   | { type: 'merge_started' }
   | { type: 'merge_ended' }
   | { type: 'commitMessage'; message: string; error?: string }
-  | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string };
+  | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string }
+  | { type: 'inputHistory'; tasks: string[] };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -97,4 +99,5 @@ export interface AgentCommand {
   path?: string;
   sessionId?: string;
   action?: string;
+  activeFileContent?: string;
 }

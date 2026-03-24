@@ -8,9 +8,11 @@ lines, and events are written to stdout as JSON lines.
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from typing import Any
@@ -19,6 +21,7 @@ from kiss.agents.sorcar.persistence import (
     _load_file_usage,
     _load_history,
     _load_last_model,
+    _prefix_match_task,
     _load_model_usage,
     _load_task_chat_events,
     _record_file_usage,
@@ -97,8 +100,11 @@ class VSCodeServer:
         )
         self._file_cache: list[str] = []
         self._last_active_file: str = ""
+        self._last_active_content: str = ""
         self._task_thread: threading.Thread | None = None
         self._merging = False
+        self._complete_seq = itertools.count()
+        self._complete_seq_latest = -1
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -161,10 +167,17 @@ class VSCodeServer:
             active_file = cmd.get("activeFile")
             if active_file:
                 self._last_active_file = active_file
+            active_content = cmd.get("activeFileContent")
+            if active_content is not None:
+                self._last_active_content = active_content
+            seq = next(self._complete_seq)
+            self._complete_seq_latest = seq
             if query:
                 threading.Thread(
-                    target=self._complete, args=(query,), daemon=True
+                    target=self._complete, args=(query, seq), daemon=True
                 ).start()
+        elif cmd_type == "getInputHistory":
+            self._get_input_history()
         elif cmd_type == "generateCommitMessage":
             model = cmd.get("model") or self._selected_model
             threading.Thread(
@@ -364,6 +377,18 @@ class VSCodeServer:
             })
         self.printer.broadcast({"type": "history", "sessions": sessions, "offset": offset, "generation": generation})
 
+    def _get_input_history(self) -> None:
+        """Send deduplicated recent task texts for arrow-key cycling."""
+        entries = _load_history(limit=100)
+        seen: set[str] = set()
+        tasks: list[str] = []
+        for e in entries:
+            task = str(e.get("task", "")).strip()
+            if task and task not in seen:
+                seen.add(task)
+                tasks.append(task)
+        self.printer.broadcast({"type": "inputHistory", "tasks": tasks})
+
     def _replay_session(self, task: str) -> None:
         """Replay recorded chat events for a previous task."""
         events = _load_task_chat_events(task)
@@ -453,21 +478,21 @@ class VSCodeServer:
         Returns:
             Continuation string if a match is found, empty string otherwise.
         """
-        query_lower = query.lower()
-        # Try history match first
-        for entry in _load_history(limit=1000):
-            task = str(entry.get("task", ""))
-            if task.lower().startswith(query_lower) and len(task) > len(query):
-                return task[len(query):]
+        # Try history match first (SQL prefix match, uses idx_th_task index)
+        match = _prefix_match_task(query)
+        if match:
+            return match[len(query):]
         # Fall back to word/identifier matching from the active file
         return self._complete_from_active_file(query)
 
     def _complete_from_active_file(self, query: str) -> str:
-        """Complete the last word of *query* using words from the active file.
+        """Complete the trailing token of *query* using identifiers from the active file.
 
-        Reads the active editor file, extracts all identifier-like tokens
-        (alphanumeric + underscores, length >= 3), and finds the longest
-        match whose prefix matches the last partial word the user is typing.
+        Extracts single-word identifiers and dot-chained identifiers
+        (e.g. ``self.method``, ``os.path.join``) from the active editor
+        buffer (or falls back to reading from disk). Matches the trailing
+        token of the query — which may contain dots — against all
+        candidates via case-insensitive prefix matching.
 
         Args:
             query: The full query string from the chat input.
@@ -475,36 +500,50 @@ class VSCodeServer:
         Returns:
             The remaining suffix to append, or empty string if no match.
         """
-        import re
+        content = self._last_active_content
+        if not content:
+            active_path = self._last_active_file
+            if not active_path:
+                return ""
+            try:
+                with open(active_path) as f:
+                    content = f.read(50000)
+            except OSError:
+                return ""
 
-        active_path = self._last_active_file
-        if not active_path:
-            return ""
-        try:
-            with open(active_path) as f:
-                content = f.read(50000)
-        except OSError:
-            return ""
-        # Extract the last partial word from the query
-        m = re.search(r"(\w+)$", query)
+        # Extract the trailing token (may include dots for chains)
+        m = re.search(r"([\w][\w.]*)\s*$", query)
         if not m:
             return ""
         partial = m.group(1)
         if len(partial) < 2:
             return ""
         partial_lower = partial.lower()
-        # Extract unique words/identifiers from file (length >= 3)
+
+        # Extract single-word identifiers (length >= 3) and dot-chained identifiers
         words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
+        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", content))
+        candidates = words | chains
+
         best = ""
-        for word in words:
-            if word.lower().startswith(partial_lower) and len(word) > len(partial):
-                suffix = word[len(partial):]
-                if not best or len(word) > len(partial) + len(best):
+        for candidate in candidates:
+            if candidate.lower().startswith(partial_lower) and len(candidate) > len(partial):
+                suffix = candidate[len(partial):]
+                if len(suffix) > len(best):
                     best = suffix
         return best
 
-    def _complete(self, query: str) -> None:
-        """Ghost text autocomplete via fast local prefix matching."""
+    def _complete(self, query: str, seq: int = -1) -> None:
+        """Ghost text autocomplete via fast local prefix matching.
+
+        Args:
+            query: Raw query text from the chat input.
+            seq: Sequence number for this request. If a newer request has
+                been issued (``seq`` no longer matches the counter), this
+                call exits early to avoid broadcasting stale results.
+        """
+        if seq >= 0 and seq != self._complete_seq_latest:
+            return
         query = query.strip()
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
@@ -513,6 +552,8 @@ class VSCodeServer:
         fast = clip_autocomplete_suggestion(
             query, self._fast_complete(query)
         )
+        if seq >= 0 and seq != self._complete_seq_latest:
+            return
         self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
 
     def _refresh_file_cache(self) -> None:

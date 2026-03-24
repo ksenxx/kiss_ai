@@ -199,6 +199,32 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
     return [dict(r) for r in rows]
 
 
+def _prefix_match_task(query: str) -> str:
+    """Find the most recent task starting with *query* (case-insensitive).
+
+    Uses a SQL ``LIKE 'prefix%'`` query with the ``idx_th_task`` index,
+    avoiding the need to load many rows into Python for prefix scanning.
+
+    Args:
+        query: The prefix string to match against task text.
+
+    Returns:
+        The full task string of the most recent match, or ``""`` if none.
+    """
+    if not query:
+        return ""
+    db = _get_db()
+    # Escape LIKE wildcards in the query, then append '%'
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    row = db.execute(
+        "SELECT task FROM task_history "
+        "WHERE task LIKE ? ESCAPE '\\' AND LENGTH(task) > ? "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (escaped + "%", len(query)),
+    ).fetchone()
+    return row["task"] if row else ""
+
+
 def _search_history(
     query: str, limit: int = 50, offset: int = 0
 ) -> list[_HistoryEntry]:

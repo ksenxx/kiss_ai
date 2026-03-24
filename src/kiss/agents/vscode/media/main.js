@@ -545,6 +545,7 @@
     case 'tasks_updated':
       refreshHistory();
       vscode.postMessage({ type: 'getWelcomeSuggestions' });
+      vscode.postMessage({ type: 'getInputHistory' });
       break;
     case 'welcome_suggestions':
       renderWelcomeSuggestions(ev.suggestions || []);
@@ -560,6 +561,10 @@
       inp.focus();
       setTimeout(function() { inp.focus(); }, 100);
       setTimeout(function() { inp.focus(); }, 300);
+      break;
+    case 'inputHistory':
+      histCache = ev.tasks || [];
+      if (histIdx < 0) histIdx = -1;
       break;
     case 'ghost':
       if (ev.suggestion && ev.query === inp.value) {
@@ -664,9 +669,6 @@
     var container = document.getElementById('suggestions');
     if (!container) return;
     container.innerHTML = '';
-    // Always update histCache for arrow-key cycling, even when suggestions is empty
-    histCache = (suggestions || []).map(function(s) { return s.text; });
-    histIdx = -1;
     if (!suggestions || suggestions.length === 0) return;
     suggestions.forEach(function(s) {
       var chip = document.createElement('div');
@@ -994,6 +996,9 @@
       return;
     }
 
+    if (histCache[0] !== prompt) {
+      histCache.unshift(prompt);
+    }
     setTaskText(prompt);
     vscode.postMessage({
       type: 'submit',

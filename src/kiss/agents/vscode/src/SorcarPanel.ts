@@ -138,6 +138,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this.sendToWebview({ type: 'status', running: this._isRunning });
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
+        this._agentProcess.sendCommand({ type: 'getInputHistory' });
         this._agentProcess.sendCommand({ type: 'getLastSession' });
         this._sendActiveFileInfo();
         break;
@@ -230,11 +231,16 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._sendWelcomeSuggestions();
         break;
 
+      case 'getInputHistory':
+        this._agentProcess.sendCommand({ type: 'getInputHistory' });
+        break;
+
       case 'complete':
         this._agentProcess.sendCommand({
           type: 'complete',
           query: message.query,
           activeFile: vscode.window.activeTextEditor?.document.uri.fsPath,
+          activeFileContent: vscode.window.activeTextEditor?.document.getText(),
         });
         break;
 
