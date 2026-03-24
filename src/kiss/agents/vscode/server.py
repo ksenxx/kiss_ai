@@ -164,6 +164,9 @@ class VSCodeServer:
             self._chat_id = _generate_chat_id()
         elif cmd_type == "complete":
             query = cmd.get("query", "")
+            active_file = cmd.get("activeFile")
+            if active_file:
+                self._last_active_file = active_file
             if query:
                 threading.Thread(
                     target=self._complete, args=(query,), daemon=True
@@ -496,13 +499,13 @@ class VSCodeServer:
         """Ghost text autocomplete via fast local prefix matching."""
         query = query.strip()
         if not query or len(query) < 2:
-            self.printer.broadcast({"type": "ghost", "suggestion": ""})
+            self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
             return
 
         fast = clip_autocomplete_suggestion(
             query, self._fast_complete(query)
         )
-        self.printer.broadcast({"type": "ghost", "suggestion": fast})
+        self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
 
     def _refresh_file_cache(self) -> None:
         """Refresh the file cache from disk."""
