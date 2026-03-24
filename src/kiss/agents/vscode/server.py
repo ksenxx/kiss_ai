@@ -432,13 +432,12 @@ class VSCodeServer:
         identifiers/words from the currently active editor file.
 
         Args:
-            query: The stripped query string.
+            query: The stripped query string (guaranteed non-empty, len >= 2
+                by the caller ``_complete``).
 
         Returns:
             Continuation string if a match is found, empty string otherwise.
         """
-        if not query:
-            return ""
         query_lower = query.lower()
         # Try history match first
         for entry in _load_history(limit=1000):

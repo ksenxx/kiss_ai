@@ -450,9 +450,6 @@ class TestFastComplete(unittest.TestCase):
         result = self.server._fast_complete("xyz_nonexistent")
         assert result == ""
 
-    def test_empty_query(self) -> None:
-        result = self.server._fast_complete("")
-        assert result == ""
 
 
 class TestCompleteMinLength(unittest.TestCase):
