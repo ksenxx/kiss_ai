@@ -183,32 +183,37 @@ export class MergeManager extends EventEmitter {
     this._afterHunkAction(fp);
   }
 
-  async acceptChange(fp?: string, idx?: number): Promise<void> {
+  private async _withHunkGuard(fn: () => Promise<void>): Promise<void> {
     if (this._hunkOpInProgress) return;
     this._hunkOpInProgress = true;
     try {
-      const target = fp && idx !== undefined
-        ? { fp, idx }
-        : this._curHunk;
-      if (!target || !this._ms[target.fp]) return;
-      await this._applyHunkAction(target.fp, target.idx, 'oc', 'os');
+      await fn();
     } finally {
       this._hunkOpInProgress = false;
     }
   }
 
+  async acceptChange(fp?: string, idx?: number): Promise<void> {
+    await this._resolveHunk(fp, idx, 'oc', 'os');
+  }
+
   async rejectChange(fp?: string, idx?: number): Promise<void> {
-    if (this._hunkOpInProgress) return;
-    this._hunkOpInProgress = true;
-    try {
+    await this._resolveHunk(fp, idx, 'nc', 'ns');
+  }
+
+  private async _resolveHunk(
+    fp: string | undefined,
+    idx: number | undefined,
+    countProp: 'oc' | 'nc',
+    startProp: 'os' | 'ns'
+  ): Promise<void> {
+    return this._withHunkGuard(async () => {
       const target = fp && idx !== undefined
         ? { fp, idx }
         : this._curHunk;
       if (!target || !this._ms[target.fp]) return;
-      await this._applyHunkAction(target.fp, target.idx, 'nc', 'ns');
-    } finally {
-      this._hunkOpInProgress = false;
-    }
+      await this._applyHunkAction(target.fp, target.idx, countProp, startProp);
+    });
   }
 
   private _hunkLine(h: ProcessedHunk): number {
@@ -308,23 +313,11 @@ export class MergeManager extends EventEmitter {
   }
 
   async acceptAll(): Promise<void> {
-    if (this._hunkOpInProgress) return;
-    this._hunkOpInProgress = true;
-    try {
-      await this._resolveAll('oc', 'os', 'All changes accepted.');
-    } finally {
-      this._hunkOpInProgress = false;
-    }
+    return this._withHunkGuard(() => this._resolveAll('oc', 'os', 'All changes accepted.'));
   }
 
   async rejectAll(): Promise<void> {
-    if (this._hunkOpInProgress) return;
-    this._hunkOpInProgress = true;
-    try {
-      await this._resolveAll('nc', 'ns', 'All changes rejected.');
-    } finally {
-      this._hunkOpInProgress = false;
-    }
+    return this._withHunkGuard(() => this._resolveAll('nc', 'ns', 'All changes rejected.'));
   }
 
   private _checkAllDone(): void {
