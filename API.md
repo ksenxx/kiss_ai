@@ -21,8 +21,6 @@
       - [`kiss.agents.sorcar.web_use_tool`](#kissagentssorcarweb_use_tool)
     - [`kiss.core.utils`](#kisscoreutils)
   - [`kiss.agents`](#kissagents)
-    - [`kiss.agents.coding_agents`](#kissagentscoding_agents)
-      - [`kiss.agents.coding_agents.config`](#kissagentscoding_agentsconfig)
     - [`kiss.agents.sorcar`](#kissagentssorcar)
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
@@ -674,37 +672,6 @@ from kiss.agents import prompt_refiner_agent, get_run_simple_coding_agent, run_b
 - `task`: The task to run.
 - `model_name`: The name of the model to use for the agent.
 - **Returns:** str: The result of the task.
-
-______________________________________________________________________
-
-#### `kiss.agents.coding_agents` — *Coding agents for KISS framework.*
-
-```python
-from kiss.agents.coding_agents import Base, SYSTEM_PROMPT
-```
-
-##### `class Base` — Base class for all KISS agents with common state management and persistence.
-
-**Constructor:** `Base(name: str) -> None`
-
-- `name`: The name identifier for the agent.
-
-- **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled (either explicitly or via config).<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
-
-  - `printer`: An existing Printer instance to use directly. If provided, verbose is ignored.
-  - `verbose`: Whether to print to the console. If None, uses the verbose config value.
-
-- **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
-
-  - **Returns:** str: A JSON-formatted string of all messages in the agent's history.
-
-______________________________________________________________________
-
-#### `kiss.agents.coding_agents.config` — *Configuration Pydantic models for coding agent settings.*
-
-##### `class RelentlessCodingAgentConfig(BaseModel)`
-
-##### `class CodingAgentConfig(BaseModel)`
 
 ______________________________________________________________________
 
