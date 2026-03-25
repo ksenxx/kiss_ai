@@ -28,6 +28,7 @@ mkdir -p "$DEST"
 cp "$PROJECT_ROOT/pyproject.toml" "$DEST/"
 cp "$PROJECT_ROOT/uv.lock" "$DEST/"
 cp "$PROJECT_ROOT/README.md" "$DEST/"
+cp "$PROJECT_ROOT/SYSTEM.md" "$DEST/"
 
 # Copy all git-tracked src/kiss/ files
 cd "$PROJECT_ROOT"
