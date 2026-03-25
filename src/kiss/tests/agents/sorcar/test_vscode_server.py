@@ -710,6 +710,51 @@ class TestMainCssModelPicker(unittest.TestCase):
         assert ".model-cost" in self.css
 
 
+class TestGhostOverlayPaddingAlignment(unittest.TestCase):
+    """Test that #ghost-overlay and #task-input have matching padding."""
+
+    css: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.css = (base / "vscode" / "media" / "main.css").read_text()
+
+    @staticmethod
+    def _extract_padding(css: str, selector: str) -> str:
+        """Extract the padding value from a CSS rule block for an exact selector."""
+        import re
+
+        # Find occurrences of the selector that are exact (followed by space or {)
+        pattern = re.escape(selector) + r"\s*\{"
+        for m_sel in re.finditer(pattern, css):
+            brace_start = css.index("{", m_sel.start())
+            brace_end = css.index("}", brace_start)
+            block = css[brace_start:brace_end]
+            m = re.search(r"padding:\s*([^;]+);", block)
+            if m:
+                return m.group(1).strip()
+        raise AssertionError(f"No padding found for exact selector {selector}")
+
+    def test_ghost_overlay_padding_matches_task_input(self) -> None:
+        """#ghost-overlay padding must match #task-input padding exactly."""
+        ghost_padding = self._extract_padding(self.css, "#ghost-overlay")
+        input_padding = self._extract_padding(self.css, "#task-input")
+        assert ghost_padding == input_padding, (
+            f"Padding mismatch: #ghost-overlay has '{ghost_padding}' "
+            f"but #task-input has '{input_padding}'"
+        )
+
+    def test_task_input_has_explicit_padding(self) -> None:
+        """#task-input must have explicit padding (not rely on browser defaults)."""
+        padding = self._extract_padding(self.css, "#task-input")
+        # Should have all 4 sides specified (shorthand with at least 2 values)
+        parts = padding.split()
+        assert len(parts) >= 2, (
+            f"#task-input padding should be explicit for all sides, got: '{padding}'"
+        )
+
+
 class TestGetLastSession(unittest.TestCase):
     """Test _get_last_session loads the most recent task."""
 
