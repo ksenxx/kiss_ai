@@ -143,7 +143,7 @@
 
   function requestGhost() {
     clearGhost();
-    if (isRunning || !inp.value.trim()) return;
+    if (isRunning || !inp.value) return;
     // Don't request ghost when in file picker mode (@-mention autocomplete)
     if (getAtCtx()) return;
     // Don't request ghost when cursor isn't at end
