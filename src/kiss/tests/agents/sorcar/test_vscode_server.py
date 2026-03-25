@@ -524,14 +524,14 @@ class TestGetHistory(unittest.TestCase):
         for s in ev["sessions"]:
             assert "chat_id" in s
 
-    def test_getHistory_command_routing(self) -> None:
+    def test_get_history_command_routing(self) -> None:
         self.server._handle_command({"type": "getHistory", "offset": 5, "generation": 2})
         assert len(self.events) == 1
         assert self.events[0]["type"] == "history"
         assert self.events[0]["offset"] == 5
         assert self.events[0]["generation"] == 2
 
-    def test_getHistory_with_query(self) -> None:
+    def test_get_history_with_query(self) -> None:
         self.server._get_history("nonexistent_xyz_query_123")
         ev = self.events[0]
         assert ev["sessions"] == []

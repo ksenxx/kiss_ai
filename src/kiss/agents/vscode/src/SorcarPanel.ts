@@ -19,16 +19,13 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _activeEditorDisposable?: vscode.Disposable;
+  private _commitPending: boolean = false;
 
   constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
     this._agentProcess = new AgentProcess();
     this._mergeManager = mergeManager || new MergeManager();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || 'claude-opus-4-6';
-
-    this._mergeManager.on('allDone', () => {
-      this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
-    });
 
     // Track active editor changes to update run-prompt button
     this._activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
@@ -145,6 +142,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
       case 'submit': {
         if (this._isRunning) return;
+        this._isRunning = true;  // Claim immediately before any awaits (Race 3 fix)
         this._agentProcess.start(this._getWorkDir());
 
         // If the prompt is just a file path that exists, open it in the editor
@@ -152,6 +150,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         if (trimmed && !trimmed.includes('\n')) {
           const resolved = path.resolve(this._getWorkDir(), trimmed);
           if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+            this._isRunning = false;  // Reset on early exit
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(doc);
@@ -284,6 +283,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   public submitTask(prompt: string): void {
     if (this._isRunning || !prompt.trim()) return;
+    this._isRunning = true;  // Claim immediately (Race 4 fix)
     this._agentProcess.start(this._getWorkDir());
     this._startTask(
       prompt.trim(),
@@ -306,6 +306,9 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   }
 
   public newConversation(): void {
+    if (this._isRunning) {
+      this._agentProcess.stop();  // Stop running task first (Race 15 fix)
+    }
     this._isRunning = false;
     this._agentProcess.sendCommand({ type: 'newChat' });
     this.sendToWebview({ type: 'status', running: false });
@@ -316,17 +319,28 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this._agentProcess.stop();
   }
 
+  /** Notify the Python backend that all merge hunks have been resolved. */
+  public sendMergeAllDone(): void {
+    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+  }
+
   /**
    * Generate a commit message. Returns a Promise that resolves when the message
    * is received (or an error occurs). Accepts a CancellationToken so the VS Code
    * SCM sparkle button can show a stop/cancel button while generation is in progress.
    */
   public generateCommitMessage(token?: vscode.CancellationToken): Promise<void> {
+    if (this._commitPending) return Promise.resolve();
+    this._commitPending = true;
     this._agentProcess.start(this._getWorkDir());
     this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
 
     return new Promise<void>((resolve) => {
-      const done = () => { disposable.dispose(); resolve(); };
+      const done = () => {
+        this._commitPending = false;
+        disposable.dispose();
+        resolve();
+      };
       const disposable = this._onCommitMessage.event(() => done());
       token?.onCancellationRequested(() => done());
     });

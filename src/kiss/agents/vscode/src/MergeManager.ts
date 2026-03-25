@@ -44,6 +44,10 @@ export class MergeManager extends EventEmitter {
   private _redDeco: vscode.TextEditorDecorationType;
   private _blueDeco: vscode.TextEditorDecorationType;
   private _disposables: vscode.Disposable[] = [];
+  private _hunkOpInProgress: boolean = false;
+  private _mergeInProgress: boolean = false;
+  private _pendingMerge: MergeData | null = null;
+  private _navSeq: number = 0;
 
   constructor() {
     super();
@@ -180,19 +184,31 @@ export class MergeManager extends EventEmitter {
   }
 
   async acceptChange(fp?: string, idx?: number): Promise<void> {
-    const target = fp && idx !== undefined
-      ? { fp, idx }
-      : this._curHunk;
-    if (!target || !this._ms[target.fp]) return;
-    await this._applyHunkAction(target.fp, target.idx, 'oc', 'os');
+    if (this._hunkOpInProgress) return;
+    this._hunkOpInProgress = true;
+    try {
+      const target = fp && idx !== undefined
+        ? { fp, idx }
+        : this._curHunk;
+      if (!target || !this._ms[target.fp]) return;
+      await this._applyHunkAction(target.fp, target.idx, 'oc', 'os');
+    } finally {
+      this._hunkOpInProgress = false;
+    }
   }
 
   async rejectChange(fp?: string, idx?: number): Promise<void> {
-    const target = fp && idx !== undefined
-      ? { fp, idx }
-      : this._curHunk;
-    if (!target || !this._ms[target.fp]) return;
-    await this._applyHunkAction(target.fp, target.idx, 'nc', 'ns');
+    if (this._hunkOpInProgress) return;
+    this._hunkOpInProgress = true;
+    try {
+      const target = fp && idx !== undefined
+        ? { fp, idx }
+        : this._curHunk;
+      if (!target || !this._ms[target.fp]) return;
+      await this._applyHunkAction(target.fp, target.idx, 'nc', 'ns');
+    } finally {
+      this._hunkOpInProgress = false;
+    }
   }
 
   private _hunkLine(h: ProcessedHunk): number {
@@ -207,7 +223,8 @@ export class MergeManager extends EventEmitter {
     this._navigateHunk(1);
   }
 
-  private _navigateHunk(dir: number): void {
+  private async _navigateHunk(dir: number): Promise<void> {
+    const seq = ++this._navSeq;
     const allH: Array<{ fp: string; h: ProcessedHunk }> = [];
     for (const fp of Object.keys(this._ms)) {
       for (const h of this._ms[fp].hunks) {
@@ -252,20 +269,16 @@ export class MergeManager extends EventEmitter {
       idx: this._ms[found.fp].hunks.indexOf(found.h),
     };
 
-    vscode.workspace
-      .openTextDocument(vscode.Uri.file(found.fp))
-      .then((doc) => {
-        vscode.window
-          .showTextDocument(doc, { preview: false })
-          .then((ed) => {
-            const ln = this._hunkLine(found!.h);
-            ed.revealRange(
-              new vscode.Range(ln, 0, ln, 0),
-              vscode.TextEditorRevealType.InCenter
-            );
-            ed.selection = new vscode.Selection(ln, 0, ln, 0);
-          });
-      });
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(found.fp));
+    if (this._navSeq !== seq) return;  // Superseded by newer navigation
+    const ed = await vscode.window.showTextDocument(doc, { preview: false });
+    if (this._navSeq !== seq) return;  // Superseded by newer navigation
+    const ln = this._hunkLine(found.h);
+    ed.revealRange(
+      new vscode.Range(ln, 0, ln, 0),
+      vscode.TextEditorRevealType.InCenter
+    );
+    ed.selection = new vscode.Selection(ln, 0, ln, 0);
   }
 
   private async _resolveAll(
@@ -295,11 +308,23 @@ export class MergeManager extends EventEmitter {
   }
 
   async acceptAll(): Promise<void> {
-    await this._resolveAll('oc', 'os', 'All changes accepted.');
+    if (this._hunkOpInProgress) return;
+    this._hunkOpInProgress = true;
+    try {
+      await this._resolveAll('oc', 'os', 'All changes accepted.');
+    } finally {
+      this._hunkOpInProgress = false;
+    }
   }
 
   async rejectAll(): Promise<void> {
-    await this._resolveAll('nc', 'ns', 'All changes rejected.');
+    if (this._hunkOpInProgress) return;
+    this._hunkOpInProgress = true;
+    try {
+      await this._resolveAll('nc', 'ns', 'All changes rejected.');
+    } finally {
+      this._hunkOpInProgress = false;
+    }
   }
 
   private _checkAllDone(): void {
@@ -321,6 +346,24 @@ export class MergeManager extends EventEmitter {
    * Open merge view: insert old lines, apply decorations, navigate to first hunk.
    */
   async openMerge(data: MergeData): Promise<void> {
+    if (this._mergeInProgress) {
+      this._pendingMerge = data;
+      return;
+    }
+    this._mergeInProgress = true;
+    try {
+      await this._doOpenMerge(data);
+      while (this._pendingMerge) {
+        const next = this._pendingMerge;
+        this._pendingMerge = null;
+        await this._doOpenMerge(next);
+      }
+    } finally {
+      this._mergeInProgress = false;
+    }
+  }
+
+  private async _doOpenMerge(data: MergeData): Promise<void> {
     try {
       await vscode.workspace.saveAll(false);
     } catch { /* ignore */ }

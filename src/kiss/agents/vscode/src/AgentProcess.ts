@@ -211,7 +211,7 @@ export class AgentProcess extends EventEmitter {
    * Send a command to the Python backend.
    */
   sendCommand(cmd: AgentCommand): void {
-    if (!this.process?.stdin) {
+    if (!this.process?.stdin?.writable) {
       this.emit('message', {
         type: 'error',
         text: 'Agent process not running'
@@ -219,8 +219,15 @@ export class AgentProcess extends EventEmitter {
       return;
     }
 
-    const line = JSON.stringify(cmd) + '\n';
-    this.process.stdin.write(line);
+    try {
+      const line = JSON.stringify(cmd) + '\n';
+      this.process.stdin.write(line);
+    } catch {
+      this.emit('message', {
+        type: 'error',
+        text: 'Failed to send command to agent'
+      } as ToWebviewMessage);
+    }
   }
 
   /**
