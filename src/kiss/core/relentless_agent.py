@@ -18,7 +18,6 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
-from kiss.docker.docker_manager import DockerManager
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +111,7 @@ class RelentlessAgent(Base):
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.docker_image = docker_image
-        self.docker_manager: DockerManager | None = None
+        self.docker_manager: Any = None
         self.task_description: str = ""
         self.system_prompt: str = ""
         self.set_printer(printer, verbose=verbose)
@@ -311,6 +310,8 @@ class RelentlessAgent(Base):
         self.task_description = prompt_template.format(**args) if args else prompt_template
 
         if self.docker_image:
+            from kiss.docker.docker_manager import DockerManager
+
             with DockerManager(self.docker_image) as docker_mgr:
                 self.docker_manager = docker_mgr
                 if self.printer:

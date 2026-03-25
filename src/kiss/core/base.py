@@ -18,7 +18,6 @@ from yaml.nodes import ScalarNode
 
 from kiss.core import config as config_module
 from kiss.core.models.model_info import get_max_context_length
-from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import Printer
 from kiss.core.utils import config_to_dict
 
@@ -163,6 +162,8 @@ class Base:
         if printer:
             self.printer = printer
         elif verbose is not False and config_module.DEFAULT_CONFIG.agent.verbose:
+            from kiss.core.print_to_console import ConsolePrinter
+
             self.printer = ConsolePrinter()
         else:
             self.printer = None

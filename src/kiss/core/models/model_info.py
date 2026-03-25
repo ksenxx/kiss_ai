@@ -16,7 +16,6 @@ from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
-from kiss.core.models import AnthropicModel, GeminiModel, NovitaModel, OpenAICompatibleModel
 from kiss.core.models.model import Model, TokenCallback
 
 logger = logging.getLogger(__name__)
@@ -111,6 +110,8 @@ def _openai_compatible(
     model_config: dict[str, Any] | None,
     token_callback: TokenCallback | None,
 ) -> Model:
+    from kiss.core.models import OpenAICompatibleModel
+
     if OpenAICompatibleModel is None:  # pragma: no cover – openai always installed
         raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
     return OpenAICompatibleModel(
@@ -707,6 +708,8 @@ def model(
     Raises:
         KISSError: If the model name is not recognized.
     """
+    from kiss.core.models import AnthropicModel, GeminiModel, NovitaModel
+
     if model_config and "base_url" in model_config:
         base_url = model_config["base_url"]
         api_key = model_config.get("api_key", "")

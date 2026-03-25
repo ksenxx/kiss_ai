@@ -5,35 +5,7 @@
 
 """Model implementations for different LLM providers."""
 
-import logging
-
 from kiss.core.models.model import Attachment, Model
-
-logger = logging.getLogger(__name__)
-
-try:
-    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-except ImportError:  # pragma: no cover – openai always installed
-    logger.debug("Exception caught", exc_info=True)
-    OpenAICompatibleModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.anthropic_model import AnthropicModel
-except ImportError:  # pragma: no cover – anthropic always installed
-    logger.debug("Exception caught", exc_info=True)
-    AnthropicModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.gemini_model import GeminiModel
-except ImportError:  # pragma: no cover – google-genai always installed
-    logger.debug("Exception caught", exc_info=True)
-    GeminiModel = None  # type: ignore[assignment,misc]
-
-try:
-    from kiss.core.models.novita_model import NovitaModel
-except ImportError:
-    logger.debug("Exception caught", exc_info=True)
-    NovitaModel = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "Attachment",
@@ -43,3 +15,29 @@ __all__ = [
     "GeminiModel",
     "NovitaModel",
 ]
+
+_LAZY_IMPORTS = {
+    "AnthropicModel": "kiss.core.models.anthropic_model",
+    "OpenAICompatibleModel": "kiss.core.models.openai_compatible_model",
+    "GeminiModel": "kiss.core.models.gemini_model",
+    "NovitaModel": "kiss.core.models.novita_model",
+}
+
+
+def __getattr__(name: str) -> type:
+    """Lazily import model classes on first access to avoid loading LLM SDKs at import time."""
+    if name in _LAZY_IMPORTS:
+        import importlib
+        import logging
+
+        module_path = _LAZY_IMPORTS[name]
+        try:
+            module = importlib.import_module(module_path)
+            cls = getattr(module, name)
+            globals()[name] = cls  # Cache for subsequent accesses
+            return cls
+        except ImportError:
+            logging.getLogger(__name__).debug("Exception caught", exc_info=True)
+            globals()[name] = None  # type: ignore[assignment]
+            return None  # type: ignore[return-value]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
