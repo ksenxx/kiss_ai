@@ -30,10 +30,8 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 
 yaml.add_representer(str, _str_presenter)
 
-_artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
-_project_dir = str(_artifact_dir.parent.parent)
-
-SYSTEM_PROMPT = (Path(__file__).parent.parent.parent.parent / "SYSTEM.md").read_text().format(project_dir=_project_dir)
+_project_dir = Path(__file__).parent.parent.parent.parent
+SYSTEM_PROMPT = (Path(__file__).parent / "SYSTEM.md").read_text().format(project_dir=_project_dir)
 
 _sorcar_path = Path("SORCAR.md")
 if _sorcar_path.exists():
