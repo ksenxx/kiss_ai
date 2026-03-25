@@ -555,7 +555,7 @@ class VSCodeServer:
         (e.g. ``self.method``, ``os.path.join``) from the active editor
         buffer (or falls back to reading from disk). Matches the trailing
         token of the query — which may contain dots — against all
-        candidates via case-insensitive prefix matching.
+        candidates via case-sensitive prefix matching.
 
         Args:
             query: The full query string from the chat input.
@@ -583,8 +583,6 @@ class VSCodeServer:
         partial = m.group(1)
         if len(partial) < 2:
             return ""
-        partial_lower = partial.lower()
-
         # Extract single-word identifiers (length >= 3) and dot-chained identifiers
         words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
         chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", content))
@@ -592,7 +590,7 @@ class VSCodeServer:
 
         best = ""
         for candidate in candidates:
-            if candidate.lower().startswith(partial_lower) and len(candidate) > len(partial):
+            if candidate.startswith(partial) and len(candidate) > len(partial):
                 suffix = candidate[len(partial):]
                 if len(suffix) > len(best):
                     best = suffix

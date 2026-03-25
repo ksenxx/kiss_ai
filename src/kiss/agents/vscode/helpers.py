@@ -95,7 +95,7 @@ def rank_file_suggestions(
 
     Args:
         file_cache: List of file paths to search.
-        query: Case-insensitive substring to match against paths.
+        query: Case-sensitive substring to match against paths.
         usage: File usage counts keyed by path (insertion order
             encodes recency, last key = most recently used).
         limit: Maximum number of results to return.
@@ -104,11 +104,10 @@ def rank_file_suggestions(
         Sorted list of dicts with ``type`` (``"frequent"`` or ``"file"``)
         and ``text`` keys.
     """
-    q = query.lower()
     frequent: list[dict[str, str]] = []
     rest: list[dict[str, str]] = []
     for path in file_cache:
-        if not q or q in path.lower():
+        if not query or query in path:
             item: dict[str, str] = {"type": "file", "text": path}
             if usage.get(path, 0) > 0:
                 frequent.append(item)
@@ -116,12 +115,12 @@ def rank_file_suggestions(
                 rest.append(item)
 
     def _end_dist(text: str) -> int:
-        if not q:
+        if not query:
             return 0
-        pos = text.lower().rfind(q)
+        pos = text.rfind(query)
         if pos < 0:
             return len(text)
-        return len(text) - (pos + len(q))
+        return len(text) - (pos + len(query))
 
     _usage_keys = list(usage.keys())
     _recency = {k: i for i, k in enumerate(reversed(_usage_keys))}
