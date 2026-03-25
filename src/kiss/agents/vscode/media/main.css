@@ -748,10 +748,10 @@ header {
   background: color-mix(in srgb, var(--fg) 4%, transparent); font-weight: 600;
 }
 
-/* ── Merge Toolbar (inline card in output) ─────────── */
+/* ── Merge Toolbar (shown in input area) ───────────── */
 .merge-toolbar-card {
   border: 2px solid rgba(210,153,34,0.35); border-radius: 10px;
-  margin: 12px 0; padding: 14px; animation: fadeIn 0.2s ease;
+  margin: 0; padding: 14px; animation: fadeIn 0.2s ease;
   background: color-mix(in srgb, var(--yellow) 6%, transparent);
 }
 .merge-toolbar-header {
