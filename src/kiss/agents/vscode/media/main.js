@@ -699,9 +699,10 @@
     sb();
   }
 
-  // --- Merge toolbar (inline in output) ---
+  // --- Merge toolbar (shown in input area, replacing textarea) ---
   function showMergeToolbar() {
     if (document.getElementById('merge-toolbar')) return;
+    inputContainer.style.display = 'none';
     var bar = mkEl('div', 'merge-toolbar-card');
     bar.id = 'merge-toolbar';
     bar.innerHTML =
@@ -719,7 +720,7 @@
       + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn">\u2717\u2717 Reject All</button>'
       + '</div>'
       + '</div>';
-    O.appendChild(bar);
+    document.getElementById('input-area').appendChild(bar);
     document.getElementById('merge-accept-btn').addEventListener('click', function() {
       vscode.postMessage({ type: 'mergeAction', action: 'accept' });
     });
@@ -744,6 +745,7 @@
   function hideMergeToolbar() {
     var bar = document.getElementById('merge-toolbar');
     if (bar) bar.remove();
+    inputContainer.style.display = '';
   }
 
   // --- Init and event listeners ---

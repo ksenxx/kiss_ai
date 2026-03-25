@@ -754,7 +754,14 @@ ______________________________________________________________________
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
+- **perform_task** — Execute the task, building docker-aware tools after docker_manager is set.<br/>`perform_task(tools: list, attachments: list | None = None) -> str`
+
+  - `tools`: Extra tools passed by the caller (from run(tools=...)).
+  - `attachments`: Optional file attachments for the initial prompt.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
+
 - **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
@@ -969,7 +976,7 @@ ______________________________________________________________________
 ### `kiss.docker` — *Docker wrapper module for the KISS agent framework.*
 
 ```python
-from kiss.docker import DockerManager
+from kiss.docker import DockerManager, DockerTools
 ```
 
 #### `class DockerManager` — Manages Docker container lifecycle and command execution.
@@ -1003,6 +1010,29 @@ from kiss.docker import DockerManager
   - **Returns:** The host port mapped to the container port, or None if not mapped.
 
 - **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
+
+#### `class DockerTools` — File tools that execute inside a Docker container via bash.
+
+**Constructor:** `DockerTools(bash_fn: Callable[[str, str], str]) -> None`
+
+- `bash_fn`: Callable(command, description) -> output string. Executes a bash command inside the Docker container.
+
+- **Read** — Read file contents.<br/>`Read(file_path: str, max_lines: int = 2000) -> str`
+
+  - `file_path`: Absolute path to file.
+  - `max_lines`: Maximum number of lines to return.
+
+- **Write** — Write content to a file, creating it if it doesn't exist or overwriting if it does.<br/>`Write(file_path: str, content: str) -> str`
+
+  - `file_path`: Path to the file to write.
+  - `content`: The full content to write to the file.
+
+- **Edit** — Performs precise string replacements in files with exact matching.<br/>`Edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> str`
+
+  - `file_path`: Absolute path to the file to modify.
+  - `old_string`: Exact text to find and replace.
+  - `new_string`: Replacement text, must differ from old_string.
+  - `replace_all`: If True, replace all occurrences.
 
 ______________________________________________________________________
 
