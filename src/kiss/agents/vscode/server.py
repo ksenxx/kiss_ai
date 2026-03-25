@@ -646,22 +646,16 @@ class VSCodeServer:
     def _generate_commit_message(self, model: str) -> None:
         """Generate a git commit message from current changes."""
         try:
-            diff_result = _git(self.work_dir, "diff")
             cached_result = _git(self.work_dir, "diff", "--cached")
-            diff_text = (diff_result.stdout + cached_result.stdout).strip()
-            untracked = "\n".join(sorted(_capture_untracked(self.work_dir)))
-            if not diff_text and not untracked:
+            diff_text = cached_result.stdout.strip()
+            if not diff_text:
                 self.printer.broadcast({
                     "type": "commitMessage",
-                    "message": "",
-                    "error": "No changes detected",
+                    "message": "Error: No staged files.",
                 })
                 return
             context_parts: list[str] = []
-            if diff_text:
-                context_parts.append(f"Diff:\n{diff_text}")
-            if untracked:
-                context_parts.append(f"New untracked files:\n{untracked[:500]}")
+            context_parts.append(f"Diff:\n{diff_text}")
             agent = KISSAgent("Commit Message Generator")
             raw = agent.run(
                 model_name=model,
