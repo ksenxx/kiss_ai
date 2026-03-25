@@ -2216,7 +2216,7 @@ class TestVSCodeServerMoreBranches:
         server, events = self._make_server()
         # generate_followup_text will fail (no API key configured for model)
         # or return empty, so no followup_suggestion event
-        server._generate_followup("test task", "test result")
+        server._generate_followup("test task", "test result", server._selected_model)
         time.sleep(1)
         [e for e in events if e["type"] == "followup_suggestion"]
         # May or may not have a suggestion depending on API availability
