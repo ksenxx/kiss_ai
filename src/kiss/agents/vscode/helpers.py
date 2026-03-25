@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def clean_llm_output(text: str) -> str:
     """Strip whitespace and surrounding quotes from LLM output."""
-    return text.strip().strip('"').strip("'")
+    return text.strip('"').strip("'")
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
@@ -25,7 +25,7 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
         return ""
     if s.lower().startswith(query.lower()):
         s = s[len(query) :]
-    s = s.split("\n")[0].strip()
+    s = s.split("\n")[0]
     return s
 
 
