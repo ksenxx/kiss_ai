@@ -318,12 +318,24 @@ class TestTypescriptRaceFixesCodeInspection(unittest.TestCase):
         with open("src/kiss/agents/vscode/src/MergeManager.ts") as f:
             source = f.read()
         assert "_hunkOpInProgress" in source
-        # Check all four methods
+        # Guard is in _withHunkGuard; all four methods use it
+        idx = source.find("_withHunkGuard")
+        assert idx >= 0, "_withHunkGuard not found"
+        block = source[idx:idx + 300]
+        assert "this._hunkOpInProgress" in block, "_withHunkGuard missing guard"
+        # acceptChange/rejectChange delegate to _resolveHunk which calls _withHunkGuard;
+        # acceptAll/rejectAll call _withHunkGuard directly.
         for method in ["acceptChange", "rejectChange", "acceptAll", "rejectAll"]:
             idx = source.find(f"async {method}")
             assert idx >= 0, f"{method} not found"
             block = source[idx:idx + 300]
-            assert "this._hunkOpInProgress" in block, f"{method} missing guard"
+            assert "_withHunkGuard" in block or "_resolveHunk" in block, (
+                f"{method} missing guard"
+            )
+        assert "_resolveHunk" in source
+        ridx = source.find("_resolveHunk")
+        rblock = source[ridx:ridx + 500]
+        assert "_withHunkGuard" in rblock, "_resolveHunk missing _withHunkGuard call"
 
     def test_race9_nav_seq_guard(self) -> None:
         """Race 9: _navigateHunk uses _navSeq for stale navigation detection."""

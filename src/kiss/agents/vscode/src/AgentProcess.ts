@@ -134,14 +134,6 @@ export class AgentProcess extends EventEmitter {
   }
 
   /**
-   * Find the KISS project root directory.
-   * Delegates to module-level findKissProject().
-   */
-  findKissProject(): string | null {
-    return findKissProject();
-  }
-
-  /**
    * Start the Python backend process.
    */
   start(workDir: string): boolean {

@@ -49,9 +49,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           this._sendActiveFileInfo();
         }
       }
-      if (msg.type === 'task_done' || msg.type === 'task_stopped' || msg.type === 'task_error') {
-        this._isRunning = false;
-      }
     });
   }
 
@@ -119,17 +116,18 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   }
 
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
+    const workDir = this._getWorkDir();
     this._isRunning = true;
+    this._agentProcess.start(workDir);
     this.sendToWebview({ type: 'status', running: true });
-    const cmd: AgentCommand = {
+    this._agentProcess.sendCommand({
       type: 'run',
       prompt,
       model,
-      workDir: this._getWorkDir(),
+      workDir,
       activeFile,
       attachments,
-    };
-    this._agentProcess.sendCommand(cmd);
+    });
   }
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
@@ -146,7 +144,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       case 'submit': {
         if (this._isRunning) return;
         this._isRunning = true;  // Claim immediately before any awaits (Race 3 fix)
-        this._agentProcess.start(this._getWorkDir());
 
         // If the prompt is just a file path that exists, open it in the editor
         const trimmed = message.prompt.trim();
@@ -287,7 +284,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   public submitTask(prompt: string): void {
     if (this._isRunning || !prompt.trim()) return;
     this._isRunning = true;  // Claim immediately (Race 4 fix)
-    this._agentProcess.start(this._getWorkDir());
     this._startTask(
       prompt.trim(),
       this._selectedModel,

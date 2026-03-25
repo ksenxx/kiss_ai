@@ -277,18 +277,8 @@ class VSCodeServer:
                     pre_file_hashes,
                 )
                 if merge_result.get("status") == "opened":
-                    self._merging = True
-                    hunk_count = merge_result.get("hunk_count", 0)
                     merge_json = os.path.join(merge_dir, "pending-merge.json")
-                    if os.path.exists(merge_json):
-                        with open(merge_json) as f:
-                            merge_data = json.load(f)
-                        self.printer.broadcast({
-                            "type": "merge_data",
-                            "data": merge_data,
-                            "hunk_count": hunk_count,
-                        })
-                    self.printer.broadcast({"type": "merge_started"})
+                    self._start_merge_session(merge_json)
             except Exception:
                 logger.debug("Merge view error", exc_info=True)
             self._refresh_file_cache()
@@ -300,6 +290,36 @@ class VSCodeServer:
             if task_end_event:
                 self.printer.broadcast(task_end_event)
             self.printer.broadcast({"type": "status", "running": False})
+
+    def _start_merge_session(self, merge_json_path: str) -> bool:
+        """Load merge data from disk and broadcast merge_data + merge_started events.
+
+        Args:
+            merge_json_path: Path to the pending-merge.json file.
+
+        Returns:
+            True if a merge session was started, False otherwise.
+        """
+        try:
+            with open(merge_json_path) as f:
+                merge_data = json.load(f)
+            files = merge_data.get("files", [])
+            if not files:
+                return False
+            total_hunks = sum(len(f.get("hunks", [])) for f in files)
+            if total_hunks == 0:
+                return False
+            self._merging = True
+            self.printer.broadcast({
+                "type": "merge_data",
+                "data": merge_data,
+                "hunk_count": total_hunks,
+            })
+            self.printer.broadcast({"type": "merge_started"})
+            return True
+        except (OSError, json.JSONDecodeError, KeyError):
+            logger.debug("Failed to load merge data", exc_info=True)
+            return False
 
     def _handle_merge_action(self, action: str) -> None:
         """Handle merge accept/reject actions from the extension.
@@ -478,27 +498,7 @@ class VSCodeServer:
         extension re-opens the merge view with decorations and the
         webview shows the accept/reject toolbar.
         """
-        merge_json = _merge_data_dir() / "pending-merge.json"
-        if not merge_json.is_file():
-            return
-        try:
-            with open(merge_json) as f:
-                merge_data = json.load(f)
-            files = merge_data.get("files", [])
-            if not files:
-                return
-            total_hunks = sum(len(f.get("hunks", [])) for f in files)
-            if total_hunks == 0:
-                return
-            self._merging = True
-            self.printer.broadcast({
-                "type": "merge_data",
-                "data": merge_data,
-                "hunk_count": total_hunks,
-            })
-            self.printer.broadcast({"type": "merge_started"})
-        except (OSError, json.JSONDecodeError, KeyError):
-            logger.debug("Failed to restore pending merge", exc_info=True)
+        self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
     def _generate_followup(self, task: str, result: str, model: str) -> None:
         """Generate a follow-up suggestion using LLM after task completion."""
