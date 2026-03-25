@@ -19,8 +19,6 @@ from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
-from kiss.docker.docker_manager import DockerManager
-from kiss.docker.docker_tools import DockerTools
 
 
 class SorcarAgent(RelentlessAgent):
@@ -29,7 +27,7 @@ class SorcarAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
-        self.docker_manager: DockerManager | None = None
+        self.docker_manager: Any = None
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -63,6 +61,8 @@ class SorcarAgent(RelentlessAgent):
         stop_event = getattr(self, "_stop_event", None)
         useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
         if self.docker_manager:
+            from kiss.docker.docker_tools import DockerTools
+
             docker_tools = DockerTools(self._docker_bash)
             tools: list = [
                 self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
