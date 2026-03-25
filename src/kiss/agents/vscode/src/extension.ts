@@ -181,26 +181,13 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   // Merge commands
-  context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.acceptChange', () => {
-      getActiveMergeManager()?.acceptChange();
-    }),
-    vscode.commands.registerCommand('kissSorcar.rejectChange', () => {
-      getActiveMergeManager()?.rejectChange();
-    }),
-    vscode.commands.registerCommand('kissSorcar.prevChange', () => {
-      getActiveMergeManager()?.prevChange();
-    }),
-    vscode.commands.registerCommand('kissSorcar.nextChange', () => {
-      getActiveMergeManager()?.nextChange();
-    }),
-    vscode.commands.registerCommand('kissSorcar.acceptAll', () => {
-      getActiveMergeManager()?.acceptAll();
-    }),
-    vscode.commands.registerCommand('kissSorcar.rejectAll', () => {
-      getActiveMergeManager()?.rejectAll();
-    })
-  );
+  for (const cmd of ['acceptChange', 'rejectChange', 'prevChange', 'nextChange', 'acceptAll', 'rejectAll'] as const) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
+        getActiveMergeManager()?.[cmd]();
+      })
+    );
+  }
 
   // Set context for conditional view visibility, then auto-open on startup
   vscode.commands.executeCommand(

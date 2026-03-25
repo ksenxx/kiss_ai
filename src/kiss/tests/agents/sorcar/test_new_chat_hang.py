@@ -195,19 +195,19 @@ class TestTaskEndEventOrdering(unittest.TestCase):
 class TestTypescriptIsRunningFix(unittest.TestCase):
     """Verify SorcarPanel.ts sets _isRunning=false on task end events."""
 
-    def test_is_running_updated_on_task_done(self) -> None:
+    def test_is_running_updated_by_status_event(self) -> None:
+        """_isRunning is reset by the status event handler (sent after task_done/stopped/error)."""
         with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
             source = f.read()
-        assert "task_done" in source
-        assert "task_stopped" in source
-        assert "task_error" in source
-        # Find the block that sets _isRunning = false for task end events
-        assert "this._isRunning = false" in source
-        # Verify the condition checks all three event types
-        idx = source.find("task_done")
-        block = source[max(0, idx - 200):idx + 200]
-        assert "task_stopped" in block
-        assert "task_error" in block
+        # The status handler manages _isRunning
+        idx = source.find("msg.type === 'status'")
+        assert idx >= 0, "status handler not found"
+        block = source[idx:idx + 200]
+        assert "this._isRunning = msg.running" in block
+        # Python server always sends status:running:false after task end events
+        with open("src/kiss/agents/vscode/server.py") as f:
+            py_source = f.read()
+        assert '"type": "status", "running": False' in py_source
 
 
 if __name__ == "__main__":
