@@ -184,11 +184,11 @@ No special orchestration framework needed. No message buses. No complex state ma
 
 ## 🔧 Using Repo Optimizer
 
-The `RepoOptimizer` ([`repo_optimizer.py`](src/kiss/agents/coding_agents/repo_optimizer.py)) uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface. The code can be found [here](src/kiss/agents/coding_agents/repo_optimizer.py).
+The `RepoOptimizer` uses the `SorcarAgent` to optimize code within your own project repository. It runs a specified command, monitors output in real time, fixes errors, and iteratively optimizes for specified metrics — all without changing the agent's interface.
 
 ```bash
 # Optimize a program for speed and cost
-uv run python -m kiss.agents.coding_agents.repo_optimizer \
+uv run python -m kiss.agents.sorcar.repo_optimizer \
     --command "uv run python my_program.py" \
     --metrics "running time and cost" \
     --work-dir .
@@ -347,7 +347,7 @@ KISS has a fresh implementation of GEPA with some key improvements. GEPA (Geneti
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
 
-This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run. Finally I switched to [`repo_optimizer`](src/kiss/agents/coding_agents/repo_optimizer.py) for efficiency and simplicity. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
+This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
@@ -430,11 +430,6 @@ kiss/
 │   │   │   ├── web_use_tool.py         # WebUseTool with Playwright-based browser automation
 │   │   │   ├── config.py               # Sorcar agent configuration
 │   │   │   └── SORCAR.md               # Sorcar design document
-│   │   ├── coding_agents/          # Coding agents for software development tasks
-│   │   │   ├── repo_optimizer.py          # Iterative code optimizer using SorcarAgent
-│   │   │   ├── repo_agent.py              # Repo-level task agent
-│   │   │   ├── agent_optimizer.py         # Meta-optimizer for agent source code
-│   │   │   └── config.py                  # Coding agent configuration
 │   │   ├── gepa/                   # GEPA (Genetic-Pareto) prompt optimizer
 │   │   │   ├── gepa.py
 │   │   │   ├── config.py
@@ -448,11 +443,6 @@ kiss/
 │   │   ├── create_and_optimize_agent/  # Agent evolution (deprecated)
 │   │   │   ├── agent_evolver.py
 │   │   │   ├── improver_agent.py
-│   │   │   ├── config.py
-│   │   │   └── README.md
-│   │   ├── self_evolving_multi_agent/  # Self-evolving multi-agent (deprecated)
-│   │   │   ├── agent_evolver.py
-│   │   │   ├── multi_agent.py
 │   │   │   ├── config.py
 │   │   │   └── README.md
 │   │   └── kiss.py                 # Utility agents (prompt refiner, bash agent)
@@ -635,11 +625,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `max_agent_budget`: Maximum budget per agent run in USD (default: 10.0)
   - `global_max_budget`: Maximum total budget across all agents in USD (default: 200.0)
   - `artifact_dir`: Directory for agent artifacts (default: auto-generated with timestamp)
-- **Relentless Coding Agent Settings**: Modify `DEFAULT_CONFIG.coding_agent.relentless_coding_agent` in [`src/kiss/agents/coding_agents/config.py`](src/kiss/agents/coding_agents/config.py):
-  - `model_name`: Model for task execution (default: "claude-opus-4-6")
-  - `max_steps`: Maximum steps per sub-session (default: 100)
-  - `max_budget`: Maximum budget in USD (default: 200.0)
-  - `max_sub_sessions`: Maximum number of sub-sessions for auto-continuation (default: 10000)
 - **GEPA Settings**: Modify `DEFAULT_CONFIG.gepa` in [`src/kiss/agents/gepa/config.py`](src/kiss/agents/gepa/config.py):
   - `reflection_model`: Model to use for reflection (default: "gemini-3-flash-preview")
   - `max_generations`: Maximum number of evolutionary generations (default: 10)
@@ -661,18 +646,6 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `parent_sampling_method`: Parent sampling: 'tournament', 'power_law', or 'performance_novelty' (default: "power_law")
   - `power_law_alpha`: Power-law sampling parameter for rank-based selection (default: 1.0)
   - `performance_novelty_lambda`: Selection pressure parameter for sigmoid (default: 1.0)
-- **Self-Evolving Multi-Agent Settings**: Modify `DEFAULT_CONFIG.self_evolving_multi_agent` in [`src/kiss/agents/self_evolving_multi_agent/config.py`](src/kiss/agents/self_evolving_multi_agent/config.py):
-  - `model`: LLM model to use for the main agent (default: "gemini-3-flash-preview")
-  - `sub_agent_model`: Model for sub-agents (default: "gemini-3-flash-preview")
-  - `evolver_model`: Model for evolution (default: "gemini-3-flash-preview")
-  - `max_steps`: Maximum orchestrator steps (default: 100)
-  - `max_budget`: Maximum budget in USD (default: 10.0)
-  - `max_retries`: Maximum retries on error (default: 3)
-  - `sub_agent_max_steps`: Maximum steps for sub-agents (default: 50)
-  - `sub_agent_max_budget`: Maximum budget for sub-agents in USD (default: 2.0)
-  - `docker_image`: Docker image for execution (default: "python:3.12-slim")
-  - `workdir`: Working directory in container (default: "/workspace")
-
 ## 🛠️ Available Commands
 
 ### Development

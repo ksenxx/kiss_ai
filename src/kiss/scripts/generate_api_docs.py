@@ -17,7 +17,6 @@ EXCLUDE_DIRS = {
     "demo",
     "__pycache__",
     "create_and_optimize_agent",
-    "self_evolving_multi_agent",
 }
 EXCLUDE_FILES = {"_version.py", "conftest.py", "novelty_prompts.py"}
 
@@ -407,11 +406,6 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.core.kiss_error",
         "kiss.agents",
         "kiss.agents.kiss",
-        "kiss.agents.coding_agents",
-        "kiss.agents.coding_agents.repo_agent",
-        "kiss.agents.coding_agents.repo_optimizer",
-        "kiss.agents.coding_agents.agent_optimizer",
-        "kiss.agents.coding_agents.config",
         "kiss.agents.sorcar",
         "kiss.core.relentless_agent",
         "kiss.agents.sorcar.sorcar_agent",
