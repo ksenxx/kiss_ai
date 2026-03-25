@@ -7,6 +7,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 DEST="$SCRIPT_DIR/kiss_project"
 
+# Sync version from _version.py into package.json
+VERSION=$(python3 -c "exec(open('$PROJECT_ROOT/src/kiss/_version.py').read()); print(__version__)")
+if [ -n "$VERSION" ]; then
+    # Use python for portable JSON editing
+    python3 -c "
+import json, pathlib
+p = pathlib.Path('$SCRIPT_DIR/package.json')
+d = json.loads(p.read_text())
+d['version'] = '$VERSION'
+p.write_text(json.dumps(d, indent=2) + '\n')
+"
+    echo "Synced extension version to $VERSION"
+fi
+
 rm -rf "$DEST"
 mkdir -p "$DEST"
 

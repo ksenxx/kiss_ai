@@ -49,6 +49,9 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           this._sendActiveFileInfo();
         }
       }
+      if (msg.type === 'task_done' || msg.type === 'task_stopped' || msg.type === 'task_error') {
+        this._isRunning = false;
+      }
     });
   }
 
