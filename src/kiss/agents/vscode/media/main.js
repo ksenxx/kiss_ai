@@ -144,6 +144,8 @@
   function requestGhost() {
     clearGhost();
     if (isRunning || !inp.value.trim()) return;
+    // Don't request ghost when in file picker mode (@-mention autocomplete)
+    if (getAtCtx()) return;
     // Don't request ghost when cursor isn't at end
     if (inp.selectionStart < inp.value.length) return;
     // Minimum query length check (2 non-whitespace chars)
