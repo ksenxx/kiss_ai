@@ -25,6 +25,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const supportsSecondarySidebar = typeof vscode.ViewColumn !== 'undefined';
 
   mergeManager = new MergeManager();
+  mergeManager.on('allDone', () => {
+    // Route to active provider only — avoids duplicate events (Race 17 fix)
+    getActiveProvider()?.sendMergeAllDone();
+  });
   context.subscriptions.push({ dispose: () => mergeManager?.dispose() });
 
   // Create and register the primary (activitybar) webview provider
@@ -58,14 +62,21 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   let _chatFocused = false;
+  let _focusToggling = false;
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.toggleFocus', async () => {
-      if (_chatFocused) {
-        _chatFocused = false;
-        await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
-      } else {
-        _chatFocused = true;
-        await getActiveProvider()?.focusChatInput();
+      if (_focusToggling) return;
+      _focusToggling = true;
+      try {
+        if (_chatFocused) {
+          _chatFocused = false;
+          await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        } else {
+          _chatFocused = true;
+          await getActiveProvider()?.focusChatInput();
+        }
+      } finally {
+        _focusToggling = false;
       }
     })
   );
@@ -77,8 +88,8 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.newConversation', () => {
-      vscode.commands.executeCommand('kissSorcar.openPanel');
+    vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
+      await vscode.commands.executeCommand('kissSorcar.openPanel');
       getActiveProvider()?.newConversation();
     })
   );

@@ -16,7 +16,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-
 from kiss.core.models.model import Attachment
 
 

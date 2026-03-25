@@ -21,9 +21,9 @@ from kiss.agents.sorcar.persistence import (
     _load_file_usage,
     _load_history,
     _load_last_model,
-    _prefix_match_task,
     _load_model_usage,
     _load_task_chat_events,
+    _prefix_match_task,
     _record_file_usage,
     _record_model_usage,
     _save_last_model,
@@ -101,6 +101,7 @@ class VSCodeServer:
         self._file_cache: list[str] = []
         self._last_active_file: str = ""
         self._last_active_content: str = ""
+        self._state_lock = threading.Lock()
         self._task_thread: threading.Thread | None = None
         self._merging = False
         self._complete_seq = itertools.count()
@@ -153,6 +154,8 @@ class VSCodeServer:
             if self._user_answer_event:
                 self._user_answer_event.set()
         elif cmd_type == "resumeSession":
+            if self._task_thread and self._task_thread.is_alive():
+                return
             task = cmd.get("sessionId", "")
             if task:
                 self._replay_session(task)
@@ -161,20 +164,26 @@ class VSCodeServer:
         elif cmd_type == "getLastSession":
             self._get_last_session()
         elif cmd_type == "newChat":
-            self.agent.new_chat()
+            if not (self._task_thread and self._task_thread.is_alive()):
+                self.agent.new_chat()
         elif cmd_type == "complete":
             query = cmd.get("query", "")
             active_file = cmd.get("activeFile")
-            if active_file:
-                self._last_active_file = active_file
             active_content = cmd.get("activeFileContent")
-            if active_content is not None:
-                self._last_active_content = active_content
+            with self._state_lock:
+                if active_file:
+                    self._last_active_file = active_file
+                if active_content is not None:
+                    self._last_active_content = active_content
+                snapshot_file = self._last_active_file
+                snapshot_content = self._last_active_content
             seq = next(self._complete_seq)
             self._complete_seq_latest = seq
             if query:
                 threading.Thread(
-                    target=self._complete, args=(query, seq), daemon=True
+                    target=self._complete,
+                    args=(query, seq, snapshot_file, snapshot_content),
+                    daemon=True,
                 ).start()
         elif cmd_type == "getInputHistory":
             self._get_input_history()
@@ -244,7 +253,7 @@ class VSCodeServer:
             self.printer.broadcast({"type": "task_done"})
             _record_model_usage(model)
             result_summary = self._extract_result_summary() or "No summary available"
-            self._generate_followup(prompt, result_summary)
+            self._generate_followup(prompt, result_summary, model)
         except KeyboardInterrupt:
             self.printer.broadcast({"type": "task_stopped"})
         except Exception as e:  # pragma: no cover
@@ -253,7 +262,6 @@ class VSCodeServer:
             chat_events = self.printer.stop_recording()
             _set_latest_chat_events(chat_events, task=prompt, result=result_summary)
             self.printer.broadcast({"type": "tasks_updated"})
-            self.printer.broadcast({"type": "status", "running": False})
             self.printer.reset()
             self._stop_event = None
             self._user_answer_event = None
@@ -282,6 +290,8 @@ class VSCodeServer:
             except Exception:
                 logger.debug("Merge view error", exc_info=True)
             self._refresh_file_cache()
+            # Broadcast status LAST, after all cleanup (Race 14 fix)
+            self.printer.broadcast({"type": "status", "running": False})
 
     def _handle_merge_action(self, action: str) -> None:
         """Handle merge accept/reject actions from the extension.
@@ -375,7 +385,10 @@ class VSCodeServer:
                 "has_events": has_events,
                 "chat_id": entry.get("chat_id", ""),
             })
-        self.printer.broadcast({"type": "history", "sessions": sessions, "offset": offset, "generation": generation})
+        self.printer.broadcast({
+            "type": "history", "sessions": sessions,
+            "offset": offset, "generation": generation,
+        })
 
     def _get_input_history(self) -> None:
         """Send deduplicated recent task texts for arrow-key cycling."""
@@ -443,10 +456,10 @@ class VSCodeServer:
         except (OSError, json.JSONDecodeError, KeyError):
             logger.debug("Failed to restore pending merge", exc_info=True)
 
-    def _generate_followup(self, task: str, result: str) -> None:
+    def _generate_followup(self, task: str, result: str, model: str) -> None:
         """Generate a follow-up suggestion using LLM after task completion."""
         def _run() -> None:
-            suggestion = generate_followup_text(task, result, self._selected_model)
+            suggestion = generate_followup_text(task, result, model)
             if suggestion:
                 self.printer.broadcast({
                     "type": "followup_suggestion",
@@ -465,7 +478,9 @@ class VSCodeServer:
                         return str(summary)
         return ""
 
-    def _fast_complete(self, query: str) -> str:
+    def _fast_complete(
+        self, query: str, snapshot_file: str = "", snapshot_content: str = ""
+    ) -> str:
         """Local prefix matching against history and active file words.
 
         Checks task history first, then falls back to matching
@@ -474,6 +489,8 @@ class VSCodeServer:
         Args:
             query: The stripped query string (guaranteed non-empty, len >= 2
                 by the caller ``_complete``).
+            snapshot_file: Atomically-captured active file path.
+            snapshot_content: Atomically-captured active file content.
 
         Returns:
             Continuation string if a match is found, empty string otherwise.
@@ -483,9 +500,11 @@ class VSCodeServer:
         if match:
             return match[len(query):]
         # Fall back to word/identifier matching from the active file
-        return self._complete_from_active_file(query)
+        return self._complete_from_active_file(query, snapshot_file, snapshot_content)
 
-    def _complete_from_active_file(self, query: str) -> str:
+    def _complete_from_active_file(
+        self, query: str, snapshot_file: str = "", snapshot_content: str = ""
+    ) -> str:
         """Complete the trailing token of *query* using identifiers from the active file.
 
         Extracts single-word identifiers and dot-chained identifiers
@@ -496,13 +515,15 @@ class VSCodeServer:
 
         Args:
             query: The full query string from the chat input.
+            snapshot_file: Atomically-captured active file path.
+            snapshot_content: Atomically-captured active file content.
 
         Returns:
             The remaining suffix to append, or empty string if no match.
         """
-        content = self._last_active_content
+        content = snapshot_content
         if not content:
-            active_path = self._last_active_file
+            active_path = snapshot_file
             if not active_path:
                 return ""
             try:
@@ -533,7 +554,13 @@ class VSCodeServer:
                     best = suffix
         return best
 
-    def _complete(self, query: str, seq: int = -1) -> None:
+    def _complete(
+        self,
+        query: str,
+        seq: int = -1,
+        snapshot_file: str = "",
+        snapshot_content: str = "",
+    ) -> None:
         """Ghost text autocomplete via fast local prefix matching.
 
         Args:
@@ -541,6 +568,8 @@ class VSCodeServer:
             seq: Sequence number for this request. If a newer request has
                 been issued (``seq`` no longer matches the counter), this
                 call exits early to avoid broadcasting stale results.
+            snapshot_file: Atomically-captured active file path.
+            snapshot_content: Atomically-captured active file content.
         """
         if seq >= 0 and seq != self._complete_seq_latest:
             return
@@ -550,7 +579,7 @@ class VSCodeServer:
             return
 
         fast = clip_autocomplete_suggestion(
-            query, self._fast_complete(query)
+            query, self._fast_complete(query, snapshot_file, snapshot_content)
         )
         if seq >= 0 and seq != self._complete_seq_latest:
             return
