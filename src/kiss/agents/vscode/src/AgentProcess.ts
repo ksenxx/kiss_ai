@@ -6,9 +6,123 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import { AgentCommand, ToWebviewMessage } from './types';
+
+// ---------------------------------------------------------------------------
+// Module-level utility functions (shared with DependencyInstaller)
+// ---------------------------------------------------------------------------
+
+function isValidKissProject(dir: string): boolean {
+  try {
+    const pyproject = path.join(dir, 'pyproject.toml');
+    if (!fs.existsSync(pyproject)) return false;
+    const content = fs.readFileSync(pyproject, 'utf-8');
+    return content.includes('name = "kiss') || content.includes("name = 'kiss");
+  } catch {
+    return false;
+  }
+}
+
+function searchUpward(startDir: string): string | null {
+  let dir = startDir;
+  for (let i = 0; i < 10; i++) {
+    if (isValidKissProject(dir)) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * Find the KISS project root directory.
+ * Search order:
+ * 0. Embedded kiss_project/ inside the extension (standalone mode)
+ * 1. Configuration setting
+ * 2. Search up from workspace folders
+ * 3. Search up from extension directory
+ * 4. Environment variable
+ * 5. Common locations
+ */
+export function findKissProject(): string | null {
+  // 0. Check for embedded kiss_project/ (standalone mode)
+  const embeddedPath = path.join(__dirname, '..', 'kiss_project');
+  if (isValidKissProject(embeddedPath)) return embeddedPath;
+
+  // 1. Check configuration setting
+  const configPath = vscode.workspace.getConfiguration('kissSorcar').get<string>('kissProjectPath');
+  if (configPath && isValidKissProject(configPath)) return configPath;
+
+  // 2. Search up from workspace folders
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (workspaceFolders) {
+    for (const folder of workspaceFolders) {
+      const found = searchUpward(folder.uri.fsPath);
+      if (found) return found;
+    }
+  }
+
+  // 3. Search from this file's directory upward
+  const found = searchUpward(__dirname);
+  if (found) return found;
+
+  // 4. Environment variable
+  const envPath = process.env.KISS_PROJECT_PATH;
+  if (envPath && isValidKissProject(envPath)) return envPath;
+
+  // 5. Common locations
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  for (const p of [
+    path.join(homeDir, 'work', 'kiss'),
+    path.join(homeDir, 'projects', 'kiss'),
+    path.join(homeDir, 'dev', 'kiss'),
+    path.join(homeDir, 'kiss'),
+  ]) {
+    if (isValidKissProject(p)) return p;
+  }
+
+  return null;
+}
+
+/**
+ * Find the uv binary path, or null if not installed anywhere.
+ */
+export function findUvPath(): string | null {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const candidates = [
+    path.join(homeDir, '.local', 'bin', 'uv'),
+    path.join(homeDir, '.cargo', 'bin', 'uv'),
+    '/usr/local/bin/uv',
+    '/opt/homebrew/bin/uv',
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  // Check if uv is on PATH
+  try {
+    execSync(process.platform === 'win32' ? 'where uv' : 'which uv', { stdio: 'ignore' });
+    return 'uv';
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find the uv binary path, with 'uv' fallback for spawning.
+ */
+export function findUvBinary(): string {
+  return findUvPath() ?? 'uv';
+}
+
+// ---------------------------------------------------------------------------
+// AgentProcess class
+// ---------------------------------------------------------------------------
 
 export class AgentProcess extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -21,105 +135,10 @@ export class AgentProcess extends EventEmitter {
 
   /**
    * Find the KISS project root directory.
-   * Search order:
-   * 1. Configuration setting
-   * 2. Search up from workspace folders
-   * 3. Search up from extension directory
-   * 4. Environment variable
-   * 5. Common locations
+   * Delegates to module-level findKissProject().
    */
   findKissProject(): string | null {
-    // 1. Check configuration setting
-    const configPath = vscode.workspace.getConfiguration('kissSorcar').get<string>('kissProjectPath');
-    if (configPath && this.isValidKissProject(configPath)) {
-      return configPath;
-    }
-
-    // 2. Search up from workspace folders
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (workspaceFolders) {
-      for (const folder of workspaceFolders) {
-        const found = this.searchUpward(folder.uri.fsPath);
-        if (found) return found;
-      }
-    }
-
-    // 3. Search from this file's directory upward
-    // The extension is at src/kiss/agents/vscode, so go up 4 levels
-    const extensionDir = __dirname;
-    const found = this.searchUpward(extensionDir);
-    if (found) return found;
-
-    // 4. Environment variable
-    const envPath = process.env.KISS_PROJECT_PATH;
-    if (envPath && this.isValidKissProject(envPath)) {
-      return envPath;
-    }
-
-    // 5. Common locations
-    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const commonPaths = [
-      path.join(homeDir, 'work', 'kiss'),
-      path.join(homeDir, 'projects', 'kiss'),
-      path.join(homeDir, 'dev', 'kiss'),
-      path.join(homeDir, 'kiss'),
-    ];
-    for (const p of commonPaths) {
-      if (this.isValidKissProject(p)) {
-        return p;
-      }
-    }
-
-    return null;
-  }
-
-  private searchUpward(startDir: string): string | null {
-    let dir = startDir;
-    for (let i = 0; i < 10; i++) {
-      if (this.isValidKissProject(dir)) {
-        return dir;
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-    return null;
-  }
-
-  private isValidKissProject(dir: string): boolean {
-    try {
-      const pyproject = path.join(dir, 'pyproject.toml');
-      if (!fs.existsSync(pyproject)) return false;
-      const content = fs.readFileSync(pyproject, 'utf-8');
-      // Check if it contains kiss project marker (kiss or kiss-agent-framework)
-      return content.includes('name = "kiss') || content.includes("name = 'kiss");
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Find the uv binary path.
-   * Checks common locations since VSCode Desktop may not have user's PATH.
-   */
-  private findUvBinary(): string {
-    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const candidates = [
-      path.join(homeDir, '.local', 'bin', 'uv'),
-      path.join(homeDir, '.cargo', 'bin', 'uv'),
-      '/usr/local/bin/uv',
-      '/opt/homebrew/bin/uv',
-      'uv', // fallback to PATH
-    ];
-    for (const candidate of candidates) {
-      if (candidate === 'uv') return candidate;
-      try {
-        if (fs.existsSync(candidate)) return candidate;
-      } catch {
-        continue;
-      }
-    }
-    return 'uv'; // unreachable since 'uv' is in candidates, but kept for safety
+    return findKissProject();
   }
 
   /**
@@ -130,7 +149,7 @@ export class AgentProcess extends EventEmitter {
       return true; // Already running
     }
 
-    this.kissProjectPath = this.findKissProject();
+    this.kissProjectPath = findKissProject();
     if (!this.kissProjectPath) {
       this.emit('message', {
         type: 'error',
@@ -141,7 +160,7 @@ export class AgentProcess extends EventEmitter {
 
     const serverModule = 'kiss.agents.vscode.server';
     const pythonArgs = ['-u', '-m', serverModule];
-    const uvBin = this.findUvBinary();
+    const uvBin = findUvBinary();
     const args = ['run', 'python', ...pythonArgs];
 
     try {
@@ -247,5 +266,4 @@ export class AgentProcess extends EventEmitter {
     }
     this.removeAllListeners();
   }
-
 }

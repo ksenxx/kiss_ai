@@ -148,6 +148,20 @@ def _strip_heredocs(command: str) -> str:
     )
 
 
+def _clean_env() -> dict[str, str]:
+    """Return a copy of ``os.environ`` without ``VIRTUAL_ENV``.
+
+    When the agent process runs inside a virtual-env (e.g. the VS Code
+    extension's own ``.venv``), the ``VIRTUAL_ENV`` variable leaks into
+    child processes and causes ``uv run`` to emit a spurious warning about
+    a mismatched environment.  Stripping it lets ``uv`` (and other tools)
+    discover the correct project ``.venv`` on their own.
+    """
+    env = os.environ.copy()
+    env.pop("VIRTUAL_ENV", None)
+    return env
+
+
 def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> str:
     if returncode != 0:
         msg = f"Error (exit code {returncode}):"
@@ -314,6 +328,8 @@ class UsefulTools:
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
+        env = _clean_env()
+
         try:
             process = subprocess.Popen(
                 command,
@@ -322,6 +338,7 @@ class UsefulTools:
                 stderr=subprocess.STDOUT,
                 text=True,
                 start_new_session=True,
+                env=env,
             )
             done = threading.Event()
             monitor = None
@@ -364,6 +381,7 @@ class UsefulTools:
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            env=_clean_env(),
         )
         timed_out = False
         done = threading.Event()

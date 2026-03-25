@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { SorcarViewProvider } from './SorcarPanel';
 import { MergeManager } from './MergeManager';
+import { ensureDependencies } from './DependencyInstaller';
 
 let primaryProvider: SorcarViewProvider | undefined;
 let secondaryProvider: SorcarViewProvider | undefined;
@@ -208,6 +209,11 @@ export function activate(context: vscode.ExtensionContext): void {
     !supportsSecondarySidebar
   ).then(() => {
     vscode.commands.executeCommand('kissSorcar.openPanel');
+  });
+
+  // Auto-install dependencies (uv, Python, Playwright Chromium) in background
+  ensureDependencies().catch(err => {
+    console.error('[KISS Sorcar] Dependency setup error:', err);
   });
 
   console.log('KISS Sorcar extension activated');

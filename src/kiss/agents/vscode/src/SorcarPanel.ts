@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { AgentProcess } from './AgentProcess';
+import { AgentProcess, findKissProject } from './AgentProcess';
 import { MergeManager } from './MergeManager';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
@@ -486,7 +486,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   private _getVersion(): string {
     try {
-      const kissRoot = this._agentProcess.findKissProject();
+      const kissRoot = findKissProject();
       if (kissRoot) {
         const versionFile = path.join(kissRoot, 'src', 'kiss', '_version.py');
         const content = fs.readFileSync(versionFile, 'utf-8');

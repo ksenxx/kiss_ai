@@ -36,3 +36,4 @@ env.sh
 node_modules/
 src/kiss/agents/vscode/out/
 
+kiss_project/

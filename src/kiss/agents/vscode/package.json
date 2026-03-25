@@ -155,9 +155,10 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run copy-kiss",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "copy-kiss": "bash copy-kiss.sh",
     "package": "vsce package --no-dependencies --allow-star-activation"
   },
   "devDependencies": {

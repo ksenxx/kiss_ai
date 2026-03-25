@@ -1,0 +1,25 @@
+# TypeScript sources (compiled JS is in out/)
+src/**
+
+# Python bytecode
+**/__pycache__/**
+
+# Dev dependencies
+node_modules/**
+
+# Build config
+tsconfig.json
+
+# Tests in embedded project (not needed at runtime)
+kiss_project/src/kiss/tests/**
+
+# Embedded extension dev files (avoid nesting)
+kiss_project/src/kiss/agents/vscode/src/**
+kiss_project/src/kiss/agents/vscode/node_modules/**
+kiss_project/src/kiss/agents/vscode/out/**
+kiss_project/src/kiss/agents/vscode/tsconfig.json
+kiss_project/src/kiss/agents/vscode/.vscodeignore
+kiss_project/src/kiss/agents/vscode/copy-kiss.sh
+
+# Build script
+copy-kiss.sh

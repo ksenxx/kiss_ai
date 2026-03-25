@@ -8,6 +8,7 @@ lines, and events are written to stdout as JSON lines.
 from __future__ import annotations
 
 import base64
+import ctypes
 import itertools
 import json
 import logging
@@ -310,9 +311,45 @@ class VSCodeServer:
         _cleanup_merge_data(str(_merge_data_dir()))
 
     def _stop_task(self) -> None:
-        """Signal the agent to stop."""
+        """Signal the agent to stop.
+
+        Sets the cooperative stop event and, if the task thread doesn't
+        exit promptly, forces a ``KeyboardInterrupt`` in the task thread
+        using ``ctypes.pythonapi.PyThreadState_SetAsyncExc``.  This
+        handles the case where the agent is blocked in an LLM API call
+        or other I/O and never reaches a cooperative ``_check_stop()``
+        call.
+        """
         if self._stop_event:
             self._stop_event.set()
+        task_thread = self._task_thread
+        if task_thread is not None and task_thread.is_alive():
+            threading.Thread(
+                target=self._force_stop_thread,
+                args=(task_thread,),
+                daemon=True,
+            ).start()
+
+    @staticmethod
+    def _force_stop_thread(task_thread: threading.Thread) -> None:
+        """Watchdog that forces ``KeyboardInterrupt`` in *task_thread*.
+
+        Waits 1 second for the cooperative stop-event mechanism to work.
+        If the thread is still alive, raises ``KeyboardInterrupt``
+        asynchronously in it.  Retries once after 5 seconds in case the
+        first exception was swallowed or the thread was in C code.
+        """
+        task_thread.join(timeout=1)
+        for _ in range(2):
+            if not task_thread.is_alive():
+                return
+            tid = task_thread.ident
+            if tid is not None:
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(tid),
+                    ctypes.py_object(KeyboardInterrupt),
+                )
+            task_thread.join(timeout=5)
 
     def _await_user_response(self) -> None:
         """Block until the user sends a response."""
