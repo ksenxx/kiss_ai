@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
 import { exec, execSync, spawn } from 'child_process';
 import { findKissProject, findUvPath } from './AgentProcess';
 
@@ -27,62 +28,118 @@ export async function ensureDependencies(): Promise<void> {
   // Fast path: everything looks ready, ensure playwright in background
   if (uvPath && venvExists) {
     spawnBackground(uvPath, ['run', 'python', '-m', 'playwright', 'install', 'chromium'], kissProjectPath);
-    return;
-  }
-
-  // Slow path: show progress notification and install missing deps
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'KISS Sorcar', cancellable: false },
-    async (progress) => {
-      // 1. Install uv if needed
-      if (!uvPath) {
-        progress.report({ message: 'Installing uv package manager...' });
-        uvPath = await installUv();
+  } else {
+    // Slow path: show progress notification and install missing deps
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'KISS Sorcar', cancellable: false },
+      async (progress) => {
+        // 1. Install uv if needed
         if (!uvPath) {
-          vscode.window.showErrorMessage(
-            'KISS Sorcar: Failed to install uv. Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh'
-          );
-          return;
+          progress.report({ message: 'Installing uv package manager...' });
+          uvPath = await installUv();
+          if (!uvPath) {
+            vscode.window.showErrorMessage(
+              'KISS Sorcar: Failed to install uv. Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh'
+            );
+            return;
+          }
         }
-      }
 
-      // 2. Warn about git
-      if (!commandExists('git')) {
-        vscode.window.showWarningMessage(
-          'KISS Sorcar: git is required but not found. Please install git.'
+        // 2. Warn about git
+        if (!commandExists('git')) {
+          vscode.window.showWarningMessage(
+            'KISS Sorcar: git is required but not found. Please install git.'
+          );
+        }
+
+        // 3. Set up Python environment (installs Python 3.13+ and all pip dependencies)
+        if (!venvExists) {
+          progress.report({ message: 'Setting up Python environment (first time, may take a minute)...' });
+          await runAsync(uvPath, ['sync'], kissProjectPath);
+        }
+
+        // 4. Install Playwright Chromium
+        progress.report({ message: 'Installing Chromium browser...' });
+        await runAsync(
+          uvPath,
+          ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
+          kissProjectPath
         );
       }
+    );
+  }
 
-      // 3. Set up Python environment (installs Python 3.13+ and all pip dependencies)
-      if (!venvExists) {
-        progress.report({ message: 'Setting up Python environment (first time, may take a minute)...' });
-        await runAsync(uvPath, ['sync'], kissProjectPath);
-      }
-
-      // 4. Install Playwright Chromium
-      progress.report({ message: 'Installing Chromium browser...' });
-      await runAsync(
-        uvPath,
-        ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
-        kissProjectPath
-      );
-    }
-  );
+  // Prompt for missing API keys
+  await ensureApiKeys();
 }
 
 /**
- * Install uv and return its path, or null on failure.
+ * Map Node.js platform/arch to the uv GitHub release asset triplet.
+ * Returns [archName, platformSuffix, extension] or null if unsupported.
+ */
+function uvAssetInfo(): { archName: string; triplet: string; ext: string } | null {
+  const archMap: Record<string, string> = {
+    'arm64': 'aarch64',
+    'x64': 'x86_64',
+  };
+  const arch = archMap[process.arch];
+  if (!arch) return null;
+
+  if (process.platform === 'darwin') {
+    return { archName: arch, triplet: `${arch}-apple-darwin`, ext: 'tar.gz' };
+  } else if (process.platform === 'linux') {
+    return { archName: arch, triplet: `${arch}-unknown-linux-gnu`, ext: 'tar.gz' };
+  } else if (process.platform === 'win32') {
+    return { archName: arch, triplet: `${arch}-pc-windows-msvc`, ext: 'zip' };
+  }
+  return null;
+}
+
+/**
+ * Install uv from the latest GitHub binary release and return its path, or null on failure.
+ * Downloads the platform-specific binary from https://github.com/astral-sh/uv/releases/latest
+ * and extracts it to ~/.local/bin/.
  */
 async function installUv(): Promise<string | null> {
-  const cmd =
-    process.platform === 'win32'
-      ? 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
-      : 'curl -LsSf https://astral.sh/uv/install.sh | sh';
+  const asset = uvAssetInfo();
+  if (!asset) {
+    console.error(`[KISS Sorcar] Unsupported platform/arch: ${process.platform}/${process.arch}`);
+    return null;
+  }
+
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const installDir = path.join(homeDir, '.local', 'bin');
+  const assetName = `uv-${asset.triplet}`;
+  const url = `https://github.com/astral-sh/uv/releases/latest/download/${assetName}.${asset.ext}`;
+
   try {
-    await execPromise(cmd);
+    // Ensure install directory exists
+    fs.mkdirSync(installDir, { recursive: true });
+
+    if (process.platform === 'win32') {
+      // Windows: download zip and extract with PowerShell
+      const zipPath = path.join(installDir, `${assetName}.zip`);
+      await execPromise(
+        `powershell -Command "Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
+        `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
+        `Move-Item -Force '${path.join(installDir, assetName, 'uv.exe')}' '${path.join(installDir, 'uv.exe')}'; ` +
+        `Move-Item -Force '${path.join(installDir, assetName, 'uvx.exe')}' '${path.join(installDir, 'uvx.exe')}'; ` +
+        `Remove-Item -Force '${zipPath}'; Remove-Item -Recurse -Force '${path.join(installDir, assetName)}'"`
+      );
+    } else {
+      // macOS/Linux: download tar.gz and extract with tar, then move binaries
+      await execPromise(
+        `curl -fsSL '${url}' | tar xz -C '${installDir}' && ` +
+        `mv -f '${path.join(installDir, assetName, 'uv')}' '${installDir}/' && ` +
+        `mv -f '${path.join(installDir, assetName, 'uvx')}' '${installDir}/' && ` +
+        `rm -rf '${path.join(installDir, assetName)}' && ` +
+        `chmod +x '${path.join(installDir, 'uv')}' '${path.join(installDir, 'uvx')}'`
+      );
+    }
+
     return findUvPath();
   } catch (err) {
-    console.error('[KISS Sorcar] Failed to install uv:', err);
+    console.error('[KISS Sorcar] Failed to install uv from GitHub release:', err);
     return null;
   }
 }
@@ -148,4 +205,178 @@ function execPromise(cmd: string): Promise<string> {
       else resolve(stdout);
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// API Key Setup
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the path to the user's shell rc file based on the SHELL environment variable.
+ */
+function getShellRcPath(): string {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const shell = process.env.SHELL || '';
+
+  if (shell.endsWith('/zsh') || shell.endsWith('/zsh-5')) {
+    return path.join(homeDir, '.zshrc');
+  } else if (shell.endsWith('/fish')) {
+    return path.join(homeDir, '.config', 'fish', 'config.fish');
+  } else {
+    return path.join(homeDir, '.bashrc');
+  }
+}
+
+/**
+ * Validate an Anthropic API key by calling the /v1/models endpoint.
+ * Returns true if the key is valid (HTTP 200), false otherwise.
+ */
+function validateAnthropicKey(key: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = https.request(
+      {
+        hostname: 'api.anthropic.com',
+        path: '/v1/models',
+        method: 'GET',
+        headers: {
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+        },
+        timeout: 15000,
+      },
+      (res) => {
+        resolve(res.statusCode === 200);
+        res.resume(); // consume response body
+      }
+    );
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
+/**
+ * Add an environment variable export line to a shell rc file.
+ * If the variable already exists in the file, replaces it. Otherwise appends.
+ */
+function addToShellRc(rcPath: string, envName: string, value: string): void {
+  const isFish = rcPath.endsWith('config.fish');
+  const exportLine = isFish
+    ? `set -gx ${envName} "${value}"`
+    : `export ${envName}="${value}"`;
+
+  let content = '';
+  try {
+    content = fs.readFileSync(rcPath, 'utf-8');
+  } catch {
+    // File doesn't exist yet — will be created
+    const dir = path.dirname(rcPath);
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  // Check if an export for this variable already exists
+  const linePattern = isFish
+    ? new RegExp(`^\\s*set\\s+-gx\\s+${envName}\\s.*$`, 'gm')
+    : new RegExp(`^\\s*export\\s+${envName}=.*$`, 'gm');
+
+  if (linePattern.test(content)) {
+    linePattern.lastIndex = 0; // reset after test() so replace() starts from beginning
+    content = content.replace(linePattern, exportLine);
+  } else {
+    if (content.length > 0 && !content.endsWith('\n')) {
+      content += '\n';
+    }
+    content += exportLine + '\n';
+  }
+
+  fs.writeFileSync(rcPath, content);
+}
+
+/**
+ * Prompt the user for an API key. If a validate function is provided,
+ * the key is validated and the user is re-prompted if invalid.
+ * Returns the key string, or undefined if the user cancelled.
+ */
+async function promptForApiKey(
+  displayName: string,
+  placeholder: string,
+  validate?: (key: string) => Promise<boolean>
+): Promise<string | undefined> {
+  while (true) {
+    const key = await vscode.window.showInputBox({
+      title: displayName,
+      prompt: `${displayName} is not set. Please enter your key:`,
+      password: true,
+      placeHolder: placeholder,
+      ignoreFocusOut: true,
+    });
+
+    if (key === undefined) {
+      return undefined; // User pressed Escape
+    }
+
+    const trimmed = key.trim();
+    if (!trimmed) {
+      continue; // Empty input — re-prompt
+    }
+
+    if (validate) {
+      const valid = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Validating ${displayName}...` },
+        () => validate(trimmed)
+      );
+
+      if (!valid) {
+        const choice = await vscode.window.showWarningMessage(
+          `The ${displayName} is not valid. Please try again.`,
+          'Try Again',
+          'Cancel'
+        );
+        if (choice !== 'Try Again') {
+          return undefined;
+        }
+        continue;
+      }
+    }
+
+    return trimmed;
+  }
+}
+
+/**
+ * Ensure all LLM API keys are configured.
+ * Prompts the user for each missing key. Validates the Anthropic key.
+ * Saves provided keys to the user's shell rc file and current process env.
+ */
+async function ensureApiKeys(): Promise<void> {
+  const rcPath = getShellRcPath();
+
+  const keys = [
+    { envName: 'ANTHROPIC_API_KEY', displayName: 'Anthropic API Key', placeholder: 'sk-ant-...', validate: true },
+    { envName: 'OPENAI_API_KEY', displayName: 'OpenAI API Key', placeholder: 'sk-...', validate: false },
+    { envName: 'GEMINI_API_KEY', displayName: 'Gemini API Key', placeholder: 'AI...', validate: false },
+  ];
+
+  for (const { envName, displayName, placeholder, validate } of keys) {
+    if (process.env[envName]) {
+      continue; // Already set in environment
+    }
+
+    const key = await promptForApiKey(
+      displayName,
+      placeholder,
+      validate ? validateAnthropicKey : undefined
+    );
+
+    if (key) {
+      process.env[envName] = key;
+      addToShellRc(rcPath, envName, key);
+      vscode.window.showInformationMessage(
+        `${displayName} saved to ~/${path.basename(rcPath)}`
+      );
+    }
+  }
 }
