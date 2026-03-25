@@ -615,7 +615,6 @@ class VSCodeServer:
         """
         if seq >= 0 and seq != self._complete_seq_latest:
             return
-        query = query.strip()
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
             return
