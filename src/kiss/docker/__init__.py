@@ -5,5 +5,6 @@
 """Docker wrapper module for the KISS agent framework."""
 
 from kiss.docker.docker_manager import DockerManager
+from kiss.docker.docker_tools import DockerTools
 
-__all__ = ["DockerManager"]
+__all__ = ["DockerManager", "DockerTools"]

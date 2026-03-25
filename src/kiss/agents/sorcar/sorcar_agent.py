@@ -20,6 +20,7 @@ from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
 from kiss.docker.docker_manager import DockerManager
+from kiss.docker.docker_tools import DockerTools
 
 
 class SorcarAgent(RelentlessAgent):
@@ -31,6 +32,11 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: DockerManager | None = None
 
     def _get_tools(self) -> list:
+        """Build tool list, using DockerTools when docker_manager is active.
+
+        Must be called after docker_manager is set up (i.e., from perform_task,
+        not from run() before super().run()).
+        """
         def _stream(text: str) -> None:
             if self.printer:
                 self.printer.print(text, type="bash_stream")
@@ -56,12 +62,34 @@ class SorcarAgent(RelentlessAgent):
 
         stop_event = getattr(self, "_stop_event", None)
         useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
-        bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
-        tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+        if self.docker_manager:
+            docker_tools = DockerTools(self._docker_bash)
+            tools: list = [
+                self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
+            ]
+        else:
+            tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
         tools.append(ask_user_question)
         return tools
+
+    def perform_task(
+        self,
+        tools: list,
+        attachments: list | None = None,
+    ) -> str:
+        """Execute the task, building docker-aware tools after docker_manager is set.
+
+        Args:
+            tools: Extra tools passed by the caller (from run(tools=...)).
+            attachments: Optional file attachments for the initial prompt.
+
+        Returns:
+            YAML string with 'success' and 'summary' keys.
+        """
+        all_tools = self._get_tools() + tools
+        return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
         self,
@@ -186,7 +214,7 @@ class SorcarAgent(RelentlessAgent):
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,
                 verbose=verbose,
-                tools=self._get_tools() + (tools if tools else []),
+                tools=tools or [],
                 attachments=attachments,
             )
         finally:

@@ -199,7 +199,7 @@ class TestSorcarAgentCallbackWiring:
     def test_run_sets_callbacks_temporarily(self) -> None:
         agent = SorcarAgent("test")
         parent_class = cast(Any, agent.__class__.__mro__[1])
-        original_run = parent_class.run
+        original_perform = parent_class.perform_task
         captured: dict[str, object] = {}
 
         def wait_callback(instruction: str, url: str) -> None:
@@ -208,20 +208,18 @@ class TestSorcarAgentCallbackWiring:
         def ask_callback(question: str) -> str:
             return f"UI: {question}"
 
-        def fake_run(
-            self: object, *args: object, **kwargs: object
+        def fake_perform(
+            self: object, tools: list, attachments: list | None = None,
         ) -> str:
-            del self, args
+            del self, attachments
             captured["wait"] = getattr(agent, "_wait_for_user_callback", None)
             captured["ask"] = getattr(agent, "_ask_user_question_callback", None)
-            tools_obj = kwargs["tools"]
-            assert isinstance(tools_obj, list)
-            tools = [t for t in tools_obj if callable(t)]
-            ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
+            callables = [t for t in tools if callable(t)]
+            ask_tool = next(t for t in callables if t.__name__ == "ask_user_question")
             captured["answer"] = ask_tool("hello")
-            return "success: true\nsummary: ok\n"
+            return "success: true\nis_continue: false\nsummary: ok\n"
 
-        parent_class.run = fake_run  # type: ignore[method-assign]
+        parent_class.perform_task = fake_perform  # type: ignore[method-assign]
         try:
             result = agent.run(
                 prompt_template="task",
@@ -229,7 +227,7 @@ class TestSorcarAgentCallbackWiring:
                 ask_user_question_callback=ask_callback,
             )
         finally:
-            parent_class.run = original_run  # type: ignore[method-assign]
+            parent_class.perform_task = original_perform  # type: ignore[method-assign]
 
         assert "success: true" in result
         assert captured["wait"] is wait_callback
