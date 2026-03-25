@@ -912,10 +912,14 @@ class TestCompleteFromActiveFile(unittest.TestCase):
         # Specifically, "self.method_name" (len 16) > "self.attribute" (len 14)
         assert result == "method_name"
 
-    def test_case_insensitive_match(self) -> None:
-        """Matching is case-insensitive."""
+    def test_case_sensitive_match(self) -> None:
+        """Matching is case-sensitive."""
         content = "MyClassName = 1"
+        # "myclass" does not match "MyClassName" because of case mismatch
         result = self.server._complete_from_active_file("use myclass", snapshot_content=content)
+        assert result == ""
+        # "MyClass" matches "MyClassName" with correct case
+        result = self.server._complete_from_active_file("use MyClass", snapshot_content=content)
         assert result == "Name"
 
     def test_no_match_returns_empty(self) -> None:
