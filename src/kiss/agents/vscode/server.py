@@ -240,6 +240,7 @@ class VSCodeServer:
 
         self.printer.start_recording()
         result_summary = ""
+        task_end_event: dict[str, Any] | None = None
         try:
             self.agent.run(
                 prompt_template=prompt,
@@ -251,14 +252,14 @@ class VSCodeServer:
                 wait_for_user_callback=self._wait_for_user,
                 ask_user_question_callback=self._ask_user_question,
             )
-            self.printer.broadcast({"type": "task_done"})
             _record_model_usage(model)
             result_summary = self._extract_result_summary() or "No summary available"
             self._generate_followup(prompt, result_summary, model)
+            task_end_event = {"type": "task_done"}
         except KeyboardInterrupt:
-            self.printer.broadcast({"type": "task_stopped"})
+            task_end_event = {"type": "task_stopped"}
         except Exception as e:  # pragma: no cover
-            self.printer.broadcast({"type": "task_error", "text": str(e)})
+            task_end_event = {"type": "task_error", "text": str(e)}
         finally:
             chat_events = self.printer.stop_recording()
             _set_latest_chat_events(chat_events, task=prompt, result=result_summary)
@@ -291,7 +292,13 @@ class VSCodeServer:
             except Exception:
                 logger.debug("Merge view error", exc_info=True)
             self._refresh_file_cache()
-            # Broadcast status LAST, after all cleanup (Race 14 fix)
+            # Broadcast task_done/stopped/error and status LAST, after all
+            # cleanup.  Previously task_done was in the try block while
+            # status:running:false was in finally, creating a window where
+            # the webview enabled input but the extension's _isRunning
+            # stayed True — causing silently dropped submits.
+            if task_end_event:
+                self.printer.broadcast(task_end_event)
             self.printer.broadcast({"type": "status", "running": False})
 
     def _handle_merge_action(self, action: str) -> None:

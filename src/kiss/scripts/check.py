@@ -152,6 +152,36 @@ def clean_build_artifacts() -> None:
         print(f"\n✅ Cleaned {removed_count} items")
 
 
+def _sync_extension_version() -> None:
+    """Sync VS Code extension version from _version.py into package.json.
+
+    Reads the canonical version from ``src/kiss/_version.py`` and updates
+    the ``version`` field in the extension's ``package.json`` if they differ.
+    """
+    import json
+
+    project_root = Path(__file__).parent.parent.parent.parent
+    version_file = project_root / "src" / "kiss" / "_version.py"
+    package_json = project_root / "src" / "kiss" / "agents" / "vscode" / "package.json"
+
+    if not version_file.exists() or not package_json.exists():
+        return
+
+    # Extract version from _version.py
+    namespace: dict[str, str] = {}
+    exec(version_file.read_text(), namespace)  # noqa: S102
+    version = namespace.get("__version__", "")
+    if not version:
+        return
+
+    # Update package.json if needed
+    data = json.loads(package_json.read_text())
+    if data.get("version") != version:
+        data["version"] = version
+        package_json.write_text(json.dumps(data, indent=2) + "\n")
+        print(f"Synced extension version to {version}")
+
+
 def main() -> int:
     """Run all code quality checks.
 
@@ -187,6 +217,9 @@ def main() -> int:
 
     # Find all markdown files for linting
     md_files = find_markdown_files()
+
+    # Sync extension version from _version.py before running checks
+    _sync_extension_version()
 
     checks = [
         (["uv", "sync"], "Install dependencies (uv sync)"),

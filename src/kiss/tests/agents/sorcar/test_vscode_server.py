@@ -887,26 +887,26 @@ class TestCompleteFromActiveFile(unittest.TestCase):
 
     def test_single_word_match(self) -> None:
         """Single word identifier matching still works."""
-        self.server._last_active_content = "def calculate_total(): pass"
-        result = self.server._complete_from_active_file("fix the calc")
+        content = "def calculate_total(): pass"
+        result = self.server._complete_from_active_file("fix the calc", snapshot_content=content)
         assert result == "ulate_total"
 
     def test_chain_match_self_method(self) -> None:
         """Chained identifier like self.method is matched."""
-        self.server._last_active_content = "self.method_name()\nself.other()"
-        result = self.server._complete_from_active_file("call self.me")
+        content = "self.method_name()\nself.other()"
+        result = self.server._complete_from_active_file("call self.me", snapshot_content=content)
         assert result == "thod_name"
 
     def test_chain_match_dotted_path(self) -> None:
         """Multi-level chained identifier like os.path.join is matched."""
-        self.server._last_active_content = "import os\nos.path.join('/a', 'b')"
-        result = self.server._complete_from_active_file("use os.path.j")
+        content = "import os\nos.path.join('/a', 'b')"
+        result = self.server._complete_from_active_file("use os.path.j", snapshot_content=content)
         assert result == "oin"
 
     def test_trailing_dot_match(self) -> None:
         """Trailing dot (e.g. 'self.') matches chains starting with 'self.'."""
-        self.server._last_active_content = "self.method_name()\nself.attribute = 1"
-        result = self.server._complete_from_active_file("call self.")
+        content = "self.method_name()\nself.attribute = 1"
+        result = self.server._complete_from_active_file("call self.", snapshot_content=content)
         # Should match the longest chain starting with "self."
         assert result in ("method_name", "attribute")
         # Specifically, "self.method_name" (len 16) > "self.attribute" (len 14)
@@ -914,73 +914,69 @@ class TestCompleteFromActiveFile(unittest.TestCase):
 
     def test_case_insensitive_match(self) -> None:
         """Matching is case-insensitive."""
-        self.server._last_active_content = "MyClassName = 1"
-        result = self.server._complete_from_active_file("use myclass")
+        content = "MyClassName = 1"
+        result = self.server._complete_from_active_file("use myclass", snapshot_content=content)
         assert result == "Name"
 
     def test_no_match_returns_empty(self) -> None:
         """No matching word returns empty string."""
-        self.server._last_active_content = "def foo(): pass"
-        result = self.server._complete_from_active_file("bar")
+        content = "def foo(): pass"
+        result = self.server._complete_from_active_file("bar", snapshot_content=content)
         assert result == ""
 
     def test_no_content_no_path_returns_empty(self) -> None:
         """No content and no path returns empty."""
-        self.server._last_active_content = ""
-        self.server._last_active_file = ""
         result = self.server._complete_from_active_file("test")
         assert result == ""
 
     def test_fallback_to_disk_read(self) -> None:
         """Falls back to disk read when no content stored."""
-        self.server._last_active_content = ""
         tmpfile = os.path.join(tempfile.mkdtemp(), "test.py")
         with open(tmpfile, "w") as f:
             f.write("def some_function(): pass")
-        self.server._last_active_file = tmpfile
-        result = self.server._complete_from_active_file("some_fun")
+        result = self.server._complete_from_active_file("some_fun", snapshot_file=tmpfile)
         assert result == "ction"
         os.unlink(tmpfile)
 
     def test_disk_read_oserror(self) -> None:
         """OSError on disk read returns empty."""
-        self.server._last_active_content = ""
-        self.server._last_active_file = "/nonexistent/path/file.py"
-        result = self.server._complete_from_active_file("test")
+        result = self.server._complete_from_active_file(
+            "test", snapshot_file="/nonexistent/path/file.py"
+        )
         assert result == ""
 
     def test_short_partial_returns_empty(self) -> None:
         """Partial token shorter than 2 chars returns empty."""
-        self.server._last_active_content = "def foo(): pass"
-        result = self.server._complete_from_active_file("x")
+        content = "def foo(): pass"
+        result = self.server._complete_from_active_file("x", snapshot_content=content)
         assert result == ""
 
     def test_no_trailing_token_returns_empty(self) -> None:
         """Query with no trailing identifier returns empty."""
-        self.server._last_active_content = "def foo(): pass"
-        result = self.server._complete_from_active_file("   ")
+        content = "def foo(): pass"
+        result = self.server._complete_from_active_file("   ", snapshot_content=content)
         assert result == ""
 
     def test_longest_match_wins(self) -> None:
         """Among multiple matches, the longest suffix is returned."""
-        self.server._last_active_content = "foo\nfoobar\nfoobarbaz"
-        result = self.server._complete_from_active_file("type fo")
+        content = "foo\nfoobar\nfoobarbaz"
+        result = self.server._complete_from_active_file("type fo", snapshot_content=content)
         # foobarbaz (len 9) > foobar (len 6) > foo (len 3)
         assert result == "obarbaz"
 
     def test_both_words_and_chains_in_candidates(self) -> None:
         """Both single words and chains are available as candidates."""
-        self.server._last_active_content = "self.method\nmethod_standalone"
+        content = "self.method\nmethod_standalone"
         # "meth" should match both "method_standalone" and "self.method"
         # But "meth" won't match "self.method" as prefix since "self.method" starts with "self."
         # It should match "method_standalone" (single word)
-        result = self.server._complete_from_active_file("call meth")
+        result = self.server._complete_from_active_file("call meth", snapshot_content=content)
         assert result == "od_standalone"
 
     def test_chain_prefix_beats_word(self) -> None:
         """Chain match is preferred when it produces a longer suffix."""
-        self.server._last_active_content = "self.method_name\nself.m"
-        result = self.server._complete_from_active_file("use self.m")
+        content = "self.method_name\nself.m"
+        result = self.server._complete_from_active_file("use self.m", snapshot_content=content)
         # "self.method_name" starts with "self.m", suffix = "ethod_name" (len 10)
         # "self.m" — too short (len == partial len)
         assert result == "ethod_name"
@@ -997,25 +993,25 @@ class TestCompleteRaceCondition(unittest.TestCase):
             self.events.append(event)
 
         self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
-        self.server._last_active_content = "calculate_total = 1"
+        self._content = "calculate_total = 1"
 
     def test_stale_seq_skips_broadcast(self) -> None:
         """A complete call with an old seq number should not broadcast."""
         # Simulate: seq 0 starts, then seq 1 arrives (making seq 0 stale)
         self.server._complete_seq_latest = 5
-        self.server._complete("calc", seq=3)  # stale
+        self.server._complete("calc", seq=3, snapshot_content=self._content)  # stale
         assert len(self.events) == 0
 
     def test_current_seq_broadcasts(self) -> None:
         """A complete call with the current seq number should broadcast."""
         self.server._complete_seq_latest = 5
-        self.server._complete("calc", seq=5)
+        self.server._complete("calc", seq=5, snapshot_content=self._content)
         assert len(self.events) == 1
         assert self.events[0]["type"] == "ghost"
 
     def test_negative_seq_always_broadcasts(self) -> None:
         """seq=-1 (default) always broadcasts (for backward compat)."""
-        self.server._complete("calc")
+        self.server._complete("calc", snapshot_content=self._content)
         assert len(self.events) == 1
 
     def test_concurrent_calls_only_latest_broadcasts(self) -> None:
@@ -1087,16 +1083,16 @@ class TestCompleteIntegration(unittest.TestCase):
         assert self.events[0]["suggestion"] == ""
 
     def test_complete_with_file_content(self) -> None:
-        """Complete uses stored file content for matching."""
-        self.server._last_active_content = "def my_awesome_function(): pass"
-        self.server._complete("call my_awe")
+        """Complete uses snapshot content for matching."""
+        content = "def my_awesome_function(): pass"
+        self.server._complete("call my_awe", snapshot_content=content)
         assert len(self.events) == 1
         assert self.events[0]["suggestion"] == "some_function"
 
     def test_complete_chain_from_content(self) -> None:
-        """Complete matches chained identifiers from stored content."""
-        self.server._last_active_content = "self.important_method(x)"
-        self.server._complete("use self.imp")
+        """Complete matches chained identifiers from snapshot content."""
+        content = "self.important_method(x)"
+        self.server._complete("use self.imp", snapshot_content=content)
         assert len(self.events) == 1
         assert self.events[0]["suggestion"] == "ortant_method"
 

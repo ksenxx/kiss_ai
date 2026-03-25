@@ -705,19 +705,31 @@
     inputContainer.style.display = 'none';
     var bar = mkEl('div', 'merge-toolbar-card');
     bar.id = 'merge-toolbar';
+    var svgCheck = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    var svgX = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    var svgUp = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+    var svgDown = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+    var svgCheckAll = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 6 9 17 4 12"/><polyline points="22 2 13 13"/></svg>';
+    var svgXAll = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>';
     bar.innerHTML =
-      '<div class="merge-toolbar-header">\u2731 Review Changes</div>'
-      + '<div class="merge-toolbar-hint">Red = old lines, Blue = new lines. Accept to keep changes, reject to discard.</div>'
-      + '<div class="merge-toolbar-actions">'
-      + '<div class="merge-toolbar-row">'
-      + '<button class="merge-btn merge-accept" id="merge-accept-btn">\u2713 Accept</button>'
-      + '<button class="merge-btn merge-reject" id="merge-reject-btn">\u2717 Reject</button>'
-      + '<button class="merge-btn merge-nav" id="merge-prev-btn">\u25C0 Prev</button>'
-      + '<button class="merge-btn merge-nav" id="merge-next-btn">Next \u25B6</button>'
+      '<div class="merge-toolbar-header">'
+      + '<span class="merge-toolbar-title">Review Changes</span>'
+      + '<span class="merge-toolbar-hint">Red = old \u00b7 Blue = new</span>'
       + '</div>'
-      + '<div class="merge-toolbar-row">'
-      + '<button class="merge-btn merge-accept-all" id="merge-accept-all-btn">\u2713\u2713 Accept All</button>'
-      + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn">\u2717\u2717 Reject All</button>'
+      + '<div class="merge-toolbar-actions">'
+      + '<div class="merge-toolbar-group">'
+      + '<button class="merge-btn merge-accept" id="merge-accept-btn" data-tooltip="Accept change">' + svgCheck + ' Accept</button>'
+      + '<button class="merge-btn merge-reject" id="merge-reject-btn" data-tooltip="Reject change">' + svgX + ' Reject</button>'
+      + '</div>'
+      + '<div class="merge-toolbar-sep"></div>'
+      + '<div class="merge-toolbar-group">'
+      + '<button class="merge-btn merge-nav" id="merge-prev-btn" data-tooltip="Previous change">' + svgUp + '</button>'
+      + '<button class="merge-btn merge-nav" id="merge-next-btn" data-tooltip="Next change">' + svgDown + '</button>'
+      + '</div>'
+      + '<div class="merge-toolbar-sep"></div>'
+      + '<div class="merge-toolbar-group">'
+      + '<button class="merge-btn merge-accept-all" id="merge-accept-all-btn" data-tooltip="Accept all changes">' + svgCheckAll + ' Accept All</button>'
+      + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn" data-tooltip="Reject all changes">' + svgX + ' Reject All</button>'
       + '</div>'
       + '</div>';
     document.getElementById('input-area').appendChild(bar);

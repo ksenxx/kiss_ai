@@ -5,9 +5,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Standard install locations
 BIN_DIR="$HOME/.local/bin"
-LIB_DIR="$HOME/.local/lib"
-
-# Detect OS and architecture
+# Detect OS
 OS="$(uname -s)"
 case "$OS" in
     Darwin) OS="macos" ;;
@@ -17,82 +15,15 @@ esac
 
 ARCH="$(uname -m)"
 case "$ARCH" in
-    x86_64)  ARCH_ALT="amd64" ;;
-    arm64|aarch64) ARCH="arm64"; ARCH_ALT="arm64" ;;
-    *)       echo "ERROR: Unsupported architecture: $ARCH"; exit 1 ;;
+    arm64|aarch64) ARCH="arm64" ;;
 esac
 
-mkdir -p "$BIN_DIR" "$LIB_DIR"
-
-# Fetch latest release version from GitHub. Falls back to $2 if API fails.
-_latest_github_version() {
-    local repo="$1" default="$2" version
-    version="$(curl -sSf --max-time 10 \
-        "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
-        | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')" || true
-    echo "${version:-$default}"
-}
-
-_code_server_ca_cert() {
-    for cert in \
-        /etc/ssl/cert.pem \
-        /opt/homebrew/etc/openssl@3/cert.pem \
-        /usr/local/etc/openssl@3/cert.pem \
-        /etc/openssl/cert.pem
-    do
-        if [ -f "$cert" ]; then
-            echo "$cert"
-            return 0
-        fi
-    done
-    return 1
-}
-
-_write_code_server_wrapper() {
-    local wrapper="$BIN_DIR/code-server"
-    local cert
-
-    cat > "$wrapper" <<'EOF'
-#!/bin/bash
-set -e
-
-CODE_SERVER_BIN="$HOME/.local/lib/code-server/bin/code-server"
-
-if [ "$(uname -s)" = "Darwin" ]; then
-    export NODE_OPTIONS="--use-openssl-ca${NODE_OPTIONS:+ $NODE_OPTIONS}"
-
-    if [ -z "${NODE_EXTRA_CA_CERTS:-}" ]; then
-        for cert in \
-            /etc/ssl/cert.pem \
-            /opt/homebrew/etc/openssl@3/cert.pem \
-            /usr/local/etc/openssl@3/cert.pem \
-            /etc/openssl/cert.pem
-        do
-            if [ -f "$cert" ]; then
-                export NODE_EXTRA_CA_CERTS="$cert"
-                break
-            fi
-        done
-    fi
-fi
-
-exec "$CODE_SERVER_BIN" "$@"
-EOF
-
-    chmod +x "$wrapper"
-
-    cert="$(_code_server_ca_cert)" || cert=""
-    if [ -n "$cert" ]; then
-        echo "   code-server wrapper configured with CA bundle: $cert"
-    else
-        echo "   code-server wrapper installed"
-    fi
-}
+mkdir -p "$BIN_DIR"
 
 # ---------------------------------------------------------------------------
 # 1. Install or upgrade Homebrew  (https://brew.sh)
 # ---------------------------------------------------------------------------
-echo ">>> [1/4] Installing Homebrew..."
+echo ">>> [1/3] Installing Homebrew..."
 if command -v brew &> /dev/null; then
     echo "   Homebrew already installed, upgrading..."
     brew update
@@ -121,32 +52,9 @@ fi
 echo "   Homebrew $(brew --version | head -1) ready"
 
 # ---------------------------------------------------------------------------
-# 2. Install code-server from binaries if not already installed
+# 2. Install uv from binaries if not installed  (https://astral.sh/uv)
 # ---------------------------------------------------------------------------
-echo ">>> [2/4] Installing code-server..."
-if [ -x "$LIB_DIR/code-server/bin/code-server" ]; then
-    echo "   code-server already installed"
-else
-    CS_FALLBACK_VERSION="4.112.0"
-    CS_VERSION="$(_latest_github_version coder/code-server "$CS_FALLBACK_VERSION")"
-    CS_TARBALL="code-server-${CS_VERSION}-${OS}-${ARCH_ALT}.tar.gz"
-    CS_URL="https://github.com/coder/code-server/releases/download/v${CS_VERSION}/${CS_TARBALL}"
-    CS_TMP="$(mktemp -d)"
-    curl -fSL -o "$CS_TMP/$CS_TARBALL" "$CS_URL"
-    rm -rf "$LIB_DIR/code-server"
-    mkdir -p "$LIB_DIR/code-server"
-    tar xzf "$CS_TMP/$CS_TARBALL" -C "$LIB_DIR/code-server" --strip-components=1
-    rm -rf "$CS_TMP"
-    find "$LIB_DIR/code-server" \( -name '*.map' -o -name '*.d.ts' \) -type f -delete
-    echo "   code-server ${CS_VERSION} installed"
-fi
-chmod +x "$LIB_DIR/code-server/bin/code-server"
-_write_code_server_wrapper
-
-# ---------------------------------------------------------------------------
-# 3. Install uv from binaries if not installed  (https://astral.sh/uv)
-# ---------------------------------------------------------------------------
-echo ">>> [3/4] Installing uv..."
+echo ">>> [2/3] Installing uv..."
 if command -v uv &> /dev/null; then
     echo "   uv already installed"
 else
@@ -156,9 +64,9 @@ fi
 echo "   uv $(uv --version) ready"
 
 # ---------------------------------------------------------------------------
-# 4. Create virtual environment and sync Python dependencies
+# 3. Create virtual environment and sync Python dependencies
 # ---------------------------------------------------------------------------
-echo ">>> [4/4] Setting up Python environment..."
+echo ">>> [3/3] Setting up Python environment..."
 cd "$PROJECT_DIR"
 if [ ! -d "$PROJECT_DIR/.venv" ]; then
     echo "   Creating virtual environment with Python 3.13..."
@@ -174,9 +82,9 @@ for script in sorcar check generate-api-docs; do
 done
 
 # ---------------------------------------------------------------------------
-# 5. Install Playwright Chromium  (https://playwright.dev)
+# 4. Install Playwright Chromium  (https://playwright.dev)
 # ---------------------------------------------------------------------------
-echo ">>> [5] Installing Playwright Chromium..."
+echo ">>> [4] Installing Playwright Chromium..."
 uv run playwright install chromium
 
 # ---------------------------------------------------------------------------
