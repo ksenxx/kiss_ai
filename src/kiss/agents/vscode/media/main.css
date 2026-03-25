@@ -752,6 +752,7 @@ header {
 .merge-toolbar-card {
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 10px; padding: 10px 12px; animation: fadeIn 0.2s ease;
+  overflow: hidden;
 }
 .merge-toolbar-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -765,7 +766,7 @@ header {
   font-size: var(--fs-xs); color: var(--dim); opacity: 0.7;
 }
 .merge-toolbar-actions {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }
 .merge-toolbar-group {
   display: flex; align-items: center; gap: 2px;
@@ -774,12 +775,12 @@ header {
   width: 1px; height: 18px; background: var(--border); margin: 0 4px; flex-shrink: 0;
 }
 .merge-btn {
-  font-size: var(--fs-base); font-family: inherit; border: none; border-radius: 6px;
-  padding: 6px 12px; cursor: pointer; transition: all 0.15s;
+  font-size: var(--fs-sm); font-family: inherit; border: none; border-radius: 6px;
+  padding: 4px 8px; cursor: pointer; transition: all 0.15s;
   white-space: nowrap; font-weight: 500;
-  display: inline-flex; align-items: center; gap: 6px; background: none;
+  display: inline-flex; align-items: center; gap: 4px; background: none;
 }
-.merge-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+.merge-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
 .merge-btn.merge-accept {
   background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green);
 }
