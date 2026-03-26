@@ -48,13 +48,13 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 ## Installation and Launching KISS Sorcar
 
 You must set the **`ANTHROPIC_API_KEY`** and **`GEMINI_API_KEY`** in the environment. Then download
-[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.56/kiss-offline-installer.pkg) and
+[KISS Sorcar](https://github.com/ksenxx/kiss_ai/releases/download/v0.2.56/kiss-installer.pkg) and
 install using
 
 ```
 # To install
-xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
-open ~/Downloads/kiss-offline-installer.pkg
+xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
+open ~/Downloads/kiss-installer.pkg
 
 # To launch sorcar
 source ~/.zshrc
@@ -579,7 +579,7 @@ kiss/
 │       └── templates/
 │           └── index.html
 ├── scripts/             # Repository-level scripts
-│   ├── build_offline_pkg.sh        # Offline macOS package builder
+│   ├── build_pkg.sh                # macOS package builder
 │   ├── release.sh                  # Release script
 │   ├── test_fresh_lib_install.sh   # Fresh library install test
 │   └── test_fresh_repo_install.sh  # Fresh repo install test

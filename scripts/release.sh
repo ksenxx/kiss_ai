@@ -10,7 +10,7 @@
 # 3. Commit changes with "Version bumped"
 # 4. Push to origin
 # 5. Push to kiss_ai repo and tag with version
-# 6. Build offline .pkg and create GitHub release (with .pkg asset)
+# 6. Build .pkg and create GitHub release (with .pkg asset)
 # 7. Publish to PyPI
 
 set -e  # Exit on error
@@ -217,44 +217,44 @@ main() {
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
-    # Step 6: Build offline .pkg and create GitHub release
-    print_step "Building offline installer package..."
-    OFFLINE_PKG="$PWD/dist/kiss-offline-installer.pkg"
-    bash scripts/build_offline_pkg.sh
-    if [[ -f "$OFFLINE_PKG" ]]; then
-        print_step "Creating GitHub release with offline installer..."
-        gh release create "$TAG_NAME" "$OFFLINE_PKG" \
+    # Step 6: Build .pkg and create GitHub release
+    print_step "Building installer package..."
+    INSTALLER_PKG="$PWD/dist/kiss-installer.pkg"
+    bash scripts/build_pkg.sh
+    if [[ -f "$INSTALLER_PKG" ]]; then
+        print_step "Creating GitHub release with installer..."
+        gh release create "$TAG_NAME" "$INSTALLER_PKG" \
             --repo ksenxx/kiss_ai \
             --title "KISS $VERSION" \
             --notes "Release $VERSION
 
 ## Downloads
-- **kiss-offline-installer.pkg** — macOS offline installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
+- **kiss-installer.pkg** — macOS installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
 
 ## macOS Installation
 
 The installer package is not signed with an Apple Developer certificate. macOS Gatekeeper will block it by default. To install, use **one** of these methods:
 
 ### Method 1: System Settings (recommended)
-1. Double-click \`kiss-offline-installer.pkg\` — you'll see a warning dialog
+1. Double-click \`kiss-installer.pkg\` — you'll see a warning dialog
 2. Open **System Settings → Privacy & Security**
-3. Scroll down to find *\"kiss-offline-installer.pkg\" was blocked*
+3. Scroll down to find *\"kiss-installer.pkg\" was blocked*
 4. Click **Open Anyway** and confirm
 
 ### Method 2: Remove quarantine attribute
 \`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
-open ~/Downloads/kiss-offline-installer.pkg
+xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
+open ~/Downloads/kiss-installer.pkg
 \`\`\`
 
 ### Method 3: Command-line install
 \`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
-sudo installer -pkg ~/Downloads/kiss-offline-installer.pkg -target /
+xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
+sudo installer -pkg ~/Downloads/kiss-installer.pkg -target /
 \`\`\`"
         print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
     else
-        print_warn "Offline installer .pkg not found at $OFFLINE_PKG — skipping GitHub release asset upload"
+        print_warn "installer .pkg not found at $INSTALLER_PKG — skipping GitHub release asset upload"
         gh release create "$TAG_NAME" \
             --repo ksenxx/kiss_ai \
             --title "KISS $VERSION" \

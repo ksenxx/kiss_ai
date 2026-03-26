@@ -13,10 +13,11 @@ case "$OS" in
     *)      echo "ERROR: Unsupported OS: $OS"; exit 1 ;;
 esac
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-    arm64|aarch64) ARCH="arm64" ;;
-esac
+# Require Apple Silicon — x86 is not supported
+if [ "$(uname -m)" != "arm64" ] && [ "$(uname -m)" != "aarch64" ]; then
+    echo "ERROR: Sorcar cannot be installed on x86 hardware. Apple Silicon (arm64) is required."
+    exit 1
+fi
 
 mkdir -p "$BIN_DIR"
 
@@ -43,10 +44,8 @@ else
 fi
 
 # Add Homebrew to PATH for this session
-if [ "$OS" = "macos" ] && [ "$ARCH" = "arm64" ]; then
+if [ "$OS" = "macos" ]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
-elif [ "$OS" = "macos" ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
 fi
 
 echo "   Homebrew $(brew --version | head -1) ready"
@@ -88,49 +87,51 @@ echo ">>> [4] Installing Playwright Chromium..."
 uv run playwright install chromium
 
 # ---------------------------------------------------------------------------
-# Write install_dir marker (used by env.py for offline-installer compat)
+# Write install_dir marker (used by env.py for installer compat)
 # ---------------------------------------------------------------------------
 mkdir -p "$HOME/.kiss"
 printf '%s\n' "$PROJECT_DIR" > "$HOME/.kiss/install_dir"
 
 # ---------------------------------------------------------------------------
-# Create env.sh
+# Add PATH to shell rc file
 # ---------------------------------------------------------------------------
-PROFILE_SNIPPET="$PROJECT_DIR/env.sh"
-cat > "$PROFILE_SNIPPET" << EOF
-# KISS Agent Framework - added by install.sh
-export PATH="$BIN_DIR:\$PATH"
-EOF
-
-# ---------------------------------------------------------------------------
-# Add source line to shell rc
-# ---------------------------------------------------------------------------
-_add_to_shell_rc() {
+_add_path_to_rc() {
     local rc_file="$1"
-    local source_line="source \"$PROFILE_SNIPPET\""
+    local path_line="export PATH=\"$BIN_DIR:\$PATH\""
     if [ -f "$rc_file" ]; then
-        if ! grep -qF "$source_line" "$rc_file"; then
-            printf '\n%s\n' "$source_line" >> "$rc_file"
-            echo "   Added to $rc_file"
+        if ! grep -qF "$BIN_DIR" "$rc_file"; then
+            printf '\n# KISS Agent Framework\n%s\n' "$path_line" >> "$rc_file"
+            echo "   Added $BIN_DIR to $rc_file"
         else
-            echo "   Already in $rc_file"
+            echo "   $BIN_DIR already in $rc_file"
         fi
     else
-        echo "$source_line" > "$rc_file"
-        echo "   Created $rc_file with source line"
+        printf '# KISS Agent Framework\n%s\n' "$path_line" > "$rc_file"
+        echo "   Created $rc_file with PATH"
     fi
 }
 
 echo ">>> Configuring shell profile..."
 case "${SHELL:-/bin/zsh}" in
-    */zsh)  _add_to_shell_rc "$HOME/.zshrc" ;;
-    */bash) _add_to_shell_rc "$HOME/.bashrc" ;;
-    *)      _add_to_shell_rc "$HOME/.zshrc"
-            _add_to_shell_rc "$HOME/.bashrc" ;;
+    */zsh)  _add_path_to_rc "$HOME/.zshrc" ;;
+    */bash) _add_path_to_rc "$HOME/.bashrc" ;;
+    */fish)
+        _fish_config="$HOME/.config/fish/config.fish"
+        mkdir -p "$(dirname "$_fish_config")"
+        _fish_line="fish_add_path $BIN_DIR"
+        if [ -f "$_fish_config" ] && grep -qF "$BIN_DIR" "$_fish_config"; then
+            echo "   $BIN_DIR already in $_fish_config"
+        else
+            printf '\n# KISS Agent Framework\n%s\n' "$_fish_line" >> "$_fish_config"
+            echo "   Added $BIN_DIR to $_fish_config"
+        fi
+        ;;
+    *)      _add_path_to_rc "$HOME/.zshrc"
+            _add_path_to_rc "$HOME/.bashrc" ;;
 esac
 
 echo ""
 echo "=== Installation Complete ==="
 echo "Project: $PROJECT_DIR"
 echo ""
-echo "Open a new terminal or run: source \"$PROFILE_SNIPPET\""
+echo "Open a new terminal for PATH changes to take effect."
