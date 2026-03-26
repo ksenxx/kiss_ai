@@ -85,13 +85,41 @@ echo "   Extracting VS Code..."
 mkdir -p "$BUNDLE/vscode-app"
 # VS Code zip extracts to "Visual Studio Code.app"
 ditto -xk "$VSCODE_ZIP" "$BUNDLE/vscode-app"
-# Rename to a simpler name
+# Rename to Sorcar.app
 if [ -d "$BUNDLE/vscode-app/Visual Studio Code.app" ]; then
-    mv "$BUNDLE/vscode-app/Visual Studio Code.app" "$BUNDLE/vscode-app/Code.app"
+    mv "$BUNDLE/vscode-app/Visual Studio Code.app" "$BUNDLE/vscode-app/Sorcar.app"
 fi
 # Strip quarantine from all executables
 find "$BUNDLE/vscode-app" -type f -perm +111 -exec sh -c \
     'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; true' _ {} \;
+# Replace VS Code icon with Sorcar thumbnail
+THUMBNAIL_SRC="$PROJECT_ROOT/assets/thumbnail.jpeg"
+if [ -f "$THUMBNAIL_SRC" ]; then
+    echo "   Replacing VS Code icon with Sorcar thumbnail..."
+    _ICONSET_DIR="$STAGE/cache/Sorcar.iconset"
+    mkdir -p "$_ICONSET_DIR"
+    for size in 16 32 64 128 256 512 1024; do
+        sips -z $size $size "$THUMBNAIL_SRC" --out "$_ICONSET_DIR/icon_${size}x${size}.png" 2>/dev/null || true
+    done
+    for size in 16 32 128 256 512; do
+        double=$((size * 2))
+        if [ -f "$_ICONSET_DIR/icon_${double}x${double}.png" ]; then
+            cp "$_ICONSET_DIR/icon_${double}x${double}.png" "$_ICONSET_DIR/icon_${size}x${size}@2x.png"
+        fi
+    done
+    _SORCAR_ICNS="$STAGE/cache/Sorcar.icns"
+    iconutil -c icns -o "$_SORCAR_ICNS" "$_ICONSET_DIR" 2>/dev/null || true
+    if [ -f "$_SORCAR_ICNS" ]; then
+        # Replace the VS Code icon inside the app bundle
+        _VSCODE_ICNS="$BUNDLE/vscode-app/Sorcar.app/Contents/Resources/Code.icns"
+        if [ -f "$_VSCODE_ICNS" ]; then
+            cp "$_SORCAR_ICNS" "$_VSCODE_ICNS"
+        fi
+        # Also copy as Sorcar.icns for the bundle
+        cp "$_SORCAR_ICNS" "$BUNDLE/Sorcar.icns"
+    fi
+    rm -rf "$_ICONSET_DIR"
+fi
 echo "   VS Code: $(du -sh "$BUNDLE/vscode-app" | cut -f1)"
 
 # ---------------------------------------------------------------------------
@@ -118,6 +146,10 @@ cp "$PROJECT_ROOT/assets/kiss_logo.svg" "$BUNDLE/kiss_logo.svg"
 # Also copy PNG version if available (easier to convert to .icns)
 if [ -f "$PROJECT_ROOT/assets/kiss_logo.png" ]; then
     cp "$PROJECT_ROOT/assets/kiss_logo.png" "$BUNDLE/kiss_logo.png"
+fi
+# Copy thumbnail for Sorcar app icon
+if [ -f "$PROJECT_ROOT/assets/thumbnail.jpeg" ]; then
+    cp "$PROJECT_ROOT/assets/thumbnail.jpeg" "$BUNDLE/thumbnail.jpeg"
 fi
 
 # ---------------------------------------------------------------------------
@@ -219,15 +251,23 @@ echo "   uv installed at $THIRDPARTY/uv/, symlinked to $BIN_DIR/uv"
 echo ">>> Installing VS Code..."
 rm -rf "$THIRDPARTY/vscode"
 mkdir -p "$THIRDPARTY/vscode"
-cp -R "$KISS_BUNDLE_DIR/vscode-app/Code.app" "$THIRDPARTY/vscode/Code.app"
+cp -R "$KISS_BUNDLE_DIR/vscode-app/Sorcar.app" "$THIRDPARTY/vscode/Sorcar.app"
 # Strip quarantine from all VS Code executables
 find "$THIRDPARTY/vscode" -type f -perm +111 -exec sh -c \
     'xattr -d com.apple.quarantine "$1" 2>/dev/null; xattr -d com.apple.provenance "$1" 2>/dev/null; true' _ {} \;
+# Change bundle identifier so macOS doesn't confuse this with an existing VS Code
+VSCODE_PLIST="$THIRDPARTY/vscode/Sorcar.app/Contents/Info.plist"
+if [ -f "$VSCODE_PLIST" ]; then
+    plutil -replace CFBundleIdentifier -string "com.kiss.sorcar.vscode" "$VSCODE_PLIST"
+    plutil -replace CFBundleName -string "Sorcar Code" "$VSCODE_PLIST"
+fi
+# Re-sign the app bundle after plist modifications (otherwise macOS rejects it)
+codesign --force --deep --sign - "$THIRDPARTY/vscode/Sorcar.app" 2>/dev/null || true
 # Symlink the 'code' CLI to ~/.kiss/bin/
-VSCODE_CLI="$THIRDPARTY/vscode/Code.app/Contents/Resources/app/bin/code"
+VSCODE_CLI="$THIRDPARTY/vscode/Sorcar.app/Contents/Resources/app/bin/code"
 if [ -x "$VSCODE_CLI" ]; then
     ln -sf "$VSCODE_CLI" "$BIN_DIR/code"
-    echo "   VS Code installed at $THIRDPARTY/vscode/, CLI symlinked to $BIN_DIR/code"
+    echo "   VS Code installed at $THIRDPARTY/vscode/Sorcar.app, CLI symlinked to $BIN_DIR/code"
 else
     echo "   WARNING: VS Code CLI not found at expected location"
 fi
@@ -332,11 +372,11 @@ fi
 cat > "$SORCAR_APP/Contents/MacOS/Sorcar" << LAUNCHER
 #!/bin/bash
 # Sorcar launcher — opens the bundled VS Code
-VSCODE_APP="$THIRDPARTY/vscode/Code.app"
+VSCODE_APP="$THIRDPARTY/vscode/Sorcar.app"
 if [ -d "\$VSCODE_APP" ]; then
     open "\$VSCODE_APP" "\$@"
 else
-    osascript -e 'display alert "Sorcar" message "VS Code not found at $THIRDPARTY/vscode/Code.app. Please reinstall." as critical'
+    osascript -e 'display alert "Sorcar" message "Sorcar not found at $THIRDPARTY/vscode/Sorcar.app. Please reinstall." as critical'
     exit 1
 fi
 LAUNCHER
@@ -386,7 +426,7 @@ if [ -d "$KISS_BUNDLE_DIR/project" ]; then
 fi
 
 echo ">>> Installing KISS VS Code extension..."
-VSCODE_CLI="$THIRDPARTY/vscode/Code.app/Contents/Resources/app/bin/code"
+VSCODE_CLI="$THIRDPARTY/vscode/Sorcar.app/Contents/Resources/app/bin/code"
 if [ -x "$VSCODE_CLI" ] && [ -f "$KISS_BUNDLE_DIR/kiss-extension.vsix" ]; then
     "$VSCODE_CLI" --install-extension "$KISS_BUNDLE_DIR/kiss-extension.vsix" --force 2>&1 || true
     echo "   Extension installed into bundled VS Code"
@@ -397,7 +437,7 @@ fi
 echo ""
 echo "=== Installation Complete ==="
 echo ""
-echo "VS Code at: $THIRDPARTY/vscode/Code.app"
+echo "VS Code at: $THIRDPARTY/vscode/Sorcar.app"
 echo "uv at: $THIRDPARTY/uv/uv"
 echo "Binaries symlinked in: $BIN_DIR"
 echo "Sorcar app: /Applications/Sorcar.app"
