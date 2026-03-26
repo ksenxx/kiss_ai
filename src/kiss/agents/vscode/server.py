@@ -577,7 +577,7 @@ class VSCodeServer:
                 return ""
 
         # Extract the trailing token (may include dots for chains)
-        m = re.search(r"([\w][\w.]*)\s*$", query)
+        m = re.search(r"([\w][\w.]*)[^\w]*$", query)
         if not m:
             return ""
         partial = m.group(1)
