@@ -19,25 +19,16 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 <details>
 <summary><strong>Table of Contents</strong></summary>
 
-- [Installation](#installation)
+- [Installation and Launching KISS Sorcar](#installation-and-launching-kiss-sorcar)
+- [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
 - [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
 - [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
 - [Multi-Agent Orchestration](#-multi-agent-orchestration-is-function-composition)
-- [KISS Sorcar](#-kiss-sorcar)
-- [Key Features and Ideologies](#-key-features-and-ideologies-behind-kiss-and-sorcar)
-- [Repo Optimizer](#-using-repo-optimizer)
+- [Key Features and Principles](#-key-features-and-principles-behind-kiss-and-sorcar)
 - [Output Formatting](#-output-formatting)
-- [Trajectory Saving and Visualization](#-trajectory-saving-and-visualization)
-- [Features of The KISS Framework](#-features-of-the-kiss-framework)
-- [Full Installation & Dependency Groups](#-installation-1)
 - [KISSAgent API Reference](#-kissagent-api-reference)
 - [GEPA Prompt Optimization](#-using-gepa-for-prompt-optimization)
 - [KISSEvolve Algorithm Discovery](#-using-kissevolve-for-algorithm-discovery)
-- [Docker Manager](#-docker-manager)
-- [Project Structure](#-project-structure)
-- [Versioning](#%EF%B8%8F-versioning)
-- [Configuration](#%EF%B8%8F-configuration)
-- [Available Commands](#%EF%B8%8F-available-commands)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
 - [License](#-license)
@@ -47,9 +38,10 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also download the Visual Studio Extension at [src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix](src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix).
+To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also build the extension locally by running `cd src/kiss/agents/vscode && vsce package --allow-missing-repository`.
 
-You can open a terminal and use sorcar as a normal shell command.  Some examples are:
+You can open a terminal and use sorcar as a normal shell command. Some examples are:
+
 ```
 sorcar -t "What is 2435*234"
 
@@ -66,8 +58,6 @@ sorcar -n -t "What is 2435*234?" # to start in a new chat session
 **KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor and **a general-purpose agent with web browsing and native Desktop app execution capabilities**. It runs **locally** as a VS Code IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
 #whatispossible #KISSSorcar
-
-![KISS Sorcar Screenshot](assets/KISSSorcar.png)
 
 # Introduction to KISS
 
@@ -164,7 +154,6 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
 - **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
 - **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
-- **RepoOptimizer for Iterative Code Improvement**: Wraps `SorcarAgent` to run a command, monitor output in real time, fix errors, and iteratively optimize code for specified metrics — tracking tried ideas to avoid repeating failed approaches.
 - **Accessibility-Tree Browser Automation**: The `WebUseTool` uses Playwright's `aria_snapshot()` to extract the accessibility tree, numbers interactive elements for LLM reference, and avoids JavaScript injection to reduce bot detection.
 - **Dynamic Configuration System**: Uses Pydantic models with a `add_config()` pattern that lets each subsystem register its own config at import time, with automatic CLI argument generation from the schema.
 - **Trajectory Visualization**: A web-based UI for viewing complete agent execution histories including message flows, tool calls, token usage, and budget stats — with markdown rendering and syntax-highlighted code blocks.
