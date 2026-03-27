@@ -72,4 +72,4 @@ in the vscode extension you have to add a major feature. You need to add a new c
 
 can you create a stateful_sorcar_agent.py in src/kiss/agents/sorcar/ extending SorcarAgent such that it reads the previous tasks with the same chat_id from history.db, creates a prompt with previous tasks and results with the same chat_id, saves the new task and results in the history.db. Basically, the workflow of the agent MUST be exactly the same as the workflow with the SorcarAgent in the vscode extension. Do not create the file yet, but create a plan in PLAN.md to create the file.
 
-When the chat window of the vscode extension is loaded, first 
+When the chat window of the vscode extension is loaded, first

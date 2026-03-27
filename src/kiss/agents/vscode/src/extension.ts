@@ -183,7 +183,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   // Merge commands
-  for (const cmd of ['acceptChange', 'rejectChange', 'prevChange', 'nextChange', 'acceptAll', 'rejectAll'] as const) {
+  for (const cmd of ['acceptChange', 'rejectChange', 'prevChange', 'nextChange', 'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile'] as const) {
     context.subscriptions.push(
       vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
         getActiveMergeManager()?.[cmd]();

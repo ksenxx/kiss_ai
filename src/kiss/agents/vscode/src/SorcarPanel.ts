@@ -275,6 +275,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           this._mergeManager.nextChange();
         } else if (action === 'prev') {
           this._mergeManager.prevChange();
+        } else if (action === 'accept-file') {
+          await this._mergeManager.acceptFile();
+        } else if (action === 'reject-file') {
+          await this._mergeManager.rejectFile();
         }
         break;
       }

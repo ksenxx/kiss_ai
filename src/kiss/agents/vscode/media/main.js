@@ -589,7 +589,7 @@
       var mc = mkEl('div', 'ev merge-info');
       mc.innerHTML = '<div style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">'
         + '\u2731 Reviewing ' + (ev.hunk_count || 0) + ' change(s)</div>'
-        + '<div style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Blue = new lines. '
+        + '<div style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. '
         + 'Use the merge toolbar to accept or reject changes.</div>';
       O.appendChild(mc);
       break;
@@ -715,22 +715,32 @@
     bar.innerHTML =
       '<div class="merge-toolbar-header">'
       + '<span class="merge-toolbar-title">Review Changes</span>'
-      + '<span class="merge-toolbar-hint">Red = old \u00b7 Blue = new</span>'
+      + '<span class="merge-toolbar-hint">Red = old \u00b7 Green = new</span>'
       + '</div>'
       + '<div class="merge-toolbar-actions">'
+      // Row 1: Navigation + single hunk actions
+      + '<div class="merge-toolbar-row">'
       + '<div class="merge-toolbar-group">'
-      + '<button class="merge-btn merge-accept" id="merge-accept-btn" data-tooltip="Accept change">' + svgCheck + ' Accept</button>'
-      + '<button class="merge-btn merge-reject" id="merge-reject-btn" data-tooltip="Reject change">' + svgX + ' Reject</button>'
+      + '<button class="merge-btn merge-nav" id="merge-prev-btn">' + svgUp + ' Previous</button>'
+      + '<button class="merge-btn merge-nav" id="merge-next-btn">' + svgDown + ' Next</button>'
       + '</div>'
       + '<div class="merge-toolbar-sep"></div>'
       + '<div class="merge-toolbar-group">'
-      + '<button class="merge-btn merge-nav" id="merge-prev-btn" data-tooltip="Previous change">' + svgUp + '</button>'
-      + '<button class="merge-btn merge-nav" id="merge-next-btn" data-tooltip="Next change">' + svgDown + '</button>'
+      + '<button class="merge-btn merge-accept" id="merge-accept-btn">' + svgCheck + ' Accept</button>'
+      + '<button class="merge-btn merge-reject" id="merge-reject-btn">' + svgX + ' Reject</button>'
+      + '</div>'
+      + '</div>'
+      // Row 2: File-level + all actions
+      + '<div class="merge-toolbar-row">'
+      + '<div class="merge-toolbar-group">'
+      + '<button class="merge-btn merge-accept-file" id="merge-accept-file-btn">' + svgCheck + ' Accept File</button>'
+      + '<button class="merge-btn merge-reject-file" id="merge-reject-file-btn">' + svgX + ' Reject File</button>'
       + '</div>'
       + '<div class="merge-toolbar-sep"></div>'
       + '<div class="merge-toolbar-group">'
-      + '<button class="merge-btn merge-accept-all" id="merge-accept-all-btn" data-tooltip="Accept all changes">' + svgCheckAll + ' Accept All</button>'
-      + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn" data-tooltip="Reject all changes">' + svgX + ' Reject All</button>'
+      + '<button class="merge-btn merge-accept-all" id="merge-accept-all-btn">' + svgCheckAll + ' Accept All</button>'
+      + '<button class="merge-btn merge-reject-all" id="merge-reject-all-btn">' + svgXAll + ' Reject All</button>'
+      + '</div>'
       + '</div>'
       + '</div>';
     document.getElementById('input-area').appendChild(bar);
@@ -745,6 +755,12 @@
     });
     document.getElementById('merge-next-btn').addEventListener('click', function() {
       vscode.postMessage({ type: 'mergeAction', action: 'next' });
+    });
+    document.getElementById('merge-accept-file-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'accept-file' });
+    });
+    document.getElementById('merge-reject-file-btn').addEventListener('click', function() {
+      vscode.postMessage({ type: 'mergeAction', action: 'reject-file' });
     });
     document.getElementById('merge-accept-all-btn').addEventListener('click', function() {
       vscode.postMessage({ type: 'mergeAction', action: 'accept-all' });

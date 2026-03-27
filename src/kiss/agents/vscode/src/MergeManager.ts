@@ -56,7 +56,7 @@ export class MergeManager extends EventEmitter {
       isWholeLine: true,
     });
     this._blueDeco = vscode.window.createTextEditorDecorationType({
-      backgroundColor: 'rgba(59,130,246,0.15)',
+      backgroundColor: 'rgba(46,160,67,0.15)',
       isWholeLine: true,
     });
 
@@ -286,30 +286,66 @@ export class MergeManager extends EventEmitter {
     ed.selection = new vscode.Selection(ln, 0, ln, 0);
   }
 
+  private async _deleteFileHunks(
+    fp: string,
+    countProp: 'oc' | 'nc',
+    startProp: 'os' | 'ns'
+  ): Promise<void> {
+    const s = this._ms[fp];
+    if (!s) return;
+    const ed = await this._getOrOpenEditor(fp);
+    for (let i = s.hunks.length - 1; i >= 0; i--) {
+      if (s.hunks[i][countProp] > 0) {
+        await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
+      }
+    }
+  }
+
   private async _resolveAll(
     countProp: 'oc' | 'nc',
     startProp: 'os' | 'ns',
     label: string
   ): Promise<void> {
+    const fps = Object.keys(this._ms);
     try {
-      for (const fp of Object.keys(this._ms)) {
-        const s = this._ms[fp];
-        const ed = await this._getOrOpenEditor(fp);
-        for (let i = s.hunks.length - 1; i >= 0; i--) {
-          if (s.hunks[i][countProp] > 0) {
-            await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
-          }
-        }
-        ed.setDecorations(this._redDeco, []);
-        ed.setDecorations(this._blueDeco, []);
+      for (const fp of fps) {
+        await this._deleteFileHunks(fp, countProp, startProp);
       }
     } finally {
       this._ms = {};
       this._curHunk = null;
+      for (const fp of fps) {
+        this._refreshDeco(fp);
+      }
       await vscode.workspace.saveAll(false);
       vscode.window.showInformationMessage(label);
       this.emit('allDone');
     }
+  }
+
+  private async _resolveFile(
+    fp: string,
+    countProp: 'oc' | 'nc',
+    startProp: 'os' | 'ns'
+  ): Promise<void> {
+    await this._deleteFileHunks(fp, countProp, startProp);
+    delete this._ms[fp];
+    this._curHunk = null;
+    this._afterHunkAction(fp);
+  }
+
+  async acceptFile(): Promise<void> {
+    return this._withHunkGuard(async () => {
+      if (!this._curHunk || !this._ms[this._curHunk.fp]) return;
+      await this._resolveFile(this._curHunk.fp, 'oc', 'os');
+    });
+  }
+
+  async rejectFile(): Promise<void> {
+    return this._withHunkGuard(async () => {
+      if (!this._curHunk || !this._ms[this._curHunk.fp]) return;
+      await this._resolveFile(this._curHunk.fp, 'nc', 'ns');
+    });
   }
 
   async acceptAll(): Promise<void> {
