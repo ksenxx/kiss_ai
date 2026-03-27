@@ -68,7 +68,7 @@ def fast_model_for(selected_model: str) -> str:
         return "gemini-2.0-flash"
     if selected_model.startswith(_OPENAI_PREFIXES) and not selected_model.startswith("openai/"):
         return "gpt-4o-mini"
-    return DEFAULT_CONFIG.FAST_MODEL
+    return str(DEFAULT_CONFIG.FAST_MODEL)
 
 
 def generate_followup_text(task: str, result: str, model: str) -> str:

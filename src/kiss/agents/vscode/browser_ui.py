@@ -69,6 +69,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self._bash_buffer: list[str] = []
         self._bash_last_flush = 0.0
         self._bash_flush_timer: threading.Timer | None = None
+        self._bash_streamed = False
         self.stop_event = threading.Event()
         self._thread_local = threading.local()
         self._recordings: dict[int, list[dict[str, Any]]] = {}
@@ -76,6 +77,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
         self.reset_stream_state()
+        self._bash_streamed = False
         with self._bash_lock:
             self._bash_buffer.clear()
             if self._bash_flush_timer is not None:
@@ -253,18 +255,22 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                     needs_flush = False
             if needs_flush:
                 self._flush_bash()
+            self._bash_streamed = True
             return ""
         if type == "tool_call":
             self._flush_bash()
+            self._bash_streamed = False
             self.broadcast({"type": "text_end"})
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
             self._flush_bash()
+            result_content = "" if self._bash_streamed else truncate_result(str(content))
+            self._bash_streamed = False
             self.broadcast(
                 {
                     "type": "tool_result",
-                    "content": truncate_result(str(content)),
+                    "content": result_content,
                     "is_error": kwargs.get("is_error", False),
                 }
             )
