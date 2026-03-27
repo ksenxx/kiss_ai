@@ -19,6 +19,7 @@ import threading
 from typing import Any
 
 from kiss.agents.sorcar.persistence import (
+    _append_chat_event,
     _load_file_usage,
     _load_history,
     _load_last_model,
@@ -272,7 +273,6 @@ class VSCodeServer:
             )
             _record_model_usage(model)
             result_summary = self._extract_result_summary() or "No summary available"
-            self._generate_followup_sync(prompt, result_summary, model)
             task_end_event = {"type": "task_done"}
         except KeyboardInterrupt:
             task_end_event = {"type": "task_stopped"}
@@ -302,6 +302,8 @@ class VSCodeServer:
             self._refresh_file_cache()
             if task_end_event:
                 self.printer.broadcast(task_end_event)
+            if result_summary:
+                self._generate_followup_async(prompt, result_summary, model)
 
     def _start_merge_session(self, merge_json_path: str) -> bool:
         """Load merge data from disk and broadcast merge_data + merge_started events.
@@ -512,18 +514,33 @@ class VSCodeServer:
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
-    def _generate_followup_sync(self, task: str, result: str, model: str) -> None:
-        """Generate and broadcast a follow-up suggestion synchronously.
+    def _generate_followup_async(self, task: str, result: str, model: str) -> None:
+        """Generate and broadcast a follow-up suggestion in a background thread.
 
-        Runs before stop_recording() so the event is persisted in saved
-        chat events and survives panel re-creation / VS Code restarts.
+        The suggestion is broadcast to the webview and also appended to
+        the persisted chat events so it survives panel re-creation.
+
+        Args:
+            task: The completed task description.
+            result: The task result summary.
+            model: The model used for the task.
         """
-        suggestion = generate_followup_text(task, result, fast_model_for(model))
-        if suggestion:
-            self.printer.broadcast({
-                "type": "followup_suggestion",
-                "text": suggestion,
-            })
+        def _run() -> None:
+            try:
+                suggestion = generate_followup_text(
+                    task, result, fast_model_for(model)
+                )
+                if suggestion:
+                    event: dict[str, object] = {
+                        "type": "followup_suggestion",
+                        "text": suggestion,
+                    }
+                    self.printer.broadcast(event)
+                    _append_chat_event(task, event)
+            except Exception:
+                logger.debug("Async followup generation failed", exc_info=True)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _extract_result_summary(self) -> str:
         """Extract result summary from the last recorded events."""

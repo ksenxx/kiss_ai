@@ -80,15 +80,15 @@ class TestRace2FollowupUsesFastModel(unittest.TestCase):
     """Race 2 fix: _generate_followup uses fast_model_for to pick a cheap model."""
 
     def test_followup_uses_fast_model_for(self) -> None:
-        """Verify _generate_followup_sync uses fast_model_for, not self._selected_model directly."""
-        source = inspect.getsource(VSCodeServer._generate_followup_sync)
+        """_generate_followup_async uses fast_model_for, not _selected_model."""
+        source = inspect.getsource(VSCodeServer._generate_followup_async)
         assert "self._selected_model" not in source
         assert "fast_model_for" in source
 
     def test_run_task_calls_followup_with_model(self) -> None:
-        """Verify _run_task_inner passes the task model to _generate_followup_sync."""
+        """Verify _run_task_inner passes the task model to _generate_followup_async."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_generate_followup_sync(prompt, result_summary, model)" in source
+        assert "_generate_followup_async(prompt, result_summary, model)" in source
 
 
 class TestRace14StatusBroadcastOrder(unittest.TestCase):
