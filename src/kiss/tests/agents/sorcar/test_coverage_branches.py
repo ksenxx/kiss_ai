@@ -1488,7 +1488,7 @@ class TestVSCodeServerBranches:
 
             server, events = self._make_server()
             server.work_dir = repo
-            server._generate_commit_message("claude-opus-4-6")
+            server._generate_commit_message()
             commit_events = [e for e in events if e["type"] == "commitMessage"]
             assert len(commit_events) == 1
             assert commit_events[0]["message"] == "Error: No staged files."

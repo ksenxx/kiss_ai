@@ -533,7 +533,6 @@
       break;
     case 'followup_suggestion': {
       var fu = mkEl('div', 'followup-bar');
-      fu.dataset.tooltip = ev.text;
       fu.innerHTML = '<span class="fu-label">Suggested next</span>'
         + '<span class="fu-text">' + esc(ev.text) + '</span>';
       fu.addEventListener('click', function() {

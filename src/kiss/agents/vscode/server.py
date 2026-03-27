@@ -190,9 +190,8 @@ class VSCodeServer:
         elif cmd_type == "getInputHistory":
             self._get_input_history()
         elif cmd_type == "generateCommitMessage":
-            model = cmd.get("model") or self._selected_model
             threading.Thread(
-                target=self._generate_commit_message, args=(model,), daemon=True
+                target=self._generate_commit_message, daemon=True
             ).start()
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
@@ -272,7 +271,7 @@ class VSCodeServer:
             )
             _record_model_usage(model)
             result_summary = self._extract_result_summary() or "No summary available"
-            self._generate_followup(prompt, result_summary, model)
+            self._generate_followup(prompt, result_summary)
             task_end_event = {"type": "task_done"}
         except KeyboardInterrupt:
             task_end_event = {"type": "task_stopped"}
@@ -512,10 +511,12 @@ class VSCodeServer:
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
-    def _generate_followup(self, task: str, result: str, model: str) -> None:
+    def _generate_followup(self, task: str, result: str) -> None:
         """Generate a follow-up suggestion using LLM after task completion."""
         def _run() -> None:
-            suggestion = generate_followup_text(task, result, model)
+            from kiss.core.config import DEFAULT_CONFIG
+
+            suggestion = generate_followup_text(task, result, DEFAULT_CONFIG.FAST_MODEL)
             if suggestion:
                 self.printer.broadcast({
                     "type": "followup_suggestion",
@@ -663,9 +664,11 @@ class VSCodeServer:
         ranked = rank_file_suggestions(self._file_cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
 
-    def _generate_commit_message(self, model: str) -> None:
+    def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""
         try:
+            from kiss.core.config import DEFAULT_CONFIG
+
             cached_result = _git(self.work_dir, "diff", "--cached")
             diff_text = cached_result.stdout.strip()
             if not diff_text:
@@ -678,7 +681,7 @@ class VSCodeServer:
             context_parts.append(f"Diff:\n{diff_text}")
             agent = KISSAgent("Commit Message Generator")
             raw = agent.run(
-                model_name=model,
+                model_name=DEFAULT_CONFIG.FAST_MODEL,
                 prompt_template=(
                     "Generate a nicely markdown formatted, informative git commit message for "
                     "these changes. Use conventional commit format with a clear subject "
