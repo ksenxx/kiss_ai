@@ -388,7 +388,11 @@ class KISSAgent(Base):
             )
 
         if self.printer:
-            self.printer.print(function_response, type="tool_result")
+            self.printer.print(
+                function_response,
+                type="tool_result",
+                tool_name=function_name,
+            )
 
         return function_name, function_response
 

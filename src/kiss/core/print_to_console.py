@@ -127,8 +127,10 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            self._flush_newline()
-            self._print_tool_result(str(content), kwargs.get("is_error", False))
+            tool_name = kwargs.get("tool_name", "")
+            if tool_name in {"Bash", "Read", "Edit", "Write"} or kwargs.get("is_error", False):
+                self._flush_newline()
+                self._print_tool_result(str(content), kwargs.get("is_error", False))
             return ""
         if type == "result":
             self._flush_newline()

@@ -108,8 +108,8 @@ class TestToolResultContentParity:
         from kiss.core.printer import MAX_RESULT_LEN
         console, buf, browser, bq = _make_printers()
         long_content = "x" * (MAX_RESULT_LEN * 2)
-        console.print(long_content, type="tool_result", is_error=False)
-        browser.print(long_content, type="tool_result", is_error=False)
+        console.print(long_content, type="tool_result", is_error=False, tool_name="Read")
+        browser.print(long_content, type="tool_result", is_error=False, tool_name="Read")
         out = buf.getvalue()
         events = _drain(bq)
         tr_events = [e for e in events if e["type"] == "tool_result"]
@@ -236,7 +236,7 @@ class TestFullAgentSequenceParity:
         for p in (console, browser):
             p.print("Edit", type="tool_call", tool_input=ti)
         for p in (console, browser):
-            p.print("File edited", type="tool_result", is_error=False)
+            p.print("File edited", type="tool_result", is_error=False, tool_name="Edit")
 
         for p in (console, browser):
             p.print("Steps: 2/10, Tokens: 500", type="usage_info")
