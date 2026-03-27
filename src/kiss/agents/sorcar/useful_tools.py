@@ -148,18 +148,27 @@ def _strip_heredocs(command: str) -> str:
     )
 
 
+_cached_clean_env: dict[str, str] | None = None
+
+
 def _clean_env() -> dict[str, str]:
-    """Return a copy of ``os.environ`` without ``VIRTUAL_ENV``.
+    """Return a cached copy of ``os.environ`` without ``VIRTUAL_ENV``.
 
     When the agent process runs inside a virtual-env (e.g. the VS Code
     extension's own ``.venv``), the ``VIRTUAL_ENV`` variable leaks into
     child processes and causes ``uv run`` to emit a spurious warning about
     a mismatched environment.  Stripping it lets ``uv`` (and other tools)
     discover the correct project ``.venv`` on their own.
+
+    The result is cached after the first call since os.environ rarely
+    changes during agent execution.
     """
-    env = os.environ.copy()
-    env.pop("VIRTUAL_ENV", None)
-    return env
+    global _cached_clean_env
+    if _cached_clean_env is None:
+        env = os.environ.copy()
+        env.pop("VIRTUAL_ENV", None)
+        _cached_clean_env = env
+    return _cached_clean_env
 
 
 def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> str:

@@ -82,7 +82,18 @@ class KISSAgent(Base):
         self.set_printer(printer, verbose=self.verbose)
         token_callback = self.printer.token_callback if self.printer else None
 
-        self.model = model(model_name, model_config=model_config, token_callback=token_callback)
+        # Reuse existing model client if model name and config haven't changed
+        existing = getattr(self, "model", None)
+        if (
+            existing is not None
+            and existing.model_name == self.model_name
+            and existing.model_config == (model_config or {})
+        ):
+            existing.reset_conversation()
+            existing.token_callback = token_callback
+            self.model = existing
+        else:
+            self.model = model(model_name, model_config=model_config, token_callback=token_callback)
         self.is_agentic = is_agentic
         self.max_steps = (
             max_steps if max_steps is not None else config_module.DEFAULT_CONFIG.agent.max_steps
@@ -93,6 +104,7 @@ class KISSAgent(Base):
             else config_module.DEFAULT_CONFIG.agent.max_agent_budget
         )
         self.function_map: dict[str, Callable[..., Any]] = {}
+        self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
         self.step_count = 0
         self.total_tokens_used = 0
@@ -211,6 +223,7 @@ class KISSAgent(Base):
         """Setup tools for agentic mode.
 
         Adds finish tool if not present, and web tools if enabled in config.
+        Pre-builds and caches the tool schema so it is not rebuilt on every LLM call.
 
         Args:
             tools: Optional list of callable tools to make available to the agent.
@@ -225,6 +238,7 @@ class KISSAgent(Base):
             tools.append(self.finish)
 
         self._add_functions(tools)
+        self._cached_tools_schema = self.model._build_openai_tools_schema(self.function_map)
 
     def _run_non_agentic(self) -> str:
         """Run a single generation without tools.
@@ -300,7 +314,7 @@ class KISSAgent(Base):
         start_timestamp = int(time.time())
 
         function_calls, response_text, response = self.model.generate_and_process_with_tools(
-            self.function_map
+            self.function_map, tools_schema=self._cached_tools_schema
         )
         self._update_tokens_and_budget_from_response(response)
         usage_info = self._get_usage_info_string()

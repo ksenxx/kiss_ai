@@ -6,7 +6,6 @@ Feeds identical print() calls to both printers and verifies:
 - Semantic content (tool names, paths, results, etc.) matches
 """
 
-import asyncio
 import io
 import queue
 from types import SimpleNamespace
@@ -172,8 +171,8 @@ class TestTokenCallbackParity:
 
     def test_empty_token_no_broadcast(self):
         console, _, browser, bq = _make_printers()
-        asyncio.run(console.token_callback(""))
-        asyncio.run(browser.token_callback(""))
+        console.token_callback("")
+        browser.token_callback("")
         events = _drain(bq)
         assert len(events) == 0
 

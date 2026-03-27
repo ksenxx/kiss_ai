@@ -5,7 +5,6 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -22,7 +21,7 @@ import yaml
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model, _get_callback_loop
+from kiss.core.models.model import Model
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
@@ -95,10 +94,10 @@ class TestModelConversation(TestCase):
 
 
 class TestModelCallbackLoop(TestCase):
-    def test_invoke_callback_from_running_loop(self) -> None:
+    def test_invoke_callback_sync(self) -> None:
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
         tokens: list[str] = []
-        async def cb(token: str) -> None:
+        def cb(token: str) -> None:
             tokens.append(token)
         m = OpenAICompatibleModel(
             model_name="gpt-4o-mini",
@@ -106,11 +105,8 @@ class TestModelCallbackLoop(TestCase):
             api_key="test-key",
             token_callback=cb,
         )
-        async def invoke_from_async() -> None:
-            m._invoke_token_callback("async-token")
-        asyncio.run(invoke_from_async())
-        assert "async-token" in tokens
-        m.close_callback_loop()
+        m._invoke_token_callback("sync-token")
+        assert "sync-token" in tokens
 
     def test_invoke_callback_no_callback(self) -> None:
         """Cover the early return when token_callback is None."""
@@ -121,12 +117,6 @@ class TestModelCallbackLoop(TestCase):
             api_key="test-key",
         )
         m._invoke_token_callback("ignored")
-
-    def test_get_callback_loop(self) -> None:
-        """Cover _get_callback_loop creation."""
-        loop = _get_callback_loop()
-        assert loop is not None
-        assert loop.is_running()
 
 
 class TestGetModel(TestCase):
@@ -225,7 +215,7 @@ class TestMultiPrinter(TestCase):
         mp = MultiPrinter([p1, p2])
         cq1 = p1.add_client()
         cq2 = p2.add_client()
-        asyncio.run(mp.token_callback("tok"))
+        mp.token_callback("tok")
         assert not cq1.empty()
         assert not cq2.empty()
 
@@ -293,14 +283,14 @@ class TestModelInfoFunctions(TestCase):
         assert cost >= 0.0
 
 
-async def _noop_callback(token: str) -> None:
-    """Async no-op token callback for streaming tests."""
+def _noop_callback(token: str) -> None:
+    """No-op token callback for streaming tests."""
     pass
 
 
 def _make_collector_callback(collector: list[str]):
-    """Create an async token callback that collects tokens into a list."""
-    async def _cb(token: str) -> None:
+    """Create a token callback that collects tokens into a list."""
+    def _cb(token: str) -> None:
         collector.append(token)
     return _cb
 

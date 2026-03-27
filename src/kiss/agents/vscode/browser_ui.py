@@ -279,7 +279,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             return ""
         return ""
 
-    async def token_callback(self, token: str) -> None:
+    def token_callback(self, token: str) -> None:
         """Broadcast a streamed token as an SSE delta event to browser clients.
 
         Args:

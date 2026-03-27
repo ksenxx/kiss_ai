@@ -52,7 +52,7 @@ class _RetryableErrorModel:
         self.conversation.append({"role": "user", "content": prompt})
 
     def generate_and_process_with_tools(
-        self, function_map: dict[str, Any]
+        self, function_map: dict[str, Any], tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
         self.calls += 1
         if self.calls <= self.failures:
@@ -78,7 +78,7 @@ class _RetryableErrorModel:
 
 class _NonRetryableErrorModel(_RetryableErrorModel):
     def generate_and_process_with_tools(
-        self, function_map: dict[str, Any]
+        self, function_map: dict[str, Any], tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
         raise Exception("Unauthorized: invalid API key")
 
@@ -99,6 +99,7 @@ def _make_agent(model_obj: Any, max_steps: int = 5) -> KISSAgent:
     agent.budget_used = 0.0
     agent.session_info = ""
     agent.run_start_timestamp = 0
+    agent._cached_tools_schema = None
     return agent
 
 

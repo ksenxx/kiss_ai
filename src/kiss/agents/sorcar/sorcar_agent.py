@@ -28,6 +28,7 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
+        self._wait_for_user_callback: Callable[[str, str], None] | None = None
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -69,6 +70,8 @@ class SorcarAgent(RelentlessAgent):
             ]
         else:
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+        if self.web_use_tool is None:
+            self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
         tools.append(ask_user_question)
@@ -167,7 +170,8 @@ class SorcarAgent(RelentlessAgent):
         """
         self._wait_for_user_callback = wait_for_user_callback
         self._ask_user_question_callback = ask_user_question_callback
-        self.web_use_tool = WebUseTool(wait_for_user_callback=wait_for_user_callback)
+        # Lazy-initialized when web tools are first accessed via _get_tools()
+        self.web_use_tool = None
         # Extract the per-thread stop event from the printer so UsefulTools
         # can monitor it and kill child processes when the agent is stopped.
         tl = getattr(printer, "_thread_local", None) if printer else None

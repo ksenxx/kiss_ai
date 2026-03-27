@@ -207,9 +207,9 @@ from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatible
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
-- **close_callback_loop** — Close the per-instance event loop used for synchronous token callback invocation. Safe to call multiple times; subsequent calls are no-ops.<br/>`close_callback_loop() -> None`
+- **reset_conversation** — Reset conversation state for reuse across sub-sessions. Clears the conversation history and usage info while keeping the HTTP client and model configuration intact.<br/>`reset_conversation() -> None`
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -220,9 +220,10 @@ from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatible
 
   - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built tool schema list. When provided, skips schema rebuilding from function_map (performance optimization).
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
 - **add_function_results_to_conversation_and_return** — Adds function results to the conversation state. Matches results to tool calls by index from the last assistant message.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
@@ -271,7 +272,7 @@ ______________________________________________________________________
 
 - `model_name`: The name of the model (with provider prefix if applicable).
 - `model_config`: Optional dictionary of model configuration parameters. If it contains "base_url", routing is bypassed and an OpenAICompatibleModel is built with that base_url and optional "api_key".
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 - **Returns:** Model: An appropriate Model instance for the specified model.
 
 **`get_available_models`** — Return model names for which an API key is configured and generation is supported.<br/>`def get_available_models() -> list[str]`
@@ -310,7 +311,7 @@ ______________________________________________________________________
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 - **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -321,9 +322,10 @@ ______________________________________________________________________
 
   - **Returns:** A tuple of (content, response) where content is the generated text and response is the raw API response object.
 
-- **generate_and_process_with_tools** — Generate content with tools, process the response, and add it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generate content with tools, process the response, and add it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built tool schema list.
   - **Returns:** A tuple of (function_calls, content, response) where function_calls is a list of dictionaries containing tool call information, content is the text response, and response is the raw API response object.
 
 - **extract_input_output_token_counts_from_response** — Extract token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
@@ -350,7 +352,7 @@ ______________________________________________________________________
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -361,9 +363,10 @@ ______________________________________________________________________
 
   - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-- **generate_and_process_with_tools** — Generates content with tools and processes the response.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generates content with tools and processes the response.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built OpenAI-format tool schema list.
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
 - **add_function_results_to_conversation_and_return** — Add tool results to the conversation.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
@@ -393,7 +396,7 @@ ______________________________________________________________________
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -404,9 +407,10 @@ ______________________________________________________________________
 
   - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built OpenAI-format tool schema list.
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
 - **extract_input_output_token_counts_from_response** — Extracts token counts from a Gemini API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
@@ -441,7 +445,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional type-specific options (e.g. tool_input, is_error).
   - **Returns:** str: Any extracted text (e.g. streamed text deltas), or empty string.
 
-- **token_callback** — Handle a single streamed token from the LLM.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Handle a single streamed token from the LLM.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to process.
 
@@ -458,7 +462,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional options forwarded to each child printer.
   - **Returns:** str: The result from the last child printer.
 
-- **token_callback** — Forward a streamed token to all child printers.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Forward a streamed token to all child printers.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to forward.
 
@@ -506,7 +510,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
-- **token_callback** — Stream a single token to the console, styled by current block type.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Stream a single token to the console, styled by current block type.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to display.
 
@@ -547,7 +551,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
-- **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to broadcast.
 
@@ -1107,7 +1111,7 @@ ______________________________________________________________________
 **`rank_file_suggestions`** — Rank and filter file paths by query match, recency, and usage.<br/>`def rank_file_suggestions(file_cache: list[str], query: str, usage: dict[str, int], limit: int = 20) -> list[dict[str, str]]`
 
 - `file_cache`: List of file paths to search.
-- `query`: Case-insensitive substring to match against paths.
+- `query`: Case-sensitive substring to match against paths.
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
@@ -1699,7 +1703,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
-- **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to broadcast.
 
@@ -1726,7 +1730,7 @@ ______________________________________________________________________
 **`rank_file_suggestions`** — Rank and filter file paths by query match, recency, and usage.<br/>`def rank_file_suggestions(file_cache: list[str], query: str, usage: dict[str, int], limit: int = 20) -> list[dict[str, str]]`
 
 - `file_cache`: List of file paths to search.
-- `query`: Case-insensitive substring to match against paths.
+- `query`: Case-sensitive substring to match against paths.
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
@@ -2061,9 +2065,9 @@ from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Mod
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
-- **close_callback_loop** — Close the per-instance event loop used for synchronous token callback invocation. Safe to call multiple times; subsequent calls are no-ops.<br/>`close_callback_loop() -> None`
+- **reset_conversation** — Reset conversation state for reuse across sub-sessions. Clears the conversation history and usage info while keeping the HTTP client and model configuration intact.<br/>`reset_conversation() -> None`
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -2074,9 +2078,10 @@ from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Mod
 
   - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built tool schema list. When provided, skips schema rebuilding from function_map (performance optimization).
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
 - **add_function_results_to_conversation_and_return** — Adds function results to the conversation state. Matches results to tool calls by index from the last assistant message.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
@@ -2117,7 +2122,7 @@ ______________________________________________________________________
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -2128,9 +2133,10 @@ ______________________________________________________________________
 
   - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-- **generate_and_process_with_tools** — Generates content with tools and processes the response.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generates content with tools and processes the response.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built OpenAI-format tool schema list.
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
 - **add_function_results_to_conversation_and_return** — Add tool results to the conversation.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
@@ -2160,7 +2166,7 @@ ______________________________________________________________________
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -2171,9 +2177,10 @@ ______________________________________________________________________
 
   - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built OpenAI-format tool schema list.
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
 - **extract_input_output_token_counts_from_response** — Extracts token counts from a Gemini API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
@@ -2209,9 +2216,9 @@ ______________________________________________________________________
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
-- **close_callback_loop** — Close the per-instance event loop used for synchronous token callback invocation. Safe to call multiple times; subsequent calls are no-ops.<br/>`close_callback_loop() -> None`
+- **reset_conversation** — Reset conversation state for reuse across sub-sessions. Clears the conversation history and usage info while keeping the HTTP client and model configuration intact.<br/>`reset_conversation() -> None`
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -2222,9 +2229,10 @@ ______________________________________________________________________
 
   - **Returns:** tuple\[str, Any\]: A tuple of (generated_text, raw_response).
 
-- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generates content with tools, processes the response, and adds it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built tool schema list. When provided, skips schema rebuilding from function_map (performance optimization).
   - **Returns:** tuple\[list\[dict[str, Any]\], str, Any\]: A tuple of (function_calls, response_text, raw_response).
 
 - **add_function_results_to_conversation_and_return** — Adds function results to the conversation state. Matches results to tool calls by index from the last assistant message.<br/>`add_function_results_to_conversation_and_return(function_results: list[tuple[str, dict[str, Any]]]) -> None`
@@ -2273,7 +2281,7 @@ ______________________________________________________________________
 
 - `model_name`: The name of the model (with provider prefix if applicable).
 - `model_config`: Optional dictionary of model configuration parameters. If it contains "base_url", routing is bypassed and an OpenAICompatibleModel is built with that base_url and optional "api_key".
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 - **Returns:** Model: An appropriate Model instance for the specified model.
 
 **`get_available_models`** — Return model names for which an API key is configured and generation is supported.<br/>`def get_available_models() -> list[str]`
@@ -2307,7 +2315,7 @@ ______________________________________________________________________
 - `model_name`: The name of the Novita model to use.
 - `api_key`: The Novita API key for authentication.
 - `model_config`: Optional dictionary of model configuration parameters.
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 ______________________________________________________________________
 
@@ -2325,7 +2333,7 @@ ______________________________________________________________________
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 - **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -2336,9 +2344,10 @@ ______________________________________________________________________
 
   - **Returns:** A tuple of (content, response) where content is the generated text and response is the raw API response object.
 
-- **generate_and_process_with_tools** — Generate content with tools, process the response, and add it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]]) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generate content with tools, process the response, and add it to conversation.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
   - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Optional pre-built tool schema list.
   - **Returns:** A tuple of (function_calls, content, response) where function_calls is a list of dictionaries containing tool call information, content is the text response, and response is the raw API response object.
 
 - **extract_input_output_token_counts_from_response** — Extract token counts from an API response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
@@ -2368,7 +2377,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
-- **token_callback** — Stream a single token to the console, styled by current block type.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Stream a single token to the console, styled by current block type.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to display.
 
@@ -2394,7 +2403,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional type-specific options (e.g. tool_input, is_error).
   - **Returns:** str: Any extracted text (e.g. streamed text deltas), or empty string.
 
-- **token_callback** — Handle a single streamed token from the LLM.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Handle a single streamed token from the LLM.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to process.
 
@@ -2411,7 +2420,7 @@ ______________________________________________________________________
   - `**kwargs`: Additional options forwarded to each child printer.
   - **Returns:** str: The result from the last child printer.
 
-- **token_callback** — Forward a streamed token to all child printers.<br/>`async token_callback(token: str) -> None`
+- **token_callback** — Forward a streamed token to all child printers.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to forward.
 
@@ -2838,7 +2847,7 @@ ______________________________________________________________________
 - `model_name`: The name of the Novita model to use.
 - `api_key`: The Novita API key for authentication.
 - `model_config`: Optional dictionary of model configuration parameters.
-- `token_callback`: Optional async callback invoked with each streamed text token.
+- `token_callback`: Optional callback invoked with each streamed text token.
 
 ______________________________________________________________________
 

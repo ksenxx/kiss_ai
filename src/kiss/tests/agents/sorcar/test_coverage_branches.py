@@ -6,7 +6,6 @@ and real function calls.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import queue
@@ -303,7 +302,7 @@ class TestBaseBrowserPrinterBranches:
         p = BaseBrowserPrinter()
         cq: queue.Queue = queue.Queue()
         p._client_queue = cq
-        asyncio.get_event_loop().run_until_complete(p.token_callback("hello"))
+        p.token_callback("hello")
         ev = cq.get_nowait()
         assert ev["type"] == "text_delta"
         assert ev["text"] == "hello"
@@ -313,7 +312,7 @@ class TestBaseBrowserPrinterBranches:
         cq: queue.Queue = queue.Queue()
         p._client_queue = cq
         p._current_block_type = "thinking"
-        asyncio.get_event_loop().run_until_complete(p.token_callback("thought"))
+        p.token_callback("thought")
         ev = cq.get_nowait()
         assert ev["type"] == "thinking_delta"
 
@@ -321,14 +320,14 @@ class TestBaseBrowserPrinterBranches:
         p = BaseBrowserPrinter()
         cq: queue.Queue = queue.Queue()
         p._client_queue = cq
-        asyncio.get_event_loop().run_until_complete(p.token_callback(""))
+        p.token_callback("")
         assert cq.empty()
 
     def test_token_callback_stop(self):
         p = BaseBrowserPrinter()
         p.stop_event.set()
         with pytest.raises(KeyboardInterrupt):
-            asyncio.get_event_loop().run_until_complete(p.token_callback("x"))
+            p.token_callback("x")
         p.stop_event.clear()
 
     def test_format_tool_call_all_fields(self):
@@ -1492,7 +1491,7 @@ class TestVSCodeServerBranches:
             server._generate_commit_message("claude-opus-4-6")
             commit_events = [e for e in events if e["type"] == "commitMessage"]
             assert len(commit_events) == 1
-            assert commit_events[0]["error"] == "No changes detected"
+            assert commit_events[0]["message"] == "Error: No staged files."
 
     def test_get_last_session_empty_task(self, tmp_path):
         """When last task has empty task text, no event emitted."""
@@ -1559,7 +1558,7 @@ class TestVSCodeServerBranches:
             time.sleep(1)
             commit_events = [e for e in events if e["type"] == "commitMessage"]
             assert len(commit_events) == 1
-            assert commit_events[0]["error"] == "No changes detected"
+            assert commit_events[0]["message"] == "Error: No staged files."
 
 
 class TestVSCodePrinter:

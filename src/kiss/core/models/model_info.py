@@ -700,7 +700,7 @@ def model(
         model_config: Optional dictionary of model configuration parameters.
             If it contains "base_url", routing is bypassed and an OpenAICompatibleModel
             is built with that base_url and optional "api_key".
-        token_callback: Optional async callback invoked with each streamed text token.
+        token_callback: Optional callback invoked with each streamed text token.
 
     Returns:
         Model: An appropriate Model instance for the specified model.

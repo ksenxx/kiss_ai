@@ -627,15 +627,22 @@ class VSCodeServer:
         self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
 
     def _refresh_file_cache(self) -> None:
-        """Refresh the file cache from disk."""
-        from kiss.agents.vscode.diff_merge import _scan_files
+        """Refresh the file cache from disk in a background thread.
 
-        self._file_cache = _scan_files(self.work_dir)
+        Serves stale cache while refresh is in progress.
+        """
+        def _do_refresh() -> None:
+            from kiss.agents.vscode.diff_merge import _scan_files
+            self._file_cache = _scan_files(self.work_dir)
+
+        threading.Thread(target=_do_refresh, daemon=True).start()
 
     def _get_files(self, prefix: str) -> None:
         """Send file list for autocomplete with usage-based sorting."""
         if not self._file_cache:
-            self._refresh_file_cache()
+            # First call: scan synchronously so we have data to return.
+            from kiss.agents.vscode.diff_merge import _scan_files
+            self._file_cache = _scan_files(self.work_dir)
         usage = _load_file_usage()
         ranked = rank_file_suggestions(self._file_cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
