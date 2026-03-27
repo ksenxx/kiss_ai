@@ -90,7 +90,7 @@ class TestBashStreamDedup(unittest.TestCase):
         buf_before = buf.getvalue()
         assert "line1" in buf_before
         # tool_result should not repeat the content
-        p.print("line1\nline2\n", type="tool_result")
+        p.print("line1\nline2\n", type="tool_result", tool_name="Bash")
         buf_after = buf.getvalue()
         # The content after tool_result should only have OK rules, not repeated lines
         new_output = buf_after[len(buf_before):]
@@ -100,10 +100,22 @@ class TestBashStreamDedup(unittest.TestCase):
 
     def test_tool_result_shows_content_without_bash_stream(self):
         p, buf = _make()
-        p.print("some output", type="tool_result")
+        p.print("some output", type="tool_result", tool_name="Read")
         out = buf.getvalue()
         assert "some output" in out
         assert "OK" in out
+
+    def test_tool_result_suppressed_for_non_core_tools(self):
+        p, buf = _make()
+        p.print("accessibility tree", type="tool_result", tool_name="go_to_url")
+        out = buf.getvalue()
+        assert "accessibility tree" not in out
+
+    def test_tool_result_shown_on_error_for_non_core_tools(self):
+        p, buf = _make()
+        p.print("error msg", type="tool_result", tool_name="go_to_url", is_error=True)
+        out = buf.getvalue()
+        assert "error msg" in out
 
     def test_tool_call_resets_bash_streamed(self):
         p, buf = _make()
@@ -113,7 +125,7 @@ class TestBashStreamDedup(unittest.TestCase):
         buf.truncate(0)
         buf.seek(0)
         # Next tool_result should show content
-        p.print("file contents", type="tool_result")
+        p.print("file contents", type="tool_result", tool_name="Read")
         out = buf.getvalue()
         assert "file contents" in out
 

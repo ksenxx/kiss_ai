@@ -265,15 +265,19 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             return ""
         if type == "tool_result":
             self._flush_bash()
+            tool_name = kwargs.get("tool_name", "")
+            core_tools = {"Bash", "Read", "Edit", "Write"}
+            show_result = tool_name in core_tools or kwargs.get("is_error", False)
             result_content = "" if self._bash_streamed else truncate_result(str(content))
             self._bash_streamed = False
-            self.broadcast(
-                {
-                    "type": "tool_result",
-                    "content": result_content,
-                    "is_error": kwargs.get("is_error", False),
-                }
-            )
+            if show_result:
+                self.broadcast(
+                    {
+                        "type": "tool_result",
+                        "content": result_content,
+                        "is_error": kwargs.get("is_error", False),
+                    }
+                )
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})
