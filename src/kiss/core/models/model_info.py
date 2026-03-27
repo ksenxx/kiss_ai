@@ -708,8 +708,6 @@ def model(
     Raises:
         KISSError: If the model name is not recognized.
     """
-    from kiss.core.models import AnthropicModel, GeminiModel, NovitaModel
-
     if model_config and "base_url" in model_config:
         base_url = model_config["base_url"]
         api_key = model_config.get("api_key", "")
@@ -731,6 +729,8 @@ def model(
             token_callback,
         )
     if model_name == "text-embedding-004":
+        from kiss.core.models import GeminiModel
+
         if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
@@ -758,6 +758,8 @@ def model(
             token_callback,
         )
     if model_name.startswith("claude-"):
+        from kiss.core.models import AnthropicModel
+
         if AnthropicModel is None:  # pragma: no cover – anthropic always installed
             raise KISSError(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
@@ -769,6 +771,8 @@ def model(
             token_callback=token_callback,
         )
     if model_name.startswith("gemini-"):
+        from kiss.core.models import GeminiModel
+
         if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
@@ -788,6 +792,8 @@ def model(
             token_callback,
         )
     if model_name.startswith("novita/"):
+        from kiss.core.models import NovitaModel
+
         if NovitaModel is None:
             raise KISSError(
                 "OpenAI SDK not installed. Install 'openai' to use Novita models."

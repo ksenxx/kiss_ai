@@ -272,7 +272,7 @@ class VSCodeServer:
             )
             _record_model_usage(model)
             result_summary = self._extract_result_summary() or "No summary available"
-            self._generate_followup(prompt, result_summary, model)
+            self._generate_followup_sync(prompt, result_summary, model)
             task_end_event = {"type": "task_done"}
         except KeyboardInterrupt:
             task_end_event = {"type": "task_stopped"}
@@ -512,17 +512,18 @@ class VSCodeServer:
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
-    def _generate_followup(self, task: str, result: str, model: str) -> None:
-        """Generate a follow-up suggestion using LLM after task completion."""
-        def _run() -> None:
-            suggestion = generate_followup_text(task, result, fast_model_for(model))
-            if suggestion:
-                self.printer.broadcast({
-                    "type": "followup_suggestion",
-                    "text": suggestion,
-                })
+    def _generate_followup_sync(self, task: str, result: str, model: str) -> None:
+        """Generate and broadcast a follow-up suggestion synchronously.
 
-        threading.Thread(target=_run, daemon=True).start()
+        Runs before stop_recording() so the event is persisted in saved
+        chat events and survives panel re-creation / VS Code restarts.
+        """
+        suggestion = generate_followup_text(task, result, fast_model_for(model))
+        if suggestion:
+            self.printer.broadcast({
+                "type": "followup_suggestion",
+                "text": suggestion,
+            })
 
     def _extract_result_summary(self) -> str:
         """Extract result summary from the last recorded events."""

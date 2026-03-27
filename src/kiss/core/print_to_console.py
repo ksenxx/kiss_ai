@@ -36,10 +36,10 @@ class ConsolePrinter(StreamEventParser, Printer):
         self.reset_stream_state()
 
     @staticmethod
-    def _format_result_content(raw: str) -> Group | str:
+    def _format_result_content(raw: str) -> Group | Markdown:
         data = parse_result_yaml(raw)
         if data is None:
-            return raw
+            return Markdown(raw)
         parts: list[Any] = []
         if "success" in data:
             style = "bold green" if data["success"] else "bold red"
@@ -81,7 +81,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._flush_newline()
             self._console.print(
                 Panel(
-                    Text(str(content)),
+                    Markdown(str(content)),
                     title="[bold]System Prompt[/bold]",
                     border_style="magenta",
                     padding=(1, 2),
@@ -92,7 +92,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._flush_newline()
             self._console.print(
                 Panel(
-                    Text(str(content)),
+                    Markdown(str(content)),
                     title="[bold]Prompt[/bold]",
                     border_style="cyan",
                     padding=(1, 2),

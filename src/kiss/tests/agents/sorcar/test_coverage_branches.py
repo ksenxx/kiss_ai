@@ -2259,12 +2259,11 @@ class TestVSCodeServerMoreBranches:
         assert server._merging is True
 
     def test_generate_followup_empty(self):
-        """_generate_followup when generate_followup_text returns empty."""
+        """_generate_followup_sync when generate_followup_text returns empty."""
         server, events = self._make_server()
         # generate_followup_text will fail (no API key configured for model)
         # or return empty, so no followup_suggestion event
-        server._generate_followup("test task", "test result", server._selected_model)
-        time.sleep(1)
+        server._generate_followup_sync("test task", "test result", server._selected_model)
         [e for e in events if e["type"] == "followup_suggestion"]
         # May or may not have a suggestion depending on API availability
         # But the test exercises the branch
