@@ -27,10 +27,12 @@ class ConsolePrinter(StreamEventParser, Printer):
         self._console = Console(highlight=False, file=file)
         self._file = file or sys.stdout
         self._mid_line = False
+        self._bash_streamed = False
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
         self._mid_line = False
+        self._bash_streamed = False
         self.reset_stream_state()
 
     @staticmethod
@@ -117,9 +119,11 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._file.write(str(content))
             self._file.flush()
             self._mid_line = not str(content).endswith("\n")
+            self._bash_streamed = True
             return ""
         if type == "tool_call":
             self._flush_newline()
+            self._bash_streamed = False
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
@@ -191,12 +195,14 @@ class ConsolePrinter(StreamEventParser, Printer):
         )
 
     def _print_tool_result(self, content: str, is_error: bool) -> None:
-        display = truncate_result(content)
         style = "red" if is_error else "green"
         self._console.rule("FAILED" if is_error else "OK", style=style, align="center")
-        for line in display.splitlines():
-            self._file.write(line + "\n")
-            self._file.flush()
+        if not self._bash_streamed:
+            display = truncate_result(content)
+            for line in display.splitlines():
+                self._file.write(line + "\n")
+                self._file.flush()
+        self._bash_streamed = False
         self._console.rule(style=style)
 
     def _on_thinking_start(self) -> None:

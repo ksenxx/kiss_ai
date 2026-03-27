@@ -8,7 +8,6 @@
   - [`kiss.core`](#kisscore)
     - [`kiss.core.kiss_agent`](#kisscorekiss_agent)
     - [`kiss.core.base`](#kisscorebase)
-    - [`kiss.core.config`](#kisscoreconfig)
     - [`kiss.core.config_builder`](#kisscoreconfig_builder)
     - [`kiss.core.models`](#kisscoremodels)
       - [`kiss.core.models.model_info`](#kisscoremodelsmodel_info)
@@ -36,7 +35,6 @@
         - [`kiss.agents.vscode.kiss_project.src.kiss`](#kissagentsvscodekiss_projectsrckiss)
           - [`kiss.agents.vscode.kiss_project.src.kiss.agents`](#kissagentsvscodekiss_projectsrckissagents)
             - [`kiss.agents.vscode.kiss_project.src.kiss.agents.gepa`](#kissagentsvscodekiss_projectsrckissagentsgepa)
-              - [`kiss.agents.vscode.kiss_project.src.kiss.agents.gepa.config`](#kissagentsvscodekiss_projectsrckissagentsgepaconfig)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.gepa.gepa`](#kissagentsvscodekiss_projectsrckissagentsgepagepa)
             - [`kiss.agents.vscode.kiss_project.src.kiss.agents.kiss`](#kissagentsvscodekiss_projectsrckissagentskiss)
             - [`kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve`](#kissagentsvscodekiss_projectsrckissagentskiss_evolve)
@@ -153,12 +151,6 @@ ______________________________________________________________________
 - **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
 
   - **Returns:** str: A JSON-formatted string of all messages in the agent's history.
-
-______________________________________________________________________
-
-#### `kiss.core.config` — *Configuration Pydantic models for KISS agent settings with CLI support.*
-
-##### `class APIKeysConfig(BaseModel)`
 
 ______________________________________________________________________
 
@@ -1070,6 +1062,11 @@ ______________________________________________________________________
 - `name`: The model name string.
 - **Returns:** Tuple of (display name, numeric sort order).
 
+**`fast_model_for`** — Return a cheap/fast model from the same provider as the user's selected model.<br/>`def fast_model_for(selected_model: str) -> str`
+
+- `selected_model`: The user's currently selected model name.
+- **Returns:** A fast model name compatible with the same provider/API key.
+
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.
@@ -1170,12 +1167,6 @@ from kiss.agents.vscode.kiss_project.src.kiss.agents.gepa import GEPA, GEPAPhase
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.agents.gepa.config` — *GEPA-specific configuration that extends the main KISS config.*
-
-##### `class GEPAConfig(BaseModel)` — GEPA-specific configuration settings.
-
-______________________________________________________________________
-
 #### `kiss.agents.vscode.kiss_project.src.kiss.agents.gepa.gepa` — *GEPA (Genetic-Pareto): Reflective Prompt Evolution for Compound AI Systems.*
 
 ##### `class GEPAPhase(Enum)` — Enum representing the current phase of GEPA optimization.
@@ -1186,7 +1177,7 @@ ______________________________________________________________________
 
 ##### `class GEPA` — GEPA (Genetic-Pareto) prompt optimizer.
 
-**Constructor:** `GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int | None = None, population_size: int | None = None, pareto_size: int | None = None, mutation_rate: float | None = None, reflection_model: str | None = None, dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)`
+**Constructor:** `GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int = 10, population_size: int = 8, pareto_size: int = 4, mutation_rate: float = 0.5, reflection_model: str = 'gemini-3-flash-preview', dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)`
 
 - `agent_wrapper`: Function (prompt_template, arguments) -> (result, trajectory). Used when batched_agent_wrapper is not provided, or as fallback.
 
@@ -1675,6 +1666,11 @@ ______________________________________________________________________
 - `name`: The model name string.
 - **Returns:** Tuple of (display name, numeric sort order).
 
+**`fast_model_for`** — Return a cheap/fast model from the same provider as the user's selected model.<br/>`def fast_model_for(selected_model: str) -> str`
+
+- `selected_model`: The user's currently selected model name.
+- **Returns:** A fast model name compatible with the same provider/API key.
+
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.
@@ -1935,8 +1931,6 @@ ______________________________________________________________________
 ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.core.config` — *Configuration Pydantic models for KISS agent settings with CLI support.*
-
-##### `class APIKeysConfig(BaseModel)`
 
 ##### `class Config(BaseModel)`
 

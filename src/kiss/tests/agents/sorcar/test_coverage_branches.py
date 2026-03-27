@@ -263,6 +263,54 @@ class TestBaseBrowserPrinterBranches:
         tr = [e for e in events if e["type"] == "tool_result"][0]
         assert tr["is_error"] is True
 
+    def test_tool_result_skips_content_after_bash_stream(self):
+        """tool_result should not repeat content already streamed via bash_stream."""
+        p = BaseBrowserPrinter()
+        cq: queue.Queue = queue.Queue()
+        p._client_queue = cq
+        # Simulate bash streaming output
+        p.print("line1\n", type="bash_stream")
+        p.print("line2\n", type="bash_stream")
+        time.sleep(0.15)  # let timer flush
+        # Now the tool result comes in with the same content
+        p.print("line1\nline2\n", type="tool_result")
+        events = []
+        while not cq.empty():
+            events.append(cq.get_nowait())
+        tr = [e for e in events if e["type"] == "tool_result"][0]
+        # Content should be empty since it was already streamed
+        assert tr["content"] == ""
+        assert tr["is_error"] is False
+
+    def test_tool_result_shows_content_without_bash_stream(self):
+        """tool_result should show content when nothing was streamed."""
+        p = BaseBrowserPrinter()
+        cq: queue.Queue = queue.Queue()
+        p._client_queue = cq
+        p.print("some output", type="tool_result")
+        events = []
+        while not cq.empty():
+            events.append(cq.get_nowait())
+        tr = [e for e in events if e["type"] == "tool_result"][0]
+        assert tr["content"] == "some output"
+
+    def test_tool_call_resets_bash_streamed_flag(self):
+        """tool_call should reset _bash_streamed so next tool_result shows content."""
+        p = BaseBrowserPrinter()
+        cq: queue.Queue = queue.Queue()
+        p._client_queue = cq
+        p.print("line\n", type="bash_stream")
+        time.sleep(0.15)
+        # tool_call resets the flag
+        p.print("Read", type="tool_call", tool_input={"file_path": "/tmp/x"})
+        # Next tool_result should show content (not bash-streamed)
+        p.print("file contents", type="tool_result")
+        events = []
+        while not cq.empty():
+            events.append(cq.get_nowait())
+        tr = [e for e in events if e["type"] == "tool_result"][0]
+        assert tr["content"] == "file contents"
+
     def test_print_result_broadcasts_text_end_and_result(self):
         p = BaseBrowserPrinter()
         cq: queue.Queue = queue.Queue()

@@ -61,7 +61,7 @@ class Config(BaseModel):
     )
     FAST_MODEL: str = Field(
         default="claude-haiku-4-5",
-        description="Model to use for fast operations like commit generation and suggestion generation",
+        description="Model for fast operations like commit and suggestion generation",
     )
 
 
