@@ -55,6 +55,14 @@
         "title": "KISS: Reject All Changes"
       },
       {
+        "command": "kissSorcar.acceptFile",
+        "title": "KISS: Accept File Changes"
+      },
+      {
+        "command": "kissSorcar.rejectFile",
+        "title": "KISS: Reject File Changes"
+      },
+      {
         "command": "kissSorcar.generateCommitMessage",
         "title": "KISS: Generate Commit Message",
         "icon": "$(sparkle)"
