@@ -91,7 +91,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
       await vscode.commands.executeCommand('kissSorcar.openPanel');
-      getActiveProvider()?.newConversation();
+      const provider = getActiveProvider();
+      provider?.newConversation();
+      await provider?.focusChatInput();
     })
   );
 

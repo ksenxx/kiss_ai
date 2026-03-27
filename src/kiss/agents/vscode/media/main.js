@@ -829,7 +829,8 @@
       histIdx = -1;
       syncClearBtn();
     });
-    inp.addEventListener('blur', function() { clearGhost(); });
+    inp.addEventListener('blur', function() { clearGhost(); hideAC(); });
+    autocomplete.addEventListener('mousedown', function(e) { e.preventDefault(); });
     stopBtn.addEventListener('click', function() {
       vscode.postMessage({ type: 'stop' });
     });
