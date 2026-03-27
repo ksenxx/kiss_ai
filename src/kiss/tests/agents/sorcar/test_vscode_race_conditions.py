@@ -77,18 +77,18 @@ class TestRace1StateLockProtection(unittest.TestCase):
 
 
 class TestRace2FollowupUsesFastModel(unittest.TestCase):
-    """Race 2 fix: _generate_followup uses FAST_MODEL from config."""
+    """Race 2 fix: _generate_followup uses fast_model_for to pick a cheap model."""
 
-    def test_followup_uses_fast_model(self) -> None:
-        """Verify _generate_followup uses DEFAULT_CONFIG.FAST_MODEL, not self._selected_model."""
+    def test_followup_uses_fast_model_for(self) -> None:
+        """Verify _generate_followup uses fast_model_for, not self._selected_model directly."""
         source = inspect.getsource(VSCodeServer._generate_followup)
         assert "self._selected_model" not in source
-        assert "FAST_MODEL" in source
+        assert "fast_model_for" in source
 
-    def test_run_task_calls_followup_without_model(self) -> None:
-        """Verify _run_task_inner calls _generate_followup without model arg."""
+    def test_run_task_calls_followup_with_model(self) -> None:
+        """Verify _run_task_inner passes the task model to _generate_followup."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_generate_followup(prompt, result_summary)" in source
+        assert "_generate_followup(prompt, result_summary, model)" in source
 
 
 class TestRace14StatusBroadcastOrder(unittest.TestCase):

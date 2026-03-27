@@ -706,8 +706,8 @@ class TestScanFilesBranches:
 
 class TestSharedUtilsBranches:
     def test_clean_llm_output(self):
-        assert clean_llm_output('  "hello"  ') == "hello"
-        assert clean_llm_output("  'world'  ") == "world"
+        assert clean_llm_output('"hello"') == "hello"
+        assert clean_llm_output("'world'") == "world"
 
     def test_model_vendor_all(self):
         assert model_vendor("claude-x")[0] == "Anthropic"

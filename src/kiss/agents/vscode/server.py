@@ -46,6 +46,7 @@ from kiss.agents.vscode.diff_merge import (
 from kiss.agents.vscode.helpers import (
     clean_llm_output,
     clip_autocomplete_suggestion,
+    fast_model_for,
     generate_followup_text,
     model_vendor,
     rank_file_suggestions,
@@ -271,7 +272,7 @@ class VSCodeServer:
             )
             _record_model_usage(model)
             result_summary = self._extract_result_summary() or "No summary available"
-            self._generate_followup(prompt, result_summary)
+            self._generate_followup(prompt, result_summary, model)
             task_end_event = {"type": "task_done"}
         except KeyboardInterrupt:
             task_end_event = {"type": "task_stopped"}
@@ -511,12 +512,10 @@ class VSCodeServer:
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
-    def _generate_followup(self, task: str, result: str) -> None:
+    def _generate_followup(self, task: str, result: str, model: str) -> None:
         """Generate a follow-up suggestion using LLM after task completion."""
         def _run() -> None:
-            from kiss.core.config import DEFAULT_CONFIG
-
-            suggestion = generate_followup_text(task, result, DEFAULT_CONFIG.FAST_MODEL)
+            suggestion = generate_followup_text(task, result, fast_model_for(model))
             if suggestion:
                 self.printer.broadcast({
                     "type": "followup_suggestion",
@@ -667,8 +666,6 @@ class VSCodeServer:
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""
         try:
-            from kiss.core.config import DEFAULT_CONFIG
-
             cached_result = _git(self.work_dir, "diff", "--cached")
             diff_text = cached_result.stdout.strip()
             if not diff_text:
@@ -681,7 +678,7 @@ class VSCodeServer:
             context_parts.append(f"Diff:\n{diff_text}")
             agent = KISSAgent("Commit Message Generator")
             raw = agent.run(
-                model_name=DEFAULT_CONFIG.FAST_MODEL,
+                model_name=fast_model_for(self._selected_model),
                 prompt_template=(
                     "Generate a nicely markdown formatted, informative git commit message for "
                     "these changes. Use conventional commit format with a clear subject "

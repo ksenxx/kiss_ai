@@ -51,6 +51,26 @@ def model_vendor(name: str) -> tuple[str, int]:
     return "Together AI", 5
 
 
+def fast_model_for(selected_model: str) -> str:
+    """Return a cheap/fast model from the same provider as the user's selected model.
+
+    Args:
+        selected_model: The user's currently selected model name.
+
+    Returns:
+        A fast model name compatible with the same provider/API key.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    if selected_model.startswith("openrouter/"):
+        return "openrouter/anthropic/claude-haiku-4.5"
+    if selected_model.startswith("gemini-"):
+        return "gemini-2.0-flash"
+    if selected_model.startswith(_OPENAI_PREFIXES) and not selected_model.startswith("openai/"):
+        return "gpt-4o-mini"
+    return DEFAULT_CONFIG.FAST_MODEL
+
+
 def generate_followup_text(task: str, result: str, model: str) -> str:
     """Generate a follow-up task suggestion via LLM.
 
