@@ -309,7 +309,6 @@ async function promptForApiKey(
     const key = await vscode.window.showInputBox({
       title: displayName,
       prompt: `${displayName} is not set. Please enter your key:`,
-      password: true,
       placeHolder: placeholder,
       ignoreFocusOut: true,
     });
