@@ -766,7 +766,10 @@ header {
   font-size: var(--fs-xs); color: var(--dim); opacity: 0.7;
 }
 .merge-toolbar-actions {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.merge-toolbar-row {
+  display: flex; align-items: center; gap: 6px; width: 100%;
 }
 .merge-toolbar-group {
   display: flex; align-items: center; gap: 2px;
@@ -793,6 +796,14 @@ header {
   color: var(--dim); padding: 6px 8px;
 }
 .merge-btn.merge-nav:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+.merge-btn.merge-accept-file {
+  color: color-mix(in srgb, var(--green) 80%, var(--dim));
+}
+.merge-btn.merge-accept-file:hover { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+.merge-btn.merge-reject-file {
+  color: color-mix(in srgb, var(--red) 80%, var(--dim));
+}
+.merge-btn.merge-reject-file:hover { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red); }
 .merge-btn.merge-accept-all {
   color: color-mix(in srgb, var(--green) 70%, var(--dim));
 }
