@@ -36,6 +36,10 @@ can you carefully analyze all Python source files under src/kiss/ and identify a
 can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods. Run tests with 900 seconds
 timeout.
 
+## build and deploy vscode extension
+
+build, package, and install the KISS Sorcar VS Code extension. Run 'cd src/kiss/agents/vscode && npm run compile && npm run copy-kiss && npm run package' to create the .vsix file. Then install it with 'code --install-extension src/kiss/agents/vscode/kiss-sorcar-*.vsix --force'.
+
 # Past tasks
 
 When I click a recent item in the welcome window of the chat window in sorcar, it should behave similarly as clicking an item in the task history button in the chatbox of sorcar.

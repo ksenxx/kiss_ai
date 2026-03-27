@@ -133,37 +133,18 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     if len(sys.argv) <= 1:
         print(
             "Usage: stateful_sorcar_agent [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-c CHAT_ID] [-r]"
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n]"
         )
         sys.exit(1)
 
     parser = _build_arg_parser()
     parser.add_argument(
-        "-c", "--chat-id", type=str, default=None,
-        help="Resume an existing chat session by ID",
-    )
-    parser.add_argument(
-        "-r", "--reset", action="store_true",
-        help="Reset chat_id to a new one (start fresh session)",
-    )
-    parser.add_argument(
-        "-l", "--last", action="store_true",
-        help="Resume the most recent chat session (uses last task's chat_id)",
+        "-n", "--new", action="store_true",
+        help="Start a new chat session",
     )
     args = parser.parse_args()
 
     agent = StatefulSorcarAgent("Stateful Sorcar Agent")
-
-    if args.reset:
-        pass  # keep the fresh auto-generated chat_id
-    elif args.last:
-        last_id = _load_last_chat_id()
-        if last_id:
-            agent._chat_id = last_id
-        else:
-            print("Warning: no previous chat session found, starting new session")
-    elif args.chat_id:
-        agent._chat_id = args.chat_id
 
     task_description = _resolve_task(args)
     work_dir = args.work_dir or str(Path(".").resolve())
@@ -194,15 +175,9 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         os.chdir(old_cwd)
     elapsed = time_mod.time() - start_time
 
-    print("FINAL RESULT:")
-    result_data = yaml.safe_load(result)
-    print("Completed successfully: " + str(result_data["success"]))
-    print(result_data["summary"])
-    print("Work directory was: " + work_dir)
     print(f"Time: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")
     print(f"Total tokens: {agent.total_tokens_used}")
-    print(f"Chat ID: {agent.chat_id}")
 
 
 if __name__ == "__main__":
