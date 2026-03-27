@@ -328,7 +328,7 @@ header {
 
 /* Follow-up suggestion bar */
 .followup-bar {
-  display: flex; align-items: flex-start; gap: 8px;
+  display: flex; flex-direction: column; gap: 4px;
   padding: 8px 12px; margin: 8px 0;
   background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px solid rgba(88,166,255,0.15);
   border-radius: 8px; cursor: pointer; transition: all 0.15s;
