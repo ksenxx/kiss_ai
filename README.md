@@ -646,6 +646,7 @@ Configuration is managed through environment variables and the `DEFAULT_CONFIG` 
   - `parent_sampling_method`: Parent sampling: 'tournament', 'power_law', or 'performance_novelty' (default: "power_law")
   - `power_law_alpha`: Power-law sampling parameter for rank-based selection (default: 1.0)
   - `performance_novelty_lambda`: Selection pressure parameter for sigmoid (default: 1.0)
+
 ## 🛠️ Available Commands
 
 ### Development

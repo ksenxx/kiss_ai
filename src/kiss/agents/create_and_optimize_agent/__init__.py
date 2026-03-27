@@ -14,11 +14,6 @@ from kiss.agents.create_and_optimize_agent.agent_evolver import (
     EvolverProgress,
     create_progress_callback,
 )
-from kiss.agents.create_and_optimize_agent.config import (
-    AgentCreatorConfig,
-    EvolverConfig,
-    ImproverConfig,
-)
 from kiss.agents.create_and_optimize_agent.improver_agent import ImprovementReport, ImproverAgent
 
 warnings.warn(
@@ -35,7 +30,4 @@ __all__ = [
     "create_progress_callback",
     "ImproverAgent",
     "ImprovementReport",
-    "AgentCreatorConfig",
-    "ImproverConfig",
-    "EvolverConfig",
 ]

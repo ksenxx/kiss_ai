@@ -61,51 +61,9 @@ class APIKeysConfig(BaseModel):
     )
 
 
-class AgentConfig(BaseModel):
+class Config(BaseModel):
     api_keys: APIKeysConfig = Field(
         default_factory=APIKeysConfig, description="API keys configuration"
-    )
-    max_steps: int = Field(default=100, description="Maximum iterations in the ReAct loop")
-    verbose: bool = Field(default=True, description="Enable verbose output")
-    debug: bool = Field(default=False, description="Enable debug mode")
-    artifact_dir: str = Field(default=artifact_dir, description="Directory to save artifacts")
-    max_agent_budget: float = Field(default=10.0, description="Maximum budget for an agent")
-    global_max_budget: float = Field(
-        default=200.0, description="Maximum budget for the global agent"
-    )
-
-
-class RelentlessAgentConfig(BaseModel):
-    model_name: str = Field(
-        default="claude-opus-4-6",
-        description="LLM model to use",
-    )
-    max_steps: int = Field(
-        default=100,
-        description="Maximum steps per sub-session",
-    )
-    max_budget: float = Field(
-        default=200.0,
-        description="Maximum budget in USD",
-    )
-    max_sub_sessions: int = Field(
-        default=10000,
-        description="Maximum number of sub-sessions for auto-continuation",
-    )
-
-
-class DockerConfig(BaseModel):
-    client_shared_path: str = Field(
-        default="/testbed", description="Path inside Docker container for shared volume"
-    )
-
-
-class Config(BaseModel):
-    agent: AgentConfig = Field(default_factory=AgentConfig, description="Agent configuration")
-    docker: DockerConfig = Field(default_factory=DockerConfig, description="Docker configuration")
-    relentless_agent: RelentlessAgentConfig = Field(
-        default_factory=RelentlessAgentConfig,
-        description="Configuration for RelentlessAgent",
     )
 
 

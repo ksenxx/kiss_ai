@@ -257,7 +257,9 @@ def test_clean_env_without_virtual_env() -> None:
             os.environ["VIRTUAL_ENV"] = orig
 
 
-def test_bash_subprocess_does_not_see_virtual_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bash_subprocess_does_not_see_virtual_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Bash tool strips VIRTUAL_ENV so child processes don't see it."""
     monkeypatch.setenv("VIRTUAL_ENV", "/some/fake/venv")
     ut = UsefulTools()

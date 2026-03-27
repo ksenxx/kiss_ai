@@ -83,17 +83,16 @@ class Base:
 
         If an explicit *printer* is provided, it is always used regardless
         of the verbose setting.  Otherwise a ``ConsolePrinter`` is created
-        when verbose output is enabled (either explicitly or via config).
+        when verbose output is enabled.
 
         Args:
             printer: An existing Printer instance to use directly. If provided,
                 verbose is ignored.
-            verbose: Whether to print to the console. If None,
-                uses the verbose config value.
+            verbose: Whether to print to the console. Defaults to True if None.
         """
         if printer:
             self.printer = printer
-        elif verbose is not False and config_module.DEFAULT_CONFIG.agent.verbose:
+        elif verbose is not False:
             from kiss.core.print_to_console import ConsolePrinter
 
             self.printer = ConsolePrinter()
@@ -125,15 +124,13 @@ class Base:
             "is_agentic": getattr(self, "is_agentic", True),
             "model": self.model_name,
             "budget_used": self.budget_used,
-            "total_budget": getattr(
-                self, "max_budget", config_module.DEFAULT_CONFIG.agent.max_agent_budget
-            ),
+            "total_budget": getattr(self, "max_budget", 10.0),
             "global_budget_used": Base.global_budget_used,
-            "global_max_budget": config_module.DEFAULT_CONFIG.agent.global_max_budget,
+            "global_max_budget": 200.0,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
             "step_count": self.step_count,
-            "max_steps": getattr(self, "max_steps", config_module.DEFAULT_CONFIG.agent.max_steps),
+            "max_steps": getattr(self, "max_steps", 100),
             "command": " ".join(sys.argv),
         }
 
@@ -142,7 +139,7 @@ class Base:
 
         The file is saved to {artifact_dir}/trajectories/trajectory_{name}_{id}_{timestamp}.yaml
         """
-        folder_path = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
+        folder_path = Path(config_module.artifact_dir) / "trajectories"
         folder_path.mkdir(parents=True, exist_ok=True)
         name_safe = self.name.replace(" ", "_").replace("/", "_")
         filename = folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"

@@ -18,7 +18,7 @@ def __getattr__(name: str) -> type:
         import importlib
 
         module = importlib.import_module(_LAZY_IMPORTS[name])
-        cls = getattr(module, name)
+        cls: type = getattr(module, name)
         globals()[name] = cls
         return cls
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

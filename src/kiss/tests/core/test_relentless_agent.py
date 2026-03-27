@@ -8,7 +8,6 @@ import unittest
 
 import yaml
 
-from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import (
@@ -86,11 +85,9 @@ class TestContinuation(unittest.TestCase):
 class TestExceptionPaths(unittest.TestCase):
     def test_exception_summarizer_also_fails(self) -> None:
         """Both executor and summarizer fail (global budget exceeded)."""
-        original_global = config_module.DEFAULT_CONFIG.agent.global_max_budget
         original_used = Base.global_budget_used
         try:
-            config_module.DEFAULT_CONFIG.agent.global_max_budget = 0.0001
-            Base.global_budget_used = 0.01
+            Base.global_budget_used = 201.0
 
             agent = RelentlessAgent("ExcSum-Fail")
             with tempfile.TemporaryDirectory() as td:
@@ -105,7 +102,6 @@ class TestExceptionPaths(unittest.TestCase):
                         verbose=False,
                     )
         finally:
-            config_module.DEFAULT_CONFIG.agent.global_max_budget = original_global
             Base.global_budget_used = original_used
 
 

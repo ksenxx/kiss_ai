@@ -33,6 +33,7 @@ cp "$PROJECT_ROOT/SYSTEM.md" "$DEST/"
 # Copy all git-tracked src/kiss/ files
 cd "$PROJECT_ROOT"
 git ls-files src/kiss/ | while IFS= read -r f; do
+    [ -f "$f" ] || continue
     mkdir -p "$DEST/$(dirname "$f")"
     cp "$f" "$DEST/$f"
 done

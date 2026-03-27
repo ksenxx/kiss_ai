@@ -14,7 +14,6 @@ import traceback
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
@@ -76,9 +75,8 @@ class KISSAgent(Base):
         verbose: bool | None = None,
         session_info: str = "",
     ) -> None:
-        cfg = config_module.DEFAULT_CONFIG.agent
-        self.model_name = model_name if model_name is not None else cfg.model_name
-        self.verbose = verbose if verbose is not None else cfg.verbose
+        self.model_name = model_name
+        self.verbose = verbose if verbose is not None else True
         self.set_printer(printer, verbose=self.verbose)
         token_callback = self.printer.token_callback if self.printer else None
 
@@ -95,14 +93,8 @@ class KISSAgent(Base):
         else:
             self.model = model(model_name, model_config=model_config, token_callback=token_callback)
         self.is_agentic = is_agentic
-        self.max_steps = (
-            max_steps if max_steps is not None else config_module.DEFAULT_CONFIG.agent.max_steps
-        )
-        self.max_budget = (
-            max_budget
-            if max_budget is not None
-            else config_module.DEFAULT_CONFIG.agent.max_agent_budget
-        )
+        self.max_steps = max_steps if max_steps is not None else 100
+        self.max_budget = max_budget if max_budget is not None else 10.0
         self.function_map: dict[str, Callable[..., Any]] = {}
         self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
@@ -167,15 +159,15 @@ class KISSAgent(Base):
                 If None, no tools are provided (only the built-in finish tool is added).
             is_agentic (bool): Whether the agent is agentic. Default is True.
             max_steps (int): The maximum number of steps to take.
-                Default is DEFAULT_CONFIG.agent.max_steps.
+                Default is 100.
             max_budget (float): The maximum budget to spend.
-                Default is DEFAULT_CONFIG.agent.max_agent_budget.
+                Default is 10.0.
             model_config (dict[str, Any] | None): The model configuration to use for the agent.
                 Default is None.
             printer (Printer | None): Optional printer for streaming output.
                 Default is None.
             verbose (bool | None): Whether to print output to console.
-                Default is None (uses config verbose setting).
+                Default is None (verbose enabled).
             attachments (list[Attachment] | None): Optional file attachments (images, PDFs)
                 to include in the initial prompt. Default is None.
             session_info (str): Sub-session label string (e.g. "Session: 1/5") to
@@ -263,7 +255,7 @@ class KISSAgent(Base):
                 total_tokens=self.total_tokens_used,
                 cost=f"${self.budget_used:.4f}",
             )
-        return response_text
+        return str(response_text)
 
     def _run_agentic_loop(self) -> str:
         consecutive_errors = 0
@@ -408,7 +400,7 @@ class KISSAgent(Base):
         """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if Base.global_budget_used > config_module.DEFAULT_CONFIG.agent.global_max_budget:
+        if Base.global_budget_used > 200.0:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -453,7 +445,7 @@ class KISSAgent(Base):
         try:
             max_tokens = get_max_context_length(self.model.model_name)
             capped_tokens = self.total_tokens_used % max_tokens
-            global_max = config_module.DEFAULT_CONFIG.agent.global_max_budget
+            global_max = 200.0
             session_part = (
                 f"{self.session_info}, " if self.session_info else ""
             )

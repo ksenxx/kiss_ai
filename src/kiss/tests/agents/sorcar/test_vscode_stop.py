@@ -187,9 +187,9 @@ class TestForceStopMechanism(unittest.TestCase):
         from kiss.agents.vscode.server import VSCodeServer
 
         server = VSCodeServer()
-        force_used = threading.Event()
 
         def cooperative_task() -> None:
+            assert server._stop_event is not None
             while not server._stop_event.is_set():
                 time.sleep(0.05)
             # Task exits cooperatively — no KeyboardInterrupt needed
@@ -209,7 +209,6 @@ class TestForceStopMechanism(unittest.TestCase):
         """Watchdog exits immediately if the task thread is already dead."""
         from kiss.agents.vscode.server import VSCodeServer
 
-        done = threading.Event()
         t = threading.Thread(target=lambda: None, daemon=True)
         t.start()
         t.join()  # Thread is dead

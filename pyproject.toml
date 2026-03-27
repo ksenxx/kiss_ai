@@ -147,6 +147,7 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 ignore_missing_imports = false
+exclude = ["src/kiss/agents/vscode/kiss_project/"]
 
 [[tool.mypy.overrides]]
 module = "backports.zstd.*"
