@@ -59,6 +59,10 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("NOVITA_API_KEY", ""),
         description="Novita API key (can also be set via NOVITA_API_KEY env var)",
     )
+    FAST_MODEL: str = Field(
+        default="claude-haiku-4-5",
+        description="Model to use for fast operations like commit generation and suggestion generation",
+    )
 
 
 DEFAULT_CONFIG: Any = Config()

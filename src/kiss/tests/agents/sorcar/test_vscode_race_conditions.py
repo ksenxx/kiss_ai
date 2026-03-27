@@ -5,7 +5,7 @@ properly fixed.
 
 Fixed Python races:
 - Race 1: _last_active_file/_last_active_content pair protected by _state_lock
-- Race 2: _generate_followup receives model as parameter
+- Race 2: _generate_followup uses FAST_MODEL from config
 - Race 14: status "running: False" broadcast moved to end of finally block
 - Race 15: newConversation() stops task before resetting (TS-side)
 - Race 16: newChat/resumeSession guarded when task is running
@@ -76,22 +76,19 @@ class TestRace1StateLockProtection(unittest.TestCase):
             assert server._last_active_content == "content_b"
 
 
-class TestRace2FollowupModelParameter(unittest.TestCase):
-    """Race 2 fix: _generate_followup receives model as a parameter."""
+class TestRace2FollowupUsesFastModel(unittest.TestCase):
+    """Race 2 fix: _generate_followup uses FAST_MODEL from config."""
 
-    def test_followup_takes_model_parameter(self) -> None:
-        """Verify _generate_followup has model parameter, not self._selected_model."""
+    def test_followup_uses_fast_model(self) -> None:
+        """Verify _generate_followup uses DEFAULT_CONFIG.FAST_MODEL, not self._selected_model."""
         source = inspect.getsource(VSCodeServer._generate_followup)
-        # Should NOT read self._selected_model
         assert "self._selected_model" not in source
-        # The model parameter is used in the closure
-        sig = inspect.signature(VSCodeServer._generate_followup)
-        assert "model" in sig.parameters
+        assert "FAST_MODEL" in source
 
-    def test_run_task_passes_model_to_followup(self) -> None:
-        """Verify _run_task_inner passes the model to _generate_followup."""
+    def test_run_task_calls_followup_without_model(self) -> None:
+        """Verify _run_task_inner calls _generate_followup without model arg."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_generate_followup(prompt, result_summary, model)" in source
+        assert "_generate_followup(prompt, result_summary)" in source
 
 
 class TestRace14StatusBroadcastOrder(unittest.TestCase):
