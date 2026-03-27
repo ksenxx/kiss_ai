@@ -143,7 +143,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             return ""
         return ""
 
-    async def token_callback(self, token: str) -> None:
+    def token_callback(self, token: str) -> None:
         """Stream a single token to the console, styled by current block type.
 
         Args:

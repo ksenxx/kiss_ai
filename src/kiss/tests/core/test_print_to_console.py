@@ -5,7 +5,6 @@ Uses real objects with duck-typed attributes (SimpleNamespace) as
 message inputs.
 """
 
-import asyncio
 import io
 import unittest
 from types import SimpleNamespace
@@ -73,7 +72,7 @@ class TestStreamingFlow(unittest.TestCase):
             "content_block": {"type": "thinking"},
         }), type="stream_event")
 
-        asyncio.run(p.token_callback("I think"))
+        p.token_callback("I think")
 
         p.print(self._event({"type": "content_block_stop"}), type="stream_event")
 

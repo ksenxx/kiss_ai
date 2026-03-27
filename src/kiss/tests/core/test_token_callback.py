@@ -23,7 +23,7 @@ class CollectorPrinter(Printer):
         self.prints.append((type, kwargs))
         return ""
 
-    async def token_callback(self, token: str) -> None:
+    def token_callback(self, token: str) -> None:
         self.tokens.append(token)
 
     def reset(self) -> None:

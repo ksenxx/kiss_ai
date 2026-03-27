@@ -32,7 +32,7 @@ class NovitaModel(OpenAICompatibleModel):
             model_name: The name of the Novita model to use.
             api_key: The Novita API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
-            token_callback: Optional async callback invoked with each streamed text token.
+            token_callback: Optional callback invoked with each streamed text token.
         """
         super().__init__(
             model_name=model_name,

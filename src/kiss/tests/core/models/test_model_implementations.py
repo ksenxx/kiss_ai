@@ -220,7 +220,8 @@ class TestAnthropicCacheControl:
             """A dummy tool."""
             return x
 
-        tools = m._build_anthropic_tools_schema({"dummy_tool": dummy_tool})
+        openai_schema = m._build_openai_tools_schema({"dummy_tool": dummy_tool})
+        tools = m._build_anthropic_tools_schema(openai_schema)
         kwargs = m._build_create_kwargs(tools=tools)
         assert "cache_control" not in kwargs["tools"][-1]
         msg = m.conversation[0]

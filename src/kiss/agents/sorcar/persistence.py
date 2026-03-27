@@ -164,17 +164,18 @@ def _generate_chat_id() -> str:
 def _add_task(task: str, chat_id: str = "") -> None:
     """Append a task to the history. Thread-safe.
 
+    Single-statement write — SQLite WAL + busy_timeout handles contention.
+
     Args:
         task: The task description string.
         chat_id: Chat session identifier to associate this task with.
     """
     db = _get_db()
-    with _db_lock:
-        db.execute(
-            "INSERT INTO task_history (timestamp, task, chat_id) VALUES (?, ?, ?)",
-            (time.time(), task, chat_id),
-        )
-        db.commit()
+    db.execute(
+        "INSERT INTO task_history (timestamp, task, chat_id) VALUES (?, ?, ?)",
+        (time.time(), task, chat_id),
+    )
+    db.commit()
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
@@ -302,8 +303,7 @@ def _save_task_result(
     """Save just the result summary for a task (no event table changes).
 
     Updates only the ``result`` column of the target task_history row.
-    Use :func:`_set_latest_chat_events` when you also need to persist
-    chat events.
+    Single-statement write — SQLite WAL + busy_timeout handles contention.
 
     Args:
         task: The task description string to look up.
@@ -313,12 +313,11 @@ def _save_task_result(
     task_id = _most_recent_task_id(db, task)
     if task_id is None:
         return
-    with _db_lock:
-        db.execute(
-            "UPDATE task_history SET result = ? WHERE id = ?",
-            (result, task_id),
-        )
-        db.commit()
+    db.execute(
+        "UPDATE task_history SET result = ? WHERE id = ?",
+        (result, task_id),
+    )
+    db.commit()
 
 
 def _set_latest_chat_events(
@@ -433,6 +432,8 @@ def _load_last_model() -> str:
 def _save_last_model(model: str) -> None:
     """Persist the selected model name without incrementing usage count.
 
+    Multi-statement transaction — uses _db_lock for atomicity.
+
     Args:
         model: The model name to save as the last-selected model.
     """
@@ -483,23 +484,25 @@ def _record_file_usage(path: str) -> None:
     Updates the ``last_used`` timestamp for recency ordering and
     evicts the least recently used entries when the table exceeds
     ``_MAX_FILE_USAGE_ENTRIES`` rows.
+
+    Single atomic INSERT; eviction uses _db_lock for multi-statement safety.
     """
     db = _get_db()
     now = time.time()
-    with _db_lock:
-        db.execute(
-            "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
-            "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
-            (path, now, now),
-        )
-        row = db.execute("SELECT COUNT(*) FROM file_usage").fetchone()
-        if row[0] > _MAX_FILE_USAGE_ENTRIES:
+    db.execute(
+        "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
+        "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
+        (path, now, now),
+    )
+    row = db.execute("SELECT COUNT(*) FROM file_usage").fetchone()
+    if row[0] > _MAX_FILE_USAGE_ENTRIES:
+        with _db_lock:
             db.execute(
                 "DELETE FROM file_usage WHERE path NOT IN "
                 "(SELECT path FROM file_usage ORDER BY last_used DESC LIMIT ?)",
                 (_MAX_FILE_USAGE_ENTRIES,),
             )
-        db.commit()
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
