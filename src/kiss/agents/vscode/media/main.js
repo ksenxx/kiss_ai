@@ -371,21 +371,16 @@
       hlBlock(rc);
       target.appendChild(rc); break;
     }
-    case 'system_prompt': {
-      var sp = mkEl('div', 'ev system-prompt');
-      var spBody = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
-      sp.innerHTML = '<div class="system-prompt-h">System Prompt</div>'
-        + '<div class="system-prompt-body">' + spBody + '</div>';
-      hlBlock(sp);
-      target.appendChild(sp); break;
-    }
+    case 'system_prompt':
     case 'prompt': {
-      var pr = mkEl('div', 'ev prompt');
-      var pBody = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
-      pr.innerHTML = '<div class="prompt-h">Prompt</div>'
-        + '<div class="prompt-body">' + pBody + '</div>';
-      hlBlock(pr);
-      target.appendChild(pr); break;
+      var cls = t === 'system_prompt' ? 'system-prompt' : 'prompt';
+      var label = t === 'system_prompt' ? 'System Prompt' : 'Prompt';
+      var el = mkEl('div', 'ev ' + cls);
+      var body = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
+      el.innerHTML = '<div class="' + cls + '-h">' + label + '</div>'
+        + '<div class="' + cls + '-body">' + body + '</div>';
+      hlBlock(el);
+      target.appendChild(el); break;
     }
     case 'usage_info': {
       var u = mkEl('div', 'ev usage');
@@ -744,29 +739,16 @@
       + '</div>'
       + '</div>';
     document.getElementById('input-area').appendChild(bar);
-    document.getElementById('merge-accept-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'accept' });
-    });
-    document.getElementById('merge-reject-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'reject' });
-    });
-    document.getElementById('merge-prev-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'prev' });
-    });
-    document.getElementById('merge-next-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'next' });
-    });
-    document.getElementById('merge-accept-file-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'accept-file' });
-    });
-    document.getElementById('merge-reject-file-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'reject-file' });
-    });
-    document.getElementById('merge-accept-all-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'accept-all' });
-    });
-    document.getElementById('merge-reject-all-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'mergeAction', action: 'reject-all' });
+    var mergeActions = {
+      'merge-accept-btn': 'accept', 'merge-reject-btn': 'reject',
+      'merge-prev-btn': 'prev', 'merge-next-btn': 'next',
+      'merge-accept-file-btn': 'accept-file', 'merge-reject-file-btn': 'reject-file',
+      'merge-accept-all-btn': 'accept-all', 'merge-reject-all-btn': 'reject-all',
+    };
+    Object.keys(mergeActions).forEach(function(id) {
+      document.getElementById(id).addEventListener('click', function() {
+        vscode.postMessage({ type: 'mergeAction', action: mergeActions[id] });
+      });
     });
     sb();
   }
@@ -1016,14 +998,8 @@
     if (!prompt || isRunning) return;
 
     // File path detection: @path shortcut or bare file path
-    var fileMatch = prompt.match(/^@(\S+)$/);
-    if (fileMatch) {
-      vscode.postMessage({ type: 'openFile', path: fileMatch[1] });
-      inp.value = ''; syncClearBtn();
-      return;
-    }
-    if (looksLikeFilePath(prompt)) {
-      vscode.postMessage({ type: 'openFile', path: prompt });
+    if (/^WORK_DIR[/\\]/.test(prompt) || looksLikeFilePath(prompt)) {
+      vscode.postMessage({ type: 'openFile', path: prompt.replace(/^WORK_DIR[/\\]/, '') });
       inp.value = ''; syncClearBtn();
       return;
     }
@@ -1308,8 +1284,9 @@
       var before = inp.value.substring(0, atCtx.start);
       var after = inp.value.substring(inp.selectionStart || inp.value.length);
       var sep = (!after || /^\s/.test(after)) ? '' : ' ';
-      inp.value = before + file + sep + after; syncClearBtn();
-      var np = before.length + file.length + sep.length;
+      var mention = 'WORK_DIR/' + file;
+      inp.value = before + mention + sep + after; syncClearBtn();
+      var np = before.length + mention.length + sep.length;
       inp.setSelectionRange(np, np);
       vscode.postMessage({ type: 'recordFileUsage', path: file });
     }

@@ -262,24 +262,18 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'mergeAction': {
-        const action = message.action;
-        if (action === 'accept') {
-          await this._mergeManager.acceptChange();
-        } else if (action === 'reject') {
-          await this._mergeManager.rejectChange();
-        } else if (action === 'accept-all') {
-          await this._mergeManager.acceptAll();
-        } else if (action === 'reject-all') {
-          await this._mergeManager.rejectAll();
-        } else if (action === 'next') {
-          this._mergeManager.nextChange();
-        } else if (action === 'prev') {
-          this._mergeManager.prevChange();
-        } else if (action === 'accept-file') {
-          await this._mergeManager.acceptFile();
-        } else if (action === 'reject-file') {
-          await this._mergeManager.rejectFile();
-        }
+        const mergeActions: Record<string, () => void | Promise<void>> = {
+          'accept': () => this._mergeManager.acceptChange(),
+          'reject': () => this._mergeManager.rejectChange(),
+          'accept-all': () => this._mergeManager.acceptAll(),
+          'reject-all': () => this._mergeManager.rejectAll(),
+          'next': () => this._mergeManager.nextChange(),
+          'prev': () => this._mergeManager.prevChange(),
+          'accept-file': () => this._mergeManager.acceptFile(),
+          'reject-file': () => this._mergeManager.rejectFile(),
+        };
+        const handler = mergeActions[message.action];
+        if (handler) await handler();
         break;
       }
     }

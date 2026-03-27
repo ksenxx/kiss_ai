@@ -239,27 +239,17 @@ header {
 .rc-body.pre { white-space: pre-wrap; }
 
 /* System prompt / prompt */
-.system-prompt {
+.system-prompt, .prompt {
   border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
   overflow: hidden; background: var(--surface);
 }
-.system-prompt-h {
-  padding: 6px 12px; background: color-mix(in srgb, var(--purple) 8%, transparent); font-size: var(--fs-md);
-  font-weight: 600; color: var(--purple); text-transform: uppercase; letter-spacing: .04em;
+.system-prompt-h, .prompt-h {
+  padding: 6px 12px; font-size: var(--fs-md);
+  font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
 }
-.system-prompt-body {
-  padding: 8px 12px; font-size: var(--fs-md); word-break: break-word;
-  line-height: 1.6; max-height: 400px; overflow-y: auto;
-}
-.prompt {
-  border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
-  overflow: hidden; background: var(--surface);
-}
-.prompt-h {
-  padding: 6px 12px; background: color-mix(in srgb, var(--cyan) 8%, transparent); font-size: var(--fs-md);
-  font-weight: 600; color: var(--cyan); text-transform: uppercase; letter-spacing: .04em;
-}
-.prompt-body {
+.system-prompt-h { background: color-mix(in srgb, var(--purple) 8%, transparent); color: var(--purple); }
+.prompt-h { background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan); }
+.system-prompt-body, .prompt-body {
   padding: 8px 12px; font-size: var(--fs-md); word-break: break-word;
   line-height: 1.6; max-height: 400px; overflow-y: auto;
 }
@@ -684,31 +674,19 @@ header {
 }
 #ask-user-submit:hover { opacity: 0.9; }
 
-/* ── Markdown content rendering ──────────────────────── */
-.system-prompt-body p,
-.prompt-body p,
-.rc-body p {
-  margin: 4px 0;
+/* ── Markdown content rendering (shared by system-prompt-body, prompt-body, rc-body) ── */
+.system-prompt-body, .prompt-body, .rc-body {
+  /* Markdown typography base — inherited by all three containers */
 }
-.system-prompt-body h1, .system-prompt-body h2, .system-prompt-body h3,
-.system-prompt-body h4, .system-prompt-body h5, .system-prompt-body h6,
-.prompt-body h1, .prompt-body h2, .prompt-body h3,
-.prompt-body h4, .prompt-body h5, .prompt-body h6,
-.rc-body h1, .rc-body h2, .rc-body h3,
-.rc-body h4, .rc-body h5, .rc-body h6 {
-  margin: 8px 0 4px; font-weight: 600; color: var(--fg);
-}
+.system-prompt-body p, .prompt-body p, .rc-body p { margin: 4px 0; }
+.system-prompt-body :is(h1,h2,h3,h4,h5,h6),
+.prompt-body :is(h1,h2,h3,h4,h5,h6),
+.rc-body :is(h1,h2,h3,h4,h5,h6) { margin: 8px 0 4px; font-weight: 600; color: var(--fg); }
 .system-prompt-body h1, .prompt-body h1, .rc-body h1 { font-size: var(--fs-xl); }
 .system-prompt-body h2, .prompt-body h2, .rc-body h2 { font-size: var(--fs-lg); }
 .system-prompt-body h3, .prompt-body h3, .rc-body h3 { font-size: var(--fs-base); }
-.system-prompt-body ul, .system-prompt-body ol,
-.prompt-body ul, .prompt-body ol,
-.rc-body ul, .rc-body ol {
-  margin: 4px 0; padding-left: 20px;
-}
-.system-prompt-body li, .prompt-body li, .rc-body li {
-  margin: 2px 0;
-}
+.system-prompt-body :is(ul,ol), .prompt-body :is(ul,ol), .rc-body :is(ul,ol) { margin: 4px 0; padding-left: 20px; }
+.system-prompt-body li, .prompt-body li, .rc-body li { margin: 2px 0; }
 .system-prompt-body code, .prompt-body code, .rc-body code {
   background: color-mix(in srgb, var(--fg) 8%, transparent); padding: 1px 4px; border-radius: 3px;
   font-family: var(--vscode-editor-font-family, 'Fira Code', monospace); font-size: var(--fs-md);
@@ -717,31 +695,16 @@ header {
   background: rgba(0,0,0,0.3); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 6px 0;
 }
-.system-prompt-body pre code, .prompt-body pre code, .rc-body pre code {
-  background: none; padding: 0; font-size: var(--fs-md);
-}
+.system-prompt-body pre code, .prompt-body pre code, .rc-body pre code { background: none; padding: 0; font-size: var(--fs-md); }
 .system-prompt-body blockquote, .prompt-body blockquote, .rc-body blockquote {
-  border-left: 3px solid var(--accent); padding: 4px 10px; margin: 6px 0;
-  color: var(--dim); font-style: italic;
+  border-left: 3px solid var(--accent); padding: 4px 10px; margin: 6px 0; color: var(--dim); font-style: italic;
 }
-.system-prompt-body a, .prompt-body a, .rc-body a {
-  color: var(--accent); text-decoration: underline;
-}
-.system-prompt-body strong, .prompt-body strong, .rc-body strong {
-  font-weight: 600; color: var(--fg);
-}
-.system-prompt-body em, .prompt-body em, .rc-body em {
-  font-style: italic;
-}
-.system-prompt-body hr, .prompt-body hr, .rc-body hr {
-  border: none; border-top: 1px solid var(--border); margin: 8px 0;
-}
-.system-prompt-body table, .prompt-body table, .rc-body table {
-  border-collapse: collapse; margin: 6px 0; width: 100%;
-}
-.system-prompt-body th, .system-prompt-body td,
-.prompt-body th, .prompt-body td,
-.rc-body th, .rc-body td {
+.system-prompt-body a, .prompt-body a, .rc-body a { color: var(--accent); text-decoration: underline; }
+.system-prompt-body strong, .prompt-body strong, .rc-body strong { font-weight: 600; color: var(--fg); }
+.system-prompt-body em, .prompt-body em, .rc-body em { font-style: italic; }
+.system-prompt-body hr, .prompt-body hr, .rc-body hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+.system-prompt-body table, .prompt-body table, .rc-body table { border-collapse: collapse; margin: 6px 0; width: 100%; }
+.system-prompt-body :is(th,td), .prompt-body :is(th,td), .rc-body :is(th,td) {
   border: 1px solid var(--border); padding: 4px 8px; font-size: var(--fs-md);
 }
 .system-prompt-body th, .prompt-body th, .rc-body th {

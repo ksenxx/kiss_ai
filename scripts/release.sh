@@ -12,6 +12,7 @@
 # 5. Push to kiss_ai repo and tag with version
 # 6. Build .pkg and create GitHub release (with .pkg asset)
 # 7. Publish to PyPI
+# 8. Build and publish VS Code extension to marketplace
 
 set -e  # Exit on error
 
@@ -24,6 +25,7 @@ PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/_version.py"
 README_FILE="README.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
+VSCODE_EXT_DIR="src/kiss/agents/vscode"
 
 # Colors for output
 RED='\033[0;31m'
@@ -128,6 +130,36 @@ publish_to_pypi() {
     
     print_info "Successfully published version $version to PyPI"
     print_info "View at: https://pypi.org/project/${PYPI_PACKAGE_NAME}/${version}/"
+}
+
+publish_vscode_extension() {
+    local version="$1"
+
+    print_step "Building VS Code extension..."
+    cd "$VSCODE_EXT_DIR"
+    vsce package --no-dependencies --allow-star-activation --allow-missing-repository
+    local vsix_file="kiss-sorcar-${version}.vsix"
+
+    if [[ ! -f "$vsix_file" ]]; then
+        print_error "VSIX file not found: $vsix_file"
+        cd - > /dev/null
+        return 1
+    fi
+
+    print_info "Built $vsix_file"
+
+    if [[ -z "${VSCE_PAT:-}" ]]; then
+        print_error "VSCE_PAT environment variable is not set"
+        print_info "Please set it with: export VSCE_PAT='your-personal-access-token'"
+        cd - > /dev/null
+        return 1
+    fi
+
+    vsce publish --packagePath "$vsix_file" --pat "$VSCE_PAT"
+    cd - > /dev/null
+
+    print_info "Successfully published VS Code extension v$version"
+    print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
 }
 
 # =============================================================================
@@ -266,12 +298,17 @@ sudo installer -pkg ~/Downloads/kiss-installer.pkg -target /
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
+    # Step 8: Publish VS Code extension
+    print_step "Publishing VS Code extension..."
+    publish_vscode_extension "$VERSION"
+
     echo
     print_info "========================================"
     print_info "Release completed successfully!"
     print_info "========================================"
     print_info "GitHub:  $PUBLIC_REPO_URL"
     print_info "PyPI:    https://pypi.org/project/${PYPI_PACKAGE_NAME}/"
+    print_info "VSCode:  https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
     print_info "Version: $VERSION"
     print_info "Tag:     $TAG_NAME"
     echo

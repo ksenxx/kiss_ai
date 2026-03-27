@@ -227,11 +227,8 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             if text.strip():
                 self.broadcast({"type": "text_delta", "text": text})
             return ""
-        if type == "system_prompt":
-            self.broadcast({"type": "system_prompt", "text": str(content)})
-            return ""
-        if type == "prompt":
-            self.broadcast({"type": "prompt", "text": str(content)})
+        if type in ("system_prompt", "prompt"):
+            self.broadcast({"type": type, "text": str(content)})
             return ""
         if type == "stream_event":
             return self.parse_stream_event(content)
