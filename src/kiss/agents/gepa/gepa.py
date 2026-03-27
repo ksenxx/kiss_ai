@@ -30,12 +30,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from kiss.agents.gepa.config import GEPAConfig  # type: ignore # noqa: F401
-from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.utils import (
     escape_invalid_template_field_names,
-    get_config_value,
     get_template_field_names,
 )
 
@@ -179,11 +176,11 @@ class GEPA:
         agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]],
         initial_prompt_template: str,
         evaluation_fn: Callable[[str], dict[str, float]] | None = None,
-        max_generations: int | None = None,
-        population_size: int | None = None,
-        pareto_size: int | None = None,
-        mutation_rate: float | None = None,
-        reflection_model: str | None = None,
+        max_generations: int = 10,
+        population_size: int = 8,
+        pareto_size: int = 4,
+        mutation_rate: float = 0.5,
+        reflection_model: str = "gemini-3-flash-preview",
         dev_val_split: float | None = None,
         perfect_score: float = 1.0,
         use_merge: bool = True,
@@ -227,12 +224,11 @@ class GEPA:
         )
         self.perfect_score = perfect_score
 
-        cfg = config_module.DEFAULT_CONFIG.gepa  # type: ignore[attr-defined]
-        self.max_generations = get_config_value(max_generations, cfg, "max_generations")
-        self.population_size = get_config_value(population_size, cfg, "population_size")
-        self.pareto_size = get_config_value(pareto_size, cfg, "pareto_size")
-        self.mutation_rate = get_config_value(mutation_rate, cfg, "mutation_rate")
-        self.reflection_model = get_config_value(reflection_model, cfg, "reflection_model")
+        self.max_generations = max_generations
+        self.population_size = population_size
+        self.pareto_size = pareto_size
+        self.mutation_rate = mutation_rate
+        self.reflection_model = reflection_model
         self.dev_val_split = dev_val_split if dev_val_split is not None else 0.5
 
         # Merge configuration

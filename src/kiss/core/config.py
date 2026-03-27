@@ -30,7 +30,7 @@ def _generate_artifact_dir() -> str:
 artifact_dir = _generate_artifact_dir()
 
 
-class APIKeysConfig(BaseModel):
+class Config(BaseModel):
     GEMINI_API_KEY: str = Field(
         default_factory=lambda: os.getenv("GEMINI_API_KEY", ""),
         description="Gemini API key (can also be set via GEMINI_API_KEY env var)",
@@ -58,12 +58,6 @@ class APIKeysConfig(BaseModel):
     NOVITA_API_KEY: str = Field(
         default_factory=lambda: os.getenv("NOVITA_API_KEY", ""),
         description="Novita API key (can also be set via NOVITA_API_KEY env var)",
-    )
-
-
-class Config(BaseModel):
-    api_keys: APIKeysConfig = Field(
-        default_factory=APIKeysConfig, description="API keys configuration"
     )
 
 

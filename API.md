@@ -27,7 +27,6 @@
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
     - [`kiss.agents.gepa`](#kissagentsgepa)
-      - [`kiss.agents.gepa.config`](#kissagentsgepaconfig)
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
   - [`kiss.docker`](#kissdocker)
     - [`kiss.docker.docker_manager`](#kissdockerdocker_manager)
@@ -833,7 +832,7 @@ from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, cre
 
 ##### `class GEPA` — GEPA (Genetic-Pareto) prompt optimizer.
 
-**Constructor:** `GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int | None = None, population_size: int | None = None, pareto_size: int | None = None, mutation_rate: float | None = None, reflection_model: str | None = None, dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)`
+**Constructor:** `GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int = 10, population_size: int = 8, pareto_size: int = 4, mutation_rate: float = 0.5, reflection_model: str = 'gemini-3-flash-preview', dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)`
 
 - `agent_wrapper`: Function (prompt_template, arguments) -> (result, trajectory). Used when batched_agent_wrapper is not provided, or as fallback.
 
@@ -889,12 +888,6 @@ from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, cre
 
 - `verbose`: If True, prints all phases. If False, only prints val evaluation completion messages (when a candidate has been fully evaluated).
 - **Returns:** A callback function that prints progress updates during optimization.
-
-______________________________________________________________________
-
-#### `kiss.agents.gepa.config` — *GEPA-specific configuration that extends the main KISS config.*
-
-##### `class GEPAConfig(BaseModel)` — GEPA-specific configuration settings.
 
 ______________________________________________________________________
 
@@ -1118,7 +1111,7 @@ from kiss.agents.vscode.kiss_project.src.kiss.agents.gepa import GEPA, GEPAPhase
 
 ##### `class GEPA` — GEPA (Genetic-Pareto) prompt optimizer.
 
-**Constructor:** `GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int | None = None, population_size: int | None = None, pareto_size: int | None = None, mutation_rate: float | None = None, reflection_model: str | None = None, dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)`
+**Constructor:** `GEPA(agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]], initial_prompt_template: str, evaluation_fn: Callable[[str], dict[str, float]] | None = None, max_generations: int = 10, population_size: int = 8, pareto_size: int = 4, mutation_rate: float = 0.5, reflection_model: str = 'gemini-3-flash-preview', dev_val_split: float | None = None, perfect_score: float = 1.0, use_merge: bool = True, max_merge_invocations: int = 5, merge_val_overlap_floor: int = 2, progress_callback: Callable[[GEPAProgress], None] | None = None, batched_agent_wrapper: Callable[[str, list[dict[str, str]]], list[tuple[str, list[Any]]]] | None = None)`
 
 - `agent_wrapper`: Function (prompt_template, arguments) -> (result, trajectory). Used when batched_agent_wrapper is not provided, or as fallback.
 
