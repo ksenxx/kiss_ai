@@ -1006,6 +1006,16 @@ class TestCompleteFromActiveFile(unittest.TestCase):
         result = self.server._complete_from_active_file("   ", snapshot_content=content)
         assert result == ""
 
+    def test_trailing_space_does_not_repeat_completion(self) -> None:
+        """Typing a space after a word should not re-suggest the same completion."""
+        content = "hello_world = 1"
+        # Without trailing space, "hel" completes to "lo_world"
+        result = self.server._complete_from_active_file("type hel", snapshot_content=content)
+        assert result == "lo_world"
+        # With trailing space, no completion should be offered
+        result = self.server._complete_from_active_file("type hel ", snapshot_content=content)
+        assert result == ""
+
     def test_longest_match_wins(self) -> None:
         """Among multiple matches, the longest suffix is returned."""
         content = "foo\nfoobar\nfoobarbaz"

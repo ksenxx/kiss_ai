@@ -250,11 +250,24 @@ export class AgentProcess extends EventEmitter {
 
   /**
    * Cleanup and terminate the process.
+   *
+   * Closes stdin first so the Python server's ``for line in sys.stdin``
+   * loop sees EOF and exits cleanly.  SIGTERM and SIGKILL follow as
+   * fallbacks to avoid leaving zombie processes that block VS Code
+   * shutdown.
    */
   dispose(): void {
     if (this.process) {
-      this.process.kill('SIGTERM');
+      const proc = this.process;
       this.process = null;
+      // Close stdin to unblock the Python server's main loop
+      try { proc.stdin?.end(); } catch { /* ignored */ }
+      // SIGTERM as backup
+      try { proc.kill('SIGTERM'); } catch { /* ignored */ }
+      // SIGKILL after 2s if the process is still alive
+      setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch { /* ignored */ }
+      }, 2000);
     }
     this.removeAllListeners();
   }
