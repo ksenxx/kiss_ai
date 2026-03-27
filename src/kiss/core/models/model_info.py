@@ -721,7 +721,7 @@ def model(
             filtered or None,
             token_callback,
         )
-    keys = config_module.DEFAULT_CONFIG.api_keys
+    keys = config_module.DEFAULT_CONFIG
     if model_name.startswith("openrouter/"):
         return _openai_compatible(
             model_name,
@@ -808,7 +808,7 @@ def get_available_models() -> list[str]:
         list[str]: Sorted list of model name strings that have a configured API key
             and support text generation.
     """
-    keys = config_module.DEFAULT_CONFIG.api_keys
+    keys = config_module.DEFAULT_CONFIG
     prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,

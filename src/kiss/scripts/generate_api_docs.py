@@ -413,7 +413,6 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
 
         "kiss.agents.gepa",
         "kiss.agents.gepa.gepa",
-        "kiss.agents.gepa.config",
         "kiss.agents.kiss_evolve",
         "kiss.agents.kiss_evolve.kiss_evolve",
         "kiss.agents.imo_agent",
