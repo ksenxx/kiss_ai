@@ -221,3 +221,4 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
+sorcar = "kiss.agents.sorcar.stateful_sorcar_agent:main"

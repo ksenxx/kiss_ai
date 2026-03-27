@@ -69,8 +69,52 @@ export async function ensureDependencies(): Promise<void> {
     );
   }
 
+  // Install CLI wrapper so `sorcar` is available from any terminal
+  if (uvPath) {
+    installCliScript(kissProjectPath, uvPath);
+  }
+
   // Prompt for missing API keys
   await ensureApiKeys();
+}
+
+/**
+ * Install a `sorcar` CLI wrapper script in ~/.local/bin/ so users can
+ * invoke the agent from any terminal after the extension is installed.
+ * The wrapper calls `uv run sorcar` from the bundled kiss_project directory.
+ */
+function installCliScript(kissProjectPath: string, uvPath: string): void {
+  if (process.platform === 'win32') {
+    return; // TODO: Windows .cmd wrapper
+  }
+
+  const homeDir = process.env.HOME || '';
+  if (!homeDir) return;
+
+  const binDir = path.join(homeDir, '.local', 'bin');
+  const scriptPath = path.join(binDir, 'sorcar');
+
+  // Resolve uv to an absolute path for the wrapper script
+  let absUvPath = uvPath;
+  if (uvPath === 'uv' || !path.isAbsolute(uvPath)) {
+    try {
+      absUvPath = execSync(`which ${uvPath}`, { encoding: 'utf-8' }).trim();
+    } catch {
+      absUvPath = path.join(homeDir, '.local', 'bin', 'uv');
+    }
+  }
+
+  const script =
+    `#!/bin/bash\n` +
+    `# Installed by KISS Sorcar VS Code extension\n` +
+    `exec "${absUvPath}" run --directory "${kissProjectPath}" sorcar "$@"\n`;
+
+  try {
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+  } catch (err) {
+    console.error('[KISS Sorcar] Failed to install CLI script:', err);
+  }
 }
 
 /**
