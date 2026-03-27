@@ -356,6 +356,33 @@ def _set_latest_chat_events(
         db.commit()
 
 
+def _append_chat_event(task: str, event: dict[str, object]) -> None:
+    """Append a single event to the saved chat events for a task.
+
+    Adds the event at the end (next sequence number) of the events
+    already stored for the most recent run of *task*.
+
+    Args:
+        task: The task description string.
+        event: The event dict to append.
+    """
+    db = _get_db()
+    task_id = _most_recent_task_id(db, task)
+    if task_id is None:
+        return
+    with _db_lock:
+        row = db.execute(
+            "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM events WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        next_seq = row["next_seq"] if row else 0
+        db.execute(
+            "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
+            (task_id, next_seq, json.dumps(event)),
+        )
+        db.commit()
+
+
 def _load_task_chat_id(task: str) -> str:
     """Return the chat_id for the most recent run of *task*, or ``""``.
 
