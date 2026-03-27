@@ -47,14 +47,23 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-You must set the **`ANTHROPIC_API_KEY`** in the environment and must install Visual Studio Code . Then download and install the Visual Studio Extension at [src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix](src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix).  Launch Visual Studio Code.
+To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also download the Visual Studio Extension at [src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix](src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix).
 
+You can open a terminal and use sorcar as a normal shell command.  Some examples are:
 ```
+sorcar -t "What is 2435*234"
+
+cat "What is 2435*234" > prompt
+sorcar -f prompt
+
+sorcar -m "claude-haiku-4-5" -t "What is 2435*234?"
+
+sorcar -n -t "What is 2435*234?" # to start in a new chat session
 ```
 
 # Introduction to KISS Sorcar
 
-**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor or Antigravity and **a general-purpose agent with web browsing and native Desktop app execution capabilities**. It runs **locally** as a VS Code IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
+**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor and **a general-purpose agent with web browsing and native Desktop app execution capabilities**. It runs **locally** as a VS Code IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
 #whatispossible #KISSSorcar
 
@@ -206,73 +215,6 @@ def finish(
 
 The agent will automatically use the custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
 
-
-## 📦 Developer Installation
-
-```bash
-# Install uv if you haven't already
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone/download KISS and navigate to the directory
-cd kiss
-
-# Create virtual environment
-uv venv --python 3.13
-
-# Install all dependencies (full installation)
-uv sync
-
-# (Optional) activate the venv for convenience (uv run works without activation)
-source .venv/bin/activate
-
-# Set up API keys (optional, for LLM providers)
-export GEMINI_API_KEY="your-key-here"
-export OPENAI_API_KEY="your-key-here"
-export ANTHROPIC_API_KEY="your-key-here"
-export TOGETHER_API_KEY="your-key-here"
-export OPENROUTER_API_KEY="your-key-here"
-```
-
-### Selective Installation (Dependency Groups)
-
-KISS supports selective installation via dependency groups for minimal footprints:
-
-```bash
-# Minimal core only (no model SDKs) - for custom integrations
-uv sync --group core
-
-# Core + specific provider support
-uv sync --group claude    # Core + Anthropic Claude
-uv sync --group openai    # Core + OpenAI Compatible Models
-uv sync --group gemini    # Core + Google Gemini
-
-# Sorcar agent tools (web tools, browser UI)
-uv sync --group sorcar
-
-# Docker support (for running agents in isolated containers)
-uv sync --group docker
-
-# Development tools (mypy, ruff, pytest, etc.)
-uv sync --group dev
-
-# Combine multiple groups as needed
-uv sync --group claude --group dev
-```
-
-**Dependency Group Contents:**
-
-| Group | Description | Key Packages |
-|-------|-------------|--------------|
-| `core` | Minimal core module | pydantic, pydantic-settings, pyyaml, rich |
-| `claude` | Core + Anthropic | core + anthropic |
-| `openai` | Core + OpenAI | core + openai |
-| `gemini` | Core + Google | core + google-genai |
-| `sorcar` | Agent tools & browser UI | playwright, uvicorn, starlette |
-| `docker` | Docker integration | docker |
-| `dev` | Development tools | mypy, ruff, pyright, pytest, pytest-cov, mdformat |
-
-> **Optional Dependencies:** All LLM provider SDKs (`openai`, `anthropic`, `google-genai`) are optional. You can import `kiss.core` and `kiss.agents` without installing all of them. When you try to use a model whose SDK is not installed, KISS raises a clear `KISSError` telling you which package to install.
-
 ## 📚 KISSAgent API Reference
 
 📖 **For detailed KISSAgent API documentation, see [API.md](API.md)**
@@ -290,10 +232,6 @@ This is where I started building an optimizer for agents. Then I switched to [`a
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
 📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
-
-## 🐳 Docker Manager
-
-KISS provides a `DockerManager` class for managing Docker containers and executing commands inside them. This is useful for running code in isolated environments, testing with specific dependencies, or working with SWE-bench tasks.
 
 ## 🤖 Models Supported
 

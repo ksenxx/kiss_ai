@@ -38,7 +38,7 @@ timeout.
 
 ## build and deploy vscode extension
 
-build, package, and install the KISS Sorcar VS Code extension. Run 'cd src/kiss/agents/vscode && npm run compile && npm run copy-kiss && npm run package' to create the .vsix file. Then install it with 'code --install-extension src/kiss/agents/vscode/kiss-sorcar-*.vsix --force'.
+build, package, and install the KISS Sorcar VS Code extension. Run 'cd src/kiss/agents/vscode && npm run compile && npm run copy-kiss && npm run package' to create the .vsix file. Then install it with 'code --install-extension src/kiss/agents/vscode/kiss-sorcar-\*.vsix --force'.
 
 # Past tasks
 

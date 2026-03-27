@@ -18,7 +18,6 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _generate_chat_id,
     _load_chat_context,
-    _load_last_chat_id,
     _load_task_chat_id,
     _save_task_result,
 )
@@ -170,7 +169,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     os.chdir(work_dir)
     start_time = time_mod.time()
     try:
-        result = agent.run(**run_kwargs)
+        agent.run(**run_kwargs)
     finally:
         os.chdir(old_cwd)
     elapsed = time_mod.time() - start_time
