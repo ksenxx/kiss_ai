@@ -129,6 +129,7 @@ class VSCodeServer:
         if cmd_type == "run":
             if self._task_thread and self._task_thread.is_alive():
                 self.printer.broadcast({"type": "error", "text": "Task already running"})
+                self.printer.broadcast({"type": "status", "running": False})
                 return
             self._task_thread = threading.Thread(target=self._run_task, args=(cmd,), daemon=True)
             self._task_thread.start()
@@ -197,7 +198,22 @@ class VSCodeServer:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
-        """Run the agent with the given task."""
+        """Run the agent with the given task.
+
+        An outer try/finally guarantees that ``status: running: False``
+        is **always** broadcast when this method exits, regardless of
+        which code-path is taken.  Previously, early returns (e.g. the
+        ``_merging`` guard) and exceptions before the inner try/finally
+        could leave the TypeScript ``_isRunning`` flag stuck at ``true``,
+        silently dropping all subsequent task submissions.
+        """
+        try:
+            self._run_task_inner(cmd)
+        finally:
+            self.printer.broadcast({"type": "status", "running": False})
+
+    def _run_task_inner(self, cmd: dict[str, Any]) -> None:
+        """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
         model = cmd.get("model") or self._selected_model
         work_dir = cmd.get("workDir") or self.work_dir
@@ -228,15 +244,17 @@ class VSCodeServer:
         self.printer._thread_local.stop_event = self._stop_event
         self._user_answer_event = threading.Event()
 
+        # Immediate feedback so the user sees the task has started
+        self.printer.broadcast({"type": "status", "running": True})
+        self.printer.broadcast({"type": "clear"})
+
+        # Git snapshot captures pre-task state (may be slow for large repos)
         pre_hunks = _parse_diff_hunks(work_dir)
         pre_untracked = _capture_untracked(work_dir)
         pre_file_hashes = _snapshot_files(
             work_dir, set(pre_hunks.keys()) | pre_untracked
         )
         _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
-
-        self.printer.broadcast({"type": "status", "running": True})
-        self.printer.broadcast({"type": "clear"})
 
         self.printer.start_recording()
         result_summary = ""
@@ -282,14 +300,8 @@ class VSCodeServer:
             except Exception:
                 logger.debug("Merge view error", exc_info=True)
             self._refresh_file_cache()
-            # Broadcast task_done/stopped/error and status LAST, after all
-            # cleanup.  Previously task_done was in the try block while
-            # status:running:false was in finally, creating a window where
-            # the webview enabled input but the extension's _isRunning
-            # stayed True — causing silently dropped submits.
             if task_end_event:
                 self.printer.broadcast(task_end_event)
-            self.printer.broadcast({"type": "status", "running": False})
 
     def _start_merge_session(self, merge_json_path: str) -> bool:
         """Load merge data from disk and broadcast merge_data + merge_started events.
@@ -576,6 +588,10 @@ class VSCodeServer:
             except OSError:
                 return ""
 
+        # If the query ends with whitespace the user has moved past the word;
+        # don't complete a word that is no longer being typed.
+        if query != query.rstrip():
+            return ""
         # Extract the trailing token (may include dots for chains)
         m = re.search(r"([\w][\w.]*)[^\w]*$", query)
         if not m:

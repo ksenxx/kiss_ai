@@ -89,8 +89,8 @@ class TestRace2FollowupModelParameter(unittest.TestCase):
         assert "model" in sig.parameters
 
     def test_run_task_passes_model_to_followup(self) -> None:
-        """Verify _run_task passes the model to _generate_followup."""
-        source = inspect.getsource(VSCodeServer._run_task)
+        """Verify _run_task_inner passes the model to _generate_followup."""
+        source = inspect.getsource(VSCodeServer._run_task_inner)
         assert "_generate_followup(prompt, result_summary, model)" in source
 
 
@@ -98,21 +98,23 @@ class TestRace14StatusBroadcastOrder(unittest.TestCase):
     """Race 14 fix: status "running: False" broadcast at end of finally block."""
 
     def test_status_broadcast_after_merge_and_cache(self) -> None:
-        """Verify status broadcast comes AFTER merge setup and file cache refresh."""
-        source = inspect.getsource(VSCodeServer._run_task)
-        status_pos = source.find('"running": False')
-        merge_pos = source.find("_prepare_merge_view")
-        cache_pos = source.find("_refresh_file_cache")
+        """Verify _run_task wraps _run_task_inner with try/finally status broadcast.
 
-        assert status_pos > 0, "status broadcast not found"
+        The outer _run_task guarantees status:running:false is always sent.
+        The inner method does merge/cache cleanup before returning, so the
+        outer finally's status broadcast comes after all cleanup.
+        """
+        # Outer wrapper has the guaranteed status broadcast
+        outer_source = inspect.getsource(VSCodeServer._run_task)
+        assert '"running": False' in outer_source
+        assert "_run_task_inner" in outer_source
+
+        # Inner method has merge/cache cleanup
+        inner_source = inspect.getsource(VSCodeServer._run_task_inner)
+        merge_pos = inner_source.find("_prepare_merge_view")
+        cache_pos = inner_source.find("_refresh_file_cache")
         assert merge_pos > 0, "_prepare_merge_view not found"
         assert cache_pos > 0, "_refresh_file_cache not found"
-        assert status_pos > merge_pos, (
-            "status broadcast should come AFTER _prepare_merge_view"
-        )
-        assert status_pos > cache_pos, (
-            "status broadcast should come AFTER _refresh_file_cache"
-        )
 
     def test_task_thread_done_when_status_false(self) -> None:
         """Verify that when status:running:false is broadcast, cleanup is done."""
@@ -434,6 +436,61 @@ class TestExistingBehavior(unittest.TestCase):
         finally:
             stop.set()
             server._task_thread.join()
+
+
+class TestStatusAlwaysSentOnExit(unittest.TestCase):
+    """Verify status:running:false is always sent when _run_task exits.
+
+    Previously, early returns (e.g. _merging guard) and exceptions before
+    the inner try/finally left _isRunning stuck on the TypeScript side,
+    silently dropping all subsequent task submissions.
+    """
+
+    def _capture_server(self) -> tuple[VSCodeServer, list[dict]]:
+        server = VSCodeServer()
+        events: list[dict] = []
+        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
+        return server, events
+
+    def test_merging_early_return_sends_status_false(self) -> None:
+        """When _merging is True, _run_task still sends status:running:false."""
+        server, events = self._capture_server()
+        server._merging = True
+
+        server._run_task({"type": "run", "prompt": "test"})
+
+        status_events = [e for e in events if e.get("type") == "status"]
+        assert any(e.get("running") is False for e in status_events), (
+            f"Expected status:running:false after merging early return. Events: {events}"
+        )
+
+    def test_already_running_sends_status_false(self) -> None:
+        """When task thread is alive, 'run' command sends status:running:false."""
+        server, events = self._capture_server()
+
+        stop = threading.Event()
+        server._task_thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
+        server._task_thread.start()
+
+        try:
+            server._handle_command({
+                "type": "run", "prompt": "test", "model": "x", "workDir": "/tmp",
+            })
+            status_events = [e for e in events if e.get("type") == "status"]
+            assert any(e.get("running") is False for e in status_events), (
+                f"Expected status:running:false after already-running rejection. Events: {events}"
+            )
+        finally:
+            stop.set()
+            server._task_thread.join()
+
+    def test_outer_try_finally_in_run_task(self) -> None:
+        """_run_task wraps _run_task_inner with try/finally for status guarantee."""
+        source = inspect.getsource(VSCodeServer._run_task)
+        assert "try:" in source
+        assert "finally:" in source
+        assert '"running": False' in source
+        assert "_run_task_inner" in source
 
 
 if __name__ == "__main__":
