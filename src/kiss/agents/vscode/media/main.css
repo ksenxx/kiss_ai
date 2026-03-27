@@ -735,7 +735,7 @@ header {
   display: flex; align-items: center; gap: 6px; width: 100%;
 }
 .merge-toolbar-group {
-  display: flex; align-items: center; gap: 2px;
+  display: flex; align-items: center; gap: 2px; flex: 1;
 }
 .merge-toolbar-sep {
   width: 1px; height: 18px; background: var(--border); margin: 0 4px; flex-shrink: 0;
@@ -745,6 +745,7 @@ header {
   padding: 4px 8px; cursor: pointer; transition: all 0.15s;
   white-space: nowrap; font-weight: 500;
   display: inline-flex; align-items: center; gap: 4px; background: none;
+  flex: 1; justify-content: center;
 }
 .merge-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
 .merge-btn.merge-accept {
