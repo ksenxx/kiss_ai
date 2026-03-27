@@ -33,7 +33,7 @@ def __getattr__(name: str) -> type:
         module_path = _LAZY_IMPORTS[name]
         try:
             module = importlib.import_module(module_path)
-            cls = getattr(module, name)
+            cls: type = getattr(module, name)
             globals()[name] = cls  # Cache for subsequent accesses
             return cls
         except ImportError:

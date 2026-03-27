@@ -5,11 +5,10 @@
 
 """Core module for the KISS agent framework."""
 
-from kiss.core.config import DEFAULT_CONFIG, AgentConfig, Config
+from kiss.core.config import DEFAULT_CONFIG, Config
 from kiss.core.kiss_error import KISSError
 
 __all__ = [
-    "AgentConfig",
     "Config",
     "DEFAULT_CONFIG",
     "KISSError",

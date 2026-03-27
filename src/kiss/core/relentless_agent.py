@@ -95,19 +95,15 @@ class RelentlessAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        global_cfg = config_module.DEFAULT_CONFIG
-        cfg = global_cfg.relentless_agent
-        default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
+        default_work_dir = str(Path(config_module.artifact_dir).resolve() / "kiss_workdir")
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
 
-        self.max_sub_sessions = (
-            max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
-        )
-        self.max_steps = max_steps if max_steps is not None else cfg.max_steps
-        self.max_budget = max_budget if max_budget is not None else cfg.max_budget
-        self.model_name = model_name if model_name is not None else cfg.model_name
+        self.max_sub_sessions = max_sub_sessions if max_sub_sessions is not None else 10000
+        self.max_steps = max_steps if max_steps is not None else 100
+        self.max_budget = max_budget if max_budget is not None else 200.0
+        self.model_name = model_name if model_name is not None else "claude-opus-4-6"
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.docker_image = docker_image
@@ -119,7 +115,7 @@ class RelentlessAgent(Base):
     def _docker_bash(self, command: str, description: str) -> str:
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
-        return self.docker_manager.Bash(command, description)
+        return str(self.docker_manager.Bash(command, description))
 
     def perform_task(
         self,
@@ -287,7 +283,7 @@ class RelentlessAgent(Base):
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
-            verbose: Whether to print output to console. Defaults to config verbose setting.
+            verbose: Whether to print output to console. Defaults to True.
             tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
 

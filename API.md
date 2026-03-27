@@ -26,11 +26,9 @@
     - [`kiss.agents.sorcar`](#kissagentssorcar)
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
-      - [`kiss.agents.sorcar.config`](#kissagentssorcarconfig)
     - [`kiss.agents.gepa`](#kissagentsgepa)
       - [`kiss.agents.gepa.config`](#kissagentsgepaconfig)
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
-      - [`kiss.agents.kiss_evolve.config`](#kissagentskiss_evolveconfig)
   - [`kiss.docker`](#kissdocker)
     - [`kiss.docker.docker_manager`](#kissdockerdocker_manager)
       - [`kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentssorcarstateful_sorcar_agent)
@@ -43,11 +41,9 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.gepa.gepa`](#kissagentsvscodekiss_projectsrckissagentsgepagepa)
             - [`kiss.agents.vscode.kiss_project.src.kiss.agents.kiss`](#kissagentsvscodekiss_projectsrckissagentskiss)
             - [`kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve`](#kissagentsvscodekiss_projectsrckissagentskiss_evolve)
-              - [`kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve.config`](#kissagentsvscodekiss_projectsrckissagentskiss_evolveconfig)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve.kiss_evolve`](#kissagentsvscodekiss_projectsrckissagentskiss_evolvekiss_evolve)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve.simple_rag`](#kissagentsvscodekiss_projectsrckissagentskiss_evolvesimple_rag)
             - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar`](#kissagentsvscodekiss_projectsrckissagentssorcar)
-              - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.config`](#kissagentsvscodekiss_projectsrckissagentssorcarconfig)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.sorcar_agent`](#kissagentsvscodekiss_projectsrckissagentssorcarsorcar_agent)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentsvscodekiss_projectsrckissagentssorcarstateful_sorcar_agent)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.useful_tools`](#kissagentsvscodekiss_projectsrckissagentssorcaruseful_tools)
@@ -103,10 +99,8 @@ ______________________________________________________________________
 ### `kiss.core` — *Core module for the KISS agent framework.*
 
 ```python
-from kiss.core import AgentConfig, Config, DEFAULT_CONFIG, KISSError
+from kiss.core import Config, DEFAULT_CONFIG, KISSError
 ```
-
-#### `class AgentConfig(BaseModel)`
 
 #### `class Config(BaseModel)`
 
@@ -128,11 +122,11 @@ ______________________________________________________________________
   - `system_prompt`: Optional system prompt to provide to the model. Default is empty string (no system prompt).
   - `tools`: The tools to use for the agent. If None, no tools are provided (only the built-in finish tool is added).
   - `is_agentic`: Whether the agent is agentic. Default is True.
-  - `max_steps`: The maximum number of steps to take. Default is DEFAULT_CONFIG.agent.max_steps.
-  - `max_budget`: The maximum budget to spend. Default is DEFAULT_CONFIG.agent.max_agent_budget.
+  - `max_steps`: The maximum number of steps to take. Default is 100.
+  - `max_budget`: The maximum budget to spend. Default is 10.0.
   - `model_config`: The model configuration to use for the agent. Default is None.
   - `printer`: Optional printer for streaming output. Default is None.
-  - `verbose`: Whether to print output to console. Default is None (uses config verbose setting).
+  - `verbose`: Whether to print output to console. Default is None (verbose enabled).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
   - `session_info`: Sub-session label string (e.g. "Session: 1/5") to include in usage info output. Default is empty string.
   - **Returns:** str: The result of the agent's task.
@@ -152,10 +146,10 @@ ______________________________________________________________________
 
 - `name`: The name identifier for the agent.
 
-- **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled (either explicitly or via config).<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
+- **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled.<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
 
   - `printer`: An existing Printer instance to use directly. If provided, verbose is ignored.
-  - `verbose`: Whether to print to the console. If None, uses the verbose config value.
+  - `verbose`: Whether to print to the console. Defaults to True if None.
 
 - **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
 
@@ -166,10 +160,6 @@ ______________________________________________________________________
 #### `kiss.core.config` — *Configuration Pydantic models for KISS agent settings with CLI support.*
 
 ##### `class APIKeysConfig(BaseModel)`
-
-##### `class RelentlessAgentConfig(BaseModel)`
-
-##### `class DockerConfig(BaseModel)`
 
 ______________________________________________________________________
 
@@ -777,7 +767,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `verbose`: Whether to print output to console. Defaults to config verbose setting.
+  - `verbose`: Whether to print output to console. Defaults to True.
   - `tools`: List of callable tools available to the agent during execution.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
@@ -832,14 +822,6 @@ ______________________________________________________________________
 
 - `question`: The question to display to the user.
 - **Returns:** The user's typed response text.
-
-______________________________________________________________________
-
-#### `kiss.agents.sorcar.config` — *Configuration for the Assistant Agent.*
-
-##### `class AgentConfig(BaseModel)`
-
-##### `class SorcarConfig(BaseModel)`
 
 ______________________________________________________________________
 
@@ -926,7 +908,7 @@ from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve, SimpleRAG
 
 ##### `class KISSEvolve` — KISSEvolve: Evolutionary algorithm discovery using LLMs.
 
-**Constructor:** `KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int | None = None, max_generations: int | None = None, mutation_rate: float | None = None, elite_size: int | None = None, num_islands: int | None = None, migration_frequency: int | None = None, migration_size: int | None = None, migration_topology: str | None = None, enable_novelty_rejection: bool | None = None, novelty_threshold: float | None = None, max_rejection_attempts: int | None = None, novelty_rag_model: Model | None = None, parent_sampling_method: str | None = None, power_law_alpha: float | None = None, performance_novelty_lambda: float | None = None)`
+**Constructor:** `KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int = 8, max_generations: int = 10, mutation_rate: float = 0.7, elite_size: int = 2, num_islands: int = 2, migration_frequency: int = 5, migration_size: int = 1, migration_topology: str = 'ring', enable_novelty_rejection: bool = False, novelty_threshold: float = 0.95, max_rejection_attempts: int = 5, novelty_rag_model: Model | None = None, parent_sampling_method: str = 'power_law', power_law_alpha: float = 1.0, performance_novelty_lambda: float = 1.0)`
 
 - `code_agent_wrapper`: The code generation agent wrapper. Should accept keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
 
@@ -938,35 +920,35 @@ from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve, SimpleRAG
 
 - `extra_coding_instructions`: Extra instructions to add to the code generation prompt.
 
-- `population_size`: Number of variants to maintain in population. If None, uses value from DEFAULT_CONFIG.kiss_evolve.population_size.
+- `population_size`: Number of variants to maintain in population.
 
-- `max_generations`: Maximum number of evolutionary generations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_generations.
+- `max_generations`: Maximum number of evolutionary generations.
 
-- `mutation_rate`: Probability of mutating a variant. If None, uses value from DEFAULT_CONFIG.kiss_evolve.mutation_rate.
+- `mutation_rate`: Probability of mutating a variant.
 
-- `elite_size`: Number of best variants to preserve each generation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.elite_size.
+- `elite_size`: Number of best variants to preserve each generation.
 
-- `num_islands`: Number of islands for island-based evolution. If None, uses value from DEFAULT_CONFIG.kiss_evolve.num_islands.
+- `num_islands`: Number of islands for island-based evolution.
 
-- `migration_frequency`: Number of generations between migrations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_frequency.
+- `migration_frequency`: Number of generations between migrations.
 
-- `migration_size`: Number of individuals to migrate between islands. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_size.
+- `migration_size`: Number of individuals to migrate between islands.
 
-- `migration_topology`: Migration topology ('ring', 'fully_connected', 'random'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_topology.
+- `migration_topology`: Migration topology ('ring', 'fully_connected', 'random').
 
-- `enable_novelty_rejection`: Enable code novelty rejection sampling. If None, uses value from DEFAULT_CONFIG.kiss_evolve.enable_novelty_rejection.
+- `enable_novelty_rejection`: Enable code novelty rejection sampling.
 
-- `novelty_threshold`: Cosine similarity threshold for rejecting code (0.0-1.0, higher = more strict). If None, uses value from DEFAULT_CONFIG.kiss_evolve.novelty_threshold.
+- `novelty_threshold`: Cosine similarity threshold for rejecting code (0.0-1.0, higher = more strict).
 
-- `max_rejection_attempts`: Maximum number of rejection attempts before accepting a variant anyway. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_rejection_attempts.
+- `max_rejection_attempts`: Maximum number of rejection attempts before accepting a variant anyway.
 
 - `novelty_rag_model`: Model to use for generating code embeddings. If None and novelty rejection is enabled, uses the first model from models list.
 
-- `parent_sampling_method`: Parent sampling method ('tournament', 'power_law', or 'performance_novelty'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.parent_sampling_method.
+- `parent_sampling_method`: Parent sampling method ('tournament', 'power_law', or 'performance_novelty').
 
-- `power_law_alpha`: Power-law sampling parameter (α) for rank-based sampling. Lower = more exploration, higher = more exploitation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.power_law_alpha.
+- `power_law_alpha`: Power-law sampling parameter (α) for rank-based sampling. Lower = more exploration, higher = more exploitation.
 
-- `performance_novelty_lambda`: Performance-novelty sampling parameter (λ) controlling selection pressure. If None, uses value from DEFAULT_CONFIG.kiss_evolve.performance_novelty_lambda.
+- `performance_novelty_lambda`: Performance-novelty sampling parameter (λ) controlling selection pressure.
 
 - **evolve** — Run the evolutionary algorithm.<br/>`evolve() -> CodeVariant`
 
@@ -1006,12 +988,6 @@ from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve, SimpleRAG
 - **get_collection_stats** — Get statistics about the collection.<br/>`get_collection_stats() -> dict[str, Any]`
 
   - **Returns:** Dictionary containing collection statistics.
-
-______________________________________________________________________
-
-#### `kiss.agents.kiss_evolve.config` — *KISSEvolve-specific configuration that extends the main KISS config.*
-
-##### `class KISSEvolveConfig(BaseModel)` — KISSEvolve-specific configuration settings.
 
 ______________________________________________________________________
 
@@ -1303,7 +1279,7 @@ from kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve import CodeVari
 
 ##### `class KISSEvolve` — KISSEvolve: Evolutionary algorithm discovery using LLMs.
 
-**Constructor:** `KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int | None = None, max_generations: int | None = None, mutation_rate: float | None = None, elite_size: int | None = None, num_islands: int | None = None, migration_frequency: int | None = None, migration_size: int | None = None, migration_topology: str | None = None, enable_novelty_rejection: bool | None = None, novelty_threshold: float | None = None, max_rejection_attempts: int | None = None, novelty_rag_model: Model | None = None, parent_sampling_method: str | None = None, power_law_alpha: float | None = None, performance_novelty_lambda: float | None = None)`
+**Constructor:** `KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int = 8, max_generations: int = 10, mutation_rate: float = 0.7, elite_size: int = 2, num_islands: int = 2, migration_frequency: int = 5, migration_size: int = 1, migration_topology: str = 'ring', enable_novelty_rejection: bool = False, novelty_threshold: float = 0.95, max_rejection_attempts: int = 5, novelty_rag_model: Model | None = None, parent_sampling_method: str = 'power_law', power_law_alpha: float = 1.0, performance_novelty_lambda: float = 1.0)`
 
 - `code_agent_wrapper`: The code generation agent wrapper. Should accept keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
 
@@ -1315,35 +1291,35 @@ from kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve import CodeVari
 
 - `extra_coding_instructions`: Extra instructions to add to the code generation prompt.
 
-- `population_size`: Number of variants to maintain in population. If None, uses value from DEFAULT_CONFIG.kiss_evolve.population_size.
+- `population_size`: Number of variants to maintain in population.
 
-- `max_generations`: Maximum number of evolutionary generations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_generations.
+- `max_generations`: Maximum number of evolutionary generations.
 
-- `mutation_rate`: Probability of mutating a variant. If None, uses value from DEFAULT_CONFIG.kiss_evolve.mutation_rate.
+- `mutation_rate`: Probability of mutating a variant.
 
-- `elite_size`: Number of best variants to preserve each generation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.elite_size.
+- `elite_size`: Number of best variants to preserve each generation.
 
-- `num_islands`: Number of islands for island-based evolution. If None, uses value from DEFAULT_CONFIG.kiss_evolve.num_islands.
+- `num_islands`: Number of islands for island-based evolution.
 
-- `migration_frequency`: Number of generations between migrations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_frequency.
+- `migration_frequency`: Number of generations between migrations.
 
-- `migration_size`: Number of individuals to migrate between islands. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_size.
+- `migration_size`: Number of individuals to migrate between islands.
 
-- `migration_topology`: Migration topology ('ring', 'fully_connected', 'random'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_topology.
+- `migration_topology`: Migration topology ('ring', 'fully_connected', 'random').
 
-- `enable_novelty_rejection`: Enable code novelty rejection sampling. If None, uses value from DEFAULT_CONFIG.kiss_evolve.enable_novelty_rejection.
+- `enable_novelty_rejection`: Enable code novelty rejection sampling.
 
-- `novelty_threshold`: Cosine similarity threshold for rejecting code (0.0-1.0, higher = more strict). If None, uses value from DEFAULT_CONFIG.kiss_evolve.novelty_threshold.
+- `novelty_threshold`: Cosine similarity threshold for rejecting code (0.0-1.0, higher = more strict).
 
-- `max_rejection_attempts`: Maximum number of rejection attempts before accepting a variant anyway. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_rejection_attempts.
+- `max_rejection_attempts`: Maximum number of rejection attempts before accepting a variant anyway.
 
 - `novelty_rag_model`: Model to use for generating code embeddings. If None and novelty rejection is enabled, uses the first model from models list.
 
-- `parent_sampling_method`: Parent sampling method ('tournament', 'power_law', or 'performance_novelty'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.parent_sampling_method.
+- `parent_sampling_method`: Parent sampling method ('tournament', 'power_law', or 'performance_novelty').
 
-- `power_law_alpha`: Power-law sampling parameter (α) for rank-based sampling. Lower = more exploration, higher = more exploitation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.power_law_alpha.
+- `power_law_alpha`: Power-law sampling parameter (α) for rank-based sampling. Lower = more exploration, higher = more exploitation.
 
-- `performance_novelty_lambda`: Performance-novelty sampling parameter (λ) controlling selection pressure. If None, uses value from DEFAULT_CONFIG.kiss_evolve.performance_novelty_lambda.
+- `performance_novelty_lambda`: Performance-novelty sampling parameter (λ) controlling selection pressure.
 
 - **evolve** — Run the evolutionary algorithm.<br/>`evolve() -> CodeVariant`
 
@@ -1386,19 +1362,13 @@ from kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve import CodeVari
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve.config` — *KISSEvolve-specific configuration that extends the main KISS config.*
-
-##### `class KISSEvolveConfig(BaseModel)` — KISSEvolve-specific configuration settings.
-
-______________________________________________________________________
-
 #### `kiss.agents.vscode.kiss_project.src.kiss.agents.kiss_evolve.kiss_evolve` — *KISSEvolve: Evolutionary Algorithm Discovery using LLMs.*
 
 ##### `class CodeVariant` — Represents a code variant in the evolutionary population.
 
 ##### `class KISSEvolve` — KISSEvolve: Evolutionary algorithm discovery using LLMs.
 
-**Constructor:** `KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int | None = None, max_generations: int | None = None, mutation_rate: float | None = None, elite_size: int | None = None, num_islands: int | None = None, migration_frequency: int | None = None, migration_size: int | None = None, migration_topology: str | None = None, enable_novelty_rejection: bool | None = None, novelty_threshold: float | None = None, max_rejection_attempts: int | None = None, novelty_rag_model: Model | None = None, parent_sampling_method: str | None = None, power_law_alpha: float | None = None, performance_novelty_lambda: float | None = None)`
+**Constructor:** `KISSEvolve(code_agent_wrapper: Callable[..., str], initial_code: str, evaluation_fn: Callable[[str], dict[str, Any]], model_names: list[tuple[str, float]], extra_coding_instructions: str = '', population_size: int = 8, max_generations: int = 10, mutation_rate: float = 0.7, elite_size: int = 2, num_islands: int = 2, migration_frequency: int = 5, migration_size: int = 1, migration_topology: str = 'ring', enable_novelty_rejection: bool = False, novelty_threshold: float = 0.95, max_rejection_attempts: int = 5, novelty_rag_model: Model | None = None, parent_sampling_method: str = 'power_law', power_law_alpha: float = 1.0, performance_novelty_lambda: float = 1.0)`
 
 - `code_agent_wrapper`: The code generation agent wrapper. Should accept keyword arguments: model_name (str), prompt_template (str), and arguments (dict[str, str]).
 
@@ -1410,35 +1380,35 @@ ______________________________________________________________________
 
 - `extra_coding_instructions`: Extra instructions to add to the code generation prompt.
 
-- `population_size`: Number of variants to maintain in population. If None, uses value from DEFAULT_CONFIG.kiss_evolve.population_size.
+- `population_size`: Number of variants to maintain in population.
 
-- `max_generations`: Maximum number of evolutionary generations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_generations.
+- `max_generations`: Maximum number of evolutionary generations.
 
-- `mutation_rate`: Probability of mutating a variant. If None, uses value from DEFAULT_CONFIG.kiss_evolve.mutation_rate.
+- `mutation_rate`: Probability of mutating a variant.
 
-- `elite_size`: Number of best variants to preserve each generation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.elite_size.
+- `elite_size`: Number of best variants to preserve each generation.
 
-- `num_islands`: Number of islands for island-based evolution. If None, uses value from DEFAULT_CONFIG.kiss_evolve.num_islands.
+- `num_islands`: Number of islands for island-based evolution.
 
-- `migration_frequency`: Number of generations between migrations. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_frequency.
+- `migration_frequency`: Number of generations between migrations.
 
-- `migration_size`: Number of individuals to migrate between islands. If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_size.
+- `migration_size`: Number of individuals to migrate between islands.
 
-- `migration_topology`: Migration topology ('ring', 'fully_connected', 'random'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_topology.
+- `migration_topology`: Migration topology ('ring', 'fully_connected', 'random').
 
-- `enable_novelty_rejection`: Enable code novelty rejection sampling. If None, uses value from DEFAULT_CONFIG.kiss_evolve.enable_novelty_rejection.
+- `enable_novelty_rejection`: Enable code novelty rejection sampling.
 
-- `novelty_threshold`: Cosine similarity threshold for rejecting code (0.0-1.0, higher = more strict). If None, uses value from DEFAULT_CONFIG.kiss_evolve.novelty_threshold.
+- `novelty_threshold`: Cosine similarity threshold for rejecting code (0.0-1.0, higher = more strict).
 
-- `max_rejection_attempts`: Maximum number of rejection attempts before accepting a variant anyway. If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_rejection_attempts.
+- `max_rejection_attempts`: Maximum number of rejection attempts before accepting a variant anyway.
 
 - `novelty_rag_model`: Model to use for generating code embeddings. If None and novelty rejection is enabled, uses the first model from models list.
 
-- `parent_sampling_method`: Parent sampling method ('tournament', 'power_law', or 'performance_novelty'). If None, uses value from DEFAULT_CONFIG.kiss_evolve.parent_sampling_method.
+- `parent_sampling_method`: Parent sampling method ('tournament', 'power_law', or 'performance_novelty').
 
-- `power_law_alpha`: Power-law sampling parameter (α) for rank-based sampling. Lower = more exploration, higher = more exploitation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.power_law_alpha.
+- `power_law_alpha`: Power-law sampling parameter (α) for rank-based sampling. Lower = more exploration, higher = more exploitation.
 
-- `performance_novelty_lambda`: Performance-novelty sampling parameter (λ) controlling selection pressure. If None, uses value from DEFAULT_CONFIG.kiss_evolve.performance_novelty_lambda.
+- `performance_novelty_lambda`: Performance-novelty sampling parameter (λ) controlling selection pressure.
 
 - **evolve** — Run the evolutionary algorithm.<br/>`evolve() -> CodeVariant`
 
@@ -1486,14 +1456,6 @@ ______________________________________________________________________
 ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar` — *Sorcar agent with coding tools and browser automation.*
-
-______________________________________________________________________
-
-#### `kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.config` — *Configuration for the Assistant Agent.*
-
-##### `class AgentConfig(BaseModel)`
-
-##### `class SorcarConfig(BaseModel)`
 
 ______________________________________________________________________
 
@@ -1951,10 +1913,8 @@ ______________________________________________________________________
 #### `kiss.agents.vscode.kiss_project.src.kiss.core` — *Core module for the KISS agent framework.*
 
 ```python
-from kiss.agents.vscode.kiss_project.src.kiss.core import AgentConfig, Config, DEFAULT_CONFIG, KISSError
+from kiss.agents.vscode.kiss_project.src.kiss.core import Config, DEFAULT_CONFIG, KISSError
 ```
-
-##### `class AgentConfig(BaseModel)`
 
 ##### `class Config(BaseModel)`
 
@@ -1970,10 +1930,10 @@ ______________________________________________________________________
 
 - `name`: The name identifier for the agent.
 
-- **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled (either explicitly or via config).<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
+- **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled.<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
 
   - `printer`: An existing Printer instance to use directly. If provided, verbose is ignored.
-  - `verbose`: Whether to print to the console. If None, uses the verbose config value.
+  - `verbose`: Whether to print to the console. Defaults to True if None.
 
 - **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
 
@@ -1984,12 +1944,6 @@ ______________________________________________________________________
 #### `kiss.agents.vscode.kiss_project.src.kiss.core.config` — *Configuration Pydantic models for KISS agent settings with CLI support.*
 
 ##### `class APIKeysConfig(BaseModel)`
-
-##### `class AgentConfig(BaseModel)`
-
-##### `class RelentlessAgentConfig(BaseModel)`
-
-##### `class DockerConfig(BaseModel)`
 
 ##### `class Config(BaseModel)`
 
@@ -2018,11 +1972,11 @@ ______________________________________________________________________
   - `system_prompt`: Optional system prompt to provide to the model. Default is empty string (no system prompt).
   - `tools`: The tools to use for the agent. If None, no tools are provided (only the built-in finish tool is added).
   - `is_agentic`: Whether the agent is agentic. Default is True.
-  - `max_steps`: The maximum number of steps to take. Default is DEFAULT_CONFIG.agent.max_steps.
-  - `max_budget`: The maximum budget to spend. Default is DEFAULT_CONFIG.agent.max_agent_budget.
+  - `max_steps`: The maximum number of steps to take. Default is 100.
+  - `max_budget`: The maximum budget to spend. Default is 10.0.
   - `model_config`: The model configuration to use for the agent. Default is None.
   - `printer`: Optional printer for streaming output. Default is None.
-  - `verbose`: Whether to print output to console. Default is None (uses config verbose setting).
+  - `verbose`: Whether to print output to console. Default is None (verbose enabled).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
   - `session_info`: Sub-session label string (e.g. "Session: 1/5") to include in usage info output. Default is empty string.
   - **Returns:** str: The result of the agent's task.
@@ -2476,7 +2430,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `verbose`: Whether to print output to console. Defaults to config verbose setting.
+  - `verbose`: Whether to print output to console. Defaults to True.
   - `tools`: List of callable tools available to the agent during execution.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.

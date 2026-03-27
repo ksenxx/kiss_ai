@@ -114,7 +114,7 @@ def _openai_compatible(
 
     if OpenAICompatibleModel is None:  # pragma: no cover – openai always installed
         raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
-    return OpenAICompatibleModel(
+    return OpenAICompatibleModel(  # type: ignore[no-any-return]
         model_name=model_name,
         base_url=base_url,
         api_key=api_key,
@@ -721,7 +721,7 @@ def model(
             filtered or None,
             token_callback,
         )
-    keys = config_module.DEFAULT_CONFIG.agent.api_keys
+    keys = config_module.DEFAULT_CONFIG.api_keys
     if model_name.startswith("openrouter/"):
         return _openai_compatible(
             model_name,
@@ -735,7 +735,7 @@ def model(
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
-        return GeminiModel(
+        return GeminiModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.GEMINI_API_KEY,
             model_config=model_config,
@@ -762,7 +762,7 @@ def model(
             raise KISSError(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
             )
-        return AnthropicModel(
+        return AnthropicModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.ANTHROPIC_API_KEY,
             model_config=model_config,
@@ -773,7 +773,7 @@ def model(
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
-        return GeminiModel(
+        return GeminiModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.GEMINI_API_KEY,
             model_config=model_config,
@@ -792,7 +792,7 @@ def model(
             raise KISSError(
                 "OpenAI SDK not installed. Install 'openai' to use Novita models."
             )
-        return NovitaModel(
+        return NovitaModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.NOVITA_API_KEY,
             model_config=model_config,
@@ -808,7 +808,7 @@ def get_available_models() -> list[str]:
         list[str]: Sorted list of model name strings that have a configured API key
             and support text generation.
     """
-    keys = config_module.DEFAULT_CONFIG.agent.api_keys
+    keys = config_module.DEFAULT_CONFIG.api_keys
     prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,

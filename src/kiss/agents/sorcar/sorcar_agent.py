@@ -14,7 +14,6 @@ import yaml
 from kiss.agents.sorcar.persistence import _load_last_model, _save_last_model
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.core import config as config_module
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
@@ -105,20 +104,17 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
-        resolved_model = model_name or _load_last_model() or cfg.model_name
+        resolved_model = model_name or _load_last_model() or "claude-opus-4-6"
         _save_last_model(resolved_model)
         super()._reset(
             model_name=resolved_model,
-            max_sub_sessions=(
-                max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
-            ),
-            max_steps=max_steps if max_steps is not None else cfg.max_steps,
-            max_budget=max_budget if max_budget is not None else cfg.max_budget,
+            max_sub_sessions=max_sub_sessions if max_sub_sessions is not None else 10000,
+            max_steps=max_steps if max_steps is not None else 100,
+            max_budget=max_budget if max_budget is not None else 200.0,
             work_dir=work_dir or ".",
             docker_image=docker_image,
             printer=printer,
-            verbose=verbose if verbose is not None else cfg.verbose,
+            verbose=verbose if verbose is not None else False,
         )
 
     def run(  # type: ignore[override]

@@ -233,7 +233,7 @@ class TestModelConfigBaseUrlOverride:
     @pytest.mark.timeout(60)
     @requires_openai_api_key
     def test_base_url_and_api_key_override_calls_endpoint_and_returns_response(self):
-        api_key = config_module.DEFAULT_CONFIG.agent.api_keys.OPENAI_API_KEY
+        api_key = config_module.DEFAULT_CONFIG.api_keys.OPENAI_API_KEY
         m = model(
             "gpt-4.1-mini",
             model_config={
