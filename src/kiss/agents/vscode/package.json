@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "AI coding assistant powered by KISS Sorcar Agent",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "publisher": "ksenxx",
   "engines": {
     "vscode": "^1.98.0"
