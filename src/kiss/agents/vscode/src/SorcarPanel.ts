@@ -20,6 +20,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _activeEditorDisposable?: vscode.Disposable;
   private _commitPending: boolean = false;
+  private static _auxBarResized: boolean = false;
 
   constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
@@ -139,6 +140,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
         this._agentProcess.sendCommand({ type: 'getLastSession' });
         this._sendActiveFileInfo();
+        if (!SorcarViewProvider._auxBarResized && message.screenWidth) {
+          SorcarViewProvider._auxBarResized = true;
+          this._resizeAuxBarTo25Percent(message.screenWidth, message.sidebarWidth || 300);
+        }
         break;
 
       case 'submit': {
@@ -341,6 +346,19 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       const disposable = this._onCommitMessage.event(() => done());
       token?.onCancellationRequested(() => done());
     });
+  }
+
+  private async _resizeAuxBarTo25Percent(screenWidth: number, currentWidth: number): Promise<void> {
+    const targetWidth = Math.round(screenWidth * 0.25);
+    const delta = targetWidth - currentWidth;
+    if (delta <= 25) return;
+    const increments = Math.round(delta / 50);
+    if (increments <= 0) return;
+    try {
+      for (let i = 0; i < increments; i++) {
+        await vscode.commands.executeCommand('workbench.action.increaseViewWidth');
+      }
+    } catch { /* ignore if command unavailable */ }
   }
 
   public dispose(): void {
