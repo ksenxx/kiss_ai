@@ -163,8 +163,8 @@ publish_vscode_extension() {
 
     print_step "Building VS Code extension..."
     cd "$VSCODE_EXT_DIR"
-    vsce package --no-dependencies --allow-star-activation --allow-missing-repository
-    local vsix_file="kiss-sorcar-${version}.vsix"
+    vsce package --no-dependencies --allow-star-activation --allow-missing-repository -o kiss-sorcar.vsix
+    local vsix_file="kiss-sorcar.vsix"
 
     if [[ ! -f "$vsix_file" ]]; then
         print_error "VSIX file not found: $vsix_file"
