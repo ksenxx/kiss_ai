@@ -40,22 +40,24 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
 
-You can open a terminal and use sorcar as a normal shell command. Some examples are:
+Open a terminal and use sorcar as a normal shell command. Some examples are:
 
 ```
 sorcar -t "What is 2435*234"
 
-cat "What is 2435*234" > prompt
+cat "Can you find the cheapest non-stop flight from SFO to JFK on June 15 by consulting various websites?" > prompt
 sorcar -f prompt
 
-sorcar -m "claude-haiku-4-5" -t "What is 2435*234?"
+sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?"
 
-sorcar -n -t "What is 2435*234?" # to start in a new chat session
+# to start in a new chat session in sorcar use -n
+sorcar -n -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop slack app?' 
 ```
 
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISSSorcar.png)
+
 
 **KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor and **a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. Note that I am developing KISS Sorcar using KISS Sorcar so that I can improve the power of KISS Sorcar. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
