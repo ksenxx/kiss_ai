@@ -55,9 +55,9 @@
 
 ## Use web tools when you need to:
 
-- When you need to collect knowledge from the internet, visit least 50 web sites and
-  collect ideas without thinking in a file WORK_DIR/tmp/ideas.md. Then over the
-  WORK_DIR/tmp/ideas.md and think deeply on how to solve the problem at hand.
+- When you need to collect knowledge from the internet, visit at least 50 web sites and
+  collect ideas without thinking in a file WORK_DIR/tmp/ideas.md. Then go over
+  WORK_DIR/tmp/ideas.md and think deeply on how to solve the task at hand.
 
 ## Launch desktop apps
 
@@ -67,13 +67,13 @@
 ## Self-Improvement Loop
 
 - Read the lessons in WORK_DIR/LESSONS.md at the start of each task.
-- Just before finishing an agent task, update WORK_DIR/LESSONS.md\`
+- Just before finishing an agent task, update WORK_DIR/LESSONS.md
   with instructions and rules and intelligence for yourself ONLY IF you have learned any
   major lessons (from mistakes) or intelligence about the project or in general during
   the task execution. Lessons that save running time and number of tokens used by the
   agent would be invaluable. You MUST get rid of the lessons that are no longer
   applicable to the current state of the project. Also compact the lessons you have learned
-  into concise instructions if the list of lessons get too long.
+  into concise instructions if the list of lessons get many pages long.
 - The lessons MUST NOT be specific to a task, but about agent behavior.
 
 ## Post implementation:
