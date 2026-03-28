@@ -9,14 +9,13 @@
 # 2. Check if origin is ahead of kiss_ai repo
 # 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json
 # 4. Build VS Code extension (.vsix) so it's included in the commit
-# 5. Build .pkg installer (fail fast before committing)
-# 6. Commit changes with "Version bumped" (includes vsix)
-# 7. Push to origin
-# 8. Push to kiss_ai repo and tag with version
-# 9. Create GitHub release (with .pkg asset)
-# 10. Publish to PyPI
-# 11. Publish VS Code extension to marketplace
-# 12. Restore stashed changes
+# 5. Commit changes with "Version bumped" (includes vsix)
+# 6. Push to origin
+# 7. Push to kiss_ai repo and tag with version
+# 8. Create GitHub release
+# 9. Publish to PyPI
+# 10. Publish VS Code extension to marketplace
+# 11. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -272,18 +271,13 @@ main() {
     # Step 3: Build VS Code extension (before commit so vsix is included)
     build_vscode_extension
 
-    # Step 4: Build installer package (before commit so we fail fast)
-    print_step "Building installer package..."
-    INSTALLER_PKG="$PWD/dist/kiss-installer.pkg"
-    bash scripts/build_pkg.sh
-
-    # Step 5: Commit changes (includes version bump + fresh vsix)
+    # Step 4: Commit changes (includes version bump + fresh vsix)
     print_step "Committing version bump..."
     git add -A
     git commit -m "Version bumped to $VERSION"
     print_info "Committed version bump"
 
-    # Step 6: Pull latest from origin (rebase), then push (with retry)
+    # Step 5: Pull latest from origin (rebase), then push (with retry)
     print_step "Syncing with origin..."
     for attempt in 1 2 3; do
         git pull --rebase origin "$CURRENT_BRANCH"
@@ -299,7 +293,7 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 7: Push to kiss_ai repo (mirror from origin, force to ensure sync)
+    # Step 6: Push to kiss_ai repo (mirror from origin, force to ensure sync)
     print_step "Pushing to kiss_ai repo..."
     git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force
     print_info "Pushed to kiss_ai repo"
@@ -309,53 +303,19 @@ main() {
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
-    # Step 8: Create GitHub release
-    if [[ -f "$INSTALLER_PKG" ]]; then
-        print_step "Creating GitHub release with installer..."
-        gh release create "$TAG_NAME" "$INSTALLER_PKG" \
-            --repo ksenxx/kiss_ai \
-            --title "KISS $VERSION" \
-            --notes "Release $VERSION
+    # Step 7: Create GitHub release
+    print_step "Creating GitHub release..."
+    gh release create "$TAG_NAME" \
+        --repo ksenxx/kiss_ai \
+        --title "KISS $VERSION" \
+        --notes "Release $VERSION"
+    print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
 
-## Downloads
-- **kiss-installer.pkg** — macOS installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
-
-## macOS Installation
-
-The installer package is not signed with an Apple Developer certificate. macOS Gatekeeper will block it by default. To install, use **one** of these methods:
-
-### Method 1: System Settings (recommended)
-1. Double-click \`kiss-installer.pkg\` — you'll see a warning dialog
-2. Open **System Settings → Privacy & Security**
-3. Scroll down to find *\"kiss-installer.pkg\" was blocked*
-4. Click **Open Anyway** and confirm
-
-### Method 2: Remove quarantine attribute
-\`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
-open ~/Downloads/kiss-installer.pkg
-\`\`\`
-
-### Method 3: Command-line install
-\`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
-sudo installer -pkg ~/Downloads/kiss-installer.pkg -target /
-\`\`\`"
-        print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
-    else
-        print_warn "installer .pkg not found at $INSTALLER_PKG — skipping GitHub release asset upload"
-        gh release create "$TAG_NAME" \
-            --repo ksenxx/kiss_ai \
-            --title "KISS $VERSION" \
-            --notes "Release $VERSION"
-        print_info "GitHub release created (without .pkg): https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
-    fi
-
-    # Step 9: Publish to PyPI
+    # Step 8: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
-    # Step 10: Publish VS Code extension (already built in step 3)
+    # Step 9: Publish VS Code extension (already built in step 3)
     publish_vscode_extension "$VERSION"
 
     # Restore stashed changes
