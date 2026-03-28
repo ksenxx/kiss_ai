@@ -1283,7 +1283,7 @@
     if (atCtx) {
       var before = inp.value.substring(0, atCtx.start);
       var after = inp.value.substring(inp.selectionStart || inp.value.length);
-      var sep = (!after || /^\s/.test(after)) ? '' : ' ';
+      var sep = /^\s/.test(after) ? '' : ' ';
       var mention = 'WORK_DIR/' + file;
       inp.value = before + mention + sep + after; syncClearBtn();
       var np = before.length + mention.length + sep.length;
