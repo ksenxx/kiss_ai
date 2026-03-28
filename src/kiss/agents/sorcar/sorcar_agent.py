@@ -71,7 +71,6 @@ class SorcarAgent(RelentlessAgent):
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self.web_use_tool is None:
             self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
-        if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
         tools.append(ask_user_question)
         return tools
