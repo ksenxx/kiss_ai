@@ -247,8 +247,8 @@ class VSCodeServer:
         self.printer._thread_local.stop_event = self._stop_event
         self._user_answer_event = threading.Event()
 
-        # Immediate feedback so the user sees the task has started
-        self.printer.broadcast({"type": "status", "running": True})
+        # Note: status running=true is already sent by the TS side in _startTask()
+        # for immediate UI feedback. Only broadcast 'clear' here.
         self.printer.broadcast({"type": "clear"})
 
         # Git snapshot captures pre-task state (may be slow for large repos)

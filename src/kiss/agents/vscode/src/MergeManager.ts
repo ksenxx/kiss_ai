@@ -139,7 +139,6 @@ export class MergeManager extends EventEmitter {
     for (const h of s.hunks) {
       const old = h.baseLines;
       if (old.length > 0) {
-        const il = h.ns + offset - old.length; // ns was shifted; insert before new lines
         const insertLine = h.os + offset;
         const txt = old.join('\n') + '\n';
         await ed.edit((eb) => {
