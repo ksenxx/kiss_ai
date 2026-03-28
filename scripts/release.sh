@@ -8,13 +8,13 @@
 # 1. Stash any uncommitted changes
 # 2. Check if origin is ahead of kiss_ai repo
 # 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json
-# 4. Build .pkg installer (fail fast before committing)
-# 5. Commit changes with "Version bumped"
+# 4. Build VS Code extension (.vsix) so it's included in the commit
+# 5. Commit changes with "Version bumped" (includes vsix)
 # 6. Push to origin
 # 7. Push to kiss_ai repo and tag with version
-# 8. Create GitHub release (with .pkg asset)
+# 8. Create GitHub release
 # 9. Publish to PyPI
-# 10. Build and publish VS Code extension to marketplace
+# 10. Publish VS Code extension to marketplace
 # 11. Restore stashed changes
 
 set -e  # Exit on error
@@ -173,30 +173,33 @@ publish_to_pypi() {
     print_info "View at: https://pypi.org/project/${PYPI_PACKAGE_NAME}/${version}/"
 }
 
-publish_vscode_extension() {
-    local version="$1"
-
+build_vscode_extension() {
     print_step "Building VS Code extension..."
     cd "$VSCODE_EXT_DIR"
     vsce package --no-dependencies --allow-star-activation --allow-missing-repository -o kiss-sorcar.vsix
-    local vsix_file="kiss-sorcar.vsix"
 
-    if [[ ! -f "$vsix_file" ]]; then
-        print_error "VSIX file not found: $vsix_file"
+    if [[ ! -f "kiss-sorcar.vsix" ]]; then
+        print_error "VSIX file not found: kiss-sorcar.vsix"
         cd - > /dev/null
         return 1
     fi
 
-    print_info "Built $vsix_file"
+    print_info "Built kiss-sorcar.vsix"
+    cd - > /dev/null
+}
+
+publish_vscode_extension() {
+    local version="$1"
 
     if [[ -z "${VSCE_PAT:-}" ]]; then
         print_error "VSCE_PAT environment variable is not set"
         print_info "Please set it with: export VSCE_PAT='your-personal-access-token'"
-        cd - > /dev/null
         return 1
     fi
 
-    vsce publish --packagePath "$vsix_file" --pat "$VSCE_PAT"
+    print_step "Publishing VS Code extension..."
+    cd "$VSCODE_EXT_DIR"
+    vsce publish --packagePath "kiss-sorcar.vsix" --pat "$VSCE_PAT"
     cd - > /dev/null
 
     print_info "Successfully published VS Code extension v$version"
@@ -265,12 +268,10 @@ main() {
     update_system_md_version "$VERSION"
     update_vscode_package_version "$VERSION"
 
-    # Step 3: Build installer package (before commit so we fail fast)
-    print_step "Building installer package..."
-    INSTALLER_PKG="$PWD/dist/kiss-installer.pkg"
-    bash scripts/build_pkg.sh
+    # Step 3: Build VS Code extension (before commit so vsix is included)
+    build_vscode_extension
 
-    # Step 4: Commit changes
+    # Step 4: Commit changes (includes version bump + fresh vsix)
     print_step "Committing version bump..."
     git add -A
     git commit -m "Version bumped to $VERSION"
@@ -303,53 +304,18 @@ main() {
     print_info "Created and pushed tag: $TAG_NAME"
 
     # Step 7: Create GitHub release
-    if [[ -f "$INSTALLER_PKG" ]]; then
-        print_step "Creating GitHub release with installer..."
-        gh release create "$TAG_NAME" "$INSTALLER_PKG" \
-            --repo ksenxx/kiss_ai \
-            --title "KISS $VERSION" \
-            --notes "Release $VERSION
-
-## Downloads
-- **kiss-installer.pkg** — macOS installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
-
-## macOS Installation
-
-The installer package is not signed with an Apple Developer certificate. macOS Gatekeeper will block it by default. To install, use **one** of these methods:
-
-### Method 1: System Settings (recommended)
-1. Double-click \`kiss-installer.pkg\` — you'll see a warning dialog
-2. Open **System Settings → Privacy & Security**
-3. Scroll down to find *\"kiss-installer.pkg\" was blocked*
-4. Click **Open Anyway** and confirm
-
-### Method 2: Remove quarantine attribute
-\`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
-open ~/Downloads/kiss-installer.pkg
-\`\`\`
-
-### Method 3: Command-line install
-\`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
-sudo installer -pkg ~/Downloads/kiss-installer.pkg -target /
-\`\`\`"
-        print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
-    else
-        print_warn "installer .pkg not found at $INSTALLER_PKG — skipping GitHub release asset upload"
-        gh release create "$TAG_NAME" \
-            --repo ksenxx/kiss_ai \
-            --title "KISS $VERSION" \
-            --notes "Release $VERSION"
-        print_info "GitHub release created (without .pkg): https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
-    fi
+    print_step "Creating GitHub release..."
+    gh release create "$TAG_NAME" \
+        --repo ksenxx/kiss_ai \
+        --title "KISS $VERSION" \
+        --notes "Release $VERSION"
+    print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
 
     # Step 8: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
-    # Step 9: Publish VS Code extension
-    print_step "Publishing VS Code extension..."
+    # Step 9: Publish VS Code extension (already built in step 3)
     publish_vscode_extension "$VERSION"
 
     # Restore stashed changes

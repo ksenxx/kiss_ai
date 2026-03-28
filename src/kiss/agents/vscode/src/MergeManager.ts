@@ -530,9 +530,12 @@ export class MergeManager extends EventEmitter {
         if (old.length > 0) {
           const il = h.cs + offset;
           const txt = old.join('\n') + '\n';
-          await ed.edit((eb) => {
+          const ok = await ed.edit((eb) => {
             eb.insert(new vscode.Position(il, 0), txt);
           });
+          if (!ok) {
+            console.error(`[MergeManager] ed.edit failed in _doOpenMerge (insert at line ${il})`);
+          }
         }
         processed.push({
           os: h.cs + offset,
