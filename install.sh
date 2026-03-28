@@ -21,6 +21,12 @@ fi
 
 mkdir -p "$BIN_DIR"
 
+# Require curl — used to download Homebrew and uv
+if ! command -v curl &> /dev/null; then
+    echo "ERROR: curl is required but not found. Please install curl first."
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # 1. Install or upgrade Homebrew  (https://brew.sh)
 # ---------------------------------------------------------------------------
@@ -48,7 +54,23 @@ if [ "$OS" = "macos" ]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
 fi
 
-echo "   Homebrew $(brew --version | head -1) ready"
+if command -v brew &> /dev/null; then
+    echo "   Homebrew $(brew --version | head -1) ready"
+fi
+
+# ---------------------------------------------------------------------------
+# 1b. Install git via Homebrew (required by diff_merge, check, etc.)
+# ---------------------------------------------------------------------------
+if ! command -v git &> /dev/null; then
+    if command -v brew &> /dev/null; then
+        echo "   Installing git via Homebrew..."
+        brew install git
+    else
+        echo "ERROR: git is required but not found. Please install git first."
+        exit 1
+    fi
+fi
+echo "   git $(git --version) ready"
 
 # ---------------------------------------------------------------------------
 # 2. Install uv from binaries if not installed  (https://astral.sh/uv)
