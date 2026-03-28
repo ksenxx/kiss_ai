@@ -83,51 +83,31 @@ class TestStreamingFlow(unittest.TestCase):
 class TestBashStreamDedup(unittest.TestCase):
     """Test that tool_result doesn't repeat bash_stream output."""
 
-    def test_tool_result_skips_content_after_bash_stream(self):
-        p, buf = _make()
-        p.print("line1\n", type="bash_stream")
-        p.print("line2\n", type="bash_stream")
-        buf_before = buf.getvalue()
-        assert "line1" in buf_before
-        # tool_result should not repeat the content
-        p.print("line1\nline2\n", type="tool_result", tool_name="Bash")
-        buf_after = buf.getvalue()
-        # The content after tool_result should only have OK rules, not repeated lines
-        new_output = buf_after[len(buf_before):]
-        assert "OK" in new_output
-        assert "line1" not in new_output
-        assert "line2" not in new_output
-
-    def test_tool_result_shows_content_without_bash_stream(self):
+    def test_tool_result_not_shown_for_success(self):
         p, buf = _make()
         p.print("some output", type="tool_result", tool_name="Read")
         out = buf.getvalue()
-        assert "some output" in out
-        assert "OK" in out
+        assert "some output" not in out
+        assert "OK" not in out
 
-    def test_tool_result_suppressed_for_non_core_tools(self):
-        p, buf = _make()
-        p.print("accessibility tree", type="tool_result", tool_name="go_to_url")
-        out = buf.getvalue()
-        assert "accessibility tree" not in out
-
-    def test_tool_result_shown_on_error_for_non_core_tools(self):
+    def test_tool_result_shown_on_error(self):
         p, buf = _make()
         p.print("error msg", type="tool_result", tool_name="go_to_url", is_error=True)
         out = buf.getvalue()
         assert "error msg" in out
+        assert "FAILED" in out
 
-    def test_tool_call_resets_bash_streamed(self):
+    def test_tool_result_error_skips_content_after_bash_stream(self):
         p, buf = _make()
-        p.print("streamed\n", type="bash_stream")
-        # tool_call resets the flag
-        p.print("Read", type="tool_call", tool_input={"file_path": "/tmp/x"})
-        buf.truncate(0)
-        buf.seek(0)
-        # Next tool_result should show content
-        p.print("file contents", type="tool_result", tool_name="Read")
-        out = buf.getvalue()
-        assert "file contents" in out
+        p.print("line1\n", type="bash_stream")
+        buf_before = buf.getvalue()
+        assert "line1" in buf_before
+        # Error tool_result should show FAILED but not repeat streamed content
+        p.print("line1\n", type="tool_result", tool_name="Bash", is_error=True)
+        buf_after = buf.getvalue()
+        new_output = buf_after[len(buf_before):]
+        assert "FAILED" in new_output
+        assert "line1" not in new_output
 
     def test_reset_clears_bash_streamed(self):
         p, buf = _make()

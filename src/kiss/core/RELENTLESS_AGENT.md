@@ -110,7 +110,7 @@ self.budget_used += executor.budget_used
 self.total_tokens_used += executor.total_tokens_used
 ```
 
-This gives the RelentlessAgent awareness of total spend across all sub-sessions for tracking and reporting. Hard budget caps that prevent runaway costs operate at two levels: `max_budget` caps each individual sub-session (since each `KISSAgent` starts with `budget_used=0`), while the global budget (`Base.global_budget_used` checked against `config.agent.global_max_budget`) caps cumulative spending across all sub-sessions and agents in the process. Both checks happen at every step boundary inside `KISSAgent._check_limits()`.
+This gives the RelentlessAgent awareness of total spend across all sub-sessions for tracking and reporting. Hard budget caps that prevent runaway costs operate at two levels: `max_budget` caps each individual sub-session (since each `KISSAgent` starts with `budget_used=0`), while the global budget (`Base.global_budget_used` checked against a hard cap of $200) caps cumulative spending across all sub-sessions and agents in the process. Both checks happen at every step boundary inside `KISSAgent._check_limits()`.
 
 ### Docker Isolation
 
@@ -243,14 +243,22 @@ The `SorcarAgent` ([`src/kiss/agents/sorcar/sorcar_agent.py`](../agents/sorcar/s
 
 SorcarAgent's job is to supply **tools**, **system instructions**, and **prompt enrichment** — the three things the RelentlessAgent is deliberately agnostic about.
 
-**Tools.** The `_get_tools()` method assembles the tool list that each sub-session receives: `Bash`, `Read`, `Edit`, `Write`, and `ask_user_question` for coding work and human-in-the-loop interaction, plus a full set of browser automation tools (`go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `ask_user_browser_action`) from `WebUseTool`. If a Docker image is configured, the Bash tool is swapped for a Docker-isolated variant. This tool set is passed to `super().run(tools=self._get_tools())`, and from that point the RelentlessAgent's sub-session loop takes over — each fresh `KISSAgent` session receives these tools unchanged.
+**Tools.** The `_get_tools()` method assembles the tool list that each sub-session receives: `Bash`, `Read`, `Edit`, `Write`, and `ask_user_question` for coding work and human-in-the-loop interaction, plus a full set of browser automation tools (`go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `ask_user_browser_action`) from `WebUseTool`. If a Docker image is configured, all four file and shell tools are swapped for Docker-isolated variants via `DockerTools`. The tool set is combined with any extra caller-supplied tools in `perform_task()`, and from that point the RelentlessAgent's sub-session loop takes over — each fresh `KISSAgent` session receives these tools unchanged.
 
 ```python
 def _get_tools(self) -> list:
     stop_event = getattr(self, "_stop_event", None)
     useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
-    bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
-    tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+    if self.docker_manager:
+        from kiss.docker.docker_tools import DockerTools
+        docker_tools = DockerTools(self._docker_bash)
+        tools: list = [
+            self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
+        ]
+    else:
+        tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+    if self.web_use_tool is None:
+        self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
     if self.web_use_tool:
         tools.extend(self.web_use_tool.get_tools())
     tools.append(ask_user_question)
@@ -263,16 +271,24 @@ def _get_tools(self) -> list:
 
 ### What SorcarAgent Does Not Do
 
-SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 250 lines of logic (excluding the CLI `main()`), and its entire `run()` method ends with:
+SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 250 lines of logic (excluding the CLI `main()`), and its `run()` method ends with:
 
 ```python
 return super().run(
     model_name=model_name,
     system_prompt=system_instructions,
     prompt_template=prompt,
-    tools=self._get_tools() + (tools if tools else []),
+    tools=tools or [],
     ...
 )
+```
+
+The extra caller-supplied tools are merged with the built-in tools in the overridden `perform_task()`:
+
+```python
+def perform_task(self, tools, attachments=None):
+    all_tools = self._get_tools() + tools
+    return super().perform_task(all_tools, attachments=attachments)
 ```
 
 This is the intended extension pattern: concrete agents configure *what* the agent can do (tools and context), while `RelentlessAgent` handles *how long* and *how reliably* it can do it.

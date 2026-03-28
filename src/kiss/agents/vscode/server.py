@@ -109,6 +109,7 @@ class VSCodeServer:
         self._merging = False
         self._complete_seq = itertools.count()
         self._complete_seq_latest = -1
+        self._complete_lock = threading.Lock()
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -182,7 +183,8 @@ class VSCodeServer:
                 snapshot_file = self._last_active_file
                 snapshot_content = self._last_active_content
             seq = next(self._complete_seq)
-            self._complete_seq_latest = seq
+            with self._complete_lock:
+                self._complete_seq_latest = seq
             if query:
                 threading.Thread(
                     target=self._complete,
@@ -647,8 +649,9 @@ class VSCodeServer:
             snapshot_file: Atomically-captured active file path.
             snapshot_content: Atomically-captured active file content.
         """
-        if seq >= 0 and seq != self._complete_seq_latest:
-            return
+        with self._complete_lock:
+            if seq >= 0 and seq != self._complete_seq_latest:
+                return
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
             return
@@ -656,9 +659,10 @@ class VSCodeServer:
         fast = clip_autocomplete_suggestion(
             query, self._fast_complete(query, snapshot_file, snapshot_content)
         )
-        if seq >= 0 and seq != self._complete_seq_latest:
-            return
-        self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
+        with self._complete_lock:
+            if seq >= 0 and seq != self._complete_seq_latest:
+                return
+            self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
 
     def _refresh_file_cache(self) -> None:
         """Refresh the file cache from disk in a background thread.
