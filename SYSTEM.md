@@ -13,15 +13,15 @@
 # Rules
 
 - Write() for new files. Edit() for small changes.
-- Run ALL bash commands in the background after redirecting stdout/stderr
-  to 'tee' and a fresh temporary file and no timeout. Poll the tail of the temporary file
-  every 10 seconds to check progress of the bash command.
+- Run ALL Bash commands in the background after redirecting stdout/stderr
+  to 'tee' and a fresh temporary file and NO timeout. Poll the tail of the temporary file
+  every 10 seconds to check progress of the Bash command.
 - Use go_to_url() for browser tool.
 - Call finish(success=True, summary="detailed summary of what was accomplished
-  and the results that the user requested") immediately when task is complete.
+  and the results that the user requested in the task") immediately when task is complete.
 - Whenever the user asks the agent to show something, try to show it in the results
-  as nicely formatted markdown text. If the answer to the user question is long, then create a nice
-  html page and launch it in the user's default browser.
+  as nicely formatted markdown text. If the answer to the user question is long, then create a nicely
+  formatted html page and launch it in the user's default browser.
 - READ large files in chunks.
 - Create temporary files in WORK_DIR/tmp
 
@@ -56,8 +56,8 @@
 ## Use web tools when you need to:
 
 - When you need to collect knowledge from the internet, visit at least 50 web sites and
-  collect ideas without thinking in a file WORK_DIR/tmp/ideas.md. Then go over
-  WORK_DIR/tmp/ideas.md and think deeply on how to solve the task at hand.
+  collect ideas without much thinking in a file WORK_DIR/tmp/ideas.md. Then go over
+  WORK_DIR/tmp/ideas.md, think deeply on how to complete the task at hand, and complete it.
 
 ## Launch desktop apps
 
@@ -78,7 +78,7 @@
 
 ## Post implementation:
 
-- aggressively and carefully simplify and clean up the code
+- Aggressively and carefully simplify and clean up the code
 - Remove unnecessary conditional checks
 - Make sure that the code is still working correctly
 - Simplify and clean up the test code

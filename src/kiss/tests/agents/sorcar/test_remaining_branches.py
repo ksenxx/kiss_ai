@@ -1232,27 +1232,28 @@ class TestWebUseToolResolveLocatorInvisible:
     def test_resolve_locator_invisible_element(self, tmp_path: Path) -> None:
         """When first matching element is not visible, loop skips it (200->198).
 
-        Use visibility:hidden which keeps the element in the DOM and accessible
-        to get_by_role but makes is_visible() return False.
+        Use a zero-size button (clip:rect(0,0,0,0) + width/height 0) which stays
+        in the accessibility tree but makes is_visible() return False.
         """
         html_file = tmp_path / "hidden.html"
         html_file.write_text(
-            '<html><body>'
-            '<button style="visibility:hidden;position:absolute">Submit</button>'
-            '<button>Submit</button>'
-            '</body></html>'
+            "<html><body>"
+            '<button style="position:absolute;width:0;height:0;padding:0;'
+            'border:0;overflow:hidden;clip:rect(0,0,0,0)">Submit</button>'
+            "<button>Submit</button>"
+            "</body></html>"
         )
         tool = WebUseTool()
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Find a button element ID
+            # Both buttons should be in the accessibility snapshot
             btn_id = None
             for i, el in enumerate(tool._elements):
                 if el["role"] == "button" and el["name"] == "Submit":
                     btn_id = i + 1
                     break
-            if btn_id:
-                result = tool.click(btn_id)
-                assert "Error" not in result or "Page:" in result
+            assert btn_id is not None, "Should find Submit button in elements"
+            result = tool.click(btn_id)
+            assert "Error" not in result or "Page:" in result
         finally:
             tool.close()
