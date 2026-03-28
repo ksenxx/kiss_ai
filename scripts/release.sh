@@ -123,6 +123,18 @@ update_system_md_version() {
     fi
 }
 
+update_vscode_package_version() {
+    local version="$1"
+    local pkg_json="${VSCODE_EXT_DIR}/package.json"
+    if [[ ! -f "$pkg_json" ]]; then
+        print_warn "VS Code package.json not found: $pkg_json - skipping"
+        return
+    fi
+    sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" "$pkg_json"
+    rm -f "${pkg_json}.bak"
+    print_info "Updated $pkg_json to version $version"
+}
+
 ensure_remote() {
     if ! git remote get-url "$PUBLIC_REMOTE" &>/dev/null; then
         print_info "Adding remote '$PUBLIC_REMOTE'..."
@@ -243,6 +255,7 @@ main() {
     update_version_file "$VERSION"
     update_readme_version "$VERSION"
     update_system_md_version "$VERSION"
+    update_vscode_package_version "$VERSION"
 
     # Step 3: Commit changes
     print_step "Committing version bump..."
