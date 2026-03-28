@@ -745,7 +745,7 @@
 
   function init() {
     setupEventListeners();
-    vscode.postMessage({ type: 'ready' });
+    vscode.postMessage({ type: 'ready', screenWidth: screen.width, sidebarWidth: document.documentElement.clientWidth });
   }
 
   function setupEventListeners() {

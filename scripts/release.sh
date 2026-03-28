@@ -15,7 +15,8 @@
 # 8. Create GitHub release
 # 9. Publish to PyPI
 # 10. Publish VS Code extension to marketplace
-# 11. Restore stashed changes
+# 11. Install extension into local Cursor IDE (if installed)
+# 12. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -206,6 +207,29 @@ publish_vscode_extension() {
     print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
 }
 
+install_cursor_extension() {
+    local vsix_path="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
+    local cursor_cli=""
+
+    if command -v cursor &>/dev/null; then
+        cursor_cli="cursor"
+    elif [[ -x "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" ]]; then
+        cursor_cli="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
+    fi
+
+    if [[ -z "$cursor_cli" ]]; then
+        print_info "Cursor IDE not found — skipping local extension install"
+        return 0
+    fi
+
+    print_step "Installing extension into Cursor IDE..."
+    if "$cursor_cli" --install-extension "$vsix_path" --force 2>&1; then
+        print_info "Extension installed into Cursor IDE"
+    else
+        print_warn "Failed to install extension into Cursor IDE — continuing"
+    fi
+}
+
 # =============================================================================
 # Main Release Process
 # =============================================================================
@@ -317,6 +341,9 @@ main() {
 
     # Step 9: Publish VS Code extension (already built in step 3)
     publish_vscode_extension "$VERSION"
+
+    # Step 10: Install extension into local Cursor IDE if available
+    install_cursor_extension
 
     # Restore stashed changes
     trap - EXIT

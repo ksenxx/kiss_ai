@@ -20,6 +20,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _activeEditorDisposable?: vscode.Disposable;
   private _commitPending: boolean = false;
+  private static _auxBarResized: boolean = false;
 
   constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
@@ -117,7 +118,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
     const workDir = this._getWorkDir();
-    this._isRunning = true;
     this._agentProcess.start(workDir);
     this.sendToWebview({ type: 'status', running: true });
     this._agentProcess.sendCommand({
@@ -139,6 +139,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
         this._agentProcess.sendCommand({ type: 'getLastSession' });
         this._sendActiveFileInfo();
+        if (!SorcarViewProvider._auxBarResized && message.screenWidth) {
+          SorcarViewProvider._auxBarResized = true;
+          this._resizeAuxBarTo25Percent(message.screenWidth, message.sidebarWidth || 300);
+        }
         break;
 
       case 'submit': {
@@ -253,6 +257,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         if (!editor || !editor.document.uri.fsPath.toLowerCase().endsWith('.md')) return;
         const content = editor.document.getText();
         if (!content.trim()) return;
+        this._isRunning = true;
         this._startTask(content, this._selectedModel, editor.document.uri.fsPath);
         break;
       }
@@ -333,20 +338,37 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
 
     return new Promise<void>((resolve) => {
+      let resolved = false;
       const done = () => {
+        if (resolved) return;
+        resolved = true;
         this._commitPending = false;
         disposable.dispose();
+        clearTimeout(timer);
         resolve();
       };
       const disposable = this._onCommitMessage.event(() => done());
       token?.onCancellationRequested(() => done());
+      const timer = setTimeout(done, 30_000);
     });
+  }
+
+  private async _resizeAuxBarTo25Percent(screenWidth: number, currentWidth: number): Promise<void> {
+    const targetWidth = Math.round(screenWidth * 0.25);
+    const delta = targetWidth - currentWidth;
+    if (delta <= 25) return;
+    const increments = Math.round(delta / 50);
+    if (increments <= 0) return;
+    try {
+      for (let i = 0; i < increments; i++) {
+        await vscode.commands.executeCommand('workbench.action.increaseViewWidth');
+      }
+    } catch { /* ignore if command unavailable */ }
   }
 
   public dispose(): void {
     this._activeEditorDisposable?.dispose();
     this._agentProcess.dispose();
-    this._mergeManager.dispose();
     this._onCommitMessage.dispose();
   }
 
