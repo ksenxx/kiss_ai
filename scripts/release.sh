@@ -5,14 +5,17 @@
 # PyPI: https://pypi.org/project/kiss-agent-framework/
 #
 # Workflow:
-# 1. Check if origin is ahead of kiss_ai repo
-# 2. If ahead, bump version in _version.py and README.md
-# 3. Commit changes with "Version bumped"
-# 4. Push to origin
-# 5. Push to kiss_ai repo and tag with version
-# 6. Build .pkg and create GitHub release (with .pkg asset)
-# 7. Publish to PyPI
-# 8. Build and publish VS Code extension to marketplace
+# 1. Stash any uncommitted changes
+# 2. Check if origin is ahead of kiss_ai repo
+# 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json
+# 4. Build .pkg installer (fail fast before committing)
+# 5. Commit changes with "Version bumped"
+# 6. Push to origin
+# 7. Push to kiss_ai repo and tag with version
+# 8. Create GitHub release (with .pkg asset)
+# 9. Publish to PyPI
+# 10. Build and publish VS Code extension to marketplace
+# 11. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -221,10 +224,15 @@ main() {
     # Ensure public remote exists
     ensure_remote
 
-    # Step 1: Sync local with origin, then check against public
+    # Step 1: Stash uncommitted changes, sync with origin, then check against public
     print_step "Syncing with origin and checking kiss_ai repo..."
-    git add -A
-    git diff --cached --quiet || git commit -m "Pre-release sync"
+    STASHED=false
+    if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+        print_info "Stashing uncommitted changes..."
+        git stash push --include-untracked -m "release-script: pre-release stash"
+        STASHED=true
+    fi
+    trap 'if [[ "$STASHED" == true ]]; then print_warn "Restoring stashed changes after failure..."; git stash pop; fi' EXIT
     git fetch origin
     git fetch "$PUBLIC_REMOTE"
     git pull --rebase origin "$CURRENT_BRANCH"
@@ -257,13 +265,18 @@ main() {
     update_system_md_version "$VERSION"
     update_vscode_package_version "$VERSION"
 
-    # Step 3: Commit changes
+    # Step 3: Build installer package (before commit so we fail fast)
+    print_step "Building installer package..."
+    INSTALLER_PKG="$PWD/dist/kiss-installer.pkg"
+    bash scripts/build_pkg.sh
+
+    # Step 4: Commit changes
     print_step "Committing version bump..."
     git add -A
     git commit -m "Version bumped to $VERSION"
     print_info "Committed version bump"
 
-    # Step 4: Pull latest from origin (rebase), then push (with retry)
+    # Step 5: Pull latest from origin (rebase), then push (with retry)
     print_step "Syncing with origin..."
     for attempt in 1 2 3; do
         git pull --rebase origin "$CURRENT_BRANCH"
@@ -279,7 +292,7 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 5: Push to kiss_ai repo (mirror from origin, force to ensure sync)
+    # Step 6: Push to kiss_ai repo (mirror from origin, force to ensure sync)
     print_step "Pushing to kiss_ai repo..."
     git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force
     print_info "Pushed to kiss_ai repo"
@@ -289,10 +302,7 @@ main() {
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
-    # Step 6: Build .pkg and create GitHub release
-    print_step "Building installer package..."
-    INSTALLER_PKG="$PWD/dist/kiss-installer.pkg"
-    bash scripts/build_pkg.sh
+    # Step 7: Create GitHub release
     if [[ -f "$INSTALLER_PKG" ]]; then
         print_step "Creating GitHub release with installer..."
         gh release create "$TAG_NAME" "$INSTALLER_PKG" \
@@ -334,13 +344,21 @@ sudo installer -pkg ~/Downloads/kiss-installer.pkg -target /
         print_info "GitHub release created (without .pkg): https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
     fi
 
-    # Step 7: Publish to PyPI
+    # Step 8: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
-    # Step 8: Publish VS Code extension
+    # Step 9: Publish VS Code extension
     print_step "Publishing VS Code extension..."
     publish_vscode_extension "$VERSION"
+
+    # Restore stashed changes
+    trap - EXIT
+    if [[ "$STASHED" == true ]]; then
+        print_step "Restoring stashed changes..."
+        git stash pop
+        print_info "Stashed changes restored"
+    fi
 
     echo
     print_info "========================================"

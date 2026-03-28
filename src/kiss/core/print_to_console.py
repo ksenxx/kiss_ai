@@ -127,10 +127,9 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            tool_name = kwargs.get("tool_name", "")
-            if tool_name in {"Bash", "Read", "Edit", "Write"} or kwargs.get("is_error", False):
+            if kwargs.get("is_error", False):
                 self._flush_newline()
-                self._print_tool_result(str(content), kwargs.get("is_error", False))
+                self._print_tool_result(str(content))
             return ""
         if type == "result":
             self._flush_newline()
@@ -196,16 +195,15 @@ class ConsolePrinter(StreamEventParser, Printer):
             )
         )
 
-    def _print_tool_result(self, content: str, is_error: bool) -> None:
-        style = "red" if is_error else "green"
-        self._console.rule("FAILED" if is_error else "OK", style=style, align="center")
+    def _print_tool_result(self, content: str) -> None:
+        self._console.rule("FAILED", style="red", align="center")
         if not self._bash_streamed:
             display = truncate_result(content)
             for line in display.splitlines():
                 self._file.write(line + "\n")
                 self._file.flush()
         self._bash_streamed = False
-        self._console.rule(style=style)
+        self._console.rule(style="red")
 
     def _on_thinking_start(self) -> None:
         self._flush_newline()
@@ -257,9 +255,9 @@ class ConsolePrinter(StreamEventParser, Printer):
             )
         elif hasattr(message, "content"):
             for block in message.content:
-                if hasattr(block, "is_error") and hasattr(block, "content"):
+                if hasattr(block, "is_error") and hasattr(block, "content") and block.is_error:
                     content = (
                         block.content if isinstance(block.content, str) else str(block.content)
                     )
                     self._flush_newline()
-                    self._print_tool_result(content, bool(block.is_error))
+                    self._print_tool_result(content)
