@@ -29,13 +29,13 @@ export async function ensureDependencies(): Promise<void> {
   if (uvPath && venvExists) {
     spawnBackground(uvPath, ['run', 'python', '-m', 'playwright', 'install', 'chromium'], kissProjectPath);
   } else {
-    // Slow path: show progress notification and install missing deps
+    // Slow path: show progress bar and install missing deps
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'KISS Sorcar', cancellable: false },
+      { location: vscode.ProgressLocation.Notification, title: 'KISS Sorcar: Setting up', cancellable: false },
       async (progress) => {
         // 1. Install uv if needed
         if (!uvPath) {
-          progress.report({ message: 'Installing uv package manager...' });
+          progress.report({ message: 'Installing uv package manager...', increment: 0 });
           uvPath = await installUv();
           if (!uvPath) {
             vscode.window.showErrorMessage(
@@ -43,6 +43,7 @@ export async function ensureDependencies(): Promise<void> {
             );
             return;
           }
+          progress.report({ increment: 20 });
         }
 
         // 2. Warn about git
@@ -56,6 +57,7 @@ export async function ensureDependencies(): Promise<void> {
         if (!venvExists) {
           progress.report({ message: 'Setting up Python environment (first time, may take a minute)...' });
           await runAsync(uvPath, ['sync'], kissProjectPath);
+          progress.report({ increment: 50 });
         }
 
         // 4. Install Playwright Chromium
@@ -65,8 +67,19 @@ export async function ensureDependencies(): Promise<void> {
           ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
           kissProjectPath
         );
+        progress.report({ increment: 30 });
       }
     );
+
+    // Show restart notification after installation completes
+    vscode.window.showInformationMessage(
+      'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
+      'Restart VS Code'
+    ).then(choice => {
+      if (choice === 'Restart VS Code') {
+        vscode.commands.executeCommand('workbench.action.reloadWindow');
+      }
+    });
   }
 
   // Install CLI wrapper so `sorcar` is available from any terminal
