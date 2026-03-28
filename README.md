@@ -38,7 +38,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar-0.2.57.vsix](src/kiss/agents/vscode/kiss-sorcar-0.2.57.vsix).
+To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
 
 You can open a terminal and use sorcar as a normal shell command. Some examples are:
 
@@ -55,9 +55,9 @@ sorcar -n -t "What is 2435*234?" # to start in a new chat session
 
 # Introduction to KISS Sorcar
 
-[KISS Sorcar](assets/KISSSorcar.png)
+![KISS Sorcar](assets/KISSSorcar.png)
 
-**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor and **a general-purpose agent with web browsing and native Desktop app execution capabilities**. It runs **locally** as a VS Code IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
+**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor and **a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
 #whatispossible #KISSSorcar
 
@@ -153,11 +153,10 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **KISSAgent with ReAct Loop**: The core agent runs a generate-execute-observe loop with native function calling, automatic tool schema generation from Python function signatures and docstrings, trajectory saving, and per-step budget tracking.
 - **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with explanation and relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
 - **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output) for coding tasks, `ask_user_question` for human-in-the-loop interaction, plus full browser automation via Playwright with accessibility-tree-based element selection.
-- **Browser-Based IDE**: Embeds `code-server` (VS Code in the browser) with a chatbot interface using Server-Sent Events for real-time streaming, task history and replay, AI-powered input autocomplete, a model selector with pricing info, merge views for reviewing agent changes, and theme syncing with VS Code.
+- **StatefulSorcarAgent with Chat-Session Persistence**: Extends `SorcarAgent` with multi-turn chat-session state management — maintains a `chat_id`, loads prior chat context from `history.db`, persists tasks and results, and augments prompts with previous session history. Supports `new_chat()` to start fresh sessions and `resume_chat(task)` to continue previous ones. This is the same stateful workflow the VS Code extension uses, exposed as a standalone reusable agent and CLI (`sorcar` command with `-n` flag for new sessions).
+- **KISS Sorcar extension to VSCode**: A full-featured VS Code extension that embeds the Sorcar agent as an interactive chat panel in the secondary sidebar. The TypeScript frontend (`SorcarPanel`) communicates with a Python backend (`server.py`) over JSON-line stdio, streaming thinking, text, tool calls, and results in real time. Includes a `MergeManager` for reviewing agent file changes with inline diff decorations and per-hunk accept/reject, auto-dependency installation (uv, Python venv, Playwright Chromium) on first launch via `DependencyInstaller`, model selection with usage-ranked suggestions, session history browsing and resumption, `@file` mentions with autocomplete, git commit message generation, and keyboard shortcuts (`Cmd+T` new chat, `Cmd+D` toggle focus, `Cmd+L` run selection). The extension bundles the full KISS Python project for standalone distribution as a `.vsix`.
 - **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
 - **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
-- **Accessibility-Tree Browser Automation**: The `WebUseTool` uses Playwright's `aria_snapshot()` to extract the accessibility tree, numbers interactive elements for LLM reference, and avoids JavaScript injection to reduce bot detection.
-- **Dynamic Configuration System**: Uses Pydantic models with a `add_config()` pattern that lets each subsystem register its own config at import time, with automatic CLI argument generation from the schema.
 - **Trajectory Visualization**: A web-based UI for viewing complete agent execution histories including message flows, tool calls, token usage, and budget stats — with markdown rendering and syntax-highlighted code blocks.
 - **Docker Integration**: A `DockerManager` for running agent tasks in isolated containers with automatic image pulling, lifecycle management, port mapping, and cleanup.
 
@@ -169,7 +168,6 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **100% Branch Coverage with Redundancy Detection**: The project targets full branch coverage and uses a custom [`redundancy_analyzer.py`](src/kiss/scripts/redundancy_analyzer.py) (powered by coverage.py's dynamic context feature) to identify and remove tests whose coverage is a strict subset of other tests — keeping the test suite minimal and meaningful.
 - **Self-Improvement Loop**: The Sorcar agent maintains a `LESSONS.md` file where it records rules and patterns learned during tasks, reviewing them at the start of each new task to avoid repeating mistakes.
 - **Free and Open-Source**: KISS Sorcar is a fully functional alternative to proprietary coding assistants like Cursor, with zero monthly subscription fees and complete source transparency under Apache 2.0.
-
 
 ## 📚 KISSAgent API Reference
 
