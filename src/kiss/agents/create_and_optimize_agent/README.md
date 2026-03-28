@@ -68,7 +68,7 @@ print(f"Metrics: {best_variant.metrics}")
 
 ### ImproverAgent
 
-The `ImproverAgent` optimizes existing agent code by analyzing and improving it for token efficiency and execution speed. Configuration (model, max_steps, max_budget) is read from `DEFAULT_CONFIG.create_and_optimize_agent.improver`.
+The `ImproverAgent` optimizes existing agent code by analyzing and improving it for token efficiency and execution speed. Default values for model, max_steps, and max_budget are specified directly in the constructor parameter defaults.
 
 **Methods:**
 
@@ -77,11 +77,11 @@ The `ImproverAgent` optimizes existing agent code by analyzing and improving it 
 
 ### AgentEvolver
 
-The `AgentEvolver` creates and evolves agent populations from a task description. Configuration is read from `DEFAULT_CONFIG.create_and_optimize_agent.evolver`.
+The `AgentEvolver` creates and evolves agent populations from a task description. Default values are specified directly in the `evolve()` method parameter defaults.
 
 **Methods:**
 
-- `evolve(task_description, max_generations, initial_frontier_size, max_frontier_size, mutation_probability, progress_callback)`: Run the evolutionary optimization, returns the best variant. All parameters except `task_description` are optional and fall back to config defaults.
+- `evolve(task_description, max_generations, initial_frontier_size, max_frontier_size, mutation_probability, evolve_to_solve_task, progress_callback)`: Run the evolutionary optimization, returns the best variant. All parameters except `task_description` are optional with concrete defaults.
 - `get_best_variant()`: Get the current best variant by combined score
 - `get_pareto_frontier()`: Get all variants in the Pareto frontier
 - `save_state(path)`: Save evolver state to JSON
@@ -130,22 +130,16 @@ The `AgentEvolver` creates and evolves agent populations from a task description
 
 ## Configuration
 
-Configuration can be provided via the global config system:
+Default values are specified directly in the method parameter defaults. Override them by passing values to `evolve()` or `improve()`:
 
 ```python
-from kiss.core.config import DEFAULT_CONFIG
-
-# Access create_and_optimize_agent config
-cfg = DEFAULT_CONFIG.create_and_optimize_agent
-
-# Improver settings
-cfg.improver.max_steps = 150
-cfg.improver.max_budget = 15.0
-
-# Evolver settings
-cfg.evolver.max_generations = 10
-cfg.evolver.max_frontier_size = 6
-cfg.evolver.mutation_probability = 0.8
+evolver = AgentEvolver()
+best = evolver.evolve(
+    task_description="Build a code analysis assistant",
+    max_generations=20,
+    max_frontier_size=8,
+    mutation_probability=0.7,
+)
 ```
 
 ## How It Works
@@ -367,6 +361,7 @@ class ImproverAgent:
         work_dir: str,
         task_description: str,
         report_path: str | None = None,
+        evolve_to_solve_task: bool = False,
     ) -> tuple[bool, ImprovementReport | None]: ...
 
     def crossover_improve(
@@ -376,6 +371,7 @@ class ImproverAgent:
         secondary_report_path: str,
         work_dir: str,
         task_description: str,
+        evolve_to_solve_task: bool = False,
     ) -> tuple[bool, ImprovementReport | None]: ...
 ```
 
@@ -386,10 +382,11 @@ class AgentEvolver:
     def evolve(
         self,
         task_description: str,
-        max_generations: int | None = None,
-        initial_frontier_size: int | None = None,
-        max_frontier_size: int | None = None,
-        mutation_probability: float | None = None,
+        max_generations: int = 10,
+        initial_frontier_size: int = 4,
+        max_frontier_size: int = 6,
+        mutation_probability: float = 0.8,
+        evolve_to_solve_task: bool = False,
         progress_callback: Callable[[EvolverProgress], None] | None = None,
     ) -> AgentVariant: ...
 

@@ -80,11 +80,11 @@ GEPA(
     agent_wrapper: Callable[[str, dict[str, str]], tuple[str, list[Any]]],
     initial_prompt_template: str,
     evaluation_fn: Callable[[str], dict[str, float]] | None = None,
-    max_generations: int | None = None,
-    population_size: int | None = None,
-    pareto_size: int | None = None,
-    mutation_rate: float | None = None,
-    reflection_model: str | None = None,
+    max_generations: int = 10,
+    population_size: int = 8,
+    pareto_size: int = 4,
+    mutation_rate: float = 0.5,
+    reflection_model: str = "gemini-3-flash-preview",
     dev_val_split: float | None = None,
     perfect_score: float = 1.0,
     use_merge: bool = True,
@@ -102,11 +102,11 @@ GEPA(
 - `agent_wrapper`: Function `(prompt_template, arguments) -> (result, trajectory)`
 - `initial_prompt_template`: Initial prompt to optimize
 - `evaluation_fn`: Function `result -> {metric: score}` (higher is better)
-- `max_generations`: Evolutionary generations (default from config)
-- `population_size`: Candidates per generation (default from config)
-- `pareto_size`: Max Pareto frontier size (default from config)
+- `max_generations`: Evolutionary generations (default: 10)
+- `population_size`: Candidates per generation (default: 8)
+- `pareto_size`: Max Pareto frontier size (default: 4)
 - `mutation_rate`: Mutation probability (default: 0.5)
-- `reflection_model`: Model for reflection
+- `reflection_model`: Model for reflection (default: "gemini-3-flash-preview")
 - `dev_val_split`: Fraction for dev set (default: 0.5)
 - `perfect_score`: Score threshold to skip mutation (default: 1.0)
 - `use_merge`: Enable structural merge from Pareto frontier (default: True)
@@ -304,7 +304,7 @@ with Progress(
 
 ## Configuration
 
-Default values in [`src/kiss/agents/gepa/config.py`](config.py).
+Default values are specified directly in the `GEPA.__init__` parameter defaults (see API Reference above).
 
 ## Authors
 
