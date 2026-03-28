@@ -714,12 +714,12 @@ header {
 /* ── Merge Toolbar (shown in input area) ───────────── */
 .merge-toolbar-card {
   background: var(--input-bg); border: 1px solid var(--border);
-  border-radius: 10px; padding: 10px 12px; animation: fadeIn 0.2s ease;
-  overflow: hidden;
+  border-radius: 10px; padding: 6px 10px; animation: fadeIn 0.2s ease;
+  overflow: hidden; min-width: 0;
 }
 .merge-toolbar-header {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 4px; min-width: 0;
 }
 .merge-toolbar-title {
   font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
@@ -729,25 +729,18 @@ header {
   font-size: var(--fs-xs); color: var(--dim); opacity: 0.7;
 }
 .merge-toolbar-actions {
-  display: flex; flex-direction: column; gap: 6px;
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
 }
 .merge-toolbar-row {
-  display: flex; align-items: center; gap: 6px; width: 100%;
-}
-.merge-toolbar-group {
-  display: flex; align-items: center; gap: 2px; flex: 1;
-}
-.merge-toolbar-sep {
-  width: 1px; height: 18px; background: var(--border); margin: 0 4px; flex-shrink: 0;
+  display: flex; align-items: center; gap: 2px; width: 100%; min-width: 0;
 }
 .merge-btn {
   font-size: var(--fs-sm); font-family: inherit; border: none; border-radius: 6px;
-  padding: 4px 8px; cursor: pointer; transition: all 0.15s;
+  padding: 4px 6px; cursor: pointer; transition: all 0.15s;
   white-space: nowrap; font-weight: 500;
-  display: inline-flex; align-items: center; gap: 4px; background: none;
-  flex: 1; justify-content: center;
+  display: inline-flex; align-items: center; background: none;
+  justify-content: center; flex: 1 1 0;
 }
-.merge-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
 .merge-btn.merge-accept {
   background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green);
 }
@@ -757,25 +750,9 @@ header {
 }
 .merge-btn.merge-reject:hover { background: color-mix(in srgb, var(--red) 18%, transparent); }
 .merge-btn.merge-nav {
-  color: var(--dim); padding: 6px 8px;
+  color: var(--dim); padding: 4px 6px;
 }
 .merge-btn.merge-nav:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
-.merge-btn.merge-accept-file {
-  color: color-mix(in srgb, var(--green) 80%, var(--dim));
-}
-.merge-btn.merge-accept-file:hover { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
-.merge-btn.merge-reject-file {
-  color: color-mix(in srgb, var(--red) 80%, var(--dim));
-}
-.merge-btn.merge-reject-file:hover { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red); }
-.merge-btn.merge-accept-all {
-  color: color-mix(in srgb, var(--green) 70%, var(--dim));
-}
-.merge-btn.merge-accept-all:hover { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
-.merge-btn.merge-reject-all {
-  color: color-mix(in srgb, var(--red) 70%, var(--dim));
-}
-.merge-btn.merge-reject-all:hover { background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red); }
 .merge-info {
   border: 1px solid rgba(210,153,34,0.2); border-radius: 8px;
   padding: 10px 14px; margin: 8px 0;
