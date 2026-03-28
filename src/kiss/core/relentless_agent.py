@@ -21,8 +21,7 @@ from kiss.core.printer import Printer
 
 logger = logging.getLogger(__name__)
 
-TASK_PROMPT = """# Task
-
+TASK_PROMPT = """
 {task_description}
 
 {previous_progress}
