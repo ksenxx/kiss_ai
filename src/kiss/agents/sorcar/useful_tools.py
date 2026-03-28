@@ -367,11 +367,11 @@ class UsefulTools:
                 except Exception:  # pragma: no cover — unreachable after SIGKILL
                     pass
                 return "Error: Command execution timeout"
-            except BaseException:
+            except BaseException:  # pragma: no cover — KeyboardInterrupt timing-dependent
                 _kill_process_group(process)
                 try:
                     process.communicate(timeout=5)
-                except Exception:  # pragma: no cover — unreachable after SIGKILL + reap
+                except Exception:
                     pass
                 raise
             finally:
@@ -420,7 +420,7 @@ class UsefulTools:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:  # pragma: no cover
                 _kill_process_group(process)
-        except BaseException:
+        except BaseException:  # pragma: no cover — KeyboardInterrupt timing-dependent
             _kill_process_group(process)
             raise
         finally:
