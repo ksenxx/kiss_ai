@@ -104,17 +104,26 @@ class TestToolCallContentParity:
 class TestToolResultContentParity:
     """Both printers display the same tool result content."""
 
-    def test_truncation_applied_equally(self):
+    def test_truncation_applied_on_error(self):
         from kiss.core.printer import MAX_RESULT_LEN
         console, buf, browser, bq = _make_printers()
         long_content = "x" * (MAX_RESULT_LEN * 2)
-        console.print(long_content, type="tool_result", is_error=False, tool_name="Read")
-        browser.print(long_content, type="tool_result", is_error=False, tool_name="Read")
+        console.print(long_content, type="tool_result", is_error=True, tool_name="Read")
+        browser.print(long_content, type="tool_result", is_error=True, tool_name="Read")
         out = buf.getvalue()
         events = _drain(bq)
         tr_events = [e for e in events if e["type"] == "tool_result"]
         assert "... (truncated) ..." in out
         assert "... (truncated) ..." in tr_events[0]["content"]
+
+    def test_success_result_suppressed_in_console(self):
+        console, buf, browser, bq = _make_printers()
+        console.print("output", type="tool_result", is_error=False, tool_name="Read")
+        browser.print("output", type="tool_result", is_error=False, tool_name="Read")
+        out = buf.getvalue()
+        # Console suppresses non-error tool results (no OK panel)
+        assert "output" not in out
+        assert "OK" not in out
 
 
 class TestMessageParity:
@@ -250,7 +259,6 @@ class TestFullAgentSequenceParity:
         assert "Fix the bug" in out
         assert "Edit" in out
         assert "app.py" in out
-        assert "File edited" in out
         assert "Bug fixed" in out
 
         events = _drain(bq)

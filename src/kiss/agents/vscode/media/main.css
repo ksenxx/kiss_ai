@@ -233,7 +233,7 @@ header {
 }
 .rs b { color: var(--fg); font-weight: 500; display: block; font-size: var(--fs-base); }
 .rc-body {
-  padding: 10px 14px; font-size: var(--fs-md); max-height: 250px; overflow-y: auto;
+  padding: 10px 14px; font-size: var(--fs-md);
   word-break: break-word; line-height: 1.7;
 }
 .rc-body.pre { white-space: pre-wrap; }
