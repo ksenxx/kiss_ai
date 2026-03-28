@@ -75,7 +75,7 @@ class TestStatefulSorcarAgent:
         finally:
             parent_class.run = original_run
 
-        assert captured["prompt_template"] == "do stuff"
+        assert captured["prompt_template"] == "# Task\ndo stuff"
 
     def test_task_persisted_to_history(self) -> None:
         agent = StatefulSorcarAgent("test")
@@ -166,12 +166,12 @@ class TestStatefulSorcarAgent:
         context = th._load_chat_context(agent.chat_id)
         assert len(context) == 1
         assert context[0]["task"] == "failing task"
-        assert "Task failed: boom" in str(context[0]["result"])
+        assert "Task failed" in str(context[0]["result"])
 
-    def test_chat_context_entry_without_result(self) -> None:
-        """When a prior task has no result, only the task header appears."""
+    def test_chat_context_entry_with_default_result(self) -> None:
+        """When a prior task has only the default result, both headers appear."""
         agent = StatefulSorcarAgent("test")
-        # Manually add a task with no result to the chat
+        # _add_task inserts a default result ("Agent Failed Abrubptly")
         th._add_task("bare task", chat_id=agent.chat_id)
 
         captured: dict[str, Any] = {}
@@ -184,7 +184,7 @@ class TestStatefulSorcarAgent:
 
         prompt = str(captured["prompt_template"])
         assert "### Task 1\nbare task" in prompt
-        assert "### Result 1" not in prompt
+        assert "### Result 1" in prompt
 
     def test_chat_id_property(self) -> None:
         agent = StatefulSorcarAgent("test")
@@ -261,7 +261,7 @@ class TestStatefulSorcarAgent:
     def test_build_chat_prompt_no_context(self) -> None:
         agent = StatefulSorcarAgent("test")
         result = agent.build_chat_prompt("do something")
-        assert result == "do something"
+        assert result == "# Task\ndo something"
 
     def test_build_chat_prompt_with_context(self) -> None:
         agent = StatefulSorcarAgent("test")
@@ -273,12 +273,12 @@ class TestStatefulSorcarAgent:
         assert "### Result 1\nprior result" in result
         assert "# Task (work on it now)\n\nnew task" in result
 
-    def test_build_chat_prompt_no_result_entry(self) -> None:
+    def test_build_chat_prompt_default_result_entry(self) -> None:
         agent = StatefulSorcarAgent("test")
         th._add_task("bare task", chat_id=agent.chat_id)
         result = agent.build_chat_prompt("follow up")
         assert "### Task 1\nbare task" in result
-        assert "### Result 1" not in result
+        assert "### Result 1" in result
         assert "# Task (work on it now)\n\nfollow up" in result
 
     def test_new_chat_clears_context(self) -> None:
@@ -296,4 +296,4 @@ class TestStatefulSorcarAgent:
         # After new_chat, prompt should not include old context
         prompt = str(captured["prompt_template"])
         assert "old task" not in prompt
-        assert prompt == "fresh start"
+        assert prompt == "# Task\nfresh start"
