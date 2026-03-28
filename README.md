@@ -35,7 +35,6 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 </details>
 
-
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISSSorcar.png)
@@ -65,7 +64,6 @@ sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop
 sorcar -t 'Can you write a thorough and precise plan in PLAN.md to simplify the project code?'
 sorcar -t 'I see some issues and bugs in PLAN.md.  Can you fix them?'  # lie to the agent to force improve the plan
 ```
-
 
 # Introduction to KISS
 
