@@ -544,7 +544,9 @@ class TestP3CompleteSeqTOCTOU(unittest.TestCase):
         # The broadcast after the second check should be inside a with block
         lock_idx = after_fast.find("with self._complete_lock")
         broadcast_idx = after_fast.find('self.printer.broadcast({"type": "ghost"')
-        assert lock_idx > 0 and broadcast_idx > 0, "Expected lock and broadcast after _fast_complete"
+        assert lock_idx > 0 and broadcast_idx > 0, (
+            "Expected lock and broadcast after _fast_complete"
+        )
         assert lock_idx < broadcast_idx, (
             "Expected _complete_lock to be acquired BEFORE broadcast"
         )
@@ -598,7 +600,6 @@ class TestP3CompleteSeqTOCTOU(unittest.TestCase):
         events: list[dict] = []
         server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
 
-        errors: list[str] = []
         num_rounds = 200
 
         def updater() -> None:
@@ -734,7 +735,9 @@ class TestP8BashFlushTOCTOU(unittest.TestCase):
         # Verify the buffer was drained
         with printer._bash_lock:
             assert len(printer._bash_buffer) == 0, "Buffer should be empty after immediate flush"
-            assert printer._bash_flush_timer is None, "Timer should not be set after immediate flush"
+            assert printer._bash_flush_timer is None, (
+                "Timer should not be set after immediate flush"
+            )
 
         output_events = [e for e in events if e.get("type") == "system_output"]
         assert len(output_events) == 1

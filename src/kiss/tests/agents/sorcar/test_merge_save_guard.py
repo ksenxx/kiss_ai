@@ -128,7 +128,12 @@ class TestEdEditReturnValueChecked(unittest.TestCase):
         block = source[idx:idx + 3000]
         # Should check the edit result after inserting old lines
         insert_section = block[block.find("ed.edit"):]
-        assert "!" in insert_section[:200] or "ok" in insert_section[:200] or "if" in insert_section[:200], (
+        has_check = (
+            "!" in insert_section[:200]
+            or "ok" in insert_section[:200]
+            or "if" in insert_section[:200]
+        )
+        assert has_check, (
             "_doOpenMerge must check ed.edit() return value after inserting "
             "old lines. A failed insertion with unchecked return corrupts "
             "all subsequent hunk offsets."
