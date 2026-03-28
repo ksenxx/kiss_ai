@@ -296,7 +296,8 @@ class VSCodeServer:
                     pre_untracked,
                     pre_file_hashes,
                 )
-                if merge_result.get("status") == "opened":  # pragma: no cover — requires real git merge
+                # pragma: no cover — requires real git merge
+                if merge_result.get("status") == "opened":
                     merge_json = os.path.join(merge_dir, "pending-merge.json")
                     self._start_merge_session(merge_json)
             except Exception:  # pragma: no cover — merge view error handler

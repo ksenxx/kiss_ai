@@ -173,7 +173,8 @@ class WebUseTool:
         if self._context is None:
             return
         pages = self._context.pages
-        if len(pages) > 1 and pages[-1] != self._page:  # pragma: no branch — called when new tab detected
+        # pragma: no branch — called when new tab detected
+        if len(pages) > 1 and pages[-1] != self._page:
             self._page = pages[-1]
 
     def _resolve_locator(self, element_id: int) -> Any:

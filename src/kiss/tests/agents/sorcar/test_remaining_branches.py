@@ -15,29 +15,22 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
 
 from kiss.agents.sorcar import persistence as th
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import (
-    UsefulTools,
     _extract_leading_command_name,
     _split_respecting_quotes,
     _stop_monitor,
     _truncate_output,
 )
+from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.diff_merge import (
-    _agent_file_hunks,
     _cleanup_merge_data,
-    _file_as_new_hunks,
-    _merge_data_dir,
-    _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
     _snapshot_files,
-    _capture_untracked,
 )
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
@@ -45,9 +38,12 @@ from kiss.agents.vscode.helpers import (
     model_vendor,
     rank_file_suggestions,
 )
-from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.agents.vscode.server import VSCodePrinter, VSCodeServer
+from kiss.agents.vscode.server import VSCodeServer
 
+
+def _git(tmpdir: str, *args: str) -> None:
+    """Run a git command in tmpdir, suppressing output."""
+    _git(tmpdir, *args)
 
 # ---------------------------------------------------------------------------
 # persistence.py — uncovered branches
@@ -95,7 +91,7 @@ class TestPersistenceBranches:
         old_time = time.time() - 25 * 3600
         os.utime(sd, (old_time, old_time))
         try:
-            removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
+            th._cleanup_stale_cs_dirs(max_age_hours=24)
             # Should NOT remove because port is active
             assert sd.exists()
         finally:
@@ -245,7 +241,8 @@ class TestHelpersBranches:
 
     def test_fast_model_for_all_providers(self) -> None:
         """fast_model_for returns correct fast model per provider (lines 66-70)."""
-        assert fast_model_for("openrouter/anthropic/claude-3") == "openrouter/anthropic/claude-haiku-4.5"
+        result = fast_model_for("openrouter/anthropic/claude-3")
+        assert result == "openrouter/anthropic/claude-haiku-4.5"
         assert fast_model_for("gemini-2.5-pro") == "gemini-2.0-flash"
         assert fast_model_for("gpt-4o") == "gpt-4o-mini"
         # Default: claude model
@@ -476,8 +473,8 @@ class TestVSCodeServerBranches:
                 "files": [{"name": "a.py", "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}]}]
             }, f)
             path = f.name
+        server = VSCodeServer()
         try:
-            server = VSCodeServer()
             events: list[dict] = []
             orig = server.printer.broadcast
             def cap(ev: dict) -> None:
@@ -592,12 +589,12 @@ class TestVSCodeServerBranches:
     def test_generate_commit_message_no_staged(self) -> None:
         """_generate_commit_message broadcasts error when no staged files (line 699-703)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "init")
+            _git(tmpdir, "config", "user.email", "t@t.com")
+            _git(tmpdir, "config", "user.name", "T")
             Path(tmpdir, "a.txt").write_text("x")
-            subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "add", ".")
+            _git(tmpdir, "commit", "-m", "init")
             # No staged changes
             server = VSCodeServer()
             server.work_dir = tmpdir
@@ -639,12 +636,12 @@ class TestDiffMergeBranches:
         """_prepare_merge_view._file_changed returns False on OSError (lines 331-333)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Initialize a git repo
-            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "init")
+            _git(tmpdir, "config", "user.email", "test@test.com")
+            _git(tmpdir, "config", "user.name", "Test")
             Path(tmpdir, "a.txt").write_text("initial")
-            subprocess.run(["git", "add", "a.txt"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "add", "a.txt")
+            _git(tmpdir, "commit", "-m", "init")
             # Delete the file to trigger OSError in _file_changed
             Path(tmpdir, "a.txt").unlink()
             # Pre-hash includes a.txt
@@ -657,15 +654,15 @@ class TestDiffMergeBranches:
             assert result.get("error") == "No changes"
 
     def test_prepare_merge_view_pre_untracked_modified(self) -> None:
-        """_prepare_merge_view detects modified pre-existing untracked files (line 345->343, 351)."""
+        """_prepare_merge_view detects modified pre-existing untracked files."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "init")
+            _git(tmpdir, "config", "user.email", "test@test.com")
+            _git(tmpdir, "config", "user.name", "Test")
             # Create and commit a file
             Path(tmpdir, "committed.txt").write_text("committed")
-            subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "add", ".")
+            _git(tmpdir, "commit", "-m", "init")
 
             # Create an untracked file, snapshot it, then modify it
             untracked = Path(tmpdir, "untracked.txt")
@@ -698,12 +695,12 @@ class TestDiffMergeBranches:
     def test_prepare_merge_view_empty_new_file(self) -> None:
         """_prepare_merge_view skips empty new untracked files (line 345->343)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "init")
+            _git(tmpdir, "config", "user.email", "t@t.com")
+            _git(tmpdir, "config", "user.name", "T")
             Path(tmpdir, "x.txt").write_text("x")
-            subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "add", ".")
+            _git(tmpdir, "commit", "-m", "init")
             pre_untracked: set[str] = set()
             # Create an empty new untracked file after task
             Path(tmpdir, "empty.txt").write_text("")
@@ -716,12 +713,12 @@ class TestDiffMergeBranches:
     def test_prepare_merge_view_untracked_not_changed(self) -> None:
         """_prepare_merge_view skips untracked files that haven't changed (line 351)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "init")
+            _git(tmpdir, "config", "user.email", "t@t.com")
+            _git(tmpdir, "config", "user.name", "T")
             Path(tmpdir, "x.txt").write_text("x")
-            subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "add", ".")
+            _git(tmpdir, "commit", "-m", "init")
             # Create untracked file, snapshot, but DON'T modify it
             ut = Path(tmpdir, "unmod.txt")
             ut.write_text("same content")
@@ -734,12 +731,12 @@ class TestDiffMergeBranches:
     def test_prepare_merge_view_untracked_not_in_hashes(self) -> None:
         """_prepare_merge_view skips untracked files not in pre_file_hashes (line 351)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "init")
+            _git(tmpdir, "config", "user.email", "t@t.com")
+            _git(tmpdir, "config", "user.name", "T")
             Path(tmpdir, "x.txt").write_text("x")
-            subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "add", ".")
+            _git(tmpdir, "commit", "-m", "init")
             # Pre-untracked set includes a file that's NOT in pre_file_hashes
             # This hits the `fname not in pre_file_hashes` branch -> continue (line 351)
             pre_untracked = {"phantom.txt"}
@@ -749,14 +746,14 @@ class TestDiffMergeBranches:
             assert result.get("error") == "No changes"
 
     def test_prepare_merge_view_untracked_modified_with_saved_base(self) -> None:
-        """_prepare_merge_view: untracked file with saved base copy gets diffed (line 345->343, 351)."""
+        """_prepare_merge_view: untracked file with saved base gets diffed."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "init")
+            _git(tmpdir, "config", "user.email", "t@t.com")
+            _git(tmpdir, "config", "user.name", "T")
             Path(tmpdir, "committed.txt").write_text("x")
-            subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            _git(tmpdir, "add", ".")
+            _git(tmpdir, "commit", "-m", "init")
 
             # Create untracked file, snapshot, save base, then modify
             ut = Path(tmpdir, "notes.txt")
@@ -818,7 +815,7 @@ class TestSorcarAgentBranches:
         agent.docker_manager = None
         existing_wut = WebUseTool()
         agent.web_use_tool = existing_wut
-        tools = agent._get_tools()
+        agent._get_tools()
         # Should still be the same instance
         assert agent.web_use_tool is existing_wut
         existing_wut.close()
@@ -955,9 +952,6 @@ class TestWebUseToolBranches:
         tool._check_for_new_tab()  # should not raise
 
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-
 class TestSorcarAgentAskUserQuestion:
     """Cover ask_user_question inner function."""
 
@@ -998,7 +992,7 @@ class TestSorcarAgentDockerBranch:
         agent = SorcarAgent("test")
 
         class FakeDockerManager:
-            def Bash(self, cmd: str, desc: str) -> str:
+            def Bash(self, cmd: str, desc: str) -> str:  # noqa: N802
                 return "docker output"
 
         agent.docker_manager = FakeDockerManager()
