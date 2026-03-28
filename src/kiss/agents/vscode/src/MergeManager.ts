@@ -93,6 +93,67 @@ export class MergeManager extends EventEmitter {
     return count;
   }
 
+  /**
+   * Before save: strip base (old) lines so saved content is clean.
+   * Uses waitUntil() to defer the save until edits complete.
+   */
+  private _onWillSave(e: vscode.TextDocumentWillSaveEvent): void {
+    const fp = e.document.uri.fsPath;
+    const s = this._ms[fp];
+    if (!s || s.hunks.length === 0) return;
+    this._reinsertingFiles.add(fp);
+    e.waitUntil(
+      (async () => {
+        const ed = await this._getOrOpenEditor(fp);
+        // Remove old-lines in reverse order to preserve earlier indices
+        for (let i = s.hunks.length - 1; i >= 0; i--) {
+          const h = s.hunks[i];
+          if (h.oc > 0) {
+            await this._delLines(ed, h.os, h.oc);
+            // Shift this and all later hunks
+            for (let j = i; j < s.hunks.length; j++) {
+              if (j === i) {
+                s.hunks[j].ns -= h.oc;
+              } else {
+                s.hunks[j].os -= h.oc;
+                s.hunks[j].ns -= h.oc;
+              }
+            }
+            h.oc = 0;
+          }
+        }
+      })()
+    );
+  }
+
+  /**
+   * After save: re-insert base lines so merge decorations reappear.
+   */
+  private async _onDidSave(doc: vscode.TextDocument): Promise<void> {
+    const fp = doc.uri.fsPath;
+    if (!this._reinsertingFiles.delete(fp)) return;
+    const s = this._ms[fp];
+    if (!s) return;
+    const ed = await this._getOrOpenEditor(fp);
+    let offset = 0;
+    for (const h of s.hunks) {
+      const old = h.baseLines;
+      if (old.length > 0) {
+        const il = h.ns + offset - old.length; // ns was shifted; insert before new lines
+        const insertLine = h.os + offset;
+        const txt = old.join('\n') + '\n';
+        await ed.edit((eb) => {
+          eb.insert(new vscode.Position(insertLine, 0), txt);
+        });
+        h.os = insertLine;
+        h.oc = old.length;
+        h.ns = insertLine + old.length;
+        offset += old.length;
+      }
+    }
+    this._refreshDeco(fp);
+  }
+
   private _refreshDeco(fp: string): void {
     for (const ed of vscode.window.visibleTextEditors) {
       if (ed.document.uri.fsPath !== fp) continue;
@@ -478,6 +539,7 @@ export class MergeManager extends EventEmitter {
           oc: old.length,
           ns: h.cs + offset + old.length,
           nc: h.cc,
+          baseLines: old,
         });
         offset += old.length;
       }
