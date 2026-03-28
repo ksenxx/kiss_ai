@@ -273,7 +273,7 @@ class TestBaseBrowserPrinterBranches:
         p.print("line2\n", type="bash_stream")
         time.sleep(0.15)  # let timer flush
         # Now the tool result comes in with the same content
-        p.print("line1\nline2\n", type="tool_result")
+        p.print("line1\nline2\n", type="tool_result", tool_name="Bash")
         events = []
         while not cq.empty():
             events.append(cq.get_nowait())
@@ -287,7 +287,7 @@ class TestBaseBrowserPrinterBranches:
         p = BaseBrowserPrinter()
         cq: queue.Queue = queue.Queue()
         p._client_queue = cq
-        p.print("some output", type="tool_result")
+        p.print("some output", type="tool_result", tool_name="Bash")
         events = []
         while not cq.empty():
             events.append(cq.get_nowait())
@@ -304,7 +304,7 @@ class TestBaseBrowserPrinterBranches:
         # tool_call resets the flag
         p.print("Read", type="tool_call", tool_input={"file_path": "/tmp/x"})
         # Next tool_result should show content (not bash-streamed)
-        p.print("file contents", type="tool_result")
+        p.print("file contents", type="tool_result", tool_name="Read")
         events = []
         while not cq.empty():
             events.append(cq.get_nowait())

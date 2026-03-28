@@ -55,6 +55,8 @@ sorcar -n -t "What is 2435*234?" # to start in a new chat session
 
 # Introduction to KISS Sorcar
 
+[KISS Sorcar](assets/KISSSorcar.png)
+
 **KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor and **a general-purpose agent with web browsing and native Desktop app execution capabilities**. It runs **locally** as a VS Code IDE. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
 
 #whatispossible #KISSSorcar
@@ -168,41 +170,6 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **Self-Improvement Loop**: The Sorcar agent maintains a `LESSONS.md` file where it records rules and patterns learned during tasks, reviewing them at the start of each new task to avoid repeating mistakes.
 - **Free and Open-Source**: KISS Sorcar is a fully functional alternative to proprietary coding assistants like Cursor, with zero monthly subscription fees and complete source transparency under Apache 2.0.
 
-## 🎨 Output Formatting
-
-Unlike other agentic systems, you do not need to specify the output schema for the agent. Just create
-a suitable "finish" function with parameters. The parameters could be treated as the top level keys
-in a json format.
-
-**Example: Custom Structured Output**
-
-```python
-from kiss.core.kiss_agent import KISSAgent
-
-# Define a custom finish function with your desired output structure
-def finish(
-    sentiment: str,
-    confidence: float,
-    key_phrases: str,
-    summary: str
-) -> str:
-    """
-    Complete the analysis with structured results.
-    
-    Args:
-        sentiment: The overall sentiment ('positive', 'negative', or 'neutral')
-        confidence: Confidence score between 0.0 and 1.0
-        key_phrases: Comma-separated list of key phrases found in the text
-        summary: A brief summary of the analysis
-    
-    Returns:
-        The formatted analysis result
-    """
-    ...
-
-```
-
-The agent will automatically use the custom `finish` function instead of the default one which returns its argument. The function's parameters define what information the agent must provide, and the docstring helps the LLM understand how to format each field.
 
 ## 📚 KISSAgent API Reference
 

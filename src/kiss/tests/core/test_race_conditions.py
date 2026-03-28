@@ -84,6 +84,18 @@ class TestCrossProcessRecordModelUsage:
         kiss_dir = os.path.join(self.tmpdir, ".kiss")
         os.makedirs(kiss_dir, exist_ok=True)
 
+        # Pre-create the DB so workers don't race on WAL initialization
+        import kiss.agents.sorcar.persistence as th
+        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = Path(kiss_dir)
+        th._DB_PATH = Path(kiss_dir) / "history.db"
+        th._db_conn = None
+        th._get_db()
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+
         n_procs = 5
         increments_each = 10
         procs = [
