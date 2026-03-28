@@ -139,7 +139,7 @@ def rank_file_suggestions(
         if not query:
             return 0
         pos = text.rfind(query)
-        if pos < 0:
+        if pos < 0:  # pragma: no cover — files are pre-filtered by query match
             return len(text)
         return len(text) - (pos + len(query))
 
