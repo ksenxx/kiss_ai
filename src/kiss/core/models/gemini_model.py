@@ -34,7 +34,7 @@ class GeminiModel(Model):
             model_name: The name of the Gemini model to use.
             api_key: The Google API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
-            token_callback: Optional async callback invoked with each streamed text token.
+            token_callback: Optional callback invoked with each streamed text token.
         """
         super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.api_key = api_key
@@ -237,20 +237,24 @@ class GeminiModel(Model):
         return content, response
 
     def generate_and_process_with_tools(  # pragma: no cover – API call
-        self, function_map: dict[str, Callable[..., Any]]
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
         """Generates content with tools, processes the response, and adds it to conversation.
 
         Args:
             function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Optional pre-built OpenAI-format tool schema list.
 
         Returns:
             tuple[list[dict[str, Any]], str, Any]: A tuple of
                 (function_calls, response_text, raw_response).
         """
 
+        source = self._resolve_openai_tools_schema(function_map, tools_schema)
         declarations = []
-        for tool in self._build_openai_tools_schema(function_map):
+        for tool in source:
             fn = tool["function"]
             declarations.append(
                 types.FunctionDeclaration(

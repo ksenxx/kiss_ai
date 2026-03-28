@@ -209,7 +209,7 @@ class OpenAICompatibleModel(Model):
             base_url: The base URL for the API endpoint (e.g., "http://localhost:11434/v1").
             api_key: API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
-            token_callback: Optional async callback invoked with each streamed text token.
+            token_callback: Optional callback invoked with each streamed text token.
         """
         super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.base_url = base_url
@@ -445,12 +445,15 @@ class OpenAICompatibleModel(Model):
         return content, response
 
     def generate_and_process_with_tools(
-        self, function_map: dict[str, Callable[..., Any]]
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
         """Generate content with tools, process the response, and add it to conversation.
 
         Args:
             function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Optional pre-built tool schema list.
 
         Returns:
             A tuple of (function_calls, content, response) where function_calls is a list
@@ -462,7 +465,7 @@ class OpenAICompatibleModel(Model):
             return self._generate_with_text_based_tools(function_map)
 
         # Standard OpenAI-style native function calling
-        tools = self._build_openai_tools_schema(function_map)
+        tools = self._resolve_openai_tools_schema(function_map, tools_schema)
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
         kwargs.update(

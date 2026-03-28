@@ -29,4 +29,11 @@ artifacts/
 .ipynb_checkpoints
 screenshots/    
 .kiss.artifacts
+code-server/
+playwright-browsers/
+bin/
+env.sh
+node_modules/
+src/kiss/agents/vscode/out/
 
+kiss_project/

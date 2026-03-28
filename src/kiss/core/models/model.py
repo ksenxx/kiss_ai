@@ -5,23 +5,21 @@
 
 """Abstract base class for LLM provider model implementations."""
 
-import asyncio
 import base64
 import dataclasses
 import inspect
 import logging
 import mimetypes
-import threading
 import types as types_module
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
 logger = logging.getLogger(__name__)
 
-# Type alias for the async token streaming callback.
-TokenCallback = Callable[[str], Coroutine[Any, Any, None]]
+# Type alias for the synchronous token streaming callback.
+TokenCallback = Callable[[str], None]
 
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
@@ -87,33 +85,6 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
-_callback_helper_loop: asyncio.AbstractEventLoop | None = None
-_callback_helper_ready = threading.Event()
-_callback_helper_lock = threading.Lock()
-
-
-def _get_callback_loop() -> asyncio.AbstractEventLoop:
-    global _callback_helper_loop
-    with _callback_helper_lock:
-        if _callback_helper_loop is not None and not _callback_helper_loop.is_closed():
-            return _callback_helper_loop
-
-        def run_loop() -> None:
-            global _callback_helper_loop
-            _callback_helper_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(_callback_helper_loop)
-            _callback_helper_ready.set()
-            _callback_helper_loop.run_forever()
-
-        _callback_helper_ready.clear()
-        t = threading.Thread(target=run_loop, daemon=True)
-        t.start()
-        _callback_helper_ready.wait(timeout=5)
-        if _callback_helper_loop is None or _callback_helper_loop.is_closed():  # pragma: no cover
-            raise RuntimeError("Callback helper loop failed to start")
-        return _callback_helper_loop
-
-
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 
@@ -128,7 +99,7 @@ class Model(ABC):
         Args:
             model_name: The name/identifier of the model.
             model_config: Optional dictionary of model configuration parameters.
-            token_callback: Optional async callback invoked with each streamed text token.
+            token_callback: Optional callback invoked with each streamed text token.
         """
         self.model_name = model_name
         self.model_config = model_config or {}
@@ -136,37 +107,20 @@ class Model(ABC):
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
-        self._callback_loop: asyncio.AbstractEventLoop | None = None
 
     def _invoke_token_callback(self, token: str) -> None:
-        """Invoke the async token_callback synchronously, preserving order."""
-        if self.token_callback is None:
-            return
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("Exception caught", exc_info=True)
-            running_loop = None
-        if running_loop and running_loop.is_running():
-            helper_loop = _get_callback_loop()
-            future = asyncio.run_coroutine_threadsafe(self.token_callback(token), helper_loop)
-            future.result(timeout=30)
-            return
-        if self._callback_loop is None or self._callback_loop.is_closed():
-            self._callback_loop = asyncio.new_event_loop()
-        self._callback_loop.run_until_complete(self.token_callback(token))
+        """Invoke the token callback synchronously."""
+        if self.token_callback is not None:
+            self.token_callback(token)
 
-    def close_callback_loop(self) -> None:
-        """Close the per-instance event loop used for synchronous token callback invocation.
+    def reset_conversation(self) -> None:
+        """Reset conversation state for reuse across sub-sessions.
 
-        Safe to call multiple times; subsequent calls are no-ops.
+        Clears the conversation history and usage info while keeping the
+        HTTP client and model configuration intact.
         """
-        if self._callback_loop is not None and not self._callback_loop.is_closed():
-            self._callback_loop.close()
-        self._callback_loop = None
-
-    def __del__(self) -> None:
-        self.close_callback_loop()
+        self.conversation = []
+        self.usage_info_for_messages = ""
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.model_name})"
@@ -194,12 +148,16 @@ class Model(ABC):
 
     @abstractmethod
     def generate_and_process_with_tools(
-        self, function_map: dict[str, Callable[..., Any]]
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
         """Generates content with tools, processes the response, and adds it to conversation.
 
         Args:
             function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Optional pre-built tool schema list. When provided,
+                skips schema rebuilding from function_map (performance optimization).
 
         Returns:
             tuple[list[dict[str, Any]], str, Any]: A tuple of
@@ -293,6 +251,25 @@ class Model(ABC):
     # =========================================================================
     # Helper methods for building tool schemas (shared across implementations)
     # =========================================================================
+
+    def _resolve_openai_tools_schema(
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Return pre-built tools_schema or build one from function_map.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Optional pre-built tool schema list. When provided,
+                returned as-is (skips schema rebuilding for performance).
+
+        Returns:
+            list[dict[str, Any]]: The resolved OpenAI-format tool schema list.
+        """
+        if tools_schema is not None:
+            return tools_schema
+        return self._build_openai_tools_schema(function_map)
 
     def _build_openai_tools_schema(
         self, function_map: dict[str, Callable[..., Any]]
