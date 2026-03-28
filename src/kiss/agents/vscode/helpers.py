@@ -98,6 +98,7 @@ def generate_followup_text(task: str, result: str, model: str) -> str:
             ),
             arguments={"task": task, "result": result},
             is_agentic=False,
+            verbose=False,
         )
         return clean_llm_output(raw)
     except Exception:

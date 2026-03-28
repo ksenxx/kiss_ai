@@ -706,6 +706,7 @@ class VSCodeServer:
                 ),
                 arguments={"context": "\n\n".join(context_parts)},
                 is_agentic=False,
+                verbose=False,
             )
             msg = clean_llm_output(raw)
             self.printer.broadcast({"type": "commitMessage", "message": msg})
