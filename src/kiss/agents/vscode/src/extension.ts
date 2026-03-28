@@ -65,6 +65,11 @@ export function activate(context: vscode.ExtensionContext): void {
   let _chatFocused = false;
   let _focusToggling = false;
   context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      _chatFocused = false;
+    })
+  );
+  context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.toggleFocus', async () => {
       if (_focusToggling) return;
       _focusToggling = true;

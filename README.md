@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.63-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.64-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -35,9 +35,17 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 </details>
 
-## Installation and Launching KISS Sorcar
+# Introduction to KISS Sorcar
 
-To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
+![KISS Sorcar](assets/KISSSorcar.png)
+
+**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor IDE and **a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. Note that I am developing KISS Sorcar using KISS Sorcar so that I can improve the power and capabilities of KISS Sorcar. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
+
+#whatispossible #KISSSorcar
+
+## Install and Launch KISS Sorcar
+
+To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
 
 Open a terminal and use sorcar as a normal shell command. Some examples are:
 
@@ -56,14 +64,6 @@ sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop
 sorcar -t 'Can you write a thorough and precise plan in PLAN.md to simplify the project code?'
 sorcar -t 'I see some issues and bugs in PLAN.md.  Can you fix them?'  # lie to the agent to force improve the plan
 ```
-
-# Introduction to KISS Sorcar
-
-![KISS Sorcar](assets/KISSSorcar.png)
-
-**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor IDE and **a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **embedded in a browser** and uses **full-fledged VS Code**. It has **full browser** support and limited **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source** with **no monthly subscription fees**. Note that I am developing KISS Sorcar using KISS Sorcar so that I can improve the power and capabilities of KISS Sorcar. KISS Sorcar has been built on top of the KISS Multi Agentic Framework, which I describe in the next section.
-
-#whatispossible #KISSSorcar
 
 # Introduction to KISS
 

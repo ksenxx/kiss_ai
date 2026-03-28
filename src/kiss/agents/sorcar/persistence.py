@@ -105,7 +105,7 @@ def _get_db() -> sqlite3.Connection:
     if _db_conn is not None:
         return _db_conn
     with _db_lock:
-        if _db_conn is not None:
+        if _db_conn is not None:  # pragma: no cover — double-check lock race
             return _db_conn
         _ensure_kiss_dir()
         if not _DB_PATH.exists():
@@ -157,7 +157,7 @@ def _generate_chat_id() -> str:
                 "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1",
                 (candidate,),
             ).fetchone()
-            if row is None:
+            if row is None:  # pragma: no branch — UUID4 collision virtually impossible
                 return candidate
 
 
@@ -557,7 +557,7 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
         if p.is_file():
             try:
                 p.unlink()
-            except OSError:
+            except OSError:  # pragma: no cover — OS-level unlink failure
                 _log_exc()
     for d in sorted(_KISS_DIR.glob("cs-*")):
         if not d.is_dir() or d.name == "cs-extensions":
