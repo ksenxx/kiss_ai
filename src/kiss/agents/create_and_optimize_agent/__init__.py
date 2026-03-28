@@ -3,11 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""DEPRECATED: Use kiss.agents.coding_agents.agent_optimizer instead.
-
-This module is deprecated and will be removed in a future release.
-Please migrate to kiss.agents.coding_agents.agent_optimizer.
-"""
+"""DEPRECATED: This module is deprecated and will be removed in a future release."""
 
 import warnings
 
@@ -18,16 +14,10 @@ from kiss.agents.create_and_optimize_agent.agent_evolver import (
     EvolverProgress,
     create_progress_callback,
 )
-from kiss.agents.create_and_optimize_agent.config import (
-    AgentCreatorConfig,
-    EvolverConfig,
-    ImproverConfig,
-)
 from kiss.agents.create_and_optimize_agent.improver_agent import ImprovementReport, ImproverAgent
 
 warnings.warn(
-    "kiss.agents.create_and_optimize_agent is deprecated. "
-    "Use kiss.agents.coding_agents.agent_optimizer instead.",
+    "kiss.agents.create_and_optimize_agent is deprecated.",
     DeprecationWarning,
     stacklevel=2,
 )
@@ -40,7 +30,4 @@ __all__ = [
     "create_progress_callback",
     "ImproverAgent",
     "ImprovementReport",
-    "AgentCreatorConfig",
-    "ImproverConfig",
-    "EvolverConfig",
 ]

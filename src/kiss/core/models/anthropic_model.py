@@ -30,7 +30,7 @@ class AnthropicModel(Model):
             model_name: The name of the Claude model to use.
             api_key: The Anthropic API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
-            token_callback: Optional async callback invoked with each streamed text token.
+            token_callback: Optional callback invoked with each streamed text token.
         """
         super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.api_key = api_key
@@ -115,18 +115,19 @@ class AnthropicModel(Model):
         return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
     def _build_anthropic_tools_schema(
-        self, function_map: dict[str, Callable[..., Any]]
+        self,
+        openai_schema: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Build Anthropic tools schema from a function map.
+        """Convert an OpenAI-format tools schema to Anthropic format.
 
         Args:
-            function_map: Dictionary mapping function names to callable functions.
+            openai_schema: Tool schema list in OpenAI format.
 
         Returns:
             list[dict[str, Any]]: A list of tool schemas in Anthropic format.
         """
         tools = []
-        for tool in self._build_openai_tools_schema(function_map):
+        for tool in openai_schema:
             fn = tool.get("function", {})
             tools.append(
                 {
@@ -207,8 +208,8 @@ class AnthropicModel(Model):
         Returns:
             The raw Anthropic response message.
         """
-        if self.token_callback is not None:
-            with self.client.messages.stream(**kwargs) as stream:
+        with self.client.messages.stream(**kwargs) as stream:
+            if self.token_callback is not None:
                 for event in stream:
                     if event.type == "content_block_delta":
                         delta = event.delta
@@ -218,7 +219,6 @@ class AnthropicModel(Model):
                         elif delta_type == "text_delta":
                             self._invoke_token_callback(getattr(delta, "text", ""))
             return stream.get_final_message()
-        return self.client.messages.create(**kwargs)
 
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from the current conversation.
@@ -235,18 +235,22 @@ class AnthropicModel(Model):
         return content, response
 
     def generate_and_process_with_tools(  # pragma: no cover – API call
-        self, function_map: dict[str, Callable[..., Any]]
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
         """Generates content with tools and processes the response.
 
         Args:
             function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Optional pre-built OpenAI-format tool schema list.
 
         Returns:
             tuple[list[dict[str, Any]], str, Any]: A tuple of
                 (function_calls, response_text, raw_response).
         """
-        tools = self._build_anthropic_tools_schema(function_map)
+        resolved = self._resolve_openai_tools_schema(function_map, tools_schema)
+        tools = self._build_anthropic_tools_schema(resolved)
         kwargs = self._build_create_kwargs(tools=tools or None)
         response = self._create_message(kwargs)
 

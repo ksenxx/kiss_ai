@@ -18,12 +18,10 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
-from kiss.docker.docker_manager import DockerManager
 
 logger = logging.getLogger(__name__)
 
-TASK_PROMPT = """# Task
-
+TASK_PROMPT = """
 {task_description}
 
 {previous_progress}
@@ -96,23 +94,19 @@ class RelentlessAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        global_cfg = config_module.DEFAULT_CONFIG
-        cfg = global_cfg.relentless_agent
-        default_work_dir = str(Path(global_cfg.agent.artifact_dir).resolve() / "kiss_workdir")
+        default_work_dir = str(Path(config_module.artifact_dir).resolve() / "kiss_workdir")
 
         self.work_dir = str(Path(work_dir or default_work_dir).resolve())
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
 
-        self.max_sub_sessions = (
-            max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
-        )
-        self.max_steps = max_steps if max_steps is not None else cfg.max_steps
-        self.max_budget = max_budget if max_budget is not None else cfg.max_budget
-        self.model_name = model_name if model_name is not None else cfg.model_name
+        self.max_sub_sessions = max_sub_sessions if max_sub_sessions is not None else 10000
+        self.max_steps = max_steps if max_steps is not None else 100
+        self.max_budget = max_budget if max_budget is not None else 200.0
+        self.model_name = model_name if model_name is not None else "claude-opus-4-6"
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.docker_image = docker_image
-        self.docker_manager: DockerManager | None = None
+        self.docker_manager: Any = None
         self.task_description: str = ""
         self.system_prompt: str = ""
         self.set_printer(printer, verbose=verbose)
@@ -120,7 +114,7 @@ class RelentlessAgent(Base):
     def _docker_bash(self, command: str, description: str) -> str:
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
-        return self.docker_manager.Bash(command, description)
+        return str(self.docker_manager.Bash(command, description))
 
     def perform_task(
         self,
@@ -171,8 +165,24 @@ class RelentlessAgent(Base):
                     attachments=attachments if session == 0 else None,
                     session_info=session_info,
                 )
-            except Exception as exc:  # pragma: no cover – requires LLM API failure
+            except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
+                # Non-retryable errors: return immediately if the error has a
+                # chained cause, isn't a KISSError, or the executor never
+                # started (no steps executed means a setup/config failure).
+                if (
+                    exc.__cause__ is not None
+                    or not isinstance(exc, KISSError)
+                    or executor.step_count == 0
+                ):
+                    self.budget_used += executor.budget_used
+                    self.total_tokens_used += executor.total_tokens_used
+                    error_result: str = yaml.dump(
+                        {"success": False, "is_continue": False, "summary": str(exc)},
+                        sort_keys=False,
+                    )
+                    return error_result
+                # For step/budget limit errors, try to summarize and continue
                 trajectory_path: Path | None = None
                 try:
                     fd, tmp = tempfile.mkstemp(suffix=".json", prefix="trajectory_")
@@ -272,7 +282,7 @@ class RelentlessAgent(Base):
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
-            verbose: Whether to print output to console. Defaults to config verbose setting.
+            verbose: Whether to print output to console. Defaults to True.
             tools: List of callable tools available to the agent during execution.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
 
@@ -295,6 +305,8 @@ class RelentlessAgent(Base):
         self.task_description = prompt_template.format(**args) if args else prompt_template
 
         if self.docker_image:
+            from kiss.docker.docker_manager import DockerManager
+
             with DockerManager(self.docker_image) as docker_mgr:
                 self.docker_manager = docker_mgr
                 if self.printer:

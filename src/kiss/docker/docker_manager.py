@@ -16,7 +16,6 @@ from typing import Any
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
-from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
@@ -50,7 +49,7 @@ class DockerManager:
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
         self.ports = ports
-        self.client_shared_path = config_module.DEFAULT_CONFIG.docker.client_shared_path
+        self.client_shared_path = "/testbed"
         self.host_shared_path: str | None = None
         self.stream_callback: Callable[[str], None] | None = None
 

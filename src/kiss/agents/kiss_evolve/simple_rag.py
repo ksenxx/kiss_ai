@@ -236,39 +236,6 @@ class SimpleRAG:
 
         return results
 
-    def delete_documents(self, document_ids: list[str]) -> None:
-        """Delete documents from the collection by their IDs.
-
-        Args:
-            document_ids: List of document IDs to delete.
-
-        Returns:
-            None.
-        """
-        if not document_ids:
-            return
-
-        if self.embeddings is None:
-            return
-
-        # Find indices to remove
-        ids_to_remove = set(str(doc_id) for doc_id in document_ids)
-        indices_to_keep = [
-            i for i, doc in enumerate(self.documents) if doc["id"] not in ids_to_remove
-        ]
-
-        if len(indices_to_keep) == len(self.documents):
-            # No documents to remove
-            return
-
-        # Update documents and embeddings
-        self.documents = [self.documents[i] for i in indices_to_keep]
-        self.embeddings = self.embeddings[indices_to_keep]
-
-        # If no documents left, reset embeddings
-        if not self.documents:
-            self.embeddings = None
-
     def get_collection_stats(self) -> dict[str, Any]:
         """Get statistics about the collection.
 
@@ -283,26 +250,3 @@ class SimpleRAG:
             "embedding_dimension": embedding_dimension,
             "metric": self.metric,
         }
-
-    def clear_collection(self) -> None:
-        """Clear all documents from the collection.
-
-        Returns:
-            None.
-        """
-        self.documents = []
-        self.embeddings = None
-
-    def get_document(self, document_id: str) -> dict[str, Any] | None:
-        """Get a document by its ID.
-
-        Args:
-            document_id: Document ID to retrieve.
-
-        Returns:
-            Document dictionary or None if not found.
-        """
-        for doc in self.documents:
-            if doc["id"] == str(document_id):
-                return doc
-        return None

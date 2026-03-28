@@ -4,22 +4,20 @@ from __future__ import annotations
 
 import argparse
 import os
-import tempfile
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.task_history import _load_last_model, _save_last_model
+from kiss.agents.sorcar.persistence import _load_last_model, _save_last_model
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.core import config as config_module
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
-from kiss.docker.docker_manager import DockerManager
 
 
 class SorcarAgent(RelentlessAgent):
@@ -28,9 +26,15 @@ class SorcarAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
-        self.docker_manager: DockerManager | None = None
+        self.docker_manager: Any = None
+        self._wait_for_user_callback: Callable[[str, str], None] | None = None
 
     def _get_tools(self) -> list:
+        """Build tool list, using DockerTools when docker_manager is active.
+
+        Must be called after docker_manager is set up (i.e., from perform_task,
+        not from run() before super().run()).
+        """
         def _stream(text: str) -> None:
             if self.printer:
                 self.printer.print(text, type="bash_stream")
@@ -56,12 +60,38 @@ class SorcarAgent(RelentlessAgent):
 
         stop_event = getattr(self, "_stop_event", None)
         useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
-        bash_tool = self._docker_bash if self.docker_manager else useful_tools.Bash
-        tools = [bash_tool, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+        if self.docker_manager:
+            from kiss.docker.docker_tools import DockerTools
+
+            docker_tools = DockerTools(self._docker_bash)
+            tools: list = [
+                self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
+            ]
+        else:
+            tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+        if self.web_use_tool is None:
+            self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
         if self.web_use_tool:
             tools.extend(self.web_use_tool.get_tools())
         tools.append(ask_user_question)
         return tools
+
+    def perform_task(
+        self,
+        tools: list,
+        attachments: list | None = None,
+    ) -> str:
+        """Execute the task, building docker-aware tools after docker_manager is set.
+
+        Args:
+            tools: Extra tools passed by the caller (from run(tools=...)).
+            attachments: Optional file attachments for the initial prompt.
+
+        Returns:
+            YAML string with 'success' and 'summary' keys.
+        """
+        all_tools = self._get_tools() + tools
+        return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
         self,
@@ -74,20 +104,17 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        cfg = config_module.DEFAULT_CONFIG.sorcar.sorcar_agent
-        resolved_model = model_name or _load_last_model() or cfg.model_name
+        resolved_model = model_name or _load_last_model() or "claude-opus-4-6"
         _save_last_model(resolved_model)
         super()._reset(
             model_name=resolved_model,
-            max_sub_sessions=(
-                max_sub_sessions if max_sub_sessions is not None else cfg.max_sub_sessions
-            ),
-            max_steps=max_steps if max_steps is not None else cfg.max_steps,
-            max_budget=max_budget if max_budget is not None else cfg.max_budget,
+            max_sub_sessions=max_sub_sessions if max_sub_sessions is not None else 10000,
+            max_steps=max_steps if max_steps is not None else 100,
+            max_budget=max_budget if max_budget is not None else 200.0,
             work_dir=work_dir or ".",
             docker_image=docker_image,
             printer=printer,
-            verbose=verbose if verbose is not None else cfg.verbose,
+            verbose=verbose if verbose is not None else False,
         )
 
     def run(  # type: ignore[override]
@@ -139,7 +166,8 @@ class SorcarAgent(RelentlessAgent):
         """
         self._wait_for_user_callback = wait_for_user_callback
         self._ask_user_question_callback = ask_user_question_callback
-        self.web_use_tool = WebUseTool(wait_for_user_callback=wait_for_user_callback)
+        # Lazy-initialized when web tools are first accessed via _get_tools()
+        self.web_use_tool = None
         # Extract the per-thread stop event from the printer so UsefulTools
         # can monitor it and kill child processes when the agent is stopped.
         tl = getattr(printer, "_thread_local", None) if printer else None
@@ -162,9 +190,11 @@ class SorcarAgent(RelentlessAgent):
                 if parts:
                     prompt += (
                         f"\n\n# Important\n - User attached {', '.join(parts)}. "
-                        f"The files are included in this message. "
-                        f"Examine them directly — do NOT use browser tools "
-                        f"to view or screenshot these attachments."
+                        f"The files are included in this message as inline content "
+                        f"that you can see directly. "
+                        f"Do NOT launch a browser, call screenshot(), go_to_url(), "
+                        f"or any other browser tool to view these attachments — "
+                        f"you already have them."
                     )
             if current_editor_file:
                 system_instructions += (
@@ -184,7 +214,7 @@ class SorcarAgent(RelentlessAgent):
                 max_sub_sessions=max_sub_sessions,
                 docker_image=docker_image,
                 verbose=verbose,
-                tools=self._get_tools() + (tools if tools else []),
+                tools=tools or [],
                 attachments=attachments,
             )
         finally:
@@ -291,35 +321,52 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     """Run a demo of the SorcarAgent with a sample Gmail task."""
     import time as time_mod
 
+
+    if len(sys.argv) <= 1:
+        print("Usage: sorcar_agent.py [-m MODEL_NAME] [-e ENDPOINT] [-b MAX_BUDGET] "
+              "[-w WORK_DIR] [--headless true/false] [-v true/false] "
+              "[-t TASK_DESCRIPTION] [-f TASK_FILE]")
+        sys.exit(1)
     parser = _build_arg_parser()
-    args = parser.parse_args()
-    task_description = _resolve_task(args)
-
-    if args.work_dir is not None:
-        work_dir = args.work_dir
-        Path(work_dir).mkdir(parents=True, exist_ok=True)
+    agent = SorcarAgent("Sorcar Agent")
+    try:
+        args = parser.parse_args()
+    except Exception:
+        task_description = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else ""
+        work_dir = str(Path(".").resolve())
+        run_kwargs: dict[str, Any] = {
+            "prompt_template": task_description,
+            "work_dir": work_dir,
+            "wait_for_user_callback": cli_wait_for_user,
+            "ask_user_question_callback": cli_ask_user_question,
+        }
     else:
-        work_dir = tempfile.mkdtemp()
-    model_config = {}
-    if args.endpoint:
-        model_config["base_url"] = args.endpoint
+        task_description = _resolve_task(args)
+        if args.work_dir is not None:
+            work_dir = args.work_dir
+            Path(work_dir).mkdir(parents=True, exist_ok=True)
+        else:
+            work_dir = str(Path(".").resolve())
+        model_config = {}
+        if args.endpoint:
+            model_config["base_url"] = args.endpoint
+        run_kwargs = {
+            "prompt_template": task_description,
+            "model_name": args.model_name,
+            "max_budget": args.max_budget,
+            "model_config": model_config,
+            "work_dir": work_dir,
+            "headless": args.headless,
+            "verbose": args.verbose,
+            "wait_for_user_callback": cli_wait_for_user,
+            "ask_user_question_callback": cli_ask_user_question,
+        }
 
-    agent = SorcarAgent("Sorcar Agent Test")
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
     try:
-        result = agent.run(
-            prompt_template=task_description,
-            model_name=args.model_name,
-            max_budget=args.max_budget,
-            model_config=model_config,
-            work_dir=work_dir,
-            headless=args.headless,
-            verbose=args.verbose,
-            wait_for_user_callback=cli_wait_for_user,
-            ask_user_question_callback=cli_ask_user_question,
-        )
+        result = agent.run(**run_kwargs)
     finally:
         os.chdir(old_cwd)
     elapsed = time_mod.time() - start_time

@@ -7,9 +7,6 @@ import pytest
 
 from kiss.core.kiss_error import KISSError
 
-# Enable coverage for subprocesses: the .pth file (a1_coverage.pth) checks this
-# env var and calls coverage.process_startup() so spawned subprocesses write
-# their branch-coverage data to .coverage.subprocess.* files.
 _subprocess_rc = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".coveragerc.subprocess")
 if os.path.isfile(_subprocess_rc):
     os.environ.setdefault("COVERAGE_PROCESS_START", os.path.abspath(_subprocess_rc))
@@ -70,7 +67,6 @@ def has_minimax_api_key() -> bool:
 
 def has_novita_api_key() -> bool:
     return bool(os.environ.get("NOVITA_API_KEY"))
-
 
 
 def get_required_api_key_for_model(model_name: str) -> str | None:

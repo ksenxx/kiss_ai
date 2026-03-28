@@ -341,8 +341,11 @@ class WebUseTool:
             return f"Error scrolling {direction}: {e}"
 
     def screenshot(self, file_path: str = "screenshot.png") -> str:
-        """Capture the visible viewport as an image. Use to verify layout, captchas, or
-        visual state.
+        """Capture the visible viewport of the Chromium browser as an image.
+
+        Use to verify layout, captchas, or visual state of a web page currently
+        open in the browser. This does NOT capture or display local files,
+        attached images, or PDFs — it only screenshots the browser window.
 
         Args:
             file_path: Path where the PNG will be saved (default "screenshot.png"). Parent

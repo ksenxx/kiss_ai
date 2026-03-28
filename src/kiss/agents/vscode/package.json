@@ -1,0 +1,178 @@
+{
+  "name": "kiss-sorcar",
+  "displayName": "KISS Sorcar",
+  "description": "AI coding assistant powered by KISS Sorcar Agent",
+  "version": "0.2.56",
+  "publisher": "ksenxx",
+  "engines": {
+    "vscode": "^1.98.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "icon": "media/icon.png",
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kissSorcar.openPanel",
+        "title": "KISS: Open Sorcar Chat"
+      },
+      {
+        "command": "kissSorcar.newConversation",
+        "title": "KISS: New Conversation"
+      },
+      {
+        "command": "kissSorcar.stopTask",
+        "title": "KISS: Stop Current Task"
+      },
+      {
+        "command": "kissSorcar.acceptChange",
+        "title": "KISS: Accept Change"
+      },
+      {
+        "command": "kissSorcar.rejectChange",
+        "title": "KISS: Reject Change"
+      },
+      {
+        "command": "kissSorcar.prevChange",
+        "title": "KISS: Previous Change"
+      },
+      {
+        "command": "kissSorcar.nextChange",
+        "title": "KISS: Next Change"
+      },
+      {
+        "command": "kissSorcar.acceptAll",
+        "title": "KISS: Accept All Changes"
+      },
+      {
+        "command": "kissSorcar.rejectAll",
+        "title": "KISS: Reject All Changes"
+      },
+      {
+        "command": "kissSorcar.acceptFile",
+        "title": "KISS: Accept File Changes"
+      },
+      {
+        "command": "kissSorcar.rejectFile",
+        "title": "KISS: Reject File Changes"
+      },
+      {
+        "command": "kissSorcar.generateCommitMessage",
+        "title": "KISS: Generate Commit Message",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "kissSorcar.toggleFocus",
+        "title": "KISS: Focus Chat"
+      },
+      {
+        "command": "kissSorcar.focusEditor",
+        "title": "KISS: Focus Editor"
+      },
+      {
+        "command": "kissSorcar.runSelection",
+        "title": "KISS: Run Selection in Chat"
+      }
+    ],
+    "menus": {
+      "scm/inputBox": [
+        {
+          "command": "kissSorcar.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kissSorcar",
+          "title": "KISS Sorcar",
+          "icon": "media/spark.svg",
+          "when": "kissSorcar:doesNotSupportSecondarySidebar"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "kissSorcarSecondary",
+          "title": "KISS Sorcar",
+          "icon": "media/spark.svg",
+          "when": "!kissSorcar:doesNotSupportSecondarySidebar",
+          "order": -100
+        }
+      ]
+    },
+    "views": {
+      "kissSorcar": [
+        {
+          "type": "webview",
+          "id": "kissSorcar.chatView",
+          "name": "Chat",
+          "when": "kissSorcar:doesNotSupportSecondarySidebar"
+        }
+      ],
+      "kissSorcarSecondary": [
+        {
+          "type": "webview",
+          "id": "kissSorcar.chatViewSecondary",
+          "name": "Chat",
+          "when": "!kissSorcar:doesNotSupportSecondarySidebar"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "kissSorcar.newConversation",
+        "key": "cmd+t",
+        "mac": "cmd+t"
+      },
+      {
+        "command": "kissSorcar.toggleFocus",
+        "key": "cmd+d",
+        "mac": "cmd+d"
+      },
+      {
+        "command": "kissSorcar.runSelection",
+        "key": "cmd+l",
+        "mac": "cmd+l"
+      }
+    ],
+    "configurationDefaults": {
+      "workbench.notifications.position": "top-right"
+    },
+    "configuration": {
+      "title": "KISS Sorcar",
+      "properties": {
+        "kissSorcar.defaultModel": {
+          "type": "string",
+          "default": "claude-opus-4-6",
+          "description": "Default LLM model for new conversations"
+        },
+        "kissSorcar.kissProjectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to KISS project root (auto-detected if empty)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile && npm run copy-kiss",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "copy-kiss": "bash copy-kiss.sh",
+    "package": "vsce package --no-dependencies --allow-star-activation"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.98.0",
+    "typescript": "^5.0.0"
+  }
+}

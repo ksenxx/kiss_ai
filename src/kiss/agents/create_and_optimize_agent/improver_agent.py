@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core import config as config_module
 
 logger = logging.getLogger(__name__)
 
@@ -269,12 +268,15 @@ class ImproverAgent:
         self,
         task_description: str,
         work_dir: str,
+        evolve_to_solve_task: bool = False,
     ) -> tuple[bool, ImprovementReport | None]:
         """Create an initial agent from scratch.
 
         Args:
             task_description: Description of the task the agent should perform
             work_dir: Path where the new agent will be written
+            evolve_to_solve_task: Whether to evolve the agent to solve the task
+                or evolve a general purpose agent.
 
         Returns:
             Tuple of (success: bool, report: ImprovementReport | None)
@@ -288,6 +290,7 @@ class ImproverAgent:
             work_dir=work_dir,
             previous_report_text=previous_report_text,
             generation=0,
+            evolve_to_solve_task=evolve_to_solve_task,
         )
 
     def improve(
@@ -296,6 +299,7 @@ class ImproverAgent:
         work_dir: str,
         task_description: str,
         report_path: str | None = None,
+        evolve_to_solve_task: bool = False,
     ) -> tuple[bool, ImprovementReport | None]:
         """Improve an agent's code to reduce token usage and execution time.
 
@@ -304,6 +308,8 @@ class ImproverAgent:
             work_dir: Path where the improved agent will be written
             task_description: Description of the task the agent should perform
             report_path: Optional path to a previous improvement report
+            evolve_to_solve_task: Whether to evolve the agent to solve the task
+                or evolve a general purpose agent.
 
         Returns:
             Tuple of (success: bool, report: ImprovementReport | None)
@@ -324,6 +330,7 @@ class ImproverAgent:
             work_dir=work_dir,
             previous_report_text=previous_report_text,
             generation=generation,
+            evolve_to_solve_task=evolve_to_solve_task,
         )
 
     def _run_improvement(
@@ -332,6 +339,7 @@ class ImproverAgent:
         work_dir: str,
         previous_report_text: str,
         generation: int,
+        evolve_to_solve_task: bool = False,
     ) -> tuple[bool, ImprovementReport | None]:
         """Run the improvement process using a coding agent.
 
@@ -345,6 +353,8 @@ class ImproverAgent:
             previous_report_text: Formatted text from previous improvement report
                 to inform the coding agent of past optimizations.
             generation: Generation number to record in the new report.
+            evolve_to_solve_task: Whether to evolve the agent to solve the task
+                or evolve a general purpose agent.
 
         Returns:
             A tuple of (success, report) where success is True if improvement
@@ -355,7 +365,7 @@ class ImproverAgent:
         agent = SorcarAgent("Agent Improver")
 
         print(f"Running improvement on {work_dir}")
-        if not config_module.DEFAULT_CONFIG.create_and_optimize_agent.evolver.evolve_to_solve_task:
+        if not evolve_to_solve_task:
             agent_evolver_prompt = (
                 AGENT_EVOLVER_PROMPT_PART1 + AGENT_EVOLVER_PROMPT_PART2 + AGENT_EVOLVER_PROMPT_PART3
             )
@@ -412,6 +422,7 @@ class ImproverAgent:
         secondary_report_path: str,
         work_dir: str,
         task_description: str,
+        evolve_to_solve_task: bool = False,
     ) -> tuple[bool, ImprovementReport | None]:
         """Improve an agent by combining ideas from two variants.
 
@@ -421,6 +432,8 @@ class ImproverAgent:
             secondary_report_path: Path to the secondary variant's improvement report
             work_dir: Path where the improved agent will be written
             task_description: Description of the task the agent should perform
+            evolve_to_solve_task: Whether to evolve the agent to solve the task
+                or evolve a general purpose agent.
 
         Returns:
             Tuple of (success: bool, report: ImprovementReport | None)
@@ -456,6 +469,7 @@ class ImproverAgent:
                 work_dir=work_dir,
                 task_description=task_description,
                 report_path=temp_report_path,
+                evolve_to_solve_task=evolve_to_solve_task,
             )
         finally:
             if Path(temp_report_path).exists():

@@ -18,7 +18,6 @@ from yaml.nodes import ScalarNode
 
 from kiss.core import config as config_module
 from kiss.core.models.model_info import get_max_context_length
-from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import Printer
 from kiss.core.utils import config_to_dict
 
@@ -31,86 +30,12 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 
 yaml.add_representer(str, _str_presenter)
 
-_KISS_DIR = Path().home() / ".kiss"
+_project_dir = Path(__file__).parent.parent.parent.parent
+SYSTEM_PROMPT = (_project_dir / "SYSTEM.md").read_text()
 
-_artifact_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir)
-
-SYSTEM_PROMPT = f"""
-# FOCUS ON THE GIVEN TASK.  IT'S COMPLETION IS YOUR SOLE GOAL.  BE RELENTLESS.
-
-# Rules
-- Write() for new files. Edit() for small changes.
-- Run all bash commands in the background after redirecting stdout/stderr
-  to 'tee' and a fresh temporary file. Poll the tail of the temporary file
-  every 10 seconds to check progress of the bash command.
-- Use go_to_url() for browser tool and internet search or testing an agent/app.
-- Look at `{_KISS_DIR}/task_history.jsonl` for task history and context.  Recent tasks
-  are appended to the file.  The file could be very large.
-  Pay more attention to the recent tasks over old tasks. Do not try to finish a
-  task from the task history. DO NOT WRITE/EDIT the task history.
-- If you don't know the context of a vague task, look at the latest tasks in the
-  task history from latest to oldest to get the context.
-- Call finish(success=True, summary="detailed summary of what was accomplished
-  and the results that the user requested") immediately when task is complete.
-- Whenever the user asks the agent to show something, try to show it in the results
-  as nicely formatted marrkdown text.
-- Use 'uv run myprogram.py' for running Python programs.
-- READ large files in chunks.
-- Create temporary files in {_artifact_dir.parent}/tmp
-- YOU **MUST FOLLOW THE INSTRUCTIONS DIRECTLY**
-
-## Code Style Guidelines
-- Write simple, clean, and readable code with minimal indirection
-- Avoid unnecessary object attributes, local variables, and config variables
-- Avoid tight coupling among files and modules.
-- Avoid object/struct attribute redirections
-- No redundant abstractions or duplicate code
-- Each function should do one thing well
-- Public methods MUST have full documentation
-- Understand the root cause of an issue or bug, and patch the root cause instead of
-  of an ad hoc superficial fix.
-- Before you write code, wait and think if the code is simple, elegant, general, and minimal.
-- Once you finish the task, DO NOT write documentations unless the task specifically requires it.
-- You MUST check and test the code you have written except for formatting/typing changes
-
-## Testing Instructions
-- Run lint and typecheckers and fix any lint and typecheck errors.
-  Use 'uv run check --full' if available.
-- Carefully read the code, find and fix redundancies, duplications,
-  inconsistencies, errors, and AI slop in the code
-- You MUST achieve 100% branch coverage
-- Tests MUST NOT use mocks, patches, fakes, or any form of test doubles
-- Integration tests are HIGHLY encouraged
-- You MUST not add tests that are redundant or duplicate of existing
-  tests or does not add new branch coverage over existing tests
-- Generate meaningful stress tests for the code if you are
-  optimizing the code for performance
-- Each test should be independent and verify actual behavior
-
-## Use web tools when you need to:
-- Look up API documentation or library usage from the internet
-- Find examples of similar implementations
-- Understand existing code in the project
-- Read papers from the internet to understand concepts and algorithms
-- For deep research, you must visit and read at least 50 websites
-
-## Self-Improvement Loop
-- Just before finishing an agent task, update `{_artifact_dir.parent}/LESSONS.md`
-  with instructions and rules and intelligence for yourself ONLY IF you have learned any
-  major lessons (from mistakes) or intelligence about the project or in general during
-  the task execution.  Lessons that save running time and number of tokens used by the
-  agent would be invaluable.  You MUST get rid of the lessons that are no longer
-  applicable to the current state of the project. Also compact the lessons you have learned
-  into concise instructions if the list of lessons get too long.
-- The lessons MUST NOT be specific to a task, but about agent behavior.
-- Review lessons when the agent starts
-
-## After you have implemented the task, aggresively and carefully simplify and clean up the code
- - Remove unnecessary conditional checks
- - Make sure that the code is still working correctly
- - Simplify and clean up the test code
- - Remove all temporary files you created
-"""
+_sorcar_path = Path("SORCAR.md")
+if _sorcar_path.exists():
+    SYSTEM_PROMPT += "\n" + _sorcar_path.read_text()
 
 
 class Base:
@@ -122,7 +47,7 @@ class Base:
 
     model_name: str
     messages: list[dict[str, Any]]
-    function_map: Any
+    function_map: dict[str, Any]
     run_start_timestamp: int
     budget_used: float
     total_tokens_used: int
@@ -141,6 +66,13 @@ class Base:
             Base.agent_counter += 1
         self.base_dir = ""
         self.printer: Printer | None = None
+        self.model_name = ""
+        self.messages: list[dict[str, Any]] = []
+        self.function_map = {}
+        self.run_start_timestamp = 0
+        self.budget_used = 0.0
+        self.total_tokens_used = 0
+        self.step_count = 0
 
     def set_printer(
         self,
@@ -151,17 +83,18 @@ class Base:
 
         If an explicit *printer* is provided, it is always used regardless
         of the verbose setting.  Otherwise a ``ConsolePrinter`` is created
-        when verbose output is enabled (either explicitly or via config).
+        when verbose output is enabled.
 
         Args:
             printer: An existing Printer instance to use directly. If provided,
                 verbose is ignored.
-            verbose: Whether to print to the console. If None,
-                uses the verbose config value.
+            verbose: Whether to print to the console. Defaults to True if None.
         """
         if printer:
             self.printer = printer
-        elif verbose is not False and config_module.DEFAULT_CONFIG.agent.verbose:
+        elif verbose is not False:
+            from kiss.core.print_to_console import ConsolePrinter
+
             self.printer = ConsolePrinter()
         else:
             self.printer = None
@@ -191,15 +124,13 @@ class Base:
             "is_agentic": getattr(self, "is_agentic", True),
             "model": self.model_name,
             "budget_used": self.budget_used,
-            "total_budget": getattr(
-                self, "max_budget", config_module.DEFAULT_CONFIG.agent.max_agent_budget
-            ),
+            "total_budget": getattr(self, "max_budget", 10.0),
             "global_budget_used": Base.global_budget_used,
-            "global_max_budget": config_module.DEFAULT_CONFIG.agent.global_max_budget,
+            "global_max_budget": 200.0,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
             "step_count": self.step_count,
-            "max_steps": getattr(self, "max_steps", config_module.DEFAULT_CONFIG.agent.max_steps),
+            "max_steps": getattr(self, "max_steps", 100),
             "command": " ".join(sys.argv),
         }
 
@@ -208,7 +139,7 @@ class Base:
 
         The file is saved to {artifact_dir}/trajectories/trajectory_{name}_{id}_{timestamp}.yaml
         """
-        folder_path = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
+        folder_path = Path(config_module.artifact_dir) / "trajectories"
         folder_path.mkdir(parents=True, exist_ok=True)
         name_safe = self.name.replace(" ", "_").replace("/", "_")
         filename = folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"

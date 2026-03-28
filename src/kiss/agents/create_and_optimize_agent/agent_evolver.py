@@ -99,13 +99,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import kiss.agents.create_and_optimize_agent.config  # type: ignore # noqa: F401
 from kiss.agents.create_and_optimize_agent.improver_agent import (
     ImprovementReport,
     ImproverAgent,
 )
 from kiss.core import config as config_module
-from kiss.core.utils import get_config_value
 
 logger = logging.getLogger(__name__)
 
@@ -304,28 +302,26 @@ class AgentEvolver:
     def _reset(
         self,
         task_description: str,
-        max_generations: int | None = None,
-        initial_frontier_size: int | None = None,
-        max_frontier_size: int | None = None,
-        mutation_probability: float | None = None,
+        max_generations: int = 10,
+        initial_frontier_size: int = 4,
+        max_frontier_size: int = 6,
+        mutation_probability: float = 0.8,
+        evolve_to_solve_task: bool = False,
         progress_callback: Callable[[EvolverProgress], None] | None = None,
     ) -> None:
         """Initialize or reset the AgentEvolver state.
 
-        Sets up the evolver with configuration values, creates working directories,
-        and initializes an empty Pareto frontier. Called by evolve() before
-        starting evolution.
+        Sets up the evolver, creates working directories, and initializes
+        an empty Pareto frontier. Called by evolve() before starting evolution.
 
         Args:
             task_description: Description of the task the agent should perform.
-            max_generations: Maximum number of improvement generations. If None,
-                uses config default.
-            initial_frontier_size: Number of initial agents to create. If None,
-                uses config default.
-            max_frontier_size: Maximum size of the Pareto frontier. If None,
-                uses config default.
+            max_generations: Maximum number of improvement generations.
+            initial_frontier_size: Number of initial agents to create.
+            max_frontier_size: Maximum size of the Pareto frontier.
             mutation_probability: Probability of mutation vs crossover (0.0 to 1.0).
-                If None, uses config default.
+            evolve_to_solve_task: Whether to evolve the agent to solve the task
+                or evolve a general purpose agent.
             progress_callback: Optional callback function called with EvolverProgress
                 during optimization. Use this to track progress, display progress bars,
                 or log intermediate results.
@@ -333,23 +329,15 @@ class AgentEvolver:
         Returns:
             None. Initializes instance attributes.
         """
-        cfg = getattr(config_module.DEFAULT_CONFIG, "create_and_optimize_agent", None)
-        evolver_cfg = getattr(cfg, "evolver", None)
-
         self.task_description = task_description
-        self.max_generations = get_config_value(max_generations, evolver_cfg, "max_generations")
-        self.initial_frontier_size = get_config_value(
-            initial_frontier_size, evolver_cfg, "initial_frontier_size"
-        )
-        self.max_frontier_size = get_config_value(
-            max_frontier_size, evolver_cfg, "max_frontier_size"
-        )
-        self.mutation_probability = get_config_value(
-            mutation_probability, evolver_cfg, "mutation_probability"
-        )
+        self.max_generations = max_generations
+        self.initial_frontier_size = initial_frontier_size
+        self.max_frontier_size = max_frontier_size
+        self.mutation_probability = mutation_probability
+        self.evolve_to_solve_task = evolve_to_solve_task
 
         self.work_dir = Path(tempfile.mkdtemp())
-        self.optimal_dir = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "optimal_agent"
+        self.optimal_dir = Path(config_module.artifact_dir) / "optimal_agent"
 
         self.pareto_frontier: list[AgentVariant] = []
         self._variant_counter = 0
@@ -443,6 +431,7 @@ class AgentEvolver:
         success, initial_report = self.improver.create_initial(
             task_description=self.task_description,
             work_dir=work_dir,
+            evolve_to_solve_task=self.evolve_to_solve_task,
         )
 
         if not success or initial_report is None:
@@ -674,6 +663,7 @@ class AgentEvolver:
             work_dir=work_dir,
             task_description=self.task_description,
             report_path=variant.report_path,
+            evolve_to_solve_task=self.evolve_to_solve_task,
         )
 
         if not success or new_report is None:
@@ -715,6 +705,7 @@ class AgentEvolver:
             secondary_report_path=secondary.report_path,
             work_dir=work_dir,
             task_description=self.task_description,
+            evolve_to_solve_task=self.evolve_to_solve_task,
         )
 
         if not success or new_report is None:
@@ -734,10 +725,11 @@ class AgentEvolver:
     def evolve(
         self,
         task_description: str,
-        max_generations: int | None = None,
-        initial_frontier_size: int | None = None,
-        max_frontier_size: int | None = None,
-        mutation_probability: float | None = None,
+        max_generations: int = 10,
+        initial_frontier_size: int = 4,
+        max_frontier_size: int = 6,
+        mutation_probability: float = 0.8,
+        evolve_to_solve_task: bool = False,
         progress_callback: Callable[[EvolverProgress], None] | None = None,
     ) -> AgentVariant:
         """Run the evolutionary optimization.
@@ -748,14 +740,12 @@ class AgentEvolver:
 
         Args:
             task_description: Description of the task the agent should perform.
-            max_generations: Maximum number of improvement generations. If None,
-                uses config default.
-            initial_frontier_size: Number of initial agents to create. If None,
-                uses config default.
-            max_frontier_size: Maximum size of the Pareto frontier. If None,
-                uses config default.
+            max_generations: Maximum number of improvement generations.
+            initial_frontier_size: Number of initial agents to create.
+            max_frontier_size: Maximum size of the Pareto frontier.
             mutation_probability: Probability of mutation vs crossover (0.0 to 1.0).
-                If None, uses config default.
+            evolve_to_solve_task: Whether to evolve the agent to solve the task
+                or evolve a general purpose agent.
             progress_callback: Optional callback function called with EvolverProgress
                 during optimization. Use this to track progress, display progress bars,
                 or log intermediate results.
@@ -769,6 +759,7 @@ class AgentEvolver:
             initial_frontier_size=initial_frontier_size,
             max_frontier_size=max_frontier_size,
             mutation_probability=mutation_probability,
+            evolve_to_solve_task=evolve_to_solve_task,
             progress_callback=progress_callback,
         )
         try:

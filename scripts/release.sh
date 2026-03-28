@@ -10,8 +10,9 @@
 # 3. Commit changes with "Version bumped"
 # 4. Push to origin
 # 5. Push to kiss_ai repo and tag with version
-# 6. Build offline .pkg and create GitHub release (with .pkg asset)
+# 6. Build .pkg and create GitHub release (with .pkg asset)
 # 7. Publish to PyPI
+# 8. Build and publish VS Code extension to marketplace
 
 set -e  # Exit on error
 
@@ -23,7 +24,9 @@ PUBLIC_REPO_URL="https://github.com/ksenxx/kiss_ai.git"
 PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/_version.py"
 README_FILE="README.md"
+SYSTEM_FILE="SYSTEM.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
+VSCODE_EXT_DIR="src/kiss/agents/vscode"
 
 # Colors for output
 RED='\033[0;31m'
@@ -86,12 +89,37 @@ update_readme_version() {
         print_warn "README file not found: $README_FILE - skipping"
         return
     fi
-    if grep -q 'img.shields.io/badge/version-' "$README_FILE"; then
-        sed -i.bak "s|badge/version-[0-9][0-9.]*-blue|badge/version-${version}-blue|g" "$README_FILE"
+    local old_version
+    old_version=$(grep -oP 'badge/version-\K[0-9][0-9.]*(?=-blue)' "$README_FILE" 2>/dev/null || \
+                  grep 'badge/version-' "$README_FILE" | sed 's/.*badge\/version-\([0-9][0-9.]*\)-blue.*/\1/' | head -1)
+    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
+        sed -i.bak "s/${old_version}/${version}/g" "$README_FILE"
         rm -f "${README_FILE}.bak"
-        print_info "Updated version badge in $README_FILE to $version"
-    else
+        print_info "Updated all occurrences of $old_version to $version in $README_FILE"
+    elif [[ -z "$old_version" ]]; then
         print_warn "Version badge not found in $README_FILE - skipping"
+    else
+        print_info "README already at version $version"
+    fi
+}
+
+update_system_md_version() {
+    local version="$1"
+    if [[ ! -f "$SYSTEM_FILE" ]]; then
+        print_warn "SYSTEM file not found: $SYSTEM_FILE - skipping"
+        return
+    fi
+    local old_version
+    old_version=$(grep -oP 'Your version is \K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
+                  grep 'Your version is' "$SYSTEM_FILE" | sed 's/.*Your version is \([0-9][0-9.]*\).*/\1/' | head -1)
+    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
+        sed -i.bak "s/${old_version}/${version}/g" "$SYSTEM_FILE"
+        rm -f "${SYSTEM_FILE}.bak"
+        print_info "Updated all occurrences of $old_version to $version in $SYSTEM_FILE"
+    elif [[ -z "$old_version" ]]; then
+        print_warn "Version not found in $SYSTEM_FILE - skipping"
+    else
+        print_info "SYSTEM.md already at version $version"
     fi
 }
 
@@ -128,6 +156,36 @@ publish_to_pypi() {
     
     print_info "Successfully published version $version to PyPI"
     print_info "View at: https://pypi.org/project/${PYPI_PACKAGE_NAME}/${version}/"
+}
+
+publish_vscode_extension() {
+    local version="$1"
+
+    print_step "Building VS Code extension..."
+    cd "$VSCODE_EXT_DIR"
+    vsce package --no-dependencies --allow-star-activation --allow-missing-repository
+    local vsix_file="kiss-sorcar-${version}.vsix"
+
+    if [[ ! -f "$vsix_file" ]]; then
+        print_error "VSIX file not found: $vsix_file"
+        cd - > /dev/null
+        return 1
+    fi
+
+    print_info "Built $vsix_file"
+
+    if [[ -z "${VSCE_PAT:-}" ]]; then
+        print_error "VSCE_PAT environment variable is not set"
+        print_info "Please set it with: export VSCE_PAT='your-personal-access-token'"
+        cd - > /dev/null
+        return 1
+    fi
+
+    vsce publish --packagePath "$vsix_file" --pat "$VSCE_PAT"
+    cd - > /dev/null
+
+    print_info "Successfully published VS Code extension v$version"
+    print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
 }
 
 # =============================================================================
@@ -184,6 +242,7 @@ main() {
     print_step "Bumping version..."
     update_version_file "$VERSION"
     update_readme_version "$VERSION"
+    update_system_md_version "$VERSION"
 
     # Step 3: Commit changes
     print_step "Committing version bump..."
@@ -217,44 +276,44 @@ main() {
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
-    # Step 6: Build offline .pkg and create GitHub release
-    print_step "Building offline installer package..."
-    OFFLINE_PKG="$PWD/dist/kiss-offline-installer.pkg"
-    bash scripts/build_offline_pkg.sh
-    if [[ -f "$OFFLINE_PKG" ]]; then
-        print_step "Creating GitHub release with offline installer..."
-        gh release create "$TAG_NAME" "$OFFLINE_PKG" \
+    # Step 6: Build .pkg and create GitHub release
+    print_step "Building installer package..."
+    INSTALLER_PKG="$PWD/dist/kiss-installer.pkg"
+    bash scripts/build_pkg.sh
+    if [[ -f "$INSTALLER_PKG" ]]; then
+        print_step "Creating GitHub release with installer..."
+        gh release create "$TAG_NAME" "$INSTALLER_PKG" \
             --repo ksenxx/kiss_ai \
             --title "KISS $VERSION" \
             --notes "Release $VERSION
 
 ## Downloads
-- **kiss-offline-installer.pkg** — macOS offline installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
+- **kiss-installer.pkg** — macOS installer (bundles uv, code-server, Python 3.13, git, and all dependencies)
 
 ## macOS Installation
 
 The installer package is not signed with an Apple Developer certificate. macOS Gatekeeper will block it by default. To install, use **one** of these methods:
 
 ### Method 1: System Settings (recommended)
-1. Double-click \`kiss-offline-installer.pkg\` — you'll see a warning dialog
+1. Double-click \`kiss-installer.pkg\` — you'll see a warning dialog
 2. Open **System Settings → Privacy & Security**
-3. Scroll down to find *\"kiss-offline-installer.pkg\" was blocked*
+3. Scroll down to find *\"kiss-installer.pkg\" was blocked*
 4. Click **Open Anyway** and confirm
 
 ### Method 2: Remove quarantine attribute
 \`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
-open ~/Downloads/kiss-offline-installer.pkg
+xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
+open ~/Downloads/kiss-installer.pkg
 \`\`\`
 
 ### Method 3: Command-line install
 \`\`\`bash
-xattr -d com.apple.quarantine ~/Downloads/kiss-offline-installer.pkg
-sudo installer -pkg ~/Downloads/kiss-offline-installer.pkg -target /
+xattr -d com.apple.quarantine ~/Downloads/kiss-installer.pkg
+sudo installer -pkg ~/Downloads/kiss-installer.pkg -target /
 \`\`\`"
         print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
     else
-        print_warn "Offline installer .pkg not found at $OFFLINE_PKG — skipping GitHub release asset upload"
+        print_warn "installer .pkg not found at $INSTALLER_PKG — skipping GitHub release asset upload"
         gh release create "$TAG_NAME" \
             --repo ksenxx/kiss_ai \
             --title "KISS $VERSION" \
@@ -266,12 +325,17 @@ sudo installer -pkg ~/Downloads/kiss-offline-installer.pkg -target /
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
+    # Step 8: Publish VS Code extension
+    print_step "Publishing VS Code extension..."
+    publish_vscode_extension "$VERSION"
+
     echo
     print_info "========================================"
     print_info "Release completed successfully!"
     print_info "========================================"
     print_info "GitHub:  $PUBLIC_REPO_URL"
     print_info "PyPI:    https://pypi.org/project/${PYPI_PACKAGE_NAME}/"
+    print_info "VSCode:  https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
     print_info "Version: $VERSION"
     print_info "Tag:     $TAG_NAME"
     echo

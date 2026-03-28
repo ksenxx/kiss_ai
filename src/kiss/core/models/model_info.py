@@ -16,7 +16,6 @@ from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
-from kiss.core.models import AnthropicModel, GeminiModel, NovitaModel, OpenAICompatibleModel
 from kiss.core.models.model import Model, TokenCallback
 
 logger = logging.getLogger(__name__)
@@ -111,9 +110,11 @@ def _openai_compatible(
     model_config: dict[str, Any] | None,
     token_callback: TokenCallback | None,
 ) -> Model:
+    from kiss.core.models import OpenAICompatibleModel
+
     if OpenAICompatibleModel is None:  # pragma: no cover – openai always installed
         raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
-    return OpenAICompatibleModel(
+    return OpenAICompatibleModel(  # type: ignore[no-any-return]
         model_name=model_name,
         base_url=base_url,
         api_key=api_key,
@@ -298,11 +299,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/aion-labs/aion-rp-llama-3.1-8b": _mi(32768, 0.80, 1.60, fc=False),
     "openrouter/alfredpros/codellama-7b-instruct-solidity": _mi(4096, 0.80, 1.20, fc=False),
     "openrouter/alibaba/tongyi-deepresearch-30b-a3b": _mi(131072, 0.09, 0.45, fc=False),
-    "openrouter/allenai/molmo-2-8b": _mi(36864, 0.20, 0.20, fc=False),  # Vision model
     "openrouter/allenai/olmo-2-0325-32b-instruct": _mi(128000, 0.05, 0.20, fc=False),
     "openrouter/allenai/olmo-3-32b-think": _mi(65536, 0.15, 0.50, fc=False),
-    "openrouter/allenai/olmo-3-7b-instruct": _mi(65536, 0.10, 0.20, fc=False),
-    "openrouter/allenai/olmo-3-7b-think": _mi(65536, 0.12, 0.20, fc=False),
     "openrouter/allenai/olmo-3.1-32b-instruct": _mi(65536, 0.20, 0.60, fc=False),
     "openrouter/allenai/olmo-3.1-32b-think": _mi(65536, 0.15, 0.50, fc=False),
     "openrouter/alpindale/goliath-120b": _mi(6144, 3.75, 7.50, fc=False),
@@ -413,7 +411,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/minimax/minimax-m2": _mi(196608, 0.255, 1.00, fc=False),
     "openrouter/minimax/minimax-m2-her": _mi(65536, 0.30, 1.20, fc=False),  # Roleplay model
     "openrouter/minimax/minimax-m2.1": _mi(196608, 0.27, 0.95),
-    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.20, 1.20),
+    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.20, 1.17),
     "openrouter/minimax/minimax-m2.7": _mi(204800, 0.30, 1.20),  # NEW
     "openrouter/mistralai/codestral-2508": _mi(256000, 0.30, 0.90, fc=False),
     "openrouter/mistralai/devstral-2512": _mi(262144, 0.40, 2.00, fc=False),
@@ -433,11 +431,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/mistralai/mistral-saba": _mi(32768, 0.20, 0.60, fc=False),
     "openrouter/mistralai/mistral-small-24b-instruct-2501": _mi(32768, 0.05, 0.08, fc=False),
     "openrouter/mistralai/mistral-small-2603": _mi(262144, 0.15, 0.60),  # NEW
-    "openrouter/mistralai/mistral-small-3.1-24b-instruct": _mi(128000, 0.35, 0.56, fc=False),
+    "openrouter/mistralai/mistral-small-3.1-24b-instruct": _mi(131072, 0.03, 0.11, fc=False),
     "openrouter/mistralai/mistral-small-3.2-24b-instruct": _mi(128000, 0.075, 0.20, fc=False),
     "openrouter/mistralai/mistral-small-creative": _mi(32768, 0.10, 0.30, fc=False),
     "openrouter/mistralai/mixtral-8x22b-instruct": _mi(65536, 2.00, 6.00, fc=False),
     "openrouter/mistralai/mixtral-8x7b-instruct": _mi(32768, 0.54, 0.54, fc=False),
+    "openrouter/mistralai/pixtral-12b": _mi(32768, 0.10, 0.10, fc=False),  # NEW
     "openrouter/mistralai/pixtral-large-2411": _mi(131072, 2.00, 6.00, fc=False),
     "openrouter/mistralai/voxtral-small-24b-2507": _mi(32000, 0.10, 0.30, fc=False),  # Audio input
     "openrouter/moonshotai/kimi-k2": _mi(131000, 0.55, 2.20, fc=False),  # Unreliable FC
@@ -453,9 +452,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/nousresearch/hermes-4-405b": _mi(131072, 1.00, 3.00, fc=False),
     "openrouter/nousresearch/hermes-4-70b": _mi(131072, 0.13, 0.40, fc=False),
     "openrouter/nvidia/llama-3.1-nemotron-70b-instruct": _mi(131072, 1.20, 1.20, fc=False),
+    "openrouter/nvidia/llama-3.1-nemotron-ultra-253b-v1": _mi(131072, 0.60, 1.80, fc=False),  # NEW
     "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": _mi(131072, 0.10, 0.40),
     "openrouter/nvidia/nemotron-3-nano-30b-a3b": _mi(262144, 0.05, 0.20, fc=False),  # Unreliable FC
-    "openrouter/nvidia/nemotron-3-super-120b-a12b": _mi(8000, 0.30, 0.90),  # NEW
+    "openrouter/nvidia/nemotron-3-super-120b-a12b": _mi(262144, 0.10, 0.50),  # NEW
     "openrouter/nvidia/nemotron-nano-12b-v2-vl": _mi(131072, 0.20, 0.60, fc=False),  # Vision model
     "openrouter/nvidia/nemotron-nano-9b-v2": _mi(131072, 0.04, 0.16),
     "openrouter/openai/gpt-3.5-turbo": _mi(16385, 0.50, 1.50),
@@ -506,7 +506,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-audio": _mi(128000, 2.50, 10.00, fc=False),  # Audio model
     "openrouter/openai/gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),  # Audio model
     "openrouter/openai/gpt-oss-120b": _mi(131072, 0.039, 0.19, fc=False),
-    "openrouter/openai/gpt-oss-20b": _mi(131072, 0.03, 0.14, fc=False),
+    "openrouter/openai/gpt-oss-20b": _mi(131072, 0.03, 0.11, fc=False),
     "openrouter/openai/gpt-oss-safeguard-20b": _mi(131072, 0.075, 0.30, fc=False),  # Safety model
     "openrouter/openai/o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
     "openrouter/openai/o1-pro": _mi(200000, 150.00, 600.00, fc=False),
@@ -585,7 +585,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/thedrummer/rocinante-12b": _mi(32768, 0.17, 0.43),
     "openrouter/thedrummer/skyfall-36b-v2": _mi(32768, 0.55, 0.80, fc=False),
     "openrouter/thedrummer/unslopnemo-12b": _mi(32768, 0.40, 0.40),
-    "openrouter/tngtech/deepseek-r1t2-chimera": _mi(163840, 0.25, 0.85),
+    "openrouter/tngtech/deepseek-r1t2-chimera": _mi(163840, 0.30, 1.10),
     "openrouter/undi95/remm-slerp-l2-13b": _mi(6144, 0.45, 0.65, fc=False),
     "openrouter/upstage/solar-pro-3": _mi(128000, 0.15, 0.60, fc=False),  # Free
     "openrouter/writer/palmyra-x5": _mi(1040000, 0.60, 6.00, fc=False),
@@ -608,10 +608,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-4.5v": _mi(65536, 0.60, 1.80, fc=False),
     "openrouter/z-ai/glm-4.6": _mi(204800, 0.39, 1.90, fc=False),  # Unreliable FC
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
-    "openrouter/z-ai/glm-4.7": _mi(202752, 0.40, 1.75),
+    "openrouter/z-ai/glm-4.7": _mi(202752, 0.39, 1.75),
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
     "openrouter/z-ai/glm-5": _mi(80000, 0.72, 2.30),  # 744B MoE - FC verified
-    "openrouter/z-ai/glm-5-turbo": _mi(202752, 0.96, 3.20),  # NEW
+    "openrouter/z-ai/glm-5-turbo": _mi(202752, 1.20, 4.00),  # NEW
     "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),  # NEW
     "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
@@ -700,7 +700,7 @@ def model(
         model_config: Optional dictionary of model configuration parameters.
             If it contains "base_url", routing is bypassed and an OpenAICompatibleModel
             is built with that base_url and optional "api_key".
-        token_callback: Optional async callback invoked with each streamed text token.
+        token_callback: Optional callback invoked with each streamed text token.
 
     Returns:
         Model: An appropriate Model instance for the specified model.
@@ -719,7 +719,7 @@ def model(
             filtered or None,
             token_callback,
         )
-    keys = config_module.DEFAULT_CONFIG.agent.api_keys
+    keys = config_module.DEFAULT_CONFIG
     if model_name.startswith("openrouter/"):
         return _openai_compatible(
             model_name,
@@ -729,11 +729,13 @@ def model(
             token_callback,
         )
     if model_name == "text-embedding-004":
+        from kiss.core.models import GeminiModel
+
         if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
-        return GeminiModel(
+        return GeminiModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.GEMINI_API_KEY,
             model_config=model_config,
@@ -756,22 +758,26 @@ def model(
             token_callback,
         )
     if model_name.startswith("claude-"):
+        from kiss.core.models import AnthropicModel
+
         if AnthropicModel is None:  # pragma: no cover – anthropic always installed
             raise KISSError(
                 "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
             )
-        return AnthropicModel(
+        return AnthropicModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.ANTHROPIC_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
         )
     if model_name.startswith("gemini-"):
+        from kiss.core.models import GeminiModel
+
         if GeminiModel is None:  # pragma: no cover – google-genai always installed
             raise KISSError(
                 "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
             )
-        return GeminiModel(
+        return GeminiModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.GEMINI_API_KEY,
             model_config=model_config,
@@ -786,11 +792,13 @@ def model(
             token_callback,
         )
     if model_name.startswith("novita/"):
+        from kiss.core.models import NovitaModel
+
         if NovitaModel is None:
             raise KISSError(
                 "OpenAI SDK not installed. Install 'openai' to use Novita models."
             )
-        return NovitaModel(
+        return NovitaModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.NOVITA_API_KEY,
             model_config=model_config,
@@ -806,7 +814,7 @@ def get_available_models() -> list[str]:
         list[str]: Sorted list of model name strings that have a configured API key
             and support text generation.
     """
-    keys = config_module.DEFAULT_CONFIG.agent.api_keys
+    keys = config_module.DEFAULT_CONFIG
     prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,

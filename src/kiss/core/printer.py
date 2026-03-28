@@ -235,7 +235,7 @@ class Printer(ABC):
         """
 
     @abstractmethod
-    async def token_callback(self, token: str) -> None:
+    def token_callback(self, token: str) -> None:
         """Handle a single streamed token from the LLM.
 
         Args:
@@ -267,14 +267,14 @@ class MultiPrinter(Printer):
             result = p.print(content, type=type, **kwargs)
         return result
 
-    async def token_callback(self, token: str) -> None:
+    def token_callback(self, token: str) -> None:
         """Forward a streamed token to all child printers.
 
         Args:
             token: The text token to forward.
         """
         for p in self.printers:
-            await p.token_callback(token)
+            p.token_callback(token)
 
     def reset(self) -> None:
         """Reset streaming state on all child printers."""

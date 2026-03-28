@@ -12,12 +12,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import kiss.agents.kiss_evolve.config  # noqa: F401
 from kiss.agents.kiss_evolve.novelty_prompts import INNOVATION_INSTRUCTIONS
 from kiss.agents.kiss_evolve.simple_rag import SimpleRAG
-from kiss.core import config as config_module
 from kiss.core.models.model import Model
-from kiss.core.utils import get_config_value
 
 logger = logging.getLogger(__name__)
 
@@ -106,21 +103,21 @@ class KISSEvolve:
         evaluation_fn: Callable[[str], dict[str, Any]],
         model_names: list[tuple[str, float]],
         extra_coding_instructions: str = "",
-        population_size: int | None = None,
-        max_generations: int | None = None,
-        mutation_rate: float | None = None,
-        elite_size: int | None = None,
-        num_islands: int | None = None,
-        migration_frequency: int | None = None,
-        migration_size: int | None = None,
-        migration_topology: str | None = None,
-        enable_novelty_rejection: bool | None = None,
-        novelty_threshold: float | None = None,
-        max_rejection_attempts: int | None = None,
+        population_size: int = 8,
+        max_generations: int = 10,
+        mutation_rate: float = 0.7,
+        elite_size: int = 2,
+        num_islands: int = 2,
+        migration_frequency: int = 5,
+        migration_size: int = 1,
+        migration_topology: str = "ring",
+        enable_novelty_rejection: bool = False,
+        novelty_threshold: float = 0.95,
+        max_rejection_attempts: int = 5,
         novelty_rag_model: Model | None = None,
-        parent_sampling_method: str | None = None,
-        power_law_alpha: float | None = None,
-        performance_novelty_lambda: float | None = None,
+        parent_sampling_method: str = "power_law",
+        power_law_alpha: float = 1.0,
+        performance_novelty_lambda: float = 1.0,
     ):
         """Initialize KISSEvolve optimizer.
 
@@ -139,42 +136,28 @@ class KISSEvolve:
                 (model_name, probability). Probabilities will be normalized to sum to 1.0.
             extra_coding_instructions (str): Extra instructions to add to the code
                 generation prompt.
-            population_size (int | None): Number of variants to maintain in population.
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.population_size.
-            max_generations (int | None): Maximum number of evolutionary generations.
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.max_generations.
-            mutation_rate (float | None): Probability of mutating a variant.
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.mutation_rate.
-            elite_size (int | None): Number of best variants to preserve each
-                generation. If None, uses value from DEFAULT_CONFIG.kiss_evolve.elite_size.
-            num_islands (int | None): Number of islands for island-based evolution.
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.num_islands.
-            migration_frequency (int | None): Number of generations between migrations.
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_frequency.
-            migration_size (int | None): Number of individuals to migrate between islands.
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_size.
-            migration_topology (str | None): Migration topology
+            population_size (int): Number of variants to maintain in population.
+            max_generations (int): Maximum number of evolutionary generations.
+            mutation_rate (float): Probability of mutating a variant.
+            elite_size (int): Number of best variants to preserve each generation.
+            num_islands (int): Number of islands for island-based evolution.
+            migration_frequency (int): Number of generations between migrations.
+            migration_size (int): Number of individuals to migrate between islands.
+            migration_topology (str): Migration topology
                 ('ring', 'fully_connected', 'random').
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.migration_topology.
-            enable_novelty_rejection (bool | None): Enable code novelty rejection sampling.
-                If None, uses value from DEFAULT_CONFIG.kiss_evolve.enable_novelty_rejection.
-            novelty_threshold (float | None): Cosine similarity threshold for rejecting code
-                (0.0-1.0, higher = more strict). If None, uses value from
-                DEFAULT_CONFIG.kiss_evolve.novelty_threshold.
-            max_rejection_attempts (int | None): Maximum number of rejection attempts before
-                accepting a variant anyway. If None, uses value from
-                DEFAULT_CONFIG.kiss_evolve.max_rejection_attempts.
+            enable_novelty_rejection (bool): Enable code novelty rejection sampling.
+            novelty_threshold (float): Cosine similarity threshold for rejecting code
+                (0.0-1.0, higher = more strict).
+            max_rejection_attempts (int): Maximum number of rejection attempts before
+                accepting a variant anyway.
             novelty_rag_model (Model | None): Model to use for generating code embeddings.
                 If None and novelty rejection is enabled, uses the first model from models list.
-            parent_sampling_method (str | None): Parent sampling method ('tournament', 'power_law',
-                or 'performance_novelty'). If None, uses value from
-                DEFAULT_CONFIG.kiss_evolve.parent_sampling_method.
-            power_law_alpha (float | None): Power-law sampling parameter (α) for rank-based
-                sampling. Lower = more exploration, higher = more exploitation. If None, uses value
-                from DEFAULT_CONFIG.kiss_evolve.power_law_alpha.
-            performance_novelty_lambda (float | None): Performance-novelty sampling parameter (λ)
-                controlling selection pressure. If None, uses value from
-                DEFAULT_CONFIG.kiss_evolve.performance_novelty_lambda.
+            parent_sampling_method (str): Parent sampling method ('tournament', 'power_law',
+                or 'performance_novelty').
+            power_law_alpha (float): Power-law sampling parameter (α) for rank-based
+                sampling. Lower = more exploration, higher = more exploitation.
+            performance_novelty_lambda (float): Performance-novelty sampling parameter (λ)
+                controlling selection pressure.
         """
         self.initial_code = initial_code
         self.evaluation_fn = evaluation_fn
@@ -184,31 +167,20 @@ class KISSEvolve:
         # Validate and normalize model probabilities
         self.model_names = self._validate_and_normalize_models(model_names)
 
-        # Get config with fallback defaults
-        cfg = getattr(config_module.DEFAULT_CONFIG, "kiss_evolve", None)
-
-        self.population_size = get_config_value(population_size, cfg, "population_size")
-        self.max_generations = get_config_value(max_generations, cfg, "max_generations")
-        self.mutation_rate = get_config_value(mutation_rate, cfg, "mutation_rate")
-        self.elite_size = get_config_value(elite_size, cfg, "elite_size")
-        self.num_islands = get_config_value(num_islands, cfg, "num_islands")
-        self.migration_frequency = get_config_value(migration_frequency, cfg, "migration_frequency")
-        self.migration_size = get_config_value(migration_size, cfg, "migration_size")
-        self.migration_topology = get_config_value(migration_topology, cfg, "migration_topology")
-        self.enable_novelty_rejection = get_config_value(
-            enable_novelty_rejection, cfg, "enable_novelty_rejection"
-        )
-        self.novelty_threshold = get_config_value(novelty_threshold, cfg, "novelty_threshold")
-        self.max_rejection_attempts = get_config_value(
-            max_rejection_attempts, cfg, "max_rejection_attempts"
-        )
-        self.parent_sampling_method = get_config_value(
-            parent_sampling_method, cfg, "parent_sampling_method"
-        )
-        self.power_law_alpha = get_config_value(power_law_alpha, cfg, "power_law_alpha")
-        self.performance_novelty_lambda = get_config_value(
-            performance_novelty_lambda, cfg, "performance_novelty_lambda"
-        )
+        self.population_size = population_size
+        self.max_generations = max_generations
+        self.mutation_rate = mutation_rate
+        self.elite_size = elite_size
+        self.num_islands = num_islands
+        self.migration_frequency = migration_frequency
+        self.migration_size = migration_size
+        self.migration_topology = migration_topology
+        self.enable_novelty_rejection = enable_novelty_rejection
+        self.novelty_threshold = novelty_threshold
+        self.max_rejection_attempts = max_rejection_attempts
+        self.parent_sampling_method = parent_sampling_method
+        self.power_law_alpha = power_law_alpha
+        self.performance_novelty_lambda = performance_novelty_lambda
 
         self._validate_parameters()
         self._initialize_tracking(novelty_rag_model)
