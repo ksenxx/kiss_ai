@@ -97,11 +97,13 @@ class TestEdEditReturnValueChecked(unittest.TestCase):
     def test_del_lines_returns_boolean(self) -> None:
         """_delLines must return the boolean result of ed.edit()."""
         source = _read_merge_manager_source()
-        # Find the _delLines method
-        idx = source.find("_delLines")
+        # Find the _delLines method definition (not call sites)
+        idx = source.find("private async _delLines")
+        if idx < 0:
+            idx = source.find("async _delLines")
         assert idx >= 0, "_delLines method not found"
         block = source[idx:idx + 800]
-        assert "Promise<boolean>" in block or "boolean" in source[idx-100:idx+800], (
+        assert "Promise<boolean>" in block or "boolean" in block, (
             "_delLines must return Promise<boolean> so callers can detect failure."
         )
 
