@@ -118,21 +118,21 @@ KISSEvolve(
     evaluation_fn: Callable[[str], dict[str, Any]],
     model_names: list[tuple[str, float]],
     extra_coding_instructions: str = "",
-    population_size: int | None = None,
-    max_generations: int | None = None,
-    mutation_rate: float | None = None,
-    elite_size: int | None = None,
-    num_islands: int | None = None,
-    migration_frequency: int | None = None,
-    migration_size: int | None = None,
-    migration_topology: str | None = None,
-    enable_novelty_rejection: bool | None = None,
-    novelty_threshold: float | None = None,
-    max_rejection_attempts: int | None = None,
+    population_size: int = 8,
+    max_generations: int = 10,
+    mutation_rate: float = 0.7,
+    elite_size: int = 2,
+    num_islands: int = 2,
+    migration_frequency: int = 5,
+    migration_size: int = 1,
+    migration_topology: str = "ring",
+    enable_novelty_rejection: bool = False,
+    novelty_threshold: float = 0.95,
+    max_rejection_attempts: int = 5,
     novelty_rag_model: Model | None = None,
-    parent_sampling_method: str | None = None,
-    power_law_alpha: float | None = None,
-    performance_novelty_lambda: float | None = None,
+    parent_sampling_method: str = "power_law",
+    power_law_alpha: float = 1.0,
+    performance_novelty_lambda: float = 1.0,
 )
 ```
 
@@ -189,7 +189,7 @@ class CodeVariant:
 
 ## Configuration
 
-Default values for all parameters can be configured via `DEFAULT_CONFIG.kiss_evolve` in [`src/kiss/agents/kiss_evolve/config.py`](config.py). See the API Reference above for parameter descriptions and defaults.
+Default values are specified directly in the `KISSEvolve.__init__` parameter defaults. See the API Reference above for parameter descriptions and defaults.
 
 ## Advanced Features
 

@@ -19,6 +19,8 @@ interface ProcessedHunk {
   ns: number;
   /** New-lines count */
   nc: number;
+  /** Stored base (old) lines for re-insertion after save */
+  baseLines: string[];
 }
 
 interface MergeFileState {
@@ -48,6 +50,7 @@ export class MergeManager extends EventEmitter {
   private _mergeInProgress: boolean = false;
   private _pendingMerge: MergeData | null = null;
   private _navSeq: number = 0;
+  private _reinsertingFiles = new Set<string>();
 
   constructor() {
     super();
@@ -66,6 +69,16 @@ export class MergeManager extends EventEmitter {
       }
     });
     this._disposables.push(visibleSub);
+
+    const willSaveSub = vscode.workspace.onWillSaveTextDocument((e) => {
+      this._onWillSave(e);
+    });
+    this._disposables.push(willSaveSub);
+
+    const didSaveSub = vscode.workspace.onDidSaveTextDocument((doc) => {
+      this._onDidSave(doc);
+    });
+    this._disposables.push(didSaveSub);
   }
 
   get isActive(): boolean {
@@ -78,6 +91,67 @@ export class MergeManager extends EventEmitter {
       count += this._ms[fp].hunks.length;
     }
     return count;
+  }
+
+  /**
+   * Before save: strip base (old) lines so saved content is clean.
+   * Uses waitUntil() to defer the save until edits complete.
+   */
+  private _onWillSave(e: vscode.TextDocumentWillSaveEvent): void {
+    const fp = e.document.uri.fsPath;
+    const s = this._ms[fp];
+    if (!s || s.hunks.length === 0) return;
+    this._reinsertingFiles.add(fp);
+    e.waitUntil(
+      (async () => {
+        const ed = await this._getOrOpenEditor(fp);
+        // Remove old-lines in reverse order to preserve earlier indices
+        for (let i = s.hunks.length - 1; i >= 0; i--) {
+          const h = s.hunks[i];
+          if (h.oc > 0) {
+            await this._delLines(ed, h.os, h.oc);
+            // Shift this and all later hunks
+            for (let j = i; j < s.hunks.length; j++) {
+              if (j === i) {
+                s.hunks[j].ns -= h.oc;
+              } else {
+                s.hunks[j].os -= h.oc;
+                s.hunks[j].ns -= h.oc;
+              }
+            }
+            h.oc = 0;
+          }
+        }
+      })()
+    );
+  }
+
+  /**
+   * After save: re-insert base lines so merge decorations reappear.
+   */
+  private async _onDidSave(doc: vscode.TextDocument): Promise<void> {
+    const fp = doc.uri.fsPath;
+    if (!this._reinsertingFiles.delete(fp)) return;
+    const s = this._ms[fp];
+    if (!s) return;
+    const ed = await this._getOrOpenEditor(fp);
+    let offset = 0;
+    for (const h of s.hunks) {
+      const old = h.baseLines;
+      if (old.length > 0) {
+        const il = h.ns + offset - old.length; // ns was shifted; insert before new lines
+        const insertLine = h.os + offset;
+        const txt = old.join('\n') + '\n';
+        await ed.edit((eb) => {
+          eb.insert(new vscode.Position(insertLine, 0), txt);
+        });
+        h.os = insertLine;
+        h.oc = old.length;
+        h.ns = insertLine + old.length;
+        offset += old.length;
+      }
+    }
+    this._refreshDeco(fp);
   }
 
   private _refreshDeco(fp: string): void {
@@ -105,18 +179,19 @@ export class MergeManager extends EventEmitter {
     ed: vscode.TextEditor,
     start: number,
     count: number
-  ): Promise<void> {
-    if (count <= 0) return;
+  ): Promise<boolean> {
+    if (count <= 0) return true;
     const end = start + count;
     const doc = ed.document;
+    let ok: boolean;
     if (end < doc.lineCount) {
-      await ed.edit((eb) => {
+      ok = await ed.edit((eb) => {
         eb.delete(new vscode.Range(start, 0, end, 0));
       });
     } else if (start > 0) {
       const prevLine = doc.lineAt(start - 1);
       const lastLine = doc.lineAt(doc.lineCount - 1);
-      await ed.edit((eb) => {
+      ok = await ed.edit((eb) => {
         eb.delete(
           new vscode.Range(
             start - 1,
@@ -128,13 +203,17 @@ export class MergeManager extends EventEmitter {
       });
     } else {
       const lastLine = doc.lineAt(doc.lineCount - 1);
-      await ed.edit((eb) => {
+      ok = await ed.edit((eb) => {
         eb.replace(
           new vscode.Range(0, 0, lastLine.range.end.line, lastLine.text.length),
           ''
         );
       });
     }
+    if (!ok) {
+      console.error(`[MergeManager] ed.edit failed in _delLines (start=${start}, count=${count})`);
+    }
+    return ok;
   }
 
   private async _getOrOpenEditor(
@@ -168,7 +247,14 @@ export class MergeManager extends EventEmitter {
     const h = s.hunks[idx];
     if (h[countProp] > 0) {
       const ed = await this._getOrOpenEditor(fp);
-      await this._delLines(ed, h[startProp], h[countProp]);
+      let ok = await this._delLines(ed, h[startProp], h[countProp]);
+      if (!ok) {
+        ok = await this._delLines(ed, h[startProp], h[countProp]);
+      }
+      if (!ok) {
+        vscode.window.showWarningMessage('Failed to apply change. Please try again.');
+        return;
+      }
       const rm = h[countProp];
       s.hunks.splice(idx, 1);
       for (let i = idx; i < s.hunks.length; i++) {
@@ -296,7 +382,13 @@ export class MergeManager extends EventEmitter {
     const ed = await this._getOrOpenEditor(fp);
     for (let i = s.hunks.length - 1; i >= 0; i--) {
       if (s.hunks[i][countProp] > 0) {
-        await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
+        let ok = await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
+        if (!ok) {
+          ok = await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
+          if (!ok) {
+            console.error(`[MergeManager] Failed to delete hunk ${i} lines in ${fp}`);
+          }
+        }
       }
     }
   }
@@ -447,6 +539,7 @@ export class MergeManager extends EventEmitter {
           oc: old.length,
           ns: h.cs + offset + old.length,
           nc: h.cc,
+          baseLines: old,
         });
         offset += old.length;
       }

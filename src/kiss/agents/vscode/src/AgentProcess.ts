@@ -260,6 +260,7 @@ export class AgentProcess extends EventEmitter {
     if (this.process) {
       const proc = this.process;
       this.process = null;
+      this.removeAllListeners();
       // Close stdin to unblock the Python server's main loop
       try { proc.stdin?.end(); } catch { /* ignored */ }
       // SIGTERM as backup
@@ -268,7 +269,8 @@ export class AgentProcess extends EventEmitter {
       setTimeout(() => {
         try { proc.kill('SIGKILL'); } catch { /* ignored */ }
       }, 2000);
+    } else {
+      this.removeAllListeners();
     }
-    this.removeAllListeners();
   }
 }
