@@ -38,7 +38,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also build the extension locally by running `cd src/kiss/agents/vscode && vsce package --allow-missing-repository`.
+To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix](src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix).
 
 You can open a terminal and use sorcar as a normal shell command. Some examples are:
 

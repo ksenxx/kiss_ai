@@ -792,7 +792,9 @@
       if (e.key === 'Tab' && currentGhost) {
         e.preventDefault();
         inp.value += currentGhost;
+        if (/\S$/.test(inp.value)) inp.value += ' ';
         clearGhost();
+        syncClearBtn();
         inp.style.height = 'auto';
         inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
         return;

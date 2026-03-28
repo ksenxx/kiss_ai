@@ -77,7 +77,7 @@ class StatefulSorcarAgent(SorcarAgent):
         """
         chat_context = _load_chat_context(self._chat_id)
         if not chat_context:
-            return prompt
+            return "# Task\n" + prompt
         parts = ["## Previous tasks and results from the chat session for reference\n"]
         for i, entry in enumerate(chat_context, 1):
             parts.append(f"### Task {i}\n{entry['task']}")
@@ -118,8 +118,8 @@ class StatefulSorcarAgent(SorcarAgent):
             result_yaml = yaml.safe_load(result)
             result_summary = result_yaml.get("summary", "") if result_yaml else ""
             return result
-        except Exception as e:
-            result_summary = f"Task failed: {e}"
+        except Exception:
+            result_summary = "Task failed"
             raise
         finally:
             _save_task_result(prompt_template, result_summary)

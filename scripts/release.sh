@@ -88,12 +88,17 @@ update_readme_version() {
         print_warn "README file not found: $README_FILE - skipping"
         return
     fi
-    if grep -q 'img.shields.io/badge/version-' "$README_FILE"; then
-        sed -i.bak "s|badge/version-[0-9][0-9.]*-blue|badge/version-${version}-blue|g" "$README_FILE"
+    local old_version
+    old_version=$(grep -oP 'badge/version-\K[0-9][0-9.]*(?=-blue)' "$README_FILE" 2>/dev/null || \
+                  grep 'badge/version-' "$README_FILE" | sed 's/.*badge\/version-\([0-9][0-9.]*\)-blue.*/\1/' | head -1)
+    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
+        sed -i.bak "s/${old_version}/${version}/g" "$README_FILE"
         rm -f "${README_FILE}.bak"
-        print_info "Updated version badge in $README_FILE to $version"
-    else
+        print_info "Updated all occurrences of $old_version to $version in $README_FILE"
+    elif [[ -z "$old_version" ]]; then
         print_warn "Version badge not found in $README_FILE - skipping"
+    else
+        print_info "README already at version $version"
     fi
 }
 

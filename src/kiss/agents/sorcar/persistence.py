@@ -172,8 +172,8 @@ def _add_task(task: str, chat_id: str = "") -> None:
     """
     db = _get_db()
     db.execute(
-        "INSERT INTO task_history (timestamp, task, chat_id) VALUES (?, ?, ?)",
-        (time.time(), task, chat_id),
+        "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
+        (time.time(), task, chat_id, "Agent Failed Abrubptly"),
     )
     db.commit()
 
