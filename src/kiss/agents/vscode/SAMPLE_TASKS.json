@@ -2,6 +2,7 @@
   {"text": "Can you create a plan in PLAN.md for the following task: "},
   {"text": "I see probable issues in PLAN.md. Please fix them."},
   {"text": "Can you please use src/kiss/channels/slack_channel.py to authenticate with Slack?"},
+  {"text": "Can you use the Desktop Slack app to send a message to ksen saying 'Hello from KISS Sorcar'?"}
   {"text": "Can you please find the cheapest non-stop flight from SFO to JFK around April 15 by searching various websites?"},
   {"text": "Can you please use /path/to/SKILL.md to do the following task:"},
   {"text": "The project has at least 50 bugs. You MUST find and fix all of them before you stop."},
