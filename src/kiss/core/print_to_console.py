@@ -27,17 +27,19 @@ class ConsolePrinter(StreamEventParser, Printer):
         self._console = Console(highlight=False, file=file)
         self._file = file or sys.stdout
         self._mid_line = False
+        self._bash_streamed = False
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
         self._mid_line = False
+        self._bash_streamed = False
         self.reset_stream_state()
 
     @staticmethod
-    def _format_result_content(raw: str) -> Group | str:
+    def _format_result_content(raw: str) -> Group | Markdown:
         data = parse_result_yaml(raw)
         if data is None:
-            return raw
+            return Markdown(raw)
         parts: list[Any] = []
         if "success" in data:
             style = "bold green" if data["success"] else "bold red"
@@ -66,7 +68,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             type: Content type (e.g. "text", "prompt", "stream_event",
                 "tool_call", "tool_result", "result", "usage_info", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
-                step_count, total_tokens.
+                total_tokens.
 
         Returns:
             str: Extracted text from stream events, or empty string.
@@ -79,7 +81,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._flush_newline()
             self._console.print(
                 Panel(
-                    Text(str(content)),
+                    Markdown(str(content)),
                     title="[bold]System Prompt[/bold]",
                     border_style="magenta",
                     padding=(1, 2),
@@ -90,7 +92,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._flush_newline()
             self._console.print(
                 Panel(
-                    Text(str(content)),
+                    Markdown(str(content)),
                     title="[bold]Prompt[/bold]",
                     border_style="cyan",
                     padding=(1, 2),
@@ -117,26 +119,29 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._file.write(str(content))
             self._file.flush()
             self._mid_line = not str(content).endswith("\n")
+            self._bash_streamed = True
             return ""
         if type == "tool_call":
             self._flush_newline()
+            self._bash_streamed = False
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            self._flush_newline()
-            self._print_tool_result(str(content), kwargs.get("is_error", False))
+            tool_name = kwargs.get("tool_name", "")
+            if tool_name in {"Bash", "Read", "Edit", "Write"} or kwargs.get("is_error", False):
+                self._flush_newline()
+                self._print_tool_result(str(content), kwargs.get("is_error", False))
             return ""
         if type == "result":
             self._flush_newline()
             cost = kwargs.get("cost", "N/A")
-            step_count = kwargs.get("step_count", 0)
             total_tokens = kwargs.get("total_tokens", 0)
             body = self._format_result_content(str(content)) if content else "(no result)"
             self._console.print(
                 Panel(
                     body,
                     title="Result",
-                    subtitle=f"steps={step_count}  tokens={total_tokens}  cost={cost}",
+                    subtitle=f"tokens={total_tokens}  cost={cost}",
                     border_style="bold green",
                     padding=(1, 2),
                 )
@@ -144,7 +149,7 @@ class ConsolePrinter(StreamEventParser, Printer):
             return ""
         return ""
 
-    async def token_callback(self, token: str) -> None:
+    def token_callback(self, token: str) -> None:
         """Stream a single token to the console, styled by current block type.
 
         Args:
@@ -192,12 +197,14 @@ class ConsolePrinter(StreamEventParser, Printer):
         )
 
     def _print_tool_result(self, content: str, is_error: bool) -> None:
-        display = truncate_result(content)
         style = "red" if is_error else "green"
         self._console.rule("FAILED" if is_error else "OK", style=style, align="center")
-        for line in display.splitlines():
-            self._file.write(line + "\n")
-            self._file.flush()
+        if not self._bash_streamed:
+            display = truncate_result(content)
+            for line in display.splitlines():
+                self._file.write(line + "\n")
+                self._file.flush()
+        self._bash_streamed = False
         self._console.rule(style=style)
 
     def _on_thinking_start(self) -> None:
@@ -234,7 +241,6 @@ class ConsolePrinter(StreamEventParser, Printer):
                     self._file.flush()
                     self._mid_line = not text.endswith("\n")
         elif hasattr(message, "result"):
-            step_count = kwargs.get("step_count", 0)
             budget_used = kwargs.get("budget_used", 0.0)
             total_tokens_used = kwargs.get("total_tokens_used", 0)
             cost_str = f"${budget_used:.4f}" if budget_used else "N/A"
@@ -244,7 +250,7 @@ class ConsolePrinter(StreamEventParser, Printer):
                 Panel(
                     body,
                     title="Result",
-                    subtitle=(f"steps={step_count}  tokens={total_tokens_used}  cost={cost_str}"),
+                    subtitle=(f"tokens={total_tokens_used}  cost={cost_str}"),
                     border_style="bold green",
                     padding=(1, 2),
                 )

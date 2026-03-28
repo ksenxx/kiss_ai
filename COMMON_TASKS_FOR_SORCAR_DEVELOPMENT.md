@@ -4,7 +4,7 @@ Select a task below in sorcar editor and press cmd/ctrl-L to run the task in the
 
 ## increase test coverage
 
-can you write integration tests with no mocks or test doubles to achieve 100% branch coverage of the files under src/kiss/core/, src/kiss/core/models/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 10 tries.
+can you write integration tests with no mocks or test doubles or fakes to achieve 100% branch coverage of the files under src/kiss/agents/vscode/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Fix tests or code if some tests fail. Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles or fakes. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 3 tries.
 
 ## code review
 
@@ -25,11 +25,20 @@ run 'uv run pytest -v' with 900 seconds timeout and fix tests
 
 ## race detection
 
-can you please work hard and carefully to precisly detect all actual race conditions in src/kiss/agents/sorcar/sorcar.py? You can add random delays within 0.1 seconds before racing events to reliably trigger a race condition to confirm a race condition.
+can you please work hard and carefully to precisly detect all actual race conditions in src/kiss/agents/sorcar/sorcar.py? You can add random delays within 0.1 seconds before racing events to reliably trigger a race condition to confirm a race condition. DO NOT FIX the race conditions.
+
+## dead code elimination
+
+can you carefully analyze all Python source files under src/kiss/ and identify any dead code — unused functions, unreachable branches, unused imports, and unused variables? Remove them, ensure existing tests still pass (run 'uv run pytest -v' with 900 seconds timeout), and verify that branch coverage does not decrease after your changes.
 
 ## test compaction
 
-can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods.
+can you use src/kiss/scripts/redundancy_analyzer.py to get rid of redundant test methods in src/kiss/tests/?  Make sure that you don't decrease the overall branch coverage after removing the redundant test methods. Run tests with 900 seconds
+timeout.
+
+## build and deploy vscode extension
+
+build, package, and install the KISS Sorcar VS Code extension. Run 'cd src/kiss/agents/vscode && npm run compile && npm run copy-kiss && npm run package' to create the .vsix file. Then install it with 'code --install-extension src/kiss/agents/vscode/kiss-sorcar-\*.vsix --force'.
 
 # Past tasks
 
@@ -58,3 +67,13 @@ Can you look at install.sh and installlib.sh and create a standalone macOS packa
 
 can you write a background_agent.py in src/kiss/agents/claw/ similar to sorcar except that you will wait for messages on the slack channel #sorcar from ksen, treat the message as a task, complete the task using sorcar_agent.py, and send the results back to the slack channel. There will be no GUI integration unlike sorcar. The call to the tools cli_wait_for_user and cli_ask_user_question should send a message to the slack for user feedback from ksen. Once user ksen responds, the agent must continue to finish the task. Use the src/kiss/channels/slack_agent.py for communication via slack. Test it by running it and interacting with it. You can ask the user during testing to authenticate and to send tasks and respond to cli actions. Make sure that the background_agent.py is not hogging CPU, memory, file resources while waiting for user
 message.
+
+Look at the code of sorcar. Search the internet and find out how the Claude code extension has been implemented. Can you write down a plan in PLAN.md tp implement an extension in src/kiss/agents/vscode to VS code exactly like the sorcar chat window with same layout buttons and their functionalities, but uses src/kiss/agents/sorcar/sorcar_agent.py. Moreover you MUST support the workflow of sorcar except the ones that you get free from Desktop VSCode. Test it by launching vscode and installing the extension and see it behaves as expected by taking screenshots. Do not hardcode the location of of the KISS project in the extension. You MUST be very precise and careful. You must search the internet if you do not know the answer for something.
+
+You MUST check whether you can run a sample task in the VSCode extension. Launch Desktop VSCode and use screen capture to validate. Do the testing throroughly and fix all bugs.
+
+in the vscode extension you have to add a major feature. You need to add a new column, called chat_id as a text field storing a unique hex code for an agent chat session, to task_history table of the history database. When the user clicks the Clear button in the chatbox, you should create a new chat_id which is not present in the table. Then when a task is added, add the task to the task_history table as before, but add the new chat_id to row of the task_history table. When a task is submitted to the agent, append the tasks and results with the same chat_id in chronological order to the prompt and then run the sorcar agent and telling the agent that "## Previous tasks and results from the chat session for reference"
+
+can you create a stateful_sorcar_agent.py in src/kiss/agents/sorcar/ extending SorcarAgent such that it reads the previous tasks with the same chat_id from history.db, creates a prompt with previous tasks and results with the same chat_id, saves the new task and results in the history.db. Basically, the workflow of the agent MUST be exactly the same as the workflow with the SorcarAgent in the vscode extension. Do not create the file yet, but create a plan in PLAN.md to create the file.
+
+When the chat window of the vscode extension is loaded, first
