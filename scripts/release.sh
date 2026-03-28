@@ -24,6 +24,7 @@ PUBLIC_REPO_URL="https://github.com/ksenxx/kiss_ai.git"
 PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/_version.py"
 README_FILE="README.md"
+SYSTEM_FILE="SYSTEM.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
 VSCODE_EXT_DIR="src/kiss/agents/vscode"
 
@@ -99,6 +100,26 @@ update_readme_version() {
         print_warn "Version badge not found in $README_FILE - skipping"
     else
         print_info "README already at version $version"
+    fi
+}
+
+update_system_md_version() {
+    local version="$1"
+    if [[ ! -f "$SYSTEM_FILE" ]]; then
+        print_warn "SYSTEM file not found: $SYSTEM_FILE - skipping"
+        return
+    fi
+    local old_version
+    old_version=$(grep -oP 'Your version is \K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
+                  grep 'Your version is' "$SYSTEM_FILE" | sed 's/.*Your version is \([0-9][0-9.]*\).*/\1/' | head -1)
+    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
+        sed -i.bak "s/${old_version}/${version}/g" "$SYSTEM_FILE"
+        rm -f "${SYSTEM_FILE}.bak"
+        print_info "Updated all occurrences of $old_version to $version in $SYSTEM_FILE"
+    elif [[ -z "$old_version" ]]; then
+        print_warn "Version not found in $SYSTEM_FILE - skipping"
+    else
+        print_info "SYSTEM.md already at version $version"
     fi
 }
 
@@ -221,6 +242,7 @@ main() {
     print_step "Bumping version..."
     update_version_file "$VERSION"
     update_readme_version "$VERSION"
+    update_system_md_version "$VERSION"
 
     # Step 3: Commit changes
     print_step "Committing version bump..."
