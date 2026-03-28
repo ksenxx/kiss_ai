@@ -118,7 +118,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
     const workDir = this._getWorkDir();
-    this._isRunning = true;
     this._agentProcess.start(workDir);
     this.sendToWebview({ type: 'status', running: true });
     this._agentProcess.sendCommand({
@@ -258,6 +257,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         if (!editor || !editor.document.uri.fsPath.toLowerCase().endsWith('.md')) return;
         const content = editor.document.getText();
         if (!content.trim()) return;
+        this._isRunning = true;
         this._startTask(content, this._selectedModel, editor.document.uri.fsPath);
         break;
       }
@@ -338,13 +338,18 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
 
     return new Promise<void>((resolve) => {
+      let resolved = false;
       const done = () => {
+        if (resolved) return;
+        resolved = true;
         this._commitPending = false;
         disposable.dispose();
+        clearTimeout(timer);
         resolve();
       };
       const disposable = this._onCommitMessage.event(() => done());
       token?.onCancellationRequested(() => done());
+      const timer = setTimeout(done, 30_000);
     });
   }
 
@@ -364,7 +369,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   public dispose(): void {
     this._activeEditorDisposable?.dispose();
     this._agentProcess.dispose();
-    this._mergeManager.dispose();
     this._onCommitMessage.dispose();
   }
 
