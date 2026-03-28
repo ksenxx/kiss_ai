@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
 
-[![Version](https://img.shields.io/badge/version-0.2.56-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-0.2.57-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 
@@ -38,7 +38,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Installation and Launching KISS Sorcar
 
-To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix](src/kiss/agents/vscode/kiss-sorcar-0.2.56.vsix).
+To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, and install. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar-0.2.57.vsix](src/kiss/agents/vscode/kiss-sorcar-0.2.57.vsix).
 
 You can open a terminal and use sorcar as a normal shell command. Some examples are:
 
