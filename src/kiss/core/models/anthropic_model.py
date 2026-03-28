@@ -208,8 +208,8 @@ class AnthropicModel(Model):
         Returns:
             The raw Anthropic response message.
         """
-        if self.token_callback is not None:
-            with self.client.messages.stream(**kwargs) as stream:
+        with self.client.messages.stream(**kwargs) as stream:
+            if self.token_callback is not None:
                 for event in stream:
                     if event.type == "content_block_delta":
                         delta = event.delta
@@ -219,7 +219,6 @@ class AnthropicModel(Model):
                         elif delta_type == "text_delta":
                             self._invoke_token_callback(getattr(delta, "text", ""))
             return stream.get_final_message()
-        return self.client.messages.create(**kwargs)
 
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from the current conversation.
