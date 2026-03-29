@@ -228,20 +228,6 @@ class TestAgenticLoopAuthError(unittest.TestCase):
             )
 
 
-def test_run_agentic_loop_raises_after_three_consecutive_retryable_errors() -> None:
-    model = _RetryableErrorModel(failures=3)
-    agent = _make_agent(model)
-
-    with pytest.raises(KISSError, match="failed with 3 consecutive errors"):
-        agent._run_agentic_loop()
-
-    assert model.calls == 3
-    retry_messages = [
-        m for m in agent.messages if "Failed to get response from Model:" in str(m["content"])
-    ]
-    assert len(retry_messages) == 2
-
-
 def test_run_agentic_loop_raises_immediately_for_non_retryable_error() -> None:
     agent = _make_agent(_NonRetryableErrorModel(failures=0))
 

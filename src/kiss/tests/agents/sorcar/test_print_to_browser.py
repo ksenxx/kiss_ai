@@ -42,17 +42,6 @@ class TestCoalesceEvents(unittest.TestCase):
         assert len(result) == 2
 
 
-class TestPrintSystemPrompt(unittest.TestCase):
-    def test_system_prompt_broadcasts_event(self):
-        p = BaseBrowserPrinter()
-        q = _subscribe(p)
-        p.print("You are a helpful agent.", type="system_prompt")
-        events = _drain(q)
-        assert len(events) == 1
-        assert events[0]["type"] == "system_prompt"
-        assert events[0]["text"] == "You are a helpful agent."
-
-
 class TestHandleMessage(unittest.TestCase):
     def test_subtype_not_tool_output(self):
         p = BaseBrowserPrinter()

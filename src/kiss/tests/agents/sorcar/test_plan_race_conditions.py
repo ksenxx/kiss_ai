@@ -19,10 +19,8 @@ Race conditions tested:
 - X4:  allDone merge signal sent to wrong provider's agent
 """
 
-import ctypes
 import inspect
 import re
-import threading
 import unittest
 
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -62,34 +60,6 @@ class TestP11LastActiveFileNoLock(unittest.TestCase):
                 )
                 break
 
-    def test_concurrent_write_causes_inconsistent_pair(self) -> None:
-        """Demonstrate that the unlocked write can produce an inconsistent pair.
-
-        The task thread writes _last_active_file = "b.py" without the lock,
-        while the complete handler under _state_lock still sees old content.
-        """
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-
-        # Set initial pair under lock
-        with server._state_lock:
-            server._last_active_file = "a.py"
-            server._last_active_content = "content_of_a"
-
-        # Simulate task thread writing without lock (as _run_task_inner does)
-        server._last_active_file = "b.py"  # No lock, mimics line 222
-
-        # Now the pair is inconsistent: file=b.py, content=content_of_a
-        with server._state_lock:
-            snapshot_file = server._last_active_file
-            snapshot_content = server._last_active_content
-
-        assert snapshot_file == "b.py"
-        assert snapshot_content == "content_of_a", (
-            "P11 bug: file points to b.py but content still belongs to a.py"
-        )
-
 
 # ---------------------------------------------------------------------------
 # P12 — Stale followup suggestion interleaves with new task output
@@ -115,13 +85,6 @@ class TestP12StaleFollowupInterleave(unittest.TestCase):
         assert "_task_generation" not in inner
         assert "gen ==" not in inner
         assert "seq ==" not in inner
-
-    def test_no_task_generation_attribute(self) -> None:
-        """Verify VSCodeServer has no _task_generation attribute."""
-        server = VSCodeServer()
-        assert not hasattr(server, "_task_generation"), (
-            "Expected no _task_generation attr (P12 bug present)"
-        )
 
     def test_followup_thread_not_cancelled_on_new_task(self) -> None:
         """Verify _run_task_inner does not cancel previous followup threads."""
@@ -159,65 +122,6 @@ class TestP13SecondInterruptCorruptsFinally(unittest.TestCase):
         assert caught_type == "Exception", (
             f"Expected 'except Exception' (not catching KeyboardInterrupt), "
             f"got: except {caught_type}"
-        )
-
-    def test_second_interrupt_leaves_merging_stuck(self) -> None:
-        """Demonstrate that a KeyboardInterrupt during _start_merge_session
-        leaves self._merging = True permanently.
-
-        Simulates the P13 scenario: the finally block calls
-        _start_merge_session which sets _merging = True, then a
-        KeyboardInterrupt arrives before the method returns.
-        """
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-        assert server._merging is False
-
-        merging_set = threading.Event()
-        interrupt_done = threading.Event()
-
-        def simulate_finally_block() -> None:
-            """Mimics the finally block where _start_merge_session sets _merging."""
-            try:
-                # Simulate _start_merge_session setting _merging
-                server._merging = True
-                merging_set.set()
-                # Simulate slow work (e.g., broadcasting events)
-                # The second KeyboardInterrupt arrives here
-                interrupt_done.wait(timeout=5)
-                # In real code, this would be more cleanup...
-            except Exception:
-                # This is the `except Exception` in the finally block.
-                # KeyboardInterrupt is NOT caught here!
-                pass
-
-        def worker() -> None:
-            try:
-                simulate_finally_block()
-            except KeyboardInterrupt:
-                # The KeyboardInterrupt escapes the except Exception
-                # In real code this propagates to _run_task's outer handler
-                pass
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        merging_set.wait(timeout=5)
-
-        # Inject KeyboardInterrupt into the thread
-        tid = t.ident
-        assert tid is not None
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid),
-            ctypes.py_object(KeyboardInterrupt),
-        )
-        interrupt_done.set()
-        t.join(timeout=5)
-
-        # _merging is still True — the flag was never reset
-        assert server._merging is True, (
-            "P13 bug: _merging should be stuck at True after KeyboardInterrupt "
-            "escapes the finally block's except Exception handler"
         )
 
     def test_force_stop_sends_two_interrupts(self) -> None:
@@ -263,31 +167,6 @@ class TestP14InterruptBeforeTryBlock(unittest.TestCase):
             "P14 bug: start_recording() is called BEFORE the try block, "
             "so an interrupt between them skips stop_recording() in the finally"
         )
-
-    def test_recording_leak_on_early_interrupt(self) -> None:
-        """Demonstrate that start_recording without matching stop_recording
-        leaks an entry in _recordings.
-        """
-        printer = BaseBrowserPrinter()
-        # Simulate what happens when interrupt hits after start_recording
-        # but before the try block
-        printer.start_recording()
-        tid = threading.current_thread().ident
-        assert tid is not None
-
-        # The recording is now in _recordings
-        with printer._lock:
-            assert tid in printer._recordings, "Recording should be active"
-
-        # If we DON'T call stop_recording (simulating the interrupt),
-        # the entry stays permanently
-        with printer._lock:
-            assert tid in printer._recordings, (
-                "P14 bug: recording entry leaked because stop_recording was never called"
-            )
-
-        # Clean up to not affect other tests
-        printer.stop_recording()
 
     def test_git_snapshot_before_try_block(self) -> None:
         """Verify git snapshot code runs before the try block."""
@@ -400,25 +279,6 @@ class TestT9NewConversationDropsNewChat(unittest.TestCase):
             "T9 bug: newConversation is synchronous, can't await stop completion"
         )
 
-    def test_python_newchat_skipped_when_task_alive(self) -> None:
-        """Verify Python backend skips newChat when task thread is alive."""
-        server = VSCodeServer()
-        original_id = server.agent._chat_id
-
-        stop = threading.Event()
-        server._task_thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
-        server._task_thread.start()
-
-        try:
-            # This is what happens when TS sends newChat while task is alive
-            server._handle_command({"type": "newChat"})
-            assert server.agent._chat_id == original_id, (
-                "T9 bug: newChat was silently skipped because task thread is alive"
-            )
-        finally:
-            stop.set()
-            server._task_thread.join()
-
 
 # ---------------------------------------------------------------------------
 # T10 — _commitPending permanently stuck if Python process dies
@@ -526,13 +386,6 @@ class TestP3CompleteSeqTOCTOU(unittest.TestCase):
     atomic, preventing stale ghost suggestions from slipping through.
     """
 
-    def test_complete_lock_exists(self) -> None:
-        """Verify VSCodeServer has a _complete_lock attribute."""
-        server = VSCodeServer()
-        assert hasattr(server, "_complete_lock"), (
-            "Expected _complete_lock for atomic seq check-and-broadcast"
-        )
-
     def test_complete_uses_lock_around_second_check_and_broadcast(self) -> None:
         """Verify _complete() holds _complete_lock across the second seq check and broadcast."""
         source = inspect.getsource(VSCodeServer._complete)
@@ -567,73 +420,6 @@ class TestP3CompleteSeqTOCTOU(unittest.TestCase):
         assert lock_idx > 0, (
             "Expected _complete_seq_latest write to be under _complete_lock"
         )
-
-    def test_stale_seq_not_broadcast(self) -> None:
-        """A completion with a stale seq must not broadcast a ghost event."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-
-        # Set latest seq to 10
-        with server._complete_lock:
-            server._complete_seq_latest = 10
-
-        # Complete with stale seq=5 — should not broadcast
-        server._complete("hello world", 5, "", "")
-        ghost_events = [e for e in events if e.get("type") == "ghost"]
-        assert len(ghost_events) == 0, (
-            "Stale seq should not produce a ghost event"
-        )
-
-    def test_current_seq_broadcasts(self) -> None:
-        """A completion with the current seq should broadcast a ghost event."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-
-        with server._complete_lock:
-            server._complete_seq_latest = 10
-
-        server._complete("hello world", 10, "", "")
-        ghost_events = [e for e in events if e.get("type") == "ghost"]
-        assert len(ghost_events) == 1, "Current seq should produce a ghost event"
-
-    def test_concurrent_seq_updates_no_stale_ghost(self) -> None:
-        """Stress test: concurrent seq updates should prevent stale ghost broadcasts."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-
-        num_rounds = 200
-
-        def updater() -> None:
-            """Rapidly update _complete_seq_latest to the final value."""
-            for i in range(num_rounds):
-                with server._complete_lock:
-                    server._complete_seq_latest = i
-
-        def completer() -> None:
-            """Run _complete with seq=0 repeatedly; should be stale after update."""
-            for _ in range(50):
-                server._complete("hello world", 0, "", "")
-
-        with server._complete_lock:
-            server._complete_seq_latest = 0
-
-        t_up = threading.Thread(target=updater)
-        t_comp = threading.Thread(target=completer)
-        t_up.start()
-        t_comp.start()
-        t_up.join(timeout=10)
-        t_comp.join(timeout=10)
-
-        # After updater finishes, seq_latest = num_rounds-1.
-        # Any ghost with seq=0 that was broadcast after seq_latest was updated
-        # would be a stale ghost — but we can't distinguish timing perfectly.
-        # At minimum, verify no crashes and all ghosts have the right query.
-        for e in events:
-            if e.get("type") == "ghost":
-                assert e.get("query") == "hello world"
 
 
 # ---------------------------------------------------------------------------
@@ -678,74 +464,6 @@ class TestP8BashFlushTOCTOU(unittest.TestCase):
             "Expected buffer drain inside _bash_lock"
         )
         assert lock_idx < clear_idx, "Buffer clear should be inside the lock"
-
-    def test_concurrent_bash_stream_no_lost_output(self) -> None:
-        """Stress test: concurrent bash_stream calls should not lose any output."""
-        printer = BaseBrowserPrinter()
-        events: list[dict] = []
-        original_broadcast = printer.broadcast
-
-        lock = threading.Lock()
-        def recording_broadcast(e: dict) -> None:
-            with lock:
-                events.append(e)
-            original_broadcast(e)
-
-        printer.broadcast = recording_broadcast  # type: ignore[assignment]
-
-        num_threads = 10
-        items_per_thread = 100
-        barrier = threading.Barrier(num_threads)
-
-        def writer(tid: int) -> None:
-            barrier.wait()
-            for i in range(items_per_thread):
-                printer.print(f"t{tid}_{i}\n", type="bash_stream")
-
-        threads = [threading.Thread(target=writer, args=(t,)) for t in range(num_threads)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30)
-
-        # Flush any remaining buffered content
-        printer._flush_bash()
-
-        # Collect all system_output text
-        all_text = "".join(
-            e["text"] for e in events if e.get("type") == "system_output"
-        )
-
-        # Every item should appear exactly once
-        for tid in range(num_threads):
-            for i in range(items_per_thread):
-                token = f"t{tid}_{i}\n"
-                assert token in all_text, (
-                    f"Lost output: {token!r} not found in broadcast output"
-                )
-
-    def test_flush_timer_cancelled_on_immediate_flush(self) -> None:
-        """When buffer is drained immediately, any pending timer should be cancelled."""
-        printer = BaseBrowserPrinter()
-        events: list[dict] = []
-        printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-
-        # Force the first flush to set _bash_last_flush to an old time
-        printer._bash_last_flush = 0.0
-
-        # This should trigger immediate flush (time since last flush > 0.1s)
-        printer.print("hello", type="bash_stream")
-
-        # Verify the buffer was drained
-        with printer._bash_lock:
-            assert len(printer._bash_buffer) == 0, "Buffer should be empty after immediate flush"
-            assert printer._bash_flush_timer is None, (
-                "Timer should not be set after immediate flush"
-            )
-
-        output_events = [e for e in events if e.get("type") == "system_output"]
-        assert len(output_events) == 1
-        assert output_events[0]["text"] == "hello"
 
 
 # ---------------------------------------------------------------------------

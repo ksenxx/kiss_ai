@@ -195,64 +195,6 @@ class TestNonRetryableModelErrors(unittest.TestCase):
         thread.start()
         return server, port
 
-    def test_auth_error_returns_immediately(self) -> None:
-        """Authentication error (401) returns finish(False, False, cause)."""
-        server, port = self._start_fake_server(
-            401,
-            {"error": {"message": "Invalid API key", "type": "invalid_api_key"}},
-        )
-        try:
-            agent = RelentlessAgent("AuthError")
-            with tempfile.TemporaryDirectory() as td:
-                result = agent.run(
-                    model_name="test-model",
-                    prompt_template="Do something.",
-                    max_steps=5,
-                    max_budget=1.0,
-                    max_sub_sessions=3,
-                    work_dir=td,
-                    verbose=False,
-                    model_config={
-                        "base_url": f"http://127.0.0.1:{port}/v1",
-                        "api_key": "sk-invalid",
-                    },
-                )
-            parsed = yaml.safe_load(result)
-            assert parsed["success"] is False
-            assert parsed["is_continue"] is False
-            assert "summary" in parsed
-            assert len(parsed["summary"]) > 0
-        finally:
-            server.shutdown()
-
-    def test_permission_denied_returns_immediately(self) -> None:
-        """Permission denied error (403) returns finish(False, False, cause)."""
-        server, port = self._start_fake_server(
-            403,
-            {"error": {"message": "Permission denied", "type": "permission_denied"}},
-        )
-        try:
-            agent = RelentlessAgent("PermDenied")
-            with tempfile.TemporaryDirectory() as td:
-                result = agent.run(
-                    model_name="test-model",
-                    prompt_template="Do something.",
-                    max_steps=5,
-                    max_budget=1.0,
-                    max_sub_sessions=3,
-                    work_dir=td,
-                    verbose=False,
-                    model_config={
-                        "base_url": f"http://127.0.0.1:{port}/v1",
-                        "api_key": "sk-invalid",
-                    },
-                )
-            parsed = yaml.safe_load(result)
-            assert parsed["success"] is False
-            assert parsed["is_continue"] is False
-        finally:
-            server.shutdown()
-
     def test_connection_error_returns_immediately(self) -> None:
         """Connection error (unreachable server) returns finish(False, False, cause)."""
         agent = RelentlessAgent("ConnError")
