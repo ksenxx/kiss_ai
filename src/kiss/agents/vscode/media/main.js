@@ -558,6 +558,7 @@
       setTimeout(function() { inp.focus(); }, 100);
       setTimeout(function() { inp.focus(); }, 300);
       break;
+
     case 'inputHistory':
       histCache = ev.tasks || [];
       if (histIdx < 0) histIdx = -1;
@@ -745,7 +746,7 @@
 
   function init() {
     setupEventListeners();
-    vscode.postMessage({ type: 'ready', screenWidth: screen.width, sidebarWidth: document.documentElement.clientWidth });
+    vscode.postMessage({ type: 'ready' });
   }
 
   function setupEventListeners() {
