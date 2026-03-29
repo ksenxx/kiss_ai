@@ -174,6 +174,6 @@ class TestCLIMain:
             main()
             assert False, "Should have raised SystemExit"
         except SystemExit as e:
-            assert e.code == 2
+            assert e.code == 1
         finally:
             sys.argv = original_argv
