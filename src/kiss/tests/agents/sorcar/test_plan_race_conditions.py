@@ -307,23 +307,24 @@ class TestP14InterruptBeforeTryBlock(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestT8StartTaskNoRecovery(unittest.TestCase):
-    """T8: _startTask sets _isRunning=true before start(), and never
-    checks start()'s return value. If start() fails, _isRunning stays
-    true permanently.
+    """T8: Callers set _isRunning=true before _startTask, which calls
+    start() without checking its return value. If start() fails,
+    _isRunning stays true permanently because _startTask has no
+    error handling.
     """
 
     def test_start_task_sets_running_before_start(self) -> None:
-        """Verify _startTask sets _isRunning = true before calling start()."""
+        """Verify _isRunning is set to true in the caller before _startTask."""
         with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
             source = f.read()
-        idx = source.find("private _startTask(")
-        assert idx >= 0
-        block = source[idx:idx + 500]
-        running_pos = block.find("this._isRunning = true")
-        start_pos = block.find("this._agentProcess.start(")
-        assert running_pos > 0 and start_pos > 0
-        assert running_pos < start_pos, (
-            "T8 bug: _isRunning set before start() call"
+        # _isRunning is now set in 'submit' handler before _startTask is called
+        submit_idx = source.find("case 'submit':")
+        assert submit_idx >= 0
+        start_task_idx = source.find("this._startTask(", submit_idx)
+        assert start_task_idx > 0
+        between = source[submit_idx:start_task_idx]
+        assert "this._isRunning = true" in between, (
+            "T8 bug: _isRunning set in caller before _startTask"
         )
 
     def test_start_return_value_not_checked(self) -> None:
@@ -343,16 +344,20 @@ class TestT8StartTaskNoRecovery(unittest.TestCase):
         )
 
     def test_no_running_reset_on_start_failure(self) -> None:
-        """Verify _startTask has no fallback to reset _isRunning on failure."""
+        """Verify _startTask has no error handling to reset _isRunning on failure."""
         with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
             source = f.read()
         idx = source.find("private _startTask(")
         end_idx = source.find("\n  }", idx)
         block = source[idx:end_idx]
-        # Count how many times _isRunning is set
+        # _startTask does not set _isRunning at all (callers set it),
+        # so there is no try/catch to reset it if start() fails
+        assert "try" not in block, (
+            "T8 bug: _startTask has no error handling for start() failure"
+        )
         sets = [m.start() for m in re.finditer(r"this\._isRunning\s*=", block)]
-        assert len(sets) == 1, (
-            f"T8 bug: _startTask sets _isRunning only once (no reset on failure), "
+        assert len(sets) == 0, (
+            f"T8 bug: _startTask does not manage _isRunning (callers do), "
             f"found {len(sets)} assignments"
         )
 
@@ -420,26 +425,25 @@ class TestT9NewConversationDropsNewChat(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestT10CommitPendingStuck(unittest.TestCase):
-    """T10: generateCommitMessage sets _commitPending=true and only resets
-    it via _onCommitMessage. If the Python process dies, the listener
-    never fires and _commitPending stays true permanently.
+    """T10: generateCommitMessage sets _commitPending=true.
+
+    Originally only reset via _onCommitMessage (if Python dies, stuck forever).
+    Now has a 30s setTimeout fallback, but still no explicit process-death handler.
     """
 
-    def test_no_process_death_handler_for_commit_pending(self) -> None:
-        """Verify generateCommitMessage has no process-death/timeout reset path."""
+    def test_commit_pending_has_timeout_fallback(self) -> None:
+        """Verify generateCommitMessage has a timeout fallback to reset _commitPending."""
         with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
             source = f.read()
         idx = source.find("public generateCommitMessage(")
         end_idx = source.find("\n  }", idx)
         block = source[idx:end_idx]
-        # No timeout
-        assert "setTimeout" not in block, (
-            "T10 bug: expected no timeout fallback for _commitPending"
+        # T10 fix: setTimeout now provides a fallback to reset _commitPending
+        assert "setTimeout" in block, (
+            "T10 fix: expected setTimeout fallback for _commitPending"
         )
-        # No process close/status listener
-        assert "close" not in block
-        assert "'status'" not in block, (
-            "T10 bug: no process-death reset for _commitPending"
+        assert "clearTimeout" in block, (
+            "T10 fix: expected clearTimeout to cancel timer on success"
         )
 
     def test_commit_pending_only_reset_by_commit_message_event(self) -> None:
@@ -533,19 +537,19 @@ class TestP3CompleteSeqTOCTOU(unittest.TestCase):
         """Verify _complete() holds _complete_lock across the second seq check and broadcast."""
         source = inspect.getsource(VSCodeServer._complete)
         # The second check-and-broadcast should be under _complete_lock.
-        # Find the pattern: with self._complete_lock: ... broadcast
         assert "_complete_lock" in source, (
             "Expected _complete() to use _complete_lock"
         )
-        # Find the second seq check (after _fast_complete) and verify it's under a lock
-        fast_complete_idx = source.find("_fast_complete")
-        assert fast_complete_idx > 0
-        after_fast = source[fast_complete_idx:]
-        # The broadcast after the second check should be inside a with block
-        lock_idx = after_fast.find("with self._complete_lock")
-        broadcast_idx = after_fast.find('self.printer.broadcast({"type": "ghost"')
+        # Find the completion logic (prefix match / active file) and verify
+        # the broadcast after it is under a lock
+        match_idx = source.find("_prefix_match_task")
+        assert match_idx > 0, "Expected _prefix_match_task in _complete"
+        after_match = source[match_idx:]
+        # The broadcast after the completion logic should be inside a with block
+        lock_idx = after_match.find("with self._complete_lock")
+        broadcast_idx = after_match.find('self.printer.broadcast({"type": "ghost"')
         assert lock_idx > 0 and broadcast_idx > 0, (
-            "Expected lock and broadcast after _fast_complete"
+            "Expected lock and broadcast after completion logic"
         )
         assert lock_idx < broadcast_idx, (
             "Expected _complete_lock to be acquired BEFORE broadcast"

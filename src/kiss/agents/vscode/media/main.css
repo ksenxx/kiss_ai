@@ -674,40 +674,35 @@ header {
 }
 #ask-user-submit:hover { opacity: 0.9; }
 
-/* ── Markdown content rendering (shared by system-prompt-body, prompt-body, rc-body) ── */
-.system-prompt-body, .prompt-body, .rc-body {
-  /* Markdown typography base — inherited by all three containers */
-}
-.system-prompt-body p, .prompt-body p, .rc-body p { margin: 4px 0; }
-.system-prompt-body :is(h1,h2,h3,h4,h5,h6),
-.prompt-body :is(h1,h2,h3,h4,h5,h6),
-.rc-body :is(h1,h2,h3,h4,h5,h6) { margin: 8px 0 4px; font-weight: 600; color: var(--fg); }
-.system-prompt-body h1, .prompt-body h1, .rc-body h1 { font-size: var(--fs-xl); }
-.system-prompt-body h2, .prompt-body h2, .rc-body h2 { font-size: var(--fs-lg); }
-.system-prompt-body h3, .prompt-body h3, .rc-body h3 { font-size: var(--fs-base); }
-.system-prompt-body :is(ul,ol), .prompt-body :is(ul,ol), .rc-body :is(ul,ol) { margin: 4px 0; padding-left: 20px; }
-.system-prompt-body li, .prompt-body li, .rc-body li { margin: 2px 0; }
-.system-prompt-body code, .prompt-body code, .rc-body code {
+/* ── Markdown content rendering (shared via .md-body on system-prompt-body, prompt-body, rc-body) ── */
+.md-body p { margin: 4px 0; }
+.md-body :is(h1,h2,h3,h4,h5,h6) { margin: 8px 0 4px; font-weight: 600; color: var(--fg); }
+.md-body h1 { font-size: var(--fs-xl); }
+.md-body h2 { font-size: var(--fs-lg); }
+.md-body h3 { font-size: var(--fs-base); }
+.md-body :is(ul,ol) { margin: 4px 0; padding-left: 20px; }
+.md-body li { margin: 2px 0; }
+.md-body code {
   background: color-mix(in srgb, var(--fg) 8%, transparent); padding: 1px 4px; border-radius: 3px;
   font-family: var(--vscode-editor-font-family, 'Fira Code', monospace); font-size: var(--fs-md);
 }
-.system-prompt-body pre, .prompt-body pre, .rc-body pre {
+.md-body pre {
   background: rgba(0,0,0,0.3); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 6px 0;
 }
-.system-prompt-body pre code, .prompt-body pre code, .rc-body pre code { background: none; padding: 0; font-size: var(--fs-md); }
-.system-prompt-body blockquote, .prompt-body blockquote, .rc-body blockquote {
+.md-body pre code { background: none; padding: 0; font-size: var(--fs-md); }
+.md-body blockquote {
   border-left: 3px solid var(--accent); padding: 4px 10px; margin: 6px 0; color: var(--dim); font-style: italic;
 }
-.system-prompt-body a, .prompt-body a, .rc-body a { color: var(--accent); text-decoration: underline; }
-.system-prompt-body strong, .prompt-body strong, .rc-body strong { font-weight: 600; color: var(--fg); }
-.system-prompt-body em, .prompt-body em, .rc-body em { font-style: italic; }
-.system-prompt-body hr, .prompt-body hr, .rc-body hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
-.system-prompt-body table, .prompt-body table, .rc-body table { border-collapse: collapse; margin: 6px 0; width: 100%; }
-.system-prompt-body :is(th,td), .prompt-body :is(th,td), .rc-body :is(th,td) {
+.md-body a { color: var(--accent); text-decoration: underline; }
+.md-body strong { font-weight: 600; color: var(--fg); }
+.md-body em { font-style: italic; }
+.md-body hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+.md-body table { border-collapse: collapse; margin: 6px 0; width: 100%; }
+.md-body :is(th,td) {
   border: 1px solid var(--border); padding: 4px 8px; font-size: var(--fs-md);
 }
-.system-prompt-body th, .prompt-body th, .rc-body th {
+.md-body th {
   background: color-mix(in srgb, var(--fg) 4%, transparent); font-weight: 600;
 }
 

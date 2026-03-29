@@ -257,11 +257,6 @@ class TestCompleteFunctionSignatures(unittest.TestCase):
         assert "snapshot_file" in sig.parameters
         assert "snapshot_content" in sig.parameters
 
-    def test_fast_complete_accepts_snapshots(self) -> None:
-        sig = inspect.signature(VSCodeServer._fast_complete)
-        assert "snapshot_file" in sig.parameters
-        assert "snapshot_content" in sig.parameters
-
     def test_complete_from_active_file_accepts_snapshots(self) -> None:
         sig = inspect.signature(VSCodeServer._complete_from_active_file)
         assert "snapshot_file" in sig.parameters

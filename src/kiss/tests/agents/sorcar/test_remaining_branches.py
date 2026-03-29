@@ -43,7 +43,7 @@ from kiss.agents.vscode.server import VSCodeServer
 
 def _git(tmpdir: str, *args: str) -> None:
     """Run a git command in tmpdir, suppressing output."""
-    _git(tmpdir, *args)
+    subprocess.run(["git", *args], cwd=tmpdir, capture_output=True, check=True)
 
 # ---------------------------------------------------------------------------
 # persistence.py — uncovered branches
@@ -414,12 +414,18 @@ class TestVSCodeServerBranches:
         assert result == "in"
 
     def test_fast_complete_history_match(self) -> None:
-        """_fast_complete returns history match (line 535)."""
+        """_complete returns history match via broadcast."""
         server = VSCodeServer()
+        events: list[dict] = []  # type: ignore[type-arg]
+        def cap(ev: dict) -> None:  # type: ignore[type-arg]
+            events.append(ev)
+        server.printer.broadcast = cap  # type: ignore[assignment]
         # Add a task to history
         th._add_task("integrate all the modules together")
-        result = server._fast_complete("integrate all the module")
-        assert "s together" in result
+        server._complete("integrate all the module")
+        ghost = [e for e in events if e.get("type") == "ghost"]
+        assert len(ghost) == 1
+        assert "s together" in ghost[0]["suggestion"]
 
     def test_merge_action_all_done(self) -> None:
         """_handle_merge_action with 'all-done' calls _finish_merge."""
