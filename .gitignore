@@ -37,3 +37,4 @@ node_modules/
 src/kiss/agents/vscode/out/
 
 kiss_project/
+tmp/
