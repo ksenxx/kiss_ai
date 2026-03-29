@@ -367,7 +367,7 @@
       rc.innerHTML = '<div class="rc-h"><h3>Result</h3><div class="rs">'
         + '<span>Tokens <b>' + (ev.total_tokens || 0) + '</b></span>'
         + '<span>Cost <b>' + (ev.cost || 'N/A') + '</b></span>'
-        + '</div></div><div class="rc-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
+        + '</div></div><div class="rc-body md-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
       hlBlock(rc);
       target.appendChild(rc); break;
     }
@@ -378,7 +378,7 @@
       var el = mkEl('div', 'ev ' + cls);
       var body = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
       el.innerHTML = '<div class="' + cls + '-h">' + label + '</div>'
-        + '<div class="' + cls + '-body">' + body + '</div>';
+        + '<div class="' + cls + '-body md-body">' + body + '</div>';
       hlBlock(el);
       target.appendChild(el); break;
     }

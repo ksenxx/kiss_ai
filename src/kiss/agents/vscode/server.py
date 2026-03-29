@@ -423,6 +423,7 @@ class VSCodeServer:
         """Send available models list with usage counts and pricing."""
         usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
+        sort_keys: dict[str, tuple[int, float]] = {}
         for name in get_available_models():
             info = MODEL_INFO.get(name)
             if info and info.is_function_calling_supported:
@@ -433,13 +434,10 @@ class VSCodeServer:
                     "out": info.output_price_per_1M,
                     "uses": usage.get(name, 0),
                     "vendor": vendor_name,
-                    "_order": vendor_order,
                 })
-        models_list.sort(
-            key=lambda m: (m["_order"], -(float(m["inp"]) + float(m["out"])))
-        )
-        for m in models_list:
-            del m["_order"]
+                price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
+                sort_keys[name] = (vendor_order, -price)
+        models_list.sort(key=lambda m: sort_keys[m["name"]])
         self.printer.broadcast({
             "type": "models",
             "models": models_list,
@@ -555,30 +553,6 @@ class VSCodeServer:
                         return str(summary)
         return ""
 
-    def _fast_complete(
-        self, query: str, snapshot_file: str = "", snapshot_content: str = ""
-    ) -> str:
-        """Local prefix matching against history and active file words.
-
-        Checks task history first, then falls back to matching
-        identifiers/words from the currently active editor file.
-
-        Args:
-            query: The stripped query string (guaranteed non-empty, len >= 2
-                by the caller ``_complete``).
-            snapshot_file: Atomically-captured active file path.
-            snapshot_content: Atomically-captured active file content.
-
-        Returns:
-            Continuation string if a match is found, empty string otherwise.
-        """
-        # Try history match first (SQL prefix match, uses idx_th_task index)
-        match = _prefix_match_task(query)
-        if match:
-            return match[len(query):]
-        # Fall back to word/identifier matching from the active file
-        return self._complete_from_active_file(query, snapshot_file, snapshot_content)
-
     def _complete_from_active_file(
         self, query: str, snapshot_file: str = "", snapshot_content: str = ""
     ) -> str:
@@ -657,9 +631,12 @@ class VSCodeServer:
             self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
             return
 
-        fast = clip_autocomplete_suggestion(
-            query, self._fast_complete(query, snapshot_file, snapshot_content)
-        )
+        match = _prefix_match_task(query)
+        if match:
+            fast = match[len(query):]
+        else:
+            fast = self._complete_from_active_file(query, snapshot_file, snapshot_content)
+        fast = clip_autocomplete_suggestion(query, fast)
         with self._complete_lock:
             if seq >= 0 and seq != self._complete_seq_latest:
                 return
