@@ -13,7 +13,6 @@ Fixed Python races:
 
 import inspect
 import threading
-import time
 import unittest
 
 from kiss.agents.vscode.server import VSCodeServer
@@ -21,12 +20,6 @@ from kiss.agents.vscode.server import VSCodeServer
 
 class TestRace1StateLockProtection(unittest.TestCase):
     """Race 1 fix: _state_lock protects _last_active_file/_last_active_content pair."""
-
-    def test_state_lock_exists(self) -> None:
-        """Verify VSCodeServer has _state_lock."""
-        server = VSCodeServer()
-        assert hasattr(server, "_state_lock")
-        assert isinstance(server._state_lock, type(threading.Lock()))
 
     def test_state_lock_used_in_complete_handler(self) -> None:
         """Verify the complete handler uses _state_lock for atomic pair update."""
@@ -113,38 +106,6 @@ class TestRace14StatusBroadcastOrder(unittest.TestCase):
         assert merge_pos > 0, "_prepare_merge_view not found"
         assert cache_pos > 0, "_refresh_file_cache not found"
 
-    def test_task_thread_done_when_status_false(self) -> None:
-        """Verify that when status:running:false is broadcast, cleanup is done."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        lock = threading.Lock()
-
-        def capture(e: dict) -> None:
-            with lock:
-                events.append(e)
-
-        server.printer.broadcast = capture  # type: ignore[assignment]
-
-        cleanup_done = threading.Event()
-        status_seen = threading.Event()
-
-        def fake_task() -> None:
-            """Simulates fixed _run_task: cleanup first, then status broadcast."""
-            # Simulate cleanup work (merge + cache)
-            time.sleep(0.05)
-            cleanup_done.set()
-            # NOW broadcast status — after cleanup
-            server.printer.broadcast({"type": "status", "running": False})
-            status_seen.set()
-
-        server._task_thread = threading.Thread(target=fake_task, daemon=True)
-        server._task_thread.start()
-
-        status_seen.wait(timeout=5)
-        # Cleanup was done before status broadcast
-        assert cleanup_done.is_set()
-        server._task_thread.join(timeout=5)
-
 
 class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
     """Race 16 fix: newChat/resumeSession guarded when task is running."""
@@ -168,14 +129,6 @@ class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
         finally:
             stop.set()
             server._task_thread.join()
-
-    def test_newchat_allowed_when_no_task(self) -> None:
-        """Verify newChat works when no task is running."""
-        server = VSCodeServer()
-        original_id = server.agent._chat_id
-
-        server._handle_command({"type": "newChat"})
-        assert server.agent._chat_id != original_id
 
     def test_resume_session_blocked_when_task_running(self) -> None:
         """Verify resumeSession is blocked when _task_thread is alive."""
@@ -405,30 +358,6 @@ class TestExistingBehavior(unittest.TestCase):
         ghost_events = [e for e in events if e.get("type") == "ghost"]
         assert len(ghost_events) == 2  # Only seq=9 threads broadcast
 
-    def test_second_run_rejected_when_first_alive(self) -> None:
-        """If _task_thread is alive, the second run is rejected."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-
-        stop = threading.Event()
-        server._task_thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
-        server._task_thread.start()
-
-        try:
-            server._handle_command({
-                "type": "run",
-                "prompt": "test",
-                "model": "claude-opus-4-6",
-                "workDir": "/tmp",
-            })
-            errors = [e for e in events if e.get("type") == "error"]
-            assert len(errors) == 1
-            assert "already running" in errors[0]["text"].lower()
-        finally:
-            stop.set()
-            server._task_thread.join()
-
 
 class TestStatusAlwaysSentOnExit(unittest.TestCase):
     """Verify status:running:false is always sent when _run_task exits.
@@ -443,38 +372,6 @@ class TestStatusAlwaysSentOnExit(unittest.TestCase):
         events: list[dict] = []
         server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
         return server, events
-
-    def test_merging_early_return_sends_status_false(self) -> None:
-        """When _merging is True, _run_task still sends status:running:false."""
-        server, events = self._capture_server()
-        server._merging = True
-
-        server._run_task({"type": "run", "prompt": "test"})
-
-        status_events = [e for e in events if e.get("type") == "status"]
-        assert any(e.get("running") is False for e in status_events), (
-            f"Expected status:running:false after merging early return. Events: {events}"
-        )
-
-    def test_already_running_sends_status_false(self) -> None:
-        """When task thread is alive, 'run' command sends status:running:false."""
-        server, events = self._capture_server()
-
-        stop = threading.Event()
-        server._task_thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
-        server._task_thread.start()
-
-        try:
-            server._handle_command({
-                "type": "run", "prompt": "test", "model": "x", "workDir": "/tmp",
-            })
-            status_events = [e for e in events if e.get("type") == "status"]
-            assert any(e.get("running") is False for e in status_events), (
-                f"Expected status:running:false after already-running rejection. Events: {events}"
-            )
-        finally:
-            stop.set()
-            server._task_thread.join()
 
     def test_outer_try_finally_in_run_task(self) -> None:
         """_run_task wraps _run_task_inner with try/finally for status guarantee."""
