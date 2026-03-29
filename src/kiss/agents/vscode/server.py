@@ -211,6 +211,7 @@ class VSCodeServer:
         silently dropping all subsequent task submissions.
         """
         try:
+            self.printer.broadcast({"type": "status", "running": True})
             self._run_task_inner(cmd)
         finally:
             self.printer.broadcast({"type": "status", "running": False})
@@ -247,8 +248,6 @@ class VSCodeServer:
         self.printer._thread_local.stop_event = self._stop_event
         self._user_answer_event = threading.Event()
 
-        # Note: status running=true is already sent by the TS side in _startTask()
-        # for immediate UI feedback. Only broadcast 'clear' here.
         self.printer.broadcast({"type": "clear"})
 
         # Git snapshot captures pre-task state (may be slow for large repos)

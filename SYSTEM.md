@@ -34,7 +34,7 @@
 - No redundant abstractions or duplicate code
 - Public methods MUST have full documentation
 - Understand the root cause of an issue or bug, and patch the root cause instead of
-  of an ad hoc superficial fix.
+  an ad hoc superficial fix.
 - Before you write code, wait and think if the code is simple, elegant, general, and minimal.
 - Once you finish the task, DO NOT write documentations unless the task specifically requires it.
 - You MUST check and test the code you have written except for formatting/typing changes
