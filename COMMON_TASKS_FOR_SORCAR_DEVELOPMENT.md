@@ -44,7 +44,6 @@ build, package, and install the KISS Sorcar VS Code extension. Run 'cd src/kiss/
 
 For the app, called whatsapp, create an {app}\_agent.py in src/kiss/channels/, an extension of SorcarAgent with a set of tools, which will help the user to get authenticated to the app via the browser if not authenticated yet, store the authentication token safely in the Path.home() / ".kiss/channels/{app}" dir, and use it along with tools to perform an app related task given to the app agent. Investigate the web for the app to identify a small set of tools which will be given the agent total control over the app, implement them, and provide them as tools to the agent so that the agent can perform a given task on the app using the tools. write a main method in src/kiss/channels/{app}\_agent.py, so that it takes --task argument and executes the task using the agent.
 
-
 # Past tasks
 
 When I click a recent item in the welcome window of the chat window in sorcar, it should behave similarly as clicking an item in the task history button in the chatbox of sorcar.
