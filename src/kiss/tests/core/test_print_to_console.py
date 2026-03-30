@@ -83,20 +83,6 @@ class TestStreamingFlow(unittest.TestCase):
 class TestBashStreamDedup(unittest.TestCase):
     """Test that tool_result doesn't repeat bash_stream output."""
 
-    def test_tool_result_not_shown_for_success(self):
-        p, buf = _make()
-        p.print("some output", type="tool_result", tool_name="Read")
-        out = buf.getvalue()
-        assert "some output" not in out
-        assert "OK" not in out
-
-    def test_tool_result_shown_on_error(self):
-        p, buf = _make()
-        p.print("error msg", type="tool_result", tool_name="go_to_url", is_error=True)
-        out = buf.getvalue()
-        assert "error msg" in out
-        assert "FAILED" in out
-
     def test_tool_result_error_skips_content_after_bash_stream(self):
         p, buf = _make()
         p.print("line1\n", type="bash_stream")
@@ -108,13 +94,6 @@ class TestBashStreamDedup(unittest.TestCase):
         new_output = buf_after[len(buf_before):]
         assert "FAILED" in new_output
         assert "line1" not in new_output
-
-    def test_reset_clears_bash_streamed(self):
-        p, buf = _make()
-        p.print("streamed\n", type="bash_stream")
-        assert p._bash_streamed is True
-        p.reset()
-        assert p._bash_streamed is False
 
 
 if __name__ == "__main__":

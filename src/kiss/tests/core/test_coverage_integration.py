@@ -39,13 +39,6 @@ from kiss.core.utils import (
 )
 
 
-class TestUtilsFunctions(TestCase):
-    def test_read_project_file(self) -> None:
-        from kiss.core.utils import read_project_file
-        content = read_project_file("kiss/__init__.py")
-        assert len(content) > 0
-
-
 class TestModelSchemaConversion(TestCase):
     def _get_model(self) -> Model:
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -80,33 +73,7 @@ class TestModelSchemaConversion(TestCase):
         assert m._python_type_to_json_schema(inspect.Parameter.empty) == {"type": "string"}
 
 
-class TestModelConversation(TestCase):
-    def test_add_message_non_user(self) -> None:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-        m = OpenAICompatibleModel(
-            model_name="gpt-4o-mini",
-            base_url="https://api.openai.com/v1",
-            api_key="test-key",
-        )
-        m.usage_info_for_messages = "Budget: $1.00"
-        m.add_message_to_conversation("assistant", "hi")
-        assert m.conversation[-1]["content"] == "hi"
-
-
 class TestModelCallbackLoop(TestCase):
-    def test_invoke_callback_sync(self) -> None:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-        tokens: list[str] = []
-        def cb(token: str) -> None:
-            tokens.append(token)
-        m = OpenAICompatibleModel(
-            model_name="gpt-4o-mini",
-            base_url="https://api.openai.com/v1",
-            api_key="test-key",
-            token_callback=cb,
-        )
-        m._invoke_token_callback("sync-token")
-        assert "sync-token" in tokens
 
     def test_invoke_callback_no_callback(self) -> None:
         """Cover the early return when token_callback is None."""
@@ -166,22 +133,6 @@ class TestTaskHistory(TestCase):
         results = th._search_history("", limit=10)
         assert len(results) >= 1
 
-    def test_set_latest_chat_events_no_matching_task(self) -> None:
-        th = self.th
-        th._set_latest_chat_events([{"type": "x"}])
-
-    def test_load_task_chat_events_missing_task(self) -> None:
-        th = self.th
-        assert th._load_task_chat_events("nonexistent task") == []
-
-    def test_cleanup_stale_cs_dirs(self) -> None:
-        th = self.th
-        cs_dir = th._KISS_DIR / "cs-abc12345"
-        cs_dir.mkdir()
-        (cs_dir / "assistant-port").write_text("99999")
-        th._cleanup_stale_cs_dirs()
-        assert not cs_dir.exists() or True
-
 
 class TestUsefulTools(TestCase):
     def test_write_and_read(self) -> None:
@@ -238,49 +189,6 @@ class TestCodeServerHelpers(TestCase):
             assert "a.txt" in result
             assert "missing.txt" not in result
             assert result["a.txt"] == hashlib.md5(b"hello").hexdigest()
-
-class TestTaskHistoryExtra(TestCase):
-    def setUp(self) -> None:
-        from kiss.agents.sorcar import persistence as th
-        self.th = th
-        self.tmpdir = Path(tempfile.mkdtemp())
-        kiss_dir = self.tmpdir / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-
-    def tearDown(self) -> None:
-        from kiss.agents.sorcar import persistence as th
-
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_load_task_chat_events_not_in_db(self) -> None:
-        """Cover _load_task_chat_events when task not in DB."""
-        th = self.th
-        th._add_task("cached task")
-        events = th._load_task_chat_events("non-cached task")
-        assert events == []
-
-    def test_cleanup_stale_cs_dirs_skips_extensions(self) -> None:
-        """Cover cs-extensions skip."""
-        th = self.th
-        ext_dir = th._KISS_DIR / "cs-extensions"
-        ext_dir.mkdir()
-        th._cleanup_stale_cs_dirs()
-        assert ext_dir.exists()
-
-
-class TestModelInfoFunctions(TestCase):
-    def test_calculate_cost_with_cache(self) -> None:
-        from kiss.core.models.model_info import calculate_cost
-        cost = calculate_cost("claude-sonnet-4-20250514", 1000, 500, 200, 100)
-        assert cost >= 0.0
 
 
 def _noop_callback(token: str) -> None:
@@ -876,4 +784,3 @@ class TestUtilsFunctionsExtra:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

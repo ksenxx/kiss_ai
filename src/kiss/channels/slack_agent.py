@@ -1,11 +1,11 @@
-"""Slack Agent — SorcarAgent extension with Slack API tools.
+"""Slack Agent — StatefulSorcarAgent extension with Slack API tools.
 
-Provides authenticated access to a Slack workspace via a bot token.
-Handles authentication (reading token from disk or prompting the user
-via the browser), stores the token securely in
-``~/.kiss/channels/slack/token.json``, and exposes a focused set of
-Slack Web API tools that give the agent full control over messaging,
-channels, users, reactions, and search.
+Provides authenticated access to a Slack workspace via a bot token
+with multi-turn chat-session persistence.  Handles authentication
+(reading token from disk or prompting the user via the browser),
+stores the token securely in ``~/.kiss/channels/slack/token.json``,
+and exposes a focused set of Slack Web API tools that give the agent
+full control over messaging, channels, users, reactions, and search.
 
 Usage::
 
@@ -18,14 +18,19 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import (
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 
 logger = logging.getLogger(__name__)
 
@@ -802,32 +807,6 @@ class SlackChannelBackend:
 # ---------------------------------------------------------------------------
 
 
-def _cli_wait_for_user(instruction: str, url: str) -> None:
-    """CLI callback for browser-action prompts (prints and waits for Enter).
-
-    Args:
-        instruction: What the user should do.
-        url: Current browser URL (printed if non-empty).
-    """
-    print(f"\n>>> Browser action needed: {instruction}")
-    if url:
-        print(f"    Current URL: {url}")
-    input("Press Enter when done... ")
-
-
-def _cli_ask_user_question(question: str) -> str:
-    """CLI callback for agent questions (prints and reads from stdin).
-
-    Args:
-        question: The question to display to the user.
-
-    Returns:
-        The user's typed response text.
-    """
-    print(f"\n>>> Agent asks: {question}")
-    return input("Your answer: ")
-
-
 def _make_slack_tools(client: WebClient) -> list:
     """Create Slack API tool functions from a WebClient instance.
 
@@ -842,45 +821,8 @@ def _make_slack_tools(client: WebClient) -> list:
     return backend.get_tool_methods()
 
 
-class SlackAgent(SorcarAgent):
-    def run(  # type: ignore[override]
-        self,
-        model_name: str | None = None,
-        prompt_template: str = "",
-        arguments: dict[str, str] | None = None,
-        max_steps: int | None = None,
-        max_budget: float | None = None,
-        work_dir: str | None = None,
-        printer: Any = None,
-        max_sub_sessions: int | None = None,
-        docker_image: str | None = None,
-        headless: bool | None = None,
-        verbose: bool | None = None,
-        current_editor_file: str | None = None,
-        attachments: list | None = None,
-        wait_for_user_callback: Callable[[str, str], None] | None = None,
-        ask_user_question_callback: Callable[[str], str] | None = None,
-    ) -> str:
-        """Run the Slack agent with optional user-interaction callbacks."""
-        return super().run(
-            model_name=model_name,
-            prompt_template=prompt_template,
-            arguments=arguments,
-            max_steps=max_steps,
-            max_budget=max_budget,
-            work_dir=work_dir,
-            printer=printer,
-            max_sub_sessions=max_sub_sessions,
-            docker_image=docker_image,
-            headless=headless,
-            verbose=verbose,
-            current_editor_file=current_editor_file,
-            attachments=attachments,
-            wait_for_user_callback=wait_for_user_callback,
-            ask_user_question_callback=ask_user_question_callback,
-        )
-
-    """SorcarAgent extended with Slack workspace tools.
+class SlackAgent(StatefulSorcarAgent):
+    """StatefulSorcarAgent extended with Slack workspace tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
     browser automation) and adds authenticated Slack API tools for
@@ -995,65 +937,61 @@ class SlackAgent(SorcarAgent):
 
 
 def main() -> None:
-    """Run the SlackAgent from the command line with a --task argument."""
-    import argparse
+    """Run the SlackAgent from the command line with chat persistence."""
     import os
-    import tempfile
+    import sys
     import time as time_mod
 
-    import yaml
+    if len(sys.argv) <= 1:
+        print(
+            "Usage: slack_agent [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n]"
+        )
+        sys.exit(1)
 
-    parser = argparse.ArgumentParser(description="Run SlackAgent on a task")
-    parser.add_argument("--task", type=str, required=True, help="Task description for the agent")
-    parser.add_argument("--model_name", type=str, default=None, help="LLM model name")
-    parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
-    parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
-    parser.add_argument("--work_dir", type=str, default=None, help="Working directory")
+    parser = _build_arg_parser()
     parser.add_argument(
-        "--headless",
-        type=lambda x: str(x).lower() == "true",
-        default=False,
-        help="Run browser headless (true/false)",
-    )
-    parser.add_argument(
-        "--verbose",
-        type=lambda x: str(x).lower() == "true",
-        default=True,
-        help="Print output to console (true/false)",
+        "-n", "--new", action="store_true",
+        help="Start a new chat session",
     )
     args = parser.parse_args()
 
-    if args.work_dir is not None:
-        work_dir = args.work_dir
-        Path(work_dir).mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = tempfile.mkdtemp()
-
     agent = SlackAgent()
+
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.new:
+        agent.new_chat()
+    else:
+        agent.resume_chat(task_description)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
     try:
-        result = agent.run(
-            prompt_template=args.task,
-            model_name=args.model_name,
-            max_steps=args.max_steps,
-            max_budget=args.max_budget,
-            work_dir=work_dir,
-            headless=args.headless,
-            verbose=args.verbose,
-            wait_for_user_callback=_cli_wait_for_user,
-            ask_user_question_callback=_cli_ask_user_question,
-        )
+        agent.run(**run_kwargs)
     finally:
         os.chdir(old_cwd)
     elapsed = time_mod.time() - start_time
 
-    print("FINAL RESULT:")
-    result_data = yaml.safe_load(result)
-    print("Completed successfully: " + str(result_data["success"]))
-    print(result_data["summary"])
-    print("Work directory was: " + work_dir)
     print(f"Time: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")
     print(f"Total tokens: {agent.total_tokens_used}")

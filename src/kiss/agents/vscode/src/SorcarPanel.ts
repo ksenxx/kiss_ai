@@ -9,6 +9,20 @@ import { AgentProcess, findKissProject } from './AgentProcess';
 import { MergeManager } from './MergeManager';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
+/** Read the KISS project version from ``_version.py`` on disk. */
+function getVersion(): string {
+  try {
+    const kissRoot = findKissProject();
+    if (kissRoot) {
+      const versionFile = path.join(kissRoot, 'src', 'kiss', '_version.py');
+      const content = fs.readFileSync(versionFile, 'utf-8');
+      const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
+      if (match) return match[1];
+    }
+  } catch { /* ignore */ }
+  return '';
+}
+
 export class SorcarViewProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private _agentProcess: AgentProcess;
@@ -20,7 +34,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _activeEditorDisposable?: vscode.Disposable;
   private _commitPending: boolean = false;
-  private static _auxBarResized: boolean = false;
 
   constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
@@ -139,10 +152,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
         this._agentProcess.sendCommand({ type: 'getLastSession' });
         this._sendActiveFileInfo();
-        if (!SorcarViewProvider._auxBarResized && message.screenWidth) {
-          SorcarViewProvider._auxBarResized = true;
-          this._resizeAuxBarTo25Percent(message.screenWidth, message.sidebarWidth || 300);
-        }
         break;
 
       case 'submit': {
@@ -181,7 +190,9 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'getModels':
-        this._agentProcess.sendCommand({ type: 'getModels' });
+      case 'newChat':
+      case 'getInputHistory':
+        this._agentProcess.sendCommand({ type: message.type } as AgentCommand);
         break;
 
       case 'getHistory':
@@ -222,20 +233,12 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         }
         break;
 
-      case 'newChat':
-        this._agentProcess.sendCommand({ type: 'newChat' });
-        break;
-
       case 'resumeSession':
         this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id });
         break;
 
       case 'getWelcomeSuggestions':
         this._sendWelcomeSuggestions();
-        break;
-
-      case 'getInputHistory':
-        this._agentProcess.sendCommand({ type: 'getInputHistory' });
         break;
 
       case 'complete':
@@ -353,19 +356,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async _resizeAuxBarTo25Percent(screenWidth: number, currentWidth: number): Promise<void> {
-    const targetWidth = Math.round(screenWidth * 0.25);
-    const delta = targetWidth - currentWidth;
-    if (delta <= 25) return;
-    const increments = Math.round(delta / 50);
-    if (increments <= 0) return;
-    try {
-      for (let i = 0; i < increments; i++) {
-        await vscode.commands.executeCommand('workbench.action.increaseViewWidth');
-      }
-    } catch { /* ignore if command unavailable */ }
-  }
-
   public dispose(): void {
     this._activeEditorDisposable?.dispose();
     this._agentProcess.dispose();
@@ -405,7 +395,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   <div id="app">
     <header>
       <div class="header-left">
-        <span class="logo">\u2731 KISS Sorcar <span class="version">${this._getVersion()}</span></span>
+        <span class="logo">\u2731 KISS Sorcar <span class="version">${getVersion()}</span></span>
       </div>
       <div class="status">
         <span class="dot" id="status-dot"></span>
@@ -501,19 +491,6 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
-  }
-
-  private _getVersion(): string {
-    try {
-      const kissRoot = findKissProject();
-      if (kissRoot) {
-        const versionFile = path.join(kissRoot, 'src', 'kiss', '_version.py');
-        const content = fs.readFileSync(versionFile, 'utf-8');
-        const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
-        if (match) return match[1];
-      }
-    } catch { /* ignore */ }
-    return '';
   }
 
   private _getNonce(): string {

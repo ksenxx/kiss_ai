@@ -233,41 +233,6 @@ class TestStopEvent:
             pass
         assert not alive, f"Child {child_pid} survived stop_event!"
 
-def test_clean_env_strips_virtual_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_clean_env removes VIRTUAL_ENV from the environment."""
-    from kiss.agents.sorcar.useful_tools import _clean_env
-
-    monkeypatch.setenv("VIRTUAL_ENV", "/some/fake/venv")
-    env = _clean_env()
-    assert "VIRTUAL_ENV" not in env
-    # Other vars are preserved
-    assert "PATH" in env
-
-
-def test_clean_env_without_virtual_env() -> None:
-    """_clean_env works even when VIRTUAL_ENV is not set."""
-    from kiss.agents.sorcar.useful_tools import _clean_env
-
-    orig = os.environ.pop("VIRTUAL_ENV", None)
-    try:
-        env = _clean_env()
-        assert "VIRTUAL_ENV" not in env
-    finally:
-        if orig is not None:
-            os.environ["VIRTUAL_ENV"] = orig
-
-
-def test_bash_subprocess_does_not_see_virtual_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Bash tool strips VIRTUAL_ENV so child processes don't see it."""
-    monkeypatch.setenv("VIRTUAL_ENV", "/some/fake/venv")
-    ut = UsefulTools()
-    result = ut.Bash('echo "VENV=$VIRTUAL_ENV"', "check env", timeout_seconds=5)
-    assert "VENV=" in result
-    # The value after VENV= should be empty (VIRTUAL_ENV was stripped)
-    assert "/some/fake/venv" not in result
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

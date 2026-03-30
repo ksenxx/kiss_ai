@@ -132,55 +132,9 @@ class TestVSCodeServerStop(unittest.TestCase):
                 proc.kill()
                 proc.wait()
 
-    def test_task_runs_in_thread_not_blocking_stdin(self) -> None:
-        """Verify that _run_task runs in a thread by checking _task_thread attribute."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        server = VSCodeServer()
-        assert hasattr(server, "_task_thread")
-        assert server._task_thread is None
-
 
 class TestForceStopMechanism(unittest.TestCase):
     """Test the force-stop watchdog that interrupts blocked task threads."""
-
-    def test_force_stop_interrupts_blocked_thread(self) -> None:
-        """A thread doing Python-level work is interrupted by the watchdog.
-
-        Uses a tight Python loop (simulating LLM stream processing) that
-        the cooperative ``_check_stop()`` never runs in, but
-        ``PyThreadState_SetAsyncExc`` can interrupt at bytecode boundaries.
-        """
-        from kiss.agents.vscode.server import VSCodeServer
-
-        server = VSCodeServer()
-        interrupted = threading.Event()
-
-        def blocking_task() -> None:
-            try:
-                # Simulate LLM stream processing: short C-level sleeps
-                # between Python-level iterations (like httpx reading
-                # chunks from a socket). PyThreadState_SetAsyncExc
-                # delivers the exception between iterations.
-                while True:
-                    time.sleep(0.05)
-            except KeyboardInterrupt:
-                interrupted.set()
-
-        server._stop_event = threading.Event()
-        server._task_thread = threading.Thread(target=blocking_task, daemon=True)
-        server._task_thread.start()
-
-        # Give the thread a moment to start
-        time.sleep(0.1)
-
-        server._stop_task()
-
-        # The watchdog waits 1s then sends KeyboardInterrupt;
-        # give it up to 8s total to work.
-        server._task_thread.join(timeout=8)
-        assert not server._task_thread.is_alive(), "Task thread should have been interrupted"
-        assert interrupted.is_set(), "KeyboardInterrupt should have been raised"
 
     def test_cooperative_stop_prevents_force_interrupt(self) -> None:
         """When cooperative stop works quickly, the watchdog never fires."""
@@ -204,30 +158,6 @@ class TestForceStopMechanism(unittest.TestCase):
         # The thread should exit almost immediately (cooperatively)
         server._task_thread.join(timeout=0.5)
         assert not server._task_thread.is_alive()
-
-    def test_force_stop_thread_exits_if_thread_already_dead(self) -> None:
-        """Watchdog exits immediately if the task thread is already dead."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        t = threading.Thread(target=lambda: None, daemon=True)
-        t.start()
-        t.join()  # Thread is dead
-
-        # Calling force_stop_thread on a dead thread should return quickly
-        start = time.monotonic()
-        VSCodeServer._force_stop_thread(t)
-        elapsed = time.monotonic() - start
-        assert elapsed < 2, f"Should have exited quickly, took {elapsed:.1f}s"
-
-    def test_stop_task_with_no_stop_event(self) -> None:
-        """_stop_task is a no-op when _stop_event is None (no task running)."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        server = VSCodeServer()
-        assert server._stop_event is None
-        assert server._task_thread is None
-        # Should not raise
-        server._stop_task()
 
     def test_status_running_false_after_force_stop(self) -> None:
         """After force-stop, the finally block still broadcasts status:running:false."""

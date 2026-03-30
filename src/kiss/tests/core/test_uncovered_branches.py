@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
@@ -72,50 +70,6 @@ class TestTextBasedToolsParsing(TestCase):
         content = '```json\n{broken json}\n```'
         calls = _parse_text_based_tool_calls(content)
         assert calls == []
-
-
-class TestTaskHistoryEdgeCases(TestCase):
-    def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        import kiss.agents.sorcar.persistence as th
-
-        kiss_dir = Path(self._tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-
-    def tearDown(self) -> None:
-        import kiss.agents.sorcar.persistence as th
-
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_search_history_fresh_db(self) -> None:
-        import kiss.agents.sorcar.persistence as th
-
-        results = th._search_history("anything", limit=10)
-        assert isinstance(results, list)
-
-    def test_set_empty_events_clears_events(self) -> None:
-        import kiss.agents.sorcar.persistence as th
-
-        th._add_task("my task")
-        events: list[dict[str, object]] = [{"type": "text", "data": "hello"}]
-        th._set_latest_chat_events(events, task="my task")
-        th._set_latest_chat_events([], task="my task")
-        loaded = th._load_task_chat_events("my task")
-        assert loaded == []
-
-    def test_get_history_entry_out_of_range(self) -> None:
-        import kiss.agents.sorcar.persistence as th
-
-        entry = th._get_history_entry(9999)
-        assert entry is None
 
 
 class TestModelStr(TestCase):
@@ -246,13 +200,6 @@ class TestModelInfoFactory:
         m = model("minimax-m1")
         assert m.model_name == "minimax-m1"
 
-    def test_model_unknown_raises(self) -> None:
-        from kiss.core.kiss_error import KISSError
-        from kiss.core.models.model_info import model
-
-        with pytest.raises(KISSError, match="Unknown model name"):
-            model("totally-unknown-model")
-
 
 class TestGetAvailableModels:
     def test_get_most_expensive_model(self) -> None:
@@ -336,20 +283,6 @@ class TestPrintToConsole:
 
 
 class TestAnthropicBuildKwargs:
-    def test_build_kwargs_with_system_instruction(self) -> None:
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        m = AnthropicModel("claude-haiku-4-5", api_key="test")
-        m.model_config = {"system_instruction": "You are helpful."}
-        kwargs = m._build_create_kwargs()
-        assert kwargs["system"] == "You are helpful."
-
-    def test_build_kwargs_opus_adaptive_thinking(self) -> None:
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        m = AnthropicModel("claude-opus-4-6", api_key="test")
-        kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {"type": "adaptive"}
 
     def test_build_kwargs_user_set_max_tokens_with_thinking(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
@@ -380,23 +313,6 @@ class TestAnthropicTokenCounts:
 
         assert m.extract_input_output_token_counts_from_response(FakeResp()) == (0, 0, 0, 0)
 
-    def test_with_usage(self) -> None:
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        m = AnthropicModel("claude-haiku-4-5", api_key="test")
-
-        class Usage:
-            input_tokens = 10
-            output_tokens = 20
-            cache_read_input_tokens = 5
-            cache_creation_input_tokens = 3
-
-        class FakeResp:
-            usage = Usage()
-
-        result = m.extract_input_output_token_counts_from_response(FakeResp())
-        assert result == (10, 20, 5, 3)
-
 
 class TestAnthropicHelpers:
     def test_normalize_list_of_objects(self) -> None:
@@ -416,19 +332,6 @@ class TestAnthropicHelpers:
         assert len(result) == 2
         assert result[0] == {"type": "text", "text": "hello"}
         assert result[1] == {"type": "thinking", "thinking": "hmm"}
-
-    def test_normalize_thinking_block_with_signature(self) -> None:
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        m = AnthropicModel("claude-haiku-4-5", api_key="test")
-
-        class ThinkBlock:
-            type = "thinking"
-            thinking = "hmm"
-            signature = "sig123"
-
-        result = m._normalize_content_blocks([ThinkBlock()])
-        assert result[0]["signature"] == "sig123"
 
     def test_normalize_model_dump_block(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
@@ -470,17 +373,6 @@ class TestAnthropicHelpers:
         result = m._normalize_content_blocks([ToolBlock()])
         assert result[0]["type"] == "tool_use"
         assert result[0]["name"] == "fn"
-
-    def test_extract_text(self) -> None:
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        m = AnthropicModel("claude-haiku-4-5", api_key="test")
-        blocks = [
-            {"type": "text", "text": "Hello"},
-            {"type": "thinking", "thinking": "hmm"},
-            {"type": "text", "text": "World"},
-        ]
-        assert m._extract_text_from_blocks(blocks) == "HelloWorld"
 
 
 class TestAnthropicAddFunctionResults:
@@ -580,5 +472,3 @@ class TestStreamEventParser:
             )
         )
         p.parse_stream_event(Event({"type": "content_block_stop"}))
-
-

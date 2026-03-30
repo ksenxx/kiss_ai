@@ -259,7 +259,6 @@ def _get_tools(self) -> list:
         tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
     if self.web_use_tool is None:
         self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
-    if self.web_use_tool:
         tools.extend(self.web_use_tool.get_tools())
     tools.append(ask_user_question)
     return tools
@@ -271,7 +270,7 @@ def _get_tools(self) -> list:
 
 ### What SorcarAgent Does Not Do
 
-SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 250 lines of logic (excluding the CLI `main()`), and its `run()` method ends with:
+SorcarAgent does not touch the continuation loop, the session boundary mechanism, the summarization logic, or the `finish` function protocol. It does not manage context windows or track progress across sub-sessions. All of that is inherited from `RelentlessAgent`. The subclass is roughly 200 lines of logic (excluding the CLI `main()`), and its `run()` method ends with:
 
 ```python
 return super().run(

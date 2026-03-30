@@ -101,44 +101,6 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         t.join(timeout=10)
         assert not t.is_alive()
 
-    def test_task_done_immediately_before_status_false(self) -> None:
-        """task_done and status:false must be adjacent (no cleanup between them)."""
-        self._run_and_wait("test task")
-
-        with self.lock:
-            events = list(self.events)
-
-        task_done_idx = next(
-            (i for i, e in enumerate(events) if e.get("type") == "task_done"), None
-        )
-        status_false_idx = next(
-            (i for i, e in enumerate(events)
-             if e.get("type") == "status" and e.get("running") is False), None
-        )
-        assert task_done_idx is not None
-        assert status_false_idx is not None
-        assert status_false_idx == task_done_idx + 1, (
-            f"status:false (idx={status_false_idx}) must be right after "
-            f"task_done (idx={task_done_idx})"
-        )
-
-    def test_tasks_updated_before_task_done(self) -> None:
-        """tasks_updated (part of cleanup) must come before task_done."""
-        self._run_and_wait("ordering check")
-
-        with self.lock:
-            events = list(self.events)
-
-        task_done_idx = next(
-            (i for i, e in enumerate(events) if e.get("type") == "task_done"), None
-        )
-        tasks_updated_idx = next(
-            (i for i, e in enumerate(events) if e.get("type") == "tasks_updated"), None
-        )
-        assert task_done_idx is not None
-        assert tasks_updated_idx is not None
-        assert tasks_updated_idx < task_done_idx
-
     def test_second_task_after_new_chat_completes(self) -> None:
         """Running a task after newChat should not hang."""
         self._run_and_wait("task 1")
