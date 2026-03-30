@@ -44,7 +44,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Install and Launch KISS Sorcar
 
-To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
+To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific APY key, but you must provide the ANTHROPIC_API_KEY. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix). After installation, please **restart** Visual Studio Code. If you type 'hi' in the chat window of KISS Sorcar and nothing happens, please send me the file ~/.kiss/.install.log for diagnosis via email.
 
 Open a terminal and use sorcar as a normal shell command. Some examples are:
 
@@ -58,7 +58,7 @@ sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?" # to use a specific model
 echo "Can you find the cheapest non-stop flight from SFO to JFK on June 15 by consulting various websites?" > prompt
 sorcar -f prompt # use contents of a file to send task
 
-sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop slack app?' 
+sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop slack app?'
 
 sorcar -t 'Can you write a thorough and precise plan in PLAN.md to simplify the project code?'
 sorcar -t 'I see some issues and bugs in PLAN.md.  Can you fix them?'  # lie to the agent to force improve the plan
