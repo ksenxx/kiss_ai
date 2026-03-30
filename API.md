@@ -1719,7 +1719,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.channels.slack_agent` — *Slack Agent — SorcarAgent extension with Slack API tools.*
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.slack_agent` — *Slack Agent — StatefulSorcarAgent extension with Slack API tools.*
 
 ##### `class SlackChannelBackend` — ChannelBackend implementation for Slack.
 
@@ -1881,11 +1881,9 @@ ______________________________________________________________________
 
   - **Returns:** List of callable tool methods for Slack API operations.
 
-##### `class SlackAgent(SorcarAgent)`
+##### `class SlackAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent() -> None`
-
-- **run** — Run the Slack agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
 ______________________________________________________________________
 
@@ -2599,7 +2597,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.slack_agent` — *Slack Agent — SorcarAgent extension with Slack API tools.*
+#### `kiss.channels.slack_agent` — *Slack Agent — StatefulSorcarAgent extension with Slack API tools.*
 
 ##### `class SlackChannelBackend` — ChannelBackend implementation for Slack.
 
@@ -2761,11 +2759,9 @@ ______________________________________________________________________
 
   - **Returns:** List of callable tool methods for Slack API operations.
 
-##### `class SlackAgent(SorcarAgent)`
+##### `class SlackAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent() -> None`
-
-- **run** — Run the Slack agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
 ______________________________________________________________________
 
