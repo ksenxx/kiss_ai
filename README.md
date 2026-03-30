@@ -147,7 +147,7 @@ print(final)
 
 **That's it.** Each agent can use a different model. Each agent saves its own trajectory. And you compose them with the most powerful orchestration tool ever invented: **regular Python code**.
 
-No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions.
+No special orchestration framework needed. No message buses. No complex state machines. Just Python functions calling Python functions. 
 
 ## 💡 Key Features and Principles behind KISS and Sorcar
 
