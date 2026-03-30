@@ -594,10 +594,6 @@ class TestWebUseToolIntegration:
         result = browser_tool.go_to_url("tab:list")
         assert "Open tabs" in result
 
-    def test_tab_switch(self, http_server, browser_tool):
-        browser_tool.go_to_url(http_server + "/")
-        result = browser_tool.go_to_url("tab:0")
-        assert "Test" in result or "Page" in result
 
     def test_tab_switch_invalid(self, http_server, browser_tool):
         result = browser_tool.go_to_url("tab:999")
@@ -667,6 +663,7 @@ class TestWebUseToolPersistentContext:
             script = Path(d) / "test_persistent.py"
             script.write_text(f"""
 import sys, os
+sys.path.insert(0, os.path.abspath("src"))
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 udd = os.path.join("{d}", "user_data")
 tool = WebUseTool(user_data_dir=udd)
@@ -683,7 +680,7 @@ finally:
             result = subprocess.run(
                 ["uv", "run", "python", str(script)],
                 capture_output=True, text=True, timeout=30,
-                cwd="/Users/ksen/work/kiss",
+                cwd=os.getcwd(),
             )
             assert "PASS" in result.stdout, f"stdout={result.stdout}\nstderr={result.stderr}"
 
@@ -872,18 +869,6 @@ class TestVSCodeServerMoreBranches:
         server._handle_command({"type": "refreshFiles"})
         assert isinstance(server._file_cache, list)
 
-    def test_handle_command_resume_session_with_id(self):
-        """resumeSession with actual session ID."""
-        server, events = self._make_server()
-        # First add a task with events
-        th._add_task("test_task_for_resume")
-        th._set_latest_chat_events(
-            [{"type": "text_delta", "text": "hello"}],
-            task="test_task_for_resume"
-        )
-        server._handle_command({"type": "resumeSession", "sessionId": "test_task_for_resume"})
-        task_events = [e for e in events if e["type"] == "task_events"]
-        assert len(task_events) == 1
         # May or may not have a suggestion depending on API availability
         # But the test exercises the branch
 

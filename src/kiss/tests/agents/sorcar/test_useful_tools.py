@@ -237,5 +237,16 @@ class TestStopEvent:
         assert not alive, f"Child {child_pid} survived stop_event!"
 
 
+class TestStreamingTimeout:
+    """Test that streaming Bash correctly reports timeout."""
+
+    def test_streaming_bash_timeout(self, temp_test_dir):
+        """Streaming Bash must return timeout error when command exceeds timeout."""
+        streamed: list[str] = []
+        ut = UsefulTools(stream_callback=streamed.append)
+        result = ut.Bash("sleep 10", "should timeout", timeout_seconds=0.5)
+        assert "timeout" in result.lower()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
