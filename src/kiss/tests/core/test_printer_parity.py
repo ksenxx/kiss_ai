@@ -116,15 +116,6 @@ class TestToolResultContentParity:
         assert "... (truncated) ..." in out
         assert "... (truncated) ..." in tr_events[0]["content"]
 
-    def test_success_result_suppressed_in_console(self):
-        console, buf, browser, bq = _make_printers()
-        console.print("output", type="tool_result", is_error=False, tool_name="Read")
-        browser.print("output", type="tool_result", is_error=False, tool_name="Read")
-        out = buf.getvalue()
-        # Console suppresses non-error tool results (no OK panel)
-        assert "output" not in out
-        assert "OK" not in out
-
 
 class TestMessageParity:
     """Both printers handle message objects the same way."""

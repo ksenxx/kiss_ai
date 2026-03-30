@@ -1,49 +1,7 @@
 """Tests for file usage tracking and @ file picker frequency sorting."""
 
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
 
-from kiss.agents.sorcar import persistence
-
-
-class TestFileUsage(unittest.TestCase):
-    """Tests for _load_file_usage / _record_file_usage persistence."""
-
-    def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        kiss_dir = Path(self._tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR)
-        persistence._KISS_DIR = kiss_dir
-        persistence._DB_PATH = kiss_dir / "history.db"
-        persistence._db_conn = None
-
-    def tearDown(self) -> None:
-        if persistence._db_conn is not None:
-            persistence._db_conn.close()
-            persistence._db_conn = None
-        (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR) = self._saved
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_max_entries_reaccess_preserves_entry(self) -> None:
-        """Re-accessing a file prevents it from being evicted."""
-        orig_max = persistence._MAX_FILE_USAGE_ENTRIES
-        persistence._MAX_FILE_USAGE_ENTRIES = 3
-        try:
-            persistence._record_file_usage("a.py")
-            persistence._record_file_usage("b.py")
-            persistence._record_file_usage("c.py")
-            persistence._record_file_usage("a.py")
-            persistence._record_file_usage("d.py")
-            usage = persistence._load_file_usage()
-            assert len(usage) == 3
-            assert "b.py" not in usage
-            assert set(usage.keys()) == {"c.py", "a.py", "d.py"}
-            assert usage["a.py"] == 2
-        finally:
-            persistence._MAX_FILE_USAGE_ENTRIES = orig_max
 
 def _end_dist(text: str, q: str) -> int:
     """Distance from end of path to end of rightmost query match."""

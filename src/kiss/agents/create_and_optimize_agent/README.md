@@ -196,7 +196,6 @@ Data Structures:
         - report: ImprovementReport tracking implemented/failed ideas
         - metrics: {success, tokens_used, execution_time, ...}
         - id, generation, parent_ids (for lineage tracking)
-        - feedback: Feedback from evaluation
 
     dominates(A, B):
         # A dominates B if A is at least as good in all metrics
@@ -236,7 +235,6 @@ Algorithm EVOLVE():
 
        b. IF new_variant created successfully:
           - Evaluate: load agent.py, call agent_run(task_description)
-          - Store feedback from evaluation result
           - Update pareto_frontier:
               - Reject if dominated by any existing variant
               - Remove variants dominated by new_variant

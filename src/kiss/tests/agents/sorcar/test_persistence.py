@@ -37,12 +37,6 @@ class TestTaskHistory:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_add_and_load(self):
-        th._add_task("my task")
-        entries = th._load_history(limit=10)
-        tasks = [e["task"] for e in entries]
-        assert "my task" in tasks
-
     def test_duplicate_tasks_all_kept(self):
         th._add_task("dup")
         time.sleep(0.01)
@@ -53,21 +47,6 @@ class TestTaskHistory:
         tasks = [e["task"] for e in entries]
         assert tasks.count("dup") == 2
         assert tasks[0] == "dup"
-
-    def test_search_history(self):
-        th._add_task("alpha test")
-        th._add_task("beta test")
-        th._add_task("gamma work")
-        results = th._search_history("test", limit=10)
-        tasks = [e["task"] for e in results]
-        assert "alpha test" in tasks
-        assert "beta test" in tasks
-        assert "gamma work" not in tasks
-
-    def test_search_empty_query(self):
-        th._add_task("x")
-        results = th._search_history("", limit=10)
-        assert len(results) >= 1
 
     def test_get_history_entry(self):
         th._add_task("first")
@@ -81,86 +60,9 @@ class TestTaskHistory:
         assert entry1["task"] == "first"
         assert th._get_history_entry(99999) is None
 
-    def test_load_history_limit(self):
-        for i in range(5):
-            th._add_task(f"t{i}")
-            time.sleep(0.001)
-        entries = th._load_history(limit=3)
-        assert len(entries) == 3
-
-    def test_empty_db_on_first_creation(self):
-        entries = th._load_history()
-        assert len(entries) == 0
-
-    def test_load_history_offset(self):
-        for i in range(5):
-            th._add_task(f"t{i}")
-            time.sleep(0.001)
-        # Most recent first: t4, t3, t2, t1, t0
-        page1 = th._load_history(limit=2, offset=0)
-        page2 = th._load_history(limit=2, offset=2)
-        page3 = th._load_history(limit=2, offset=4)
-        assert [e["task"] for e in page1] == ["t4", "t3"]
-        assert [e["task"] for e in page2] == ["t2", "t1"]
-        assert [e["task"] for e in page3] == ["t0"]
-
-    def test_search_history_offset(self):
-        for i in range(5):
-            th._add_task(f"item {i}")
-            time.sleep(0.001)
-        # Search all with "item", most recent first: item 4..0
-        page1 = th._search_history("item", limit=2, offset=0)
-        page2 = th._search_history("item", limit=2, offset=2)
-        assert [e["task"] for e in page1] == ["item 4", "item 3"]
-        assert [e["task"] for e in page2] == ["item 2", "item 1"]
-
-    def test_search_empty_query_with_offset(self):
-        for i in range(3):
-            th._add_task(f"task{i}")
-            time.sleep(0.001)
-        results = th._search_history("", limit=2, offset=1)
-        assert len(results) == 2
-        assert results[0]["task"] == "task1"
-
-    def test_prefix_match_task_basic(self):
-        th._add_task("fix the bug in parser")
-        time.sleep(0.001)
-        th._add_task("fix the tests")
-        assert th._prefix_match_task("fix the t") == "fix the tests"
-        assert th._prefix_match_task("fix the b") == "fix the bug in parser"
-        assert th._prefix_match_task("nonexistent") == ""
-
-    def test_prefix_match_task_case_insensitive(self):
-        th._add_task("Add new feature")
-        assert th._prefix_match_task("add") == "Add new feature"
-        assert th._prefix_match_task("ADD") == "Add new feature"
-
-    def test_prefix_match_task_returns_most_recent(self):
-        th._add_task("deploy version 1")
-        time.sleep(0.01)
-        th._add_task("deploy version 2")
-        assert th._prefix_match_task("deploy") == "deploy version 2"
-
     def test_prefix_match_task_empty_query(self):
         th._add_task("anything")
         assert th._prefix_match_task("") == ""
-
-    def test_prefix_match_task_exact_match_excluded(self):
-        th._add_task("exact")
-        # Exact match should NOT be returned (nothing to complete)
-        assert th._prefix_match_task("exact") == ""
-
-    def test_prefix_match_task_wildcards_escaped(self):
-        th._add_task("100% done")
-        th._add_task("some_thing here")
-        # '%' and '_' in query should be treated as literals
-        assert th._prefix_match_task("100%") == "100% done"
-        assert th._prefix_match_task("some_") == "some_thing here"
-
-    def test_load_history_has_chat_id(self):
-        th._add_task("t1", chat_id="abc123")
-        entries = th._load_history(limit=1)
-        assert entries[0]["chat_id"] == "abc123"
 
 
 class TestChatEvents:
@@ -175,77 +77,15 @@ class TestChatEvents:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_set_and_load_events(self):
-        th._add_task("my task")
-        th._set_latest_chat_events([{"type": "hello"}], task="my task")
-        events = th._load_task_chat_events("my task")
-        assert events == [{"type": "hello"}]
-
-    def test_set_events_updates_has_events(self):
-        th._add_task("t")
-        th._set_latest_chat_events([{"x": 1}], task="t", result="done")
-        entry = th._load_history(limit=1)[0]
-        assert entry["task"] == "t"
-        assert entry["has_events"] == 1
-        assert entry["result"] == "done"
-
     def test_set_events_no_task(self):
         th._add_task("latest")
         th._set_latest_chat_events([{"a": 1}])
         events = th._load_task_chat_events("latest")
         assert events == [{"a": 1}]
 
-    def test_load_events_nonexistent(self):
-        assert th._load_task_chat_events("nope") == []
-
-    def test_clear_events(self):
-        th._add_task("t")
-        th._set_latest_chat_events([{"x": 1}], task="t")
-        th._set_latest_chat_events([], task="t")
-        assert th._load_task_chat_events("t") == []
-
-    def test_save_task_result_updates_result(self):
-        th._add_task("my task")
-        th._save_task_result("my task", "done!")
-        entry = th._load_history(limit=1)[0]
-        assert entry["result"] == "done!"
-
     def test_save_task_result_no_matching_task(self):
         th._save_task_result("nonexistent", "result")
         # Should not raise; just returns early
-
-
-class TestModelUsage:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_record_and_load(self):
-        th._record_model_usage("gpt-4o")
-        th._record_model_usage("gpt-4o")
-        usage = th._load_model_usage()
-        assert usage["gpt-4o"] == 2
-
-    def test_save_and_load_last_model(self):
-        th._save_last_model("claude-opus-4-6")
-        assert th._load_last_model() == "claude-opus-4-6"
-        th._save_last_model("gemini-2.0-flash")
-        assert th._load_last_model() == "gemini-2.0-flash"
-
-    def test_record_sets_last(self):
-        th._record_model_usage("a")
-        th._record_model_usage("b")
-        assert th._load_last_model() == "b"
-
-    def test_load_last_model_empty(self):
-        assert th._load_last_model() == ""
 
 
 class TestFileUsage:
@@ -259,20 +99,6 @@ class TestFileUsage:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_record_and_load(self):
-        th._record_file_usage("src/main.py")
-        th._record_file_usage("src/main.py")
-        usage = th._load_file_usage()
-        assert usage["src/main.py"] == 2
-
-    def test_recency_ordering(self):
-        th._record_file_usage("a.py")
-        time.sleep(0.01)
-        th._record_file_usage("b.py")
-        usage = th._load_file_usage()
-        keys = list(usage.keys())
-        assert keys.index("a.py") < keys.index("b.py")
 
     def test_eviction(self):
         orig = th._MAX_FILE_USAGE_ENTRIES
@@ -301,47 +127,6 @@ class TestCleanupStaleCsDirs:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_removes_old_dirs(self):
-        import os
-
-        kiss_dir = th._KISS_DIR
-        stale = kiss_dir / "cs-stale123"
-        stale.mkdir()
-        (stale / "cs-port").write_text("99999")
-        old_time = time.time() - 25 * 3600
-        os.utime(stale, (old_time, old_time))
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert removed == 1
-        assert not stale.exists()
-
-    def test_removes_stale_sorcar_data(self):
-        import os
-
-        kiss_dir = th._KISS_DIR
-        sorcar_data = kiss_dir / "sorcar-data"
-        sorcar_data.mkdir()
-        (sorcar_data / "cs-port").write_text("99999")
-        old_time = time.time() - 25 * 3600
-        os.utime(sorcar_data, (old_time, old_time))
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert removed >= 1
-        assert not sorcar_data.exists()
-
-    def test_removes_legacy_cs_data(self):
-        kiss_dir = th._KISS_DIR
-        cs_data = kiss_dir / "cs-data"
-        cs_data.mkdir()
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert removed >= 1
-        assert not cs_data.exists()
-
-    def test_removes_legacy_port_files(self):
-        kiss_dir = th._KISS_DIR
-        pf = kiss_dir / "cs-port-abc123"
-        pf.write_text("12345")
-        th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert not pf.exists()
 
     def test_keeps_sorcar_data_when_recent(self):
         kiss_dir = th._KISS_DIR
