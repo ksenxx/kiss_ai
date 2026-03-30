@@ -229,19 +229,27 @@ export async function ensureDependencies(): Promise<void> {
 
   log('=== Dependency check finished ===');
 
-  // Prompt for missing API keys
-  await ensureApiKeys();
+  // Prompt for missing API keys (returns true when required keys are set)
+  const apiKeysReady = await ensureApiKeys();
 
   // Show restart notification only after all API keys have been collected
+  // and only when the required ANTHROPIC_API_KEY is available.
   if (showRestartNotification) {
-    vscode.window.showInformationMessage(
-      'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
-      'Restart VS Code'
-    ).then(choice => {
-      if (choice === 'Restart VS Code') {
-        vscode.commands.executeCommand('workbench.action.reloadWindow');
-      }
-    });
+    if (apiKeysReady) {
+      vscode.window.showInformationMessage(
+        'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
+        'Restart VS Code'
+      ).then(choice => {
+        if (choice === 'Restart VS Code') {
+          vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+      });
+    } else {
+      vscode.window.showWarningMessage(
+        'KISS Sorcar: Installation complete, but an Anthropic API key is required. ' +
+        'Set ANTHROPIC_API_KEY in your environment or restart VS Code to be prompted again.'
+      );
+    }
   }
 }
 
@@ -925,8 +933,19 @@ async function promptForApiKey(
  * Ensure all LLM API keys are configured.
  * Prompts the user for each missing key. Validates the Anthropic key.
  * Saves provided keys to the user's shell rc file and current process env.
+ * Writes a marker file (~/.kiss/.api-keys-prompted) after the first prompt
+ * cycle so that users are not re-prompted on subsequent VS Code restarts.
+ * Returns true when the required ANTHROPIC_API_KEY is available.
  */
-async function ensureApiKeys(): Promise<void> {
+async function ensureApiKeys(): Promise<boolean> {
+  const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
+
+  // If the user has already been prompted (marker exists), skip prompting.
+  if (fs.existsSync(markerPath)) {
+    log('API keys already prompted (marker exists), skipping prompts');
+    return !!process.env.ANTHROPIC_API_KEY;
+  }
+
   const rcPath = getShellRcPath();
 
   const keys = [
@@ -952,9 +971,16 @@ async function ensureApiKeys(): Promise<void> {
     if (key) {
       process.env[envName] = key;
       addToShellRc(rcPath, envName, key);
-      vscode.window.showInformationMessage(
-        `${displayName} saved to ~/${path.basename(rcPath)}`
-      );
+      log(`${displayName} saved to ~/${path.basename(rcPath)}`);
     }
   }
+
+  // Write marker so prompts don't reappear on next restart
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
+    log('API key prompt marker written');
+  } catch { /* ignore */ }
+
+  return !!process.env.ANTHROPIC_API_KEY;
 }
