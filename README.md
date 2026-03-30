@@ -44,7 +44,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 ## Install and Launch KISS Sorcar
 
-To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific APY key, but you must provide the ANTHROPIC_API_KEY. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix). After installation, please **restart** Visual Studio Code. If you type 'hi' in the chat window of KISS Sorcar and nothing happens, please send me the file ~/.kiss/.install.log for diagnosis via email.
+To Install KISS Sorcar, keep your ANTHROPIC_API_KEY handy and open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific APY key, but you must provide the ANTHROPIC_API_KEY. You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix). After installation, please **restart** Visual Studio Code. If you type 'hi' in the chat window of KISS Sorcar and nothing happens, please send me the file ~/.kiss/.install.log for diagnosis via email.
 
 Open a terminal and use sorcar as a normal shell command. Some examples are:
 

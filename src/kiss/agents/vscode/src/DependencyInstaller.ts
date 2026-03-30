@@ -77,6 +77,8 @@ export async function ensureDependencies(): Promise<void> {
     venvExists = false;
   }
 
+  let showRestartNotification = false;
+
   // Fast path: everything looks ready, ensure playwright in background
   if (uvPath && venvExists) {
     log('Fast path: uv and .venv present, ensuring Playwright in background');
@@ -196,17 +198,7 @@ export async function ensureDependencies(): Promise<void> {
       }
     );
 
-    // Show restart notification only when installation actually succeeded
-    if (success) {
-      vscode.window.showInformationMessage(
-        'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
-        'Restart VS Code'
-      ).then(choice => {
-        if (choice === 'Restart VS Code') {
-          vscode.commands.executeCommand('workbench.action.reloadWindow');
-        }
-      });
-    }
+    showRestartNotification = !!success;
   }
 
   // Install CLI wrapper so `sorcar` is available from any terminal
@@ -239,6 +231,18 @@ export async function ensureDependencies(): Promise<void> {
 
   // Prompt for missing API keys
   await ensureApiKeys();
+
+  // Show restart notification only after all API keys have been collected
+  if (showRestartNotification) {
+    vscode.window.showInformationMessage(
+      'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
+      'Restart VS Code'
+    ).then(choice => {
+      if (choice === 'Restart VS Code') {
+        vscode.commands.executeCommand('workbench.action.reloadWindow');
+      }
+    });
+  }
 }
 
 /**
@@ -879,7 +883,14 @@ async function promptForApiKey(
     });
 
     if (key === undefined) {
-      return undefined; // User pressed Escape
+      if (!optional) {
+        const choice = await vscode.window.showWarningMessage(
+          `${displayName} is required for KISS Sorcar to function.`,
+          'Enter Key', 'Skip'
+        );
+        if (choice === 'Enter Key') { continue; }
+      }
+      return undefined;
     }
 
     const trimmed = key.trim();
@@ -919,14 +930,14 @@ async function ensureApiKeys(): Promise<void> {
   const rcPath = getShellRcPath();
 
   const keys = [
-    { envName: 'ANTHROPIC_API_KEY', displayName: 'Anthropic API Key', placeholder: 'sk-ant-...', validate: true },
-    { envName: 'OPENAI_API_KEY', displayName: 'OpenAI API Key', placeholder: 'sk-...', validate: false },
-    { envName: 'GEMINI_API_KEY', displayName: 'Gemini API Key', placeholder: 'AI...', validate: false },
-    { envName: 'TOGETHER_API_KEY', displayName: 'Together API Key', placeholder: 'tok-...', validate: false },
-    { envName: 'OPENROUTER_API_KEY', displayName: 'OpenRouter API Key', placeholder: 'sk-or-...', validate: false },
+    { envName: 'ANTHROPIC_API_KEY', displayName: 'Anthropic API Key', placeholder: 'sk-ant-...', validate: true, optional: false },
+    { envName: 'OPENAI_API_KEY', displayName: 'OpenAI API Key', placeholder: 'sk-...', validate: false, optional: true },
+    { envName: 'GEMINI_API_KEY', displayName: 'Gemini API Key', placeholder: 'AI...', validate: false, optional: true },
+    { envName: 'TOGETHER_API_KEY', displayName: 'Together API Key', placeholder: 'tok-...', validate: false, optional: true },
+    { envName: 'OPENROUTER_API_KEY', displayName: 'OpenRouter API Key', placeholder: 'sk-or-...', validate: false, optional: true },
   ];
 
-  for (const { envName, displayName, placeholder, validate } of keys) {
+  for (const { envName, displayName, placeholder, validate, optional } of keys) {
     if (process.env[envName]) {
       continue; // Already set in environment
     }
@@ -935,7 +946,7 @@ async function ensureApiKeys(): Promise<void> {
       displayName,
       placeholder,
       validate ? validateAnthropicKey : undefined,
-      true
+      optional
     );
 
     if (key) {
