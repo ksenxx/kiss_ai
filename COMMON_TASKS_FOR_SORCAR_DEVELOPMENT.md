@@ -38,7 +38,7 @@ timeout.
 
 ## build and deploy vscode extension
 
-build, package, and install the KISS Sorcar VS Code extension. Run 'cd src/kiss/agents/vscode && npm run compile && npm run copy-kiss && npm run package' to create the .vsix file. Then install it with 'code --install-extension src/kiss/agents/vscode/kiss-sorcar-\*.vsix --force'.
+build, package, and install the KISS Sorcar VS Code extension. Run 'cd src/kiss/agents/vscode && npm run compile && npm run copy-kiss && npm run package' to create the .vsix file. Then install it with 'code --install-extension src/kiss/agents/vscode/kiss-sorcar.vsix --force'.
 
 ## app agent creation
 
@@ -52,7 +52,7 @@ To validate that the code server creates a data directory for an instance of sor
 
 When I click a recent item in the welcome window of the sorcar (run with 'uv run sorcar'), you MUST not open the list of task history in the UI.
 
-When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorcar, then whatever is printed in the chat window of the sorcar gets copied to the chat window of the newly launched sorcar. Can you validate this bugs by launching sorcar and fix it without breaking any other functionality or feature.
+When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorcar, then whatever is printed in the chat window of the sorcar gets copiedvv to the chat window of the newly launched sorcar. Can you validate this bugs by launching sorcar and fix it without breaking any other functionality or feature.
 
 You have implemented a restart logic for code-server in case the code-server shuts down, but I want you to investigate the root cause of why the code-server is shutting down intermittently in the first place. See if you can fix the intermittent shutdown of the code server without changing any functionality in the project except for the fix.
 
