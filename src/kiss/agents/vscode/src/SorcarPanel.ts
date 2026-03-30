@@ -124,7 +124,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this.sendToWebview({
       type: 'activeFileInfo',
       isPrompt,
-      filename: isPrompt ? fpath.split('/').pop() || '' : '',
+      filename: isPrompt ? path.basename(fpath) : '',
       path: fpath,
     } as ToWebviewMessage);
   }
@@ -420,7 +420,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         <div id="input-wrap">
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
-            <textarea id="task-input" placeholder="Ask anything... (@ for files, ⌘D toggle between editor and chat, ⌘T new chat, ⌘L run selected text in editor as task)" rows="1"></textarea>
+            <textarea id="task-input" placeholder="Ask anything... (@ for files, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}D toggle between editor and chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}T new chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}L run selected text in editor as task)" rows="1"></textarea>
             <button id="input-clear-btn" style="display:none;">&times;</button>
           </div>
         </div>

@@ -7,6 +7,7 @@
 
 import json
 import logging
+import shutil
 import sys
 import threading
 import time
@@ -32,6 +33,23 @@ yaml.add_representer(str, _str_presenter)
 
 _project_dir = Path(__file__).parent.parent.parent.parent
 SYSTEM_PROMPT = (_project_dir / "SYSTEM.md").read_text()
+
+if sys.platform == "win32":
+    if shutil.which("bash"):
+        SYSTEM_PROMPT += (
+            "\n\n## Windows Environment\n"
+            "- This machine runs Windows with Git Bash available. "
+            "Use bash commands as normal.\n"
+        )
+    else:
+        SYSTEM_PROMPT += (
+            "\n\n## Windows Environment\n"
+            "- This machine runs Windows without bash. "
+            "Use PowerShell syntax for the Bash tool. "
+            "Examples: `Get-ChildItem` instead of `ls`, "
+            "`Select-String` instead of `grep`, "
+            "`Get-Content` instead of `cat`.\n"
+        )
 
 _sorcar_path = Path("SORCAR.md")
 if _sorcar_path.exists():

@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -250,6 +251,7 @@ class TestUsefulToolsBranches:
         result = _split_respecting_quotes("a\\;b;c", pat)
         assert result == ["a\\;b", "c"]
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses 'true' command)")
     def test_kill_process_group_already_dead(self):
         """kill_process_group handles already-dead process."""
         p = subprocess.Popen(["true"], start_new_session=True)
@@ -780,6 +782,7 @@ class TestUsefulToolsMoreBranches:
         result = _truncate_output(big, 45)
         assert "truncated" in result
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses chmod)")
     def test_edit_exception(self):
         """Edit on a directory should raise an error."""
         ut = UsefulTools()
