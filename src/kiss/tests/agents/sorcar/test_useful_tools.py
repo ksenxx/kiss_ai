@@ -3,6 +3,7 @@
 import os
 import shutil
 import signal
+import sys
 import tempfile
 from pathlib import Path
 
@@ -59,6 +60,7 @@ def any_tools(request, temp_test_dir):
     if request.param:
         return UsefulTools(stream_callback=lambda _: None), temp_test_dir
     return UsefulTools(), temp_test_dir
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
 class TestAdversarial:
     """Adversarial tests to try to break the Popen/killpg changes."""
 
@@ -139,6 +141,7 @@ class TestBugs:
         assert "exec" in names
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
 class TestStopEvent:
     """Tests that stop_event kills child processes promptly."""
 

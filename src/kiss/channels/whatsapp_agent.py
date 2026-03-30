@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -86,7 +87,8 @@ def _save_config(access_token: str, phone_number_id: str, waba_id: str = "") -> 
         "phone_number_id": phone_number_id.strip(),
         "waba_id": waba_id.strip(),
     }, indent=2))
-    path.chmod(0o600)
+    if sys.platform != "win32":
+        path.chmod(0o600)
 
 
 def _clear_config() -> None:

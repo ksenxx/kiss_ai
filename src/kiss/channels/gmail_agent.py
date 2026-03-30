@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import sys
 from collections.abc import Callable
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -95,7 +96,8 @@ def _save_credentials(creds: Credentials) -> None:
     path = _token_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(creds.to_json())
-    path.chmod(0o600)
+    if sys.platform != "win32":
+        path.chmod(0o600)
 
 
 def _clear_credentials() -> None:

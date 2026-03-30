@@ -91,12 +91,14 @@ export function findKissProject(): string | null {
  */
 export function findUvPath(): string | null {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const suffix = process.platform === 'win32' ? '.exe' : '';
   const candidates = [
-    path.join(homeDir, '.local', 'bin', 'uv'),
-    path.join(homeDir, '.cargo', 'bin', 'uv'),
-    '/usr/local/bin/uv',
-    '/opt/homebrew/bin/uv',
+    path.join(homeDir, '.local', 'bin', `uv${suffix}`),
+    path.join(homeDir, '.cargo', 'bin', `uv${suffix}`),
   ];
+  if (process.platform !== 'win32') {
+    candidates.push('/usr/local/bin/uv', '/opt/homebrew/bin/uv');
+  }
   for (const candidate of candidates) {
     try {
       if (fs.existsSync(candidate)) return candidate;
@@ -263,12 +265,17 @@ export class AgentProcess extends EventEmitter {
       this.removeAllListeners();
       // Close stdin to unblock the Python server's main loop
       try { proc.stdin?.end(); } catch { /* ignored */ }
-      // SIGTERM as backup
-      try { proc.kill('SIGTERM'); } catch { /* ignored */ }
-      // SIGKILL after 2s if the process is still alive
-      setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch { /* ignored */ }
-      }, 2000);
+      if (process.platform === 'win32') {
+        // On Windows, SIGTERM/SIGKILL both map to TerminateProcess — one call suffices
+        try { proc.kill(); } catch { /* ignored */ }
+      } else {
+        // SIGTERM as backup
+        try { proc.kill('SIGTERM'); } catch { /* ignored */ }
+        // SIGKILL after 2s if the process is still alive
+        setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch { /* ignored */ }
+        }, 2000);
+      }
     } else {
       this.removeAllListeners();
     }
