@@ -172,7 +172,7 @@ class AnthropicModel(Model):
             self.model_name.startswith(("claude-opus-4", "claude-sonnet-4", "claude-haiku-4"))
         ):
             if not user_set_max_tokens:
-                max_tokens = 64000 if self.model_name.startswith("claude-haiku-4") else 65536
+                max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
             if self.model_name.startswith("claude-opus-4-6"):
                 kwargs["thinking"] = {"type": "adaptive"}
             else:
