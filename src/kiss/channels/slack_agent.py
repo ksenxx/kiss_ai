@@ -946,8 +946,8 @@ def main() -> None:
 
     if len(sys.argv) <= 1:
         print(
-            "Usage: slack_agent [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n]"
+            "Usage: kiss-slack [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--daemon]"
         )
         sys.exit(1)
 
@@ -956,7 +956,46 @@ def main() -> None:
         "-n", "--new", action="store_true",
         help="Start a new chat session",
     )
+    parser.add_argument(
+        "--daemon", action="store_true",
+        help="Run as background daemon, monitoring Slack for inbound messages",
+    )
+    parser.add_argument(
+        "--daemon-channel", default="",
+        help="Channel name to monitor in daemon mode",
+    )
+    parser.add_argument(
+        "--allow-users", default="",
+        help="Comma-separated user IDs to allow in daemon mode",
+    )
     args = parser.parse_args()
+
+    if args.daemon:
+        from kiss.channels.background_agent import ChannelDaemon
+
+        backend = SlackChannelBackend()
+        token = _load_token()
+        if not token:
+            print("Not authenticated. Run: kiss-slack -t 'authenticate'")
+            sys.exit(1)
+        backend._client = WebClient(token=token, retry_handlers=[])
+        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
+        daemon = ChannelDaemon(
+            backend=backend,
+            channel_name=args.daemon_channel,
+            agent_name="Slack Background Agent",
+            extra_tools=backend.get_tool_methods(),
+            model_name=args.model_name,
+            max_budget=args.max_budget,
+            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
+            allow_users=allow_users,
+        )
+        print("Starting Slack daemon... (Ctrl+C to stop)")
+        try:
+            daemon.run()
+        except KeyboardInterrupt:
+            print("Daemon stopped.")
+        return
 
     agent = SlackAgent()
 

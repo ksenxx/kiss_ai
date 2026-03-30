@@ -1,4 +1,4 @@
-"""WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.
+"""WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.
 
 Provides authenticated access to WhatsApp via the Meta Graph API.
 Handles authentication (reading config from disk or prompting the user
@@ -17,14 +17,22 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import sys
-from collections.abc import Callable
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import (
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +115,9 @@ def _api_request(
     method: str,
     url: str,
     access_token: str,
-    json_body: dict | None = None,
-    data: dict | None = None,
-    files: dict | None = None,
+    json_body: dict | None = None,  # type: ignore[type-arg]
+    data: dict | None = None,  # type: ignore[type-arg]
+    files: dict | None = None,  # type: ignore[type-arg]
 ) -> dict[str, Any]:
     """Make an authenticated request to the Meta Graph API.
 
@@ -140,32 +148,240 @@ def _api_request(
 
 
 # ---------------------------------------------------------------------------
-# WhatsApp API tool functions
+# WhatsAppChannelBackend — used by background_agent.py and WhatsAppAgent tools
 # ---------------------------------------------------------------------------
 
 
-def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) -> list:
-    """Create WhatsApp API tool functions bound to the given credentials.
+class WhatsAppChannelBackend:
+    """ChannelBackend implementation for WhatsApp Business Cloud API.
 
-    Args:
-        access_token: Meta Graph API access token.
-        phone_number_id: WhatsApp Business phone number ID.
-        waba_id: WhatsApp Business Account ID (may be empty).
+    Provides channel monitoring via webhook queue, message sending,
+    and reply waiting for the background agent. Implements the
+    ``ChannelBackend`` protocol defined in ``kiss.channels``.
 
-    Returns:
-        List of callable tool functions for WhatsApp operations.
+    For the daemon loop, uses a webhook queue pattern: an embedded HTTP
+    server receives POST events from the WhatsApp platform and buffers
+    them; ``poll_messages()`` drains this buffer.
     """
-    msg_url = f"{_GRAPH_API_BASE}/{phone_number_id}/messages"
 
-    def _send(payload: dict) -> str:
-        result = _api_request("POST", msg_url, access_token, json_body=payload)
+    def __init__(self) -> None:
+        self._access_token: str = ""
+        self._phone_number_id: str = ""
+        self._waba_id: str = ""
+        self._connection_info: str = ""
+        self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._webhook_server: HTTPServer | None = None
+
+    def connect(self) -> bool:
+        """Authenticate with WhatsApp using stored config and start webhook server.
+
+        Returns:
+            True on success, False on failure.
+        """
+        cfg = _load_config()
+        if not cfg:
+            self._connection_info = (
+                "No WhatsApp config found. Please authenticate first."
+            )
+            return False
+        self._access_token = cfg["access_token"]
+        self._phone_number_id = cfg["phone_number_id"]
+        self._waba_id = cfg.get("waba_id", "")
+
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}?fields=verified_name,display_phone_number"
+        result = _api_request("GET", url, self._access_token)
         if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        messages = result.get("messages", [])  # pragma: no cover – needs live API
-        msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
-        return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+            self._connection_info = f"WhatsApp auth failed: {result['error']}"
+            return False
 
-    def send_text_message(to: str, body: str, preview_url: bool = False) -> str:
+        self._connection_info = (
+            f"Authenticated as {result.get('verified_name', '')} "
+            f"({result.get('display_phone_number', '')})"
+        )
+        self._start_webhook_server()
+        return True
+
+    def _start_webhook_server(self, port: int = 8080) -> None:
+        """Start the webhook HTTP server in a background thread.
+
+        Args:
+            port: Port to listen on. Default: 8080.
+        """
+        backend = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                # Handle webhook verification challenge
+                from urllib.parse import parse_qs, urlparse
+                parsed = urlparse(self.path)
+                params = parse_qs(parsed.query)
+                challenge = params.get("hub.challenge", [""])[0]
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(challenge.encode())
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                try:
+                    data = json.loads(body)
+                    for entry in data.get("entry", []):
+                        for change in entry.get("changes", []):
+                            value = change.get("value", {})
+                            for msg in value.get("messages", []):
+                                backend._message_queue.put(msg)
+                except Exception:
+                    pass
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args: Any) -> None:  # type: ignore[override]
+                pass  # Suppress access log
+
+        try:
+            self._webhook_server = HTTPServer(("0.0.0.0", port), Handler)
+            thread = threading.Thread(
+                target=self._webhook_server.serve_forever, daemon=True
+            )
+            thread.start()
+            logger.info("WhatsApp webhook server started on port %d", port)
+        except OSError as e:
+            logger.warning("Could not start webhook server: %s", e)
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Find a WhatsApp channel by name (returns name as channel ID).
+
+        Args:
+            name: Channel name / phone number.
+
+        Returns:
+            The name itself as the channel ID.
+        """
+        return name if name else None
+
+    def find_user(self, username: str) -> str | None:
+        """Find a user by phone number (returns phone number as user ID).
+
+        Args:
+            username: Phone number in E.164 format.
+
+        Returns:
+            The phone number itself as user ID.
+        """
+        return username if username else None
+
+    def join_channel(self, channel_id: str) -> None:
+        """No-op for WhatsApp — no channel joining required.
+
+        Args:
+            channel_id: Phone number (unused).
+        """
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Drain the webhook message queue and return new messages.
+
+        Args:
+            channel_id: Recipient phone number (unused — all messages returned).
+            oldest: Unused for push-mode channels.
+            limit: Maximum messages to return.
+
+        Returns:
+            Tuple of (messages, oldest). Each message dict has at minimum:
+            ts, user (from), text.
+        """
+        messages: list[dict[str, Any]] = []
+        while not self._message_queue.empty() and len(messages) < limit:
+            raw = self._message_queue.get_nowait()
+            msg_type = raw.get("type", "")
+            if msg_type == "text":
+                text = raw.get("text", {}).get("body", "")
+            else:
+                text = f"[{msg_type} message]"
+            messages.append({
+                "ts": raw.get("timestamp", ""),
+                "user": raw.get("from", ""),
+                "text": text,
+                "id": raw.get("id", ""),
+            })
+        return messages, oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a text message to a WhatsApp number.
+
+        Args:
+            channel_id: Recipient phone number in E.164 format.
+            text: Message text.
+            thread_ts: Unused for WhatsApp.
+        """
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        _api_request("POST", url, self._access_token, json_body={
+            "messaging_product": "whatsapp",
+            "to": channel_id,
+            "type": "text",
+            "text": {"body": text},
+        })
+
+    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+        """Block until a message from a specific user is received.
+
+        Args:
+            channel_id: Unused for WhatsApp.
+            thread_ts: Unused for WhatsApp.
+            user_id: Phone number to wait for.
+
+        Returns:
+            The text of the user's reply.
+        """
+        import time
+        while True:
+            time.sleep(2.0)
+            temp: list[dict[str, Any]] = []
+            found = ""
+            while not self._message_queue.empty():
+                raw = self._message_queue.get_nowait()
+                if raw.get("from") == user_id:
+                    found = raw.get("text", {}).get("body", "")
+                else:
+                    temp.append(raw)
+            for item in temp:
+                self._message_queue.put(item)
+            if found:
+                return found
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if a message was sent by the bot itself.
+
+        Args:
+            msg: Message dict from poll_messages.
+
+        Returns:
+            Always False — WhatsApp webhooks only deliver inbound messages.
+        """
+        return False
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Remove bot mention markers (no-op for WhatsApp).
+
+        Args:
+            text: Raw message text.
+
+        Returns:
+            Unchanged text.
+        """
+        return text
+
+    # -------------------------------------------------------------------
+    # WhatsApp API tool methods (return JSON strings for LLM agent use)
+    # -------------------------------------------------------------------
+
+    def send_text_message(self, to: str, body: str, preview_url: bool = False) -> str:
         """Send a text message to a WhatsApp number.
 
         Args:
@@ -178,15 +394,27 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
         Returns:
             JSON string with ok status and message_id.
         """
-        return _send({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "text",
-            "text": {"preview_url": preview_url, "body": body},
-        })
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "text",
+                "text": {"preview_url": preview_url, "body": body},
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            messages = result.get("messages", [])  # pragma: no cover
+            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
+            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
     def send_template_message(
-        to: str, template_name: str, language_code: str = "en_US",
+        self,
+        to: str,
+        template_name: str,
+        language_code: str = "en_US",
         components: str = "",
     ) -> str:
         """Send a pre-approved template message.
@@ -200,28 +428,41 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
             language_code: Template language code (e.g. "en_US").
                 Default: "en_US".
             components: Optional JSON string of template components
-                (header, body, button parameters). Example:
-                '[{"type":"body","parameters":[{"type":"text","text":"John"}]}]'
+                (header, body, button parameters).
 
         Returns:
             JSON string with ok status and message_id.
         """
-        template: dict[str, Any] = {
-            "name": template_name,
-            "language": {"code": language_code},
-        }
-        if components:
-            template["components"] = json.loads(components)
-        return _send({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "template",
-            "template": template,
-        })
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            template: dict[str, Any] = {
+                "name": template_name,
+                "language": {"code": language_code},
+            }
+            if components:
+                template["components"] = json.loads(components)
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "template",
+                "template": template,
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            messages = result.get("messages", [])  # pragma: no cover
+            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
+            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
     def send_media_message(
-        to: str, media_type: str, media_id: str = "", link: str = "",
-        caption: str = "", filename: str = "",
+        self,
+        to: str,
+        media_type: str,
+        media_id: str = "",
+        link: str = "",
+        caption: str = "",
+        filename: str = "",
     ) -> str:
         """Send a media message (image, document, audio, video, sticker).
 
@@ -239,23 +480,32 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
         Returns:
             JSON string with ok status and message_id.
         """
-        media_obj: dict[str, Any] = {}
-        if media_id:
-            media_obj["id"] = media_id
-        elif link:
-            media_obj["link"] = link
-        if caption and media_type in ("image", "video", "document"):
-            media_obj["caption"] = caption
-        if filename and media_type == "document":
-            media_obj["filename"] = filename
-        return _send({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": media_type,
-            media_type: media_obj,
-        })
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            media_obj: dict[str, Any] = {}
+            if media_id:
+                media_obj["id"] = media_id
+            elif link:
+                media_obj["link"] = link
+            if caption and media_type in ("image", "video", "document"):
+                media_obj["caption"] = caption
+            if filename and media_type == "document":
+                media_obj["filename"] = filename
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": media_type,
+                media_type: media_obj,
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            messages = result.get("messages", [])  # pragma: no cover
+            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
+            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def send_reaction(to: str, message_id: str, emoji: str) -> str:
+    def send_reaction(self, to: str, message_id: str, emoji: str) -> str:
         """React to a message with an emoji.
 
         Args:
@@ -266,16 +516,29 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
         Returns:
             JSON string with ok status and message_id.
         """
-        return _send({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "reaction",
-            "reaction": {"message_id": message_id, "emoji": emoji},
-        })
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "reaction",
+                "reaction": {"message_id": message_id, "emoji": emoji},
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            messages = result.get("messages", [])  # pragma: no cover
+            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
+            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
     def send_location_message(
-        to: str, latitude: str, longitude: str,
-        name: str = "", address: str = "",
+        self,
+        to: str,
+        latitude: str,
+        longitude: str,
+        name: str = "",
+        address: str = "",
     ) -> str:
         """Send a location message.
 
@@ -289,73 +552,83 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
         Returns:
             JSON string with ok status and message_id.
         """
-        location: dict[str, Any] = {
-            "latitude": latitude,
-            "longitude": longitude,
-        }
-        if name:
-            location["name"] = name
-        if address:
-            location["address"] = address
-        return _send({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "location",
-            "location": location,
-        })
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            location: dict[str, Any] = {
+                "latitude": latitude,
+                "longitude": longitude,
+            }
+            if name:
+                location["name"] = name
+            if address:
+                location["address"] = address
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "location",
+                "location": location,
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            messages = result.get("messages", [])  # pragma: no cover
+            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
+            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def send_interactive_message(to: str, interactive_json: str) -> str:
+    def send_interactive_message(self, to: str, interactive_json: str) -> str:
         """Send an interactive message (buttons, lists, or product messages).
 
         Args:
             to: Recipient phone number in E.164 format.
             interactive_json: JSON string of the interactive object.
-                For buttons example:
-                '{"type":"button","body":{"text":"Choose:"},
-                  "action":{"buttons":[
-                    {"type":"reply","reply":{"id":"1","title":"Yes"}},
-                    {"type":"reply","reply":{"id":"2","title":"No"}}
-                  ]}}'
-                For list example:
-                '{"type":"list","body":{"text":"Pick one:"},
-                  "action":{"button":"Menu","sections":[
-                    {"title":"Options","rows":[
-                      {"id":"1","title":"Option A"},
-                      {"id":"2","title":"Option B"}
-                    ]}
-                  ]}}'
 
         Returns:
             JSON string with ok status and message_id.
         """
-        return _send({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "interactive",
-            "interactive": json.loads(interactive_json),
-        })
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "interactive",
+                "interactive": json.loads(interactive_json),
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            messages = result.get("messages", [])  # pragma: no cover
+            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
+            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def send_contact_message(to: str, contacts_json: str) -> str:
+    def send_contact_message(self, to: str, contacts_json: str) -> str:
         """Send a contact card message.
 
         Args:
             to: Recipient phone number in E.164 format.
-            contacts_json: JSON string of contacts array. Example:
-                '[{"name":{"formatted_name":"John Doe","first_name":"John",
-                  "last_name":"Doe"},"phones":[{"phone":"+14155238886",
-                  "type":"CELL"}]}]'
+            contacts_json: JSON string of contacts array.
 
         Returns:
             JSON string with ok status and message_id.
         """
-        return _send({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "contacts",
-            "contacts": json.loads(contacts_json),
-        })
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "contacts",
+                "contacts": json.loads(contacts_json),
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            messages = result.get("messages", [])  # pragma: no cover
+            msg_id = messages[0]["id"] if messages else ""  # pragma: no cover
+            return json.dumps({"ok": True, "message_id": msg_id})  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def mark_as_read(message_id: str) -> str:
+    def mark_as_read(self, message_id: str) -> str:
         """Mark a received message as read.
 
         Args:
@@ -364,36 +637,49 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
         Returns:
             JSON string with ok status.
         """
-        result = _api_request("POST", msg_url, access_token, json_body={
-            "messaging_product": "whatsapp",
-            "status": "read",
-            "message_id": message_id,
-        })
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        return json.dumps(  # pragma: no cover – needs live API
-            {"ok": True, "success": result.get("success", False)})
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        try:
+            result = _api_request("POST", url, self._access_token, json_body={
+                "messaging_product": "whatsapp",
+                "status": "read",
+                "message_id": message_id,
+            })
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            return json.dumps(  # pragma: no cover
+                {"ok": True, "success": result.get("success", False)})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def get_business_profile() -> str:
+    def get_business_profile(self) -> str:
         """Get the WhatsApp Business profile information.
 
         Returns:
             JSON string with business profile data (about, address,
             description, email, websites, profile_picture_url).
         """
-        url = f"{_GRAPH_API_BASE}/{phone_number_id}/whatsapp_business_profile"
-        result = _api_request("GET", f"{url}?fields=about,address,description,"
-                              "email,websites,profile_picture_url,vertical",
-                              access_token)
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        data_list = result.get("data", [])  # pragma: no cover – needs live API
-        profile = data_list[0] if data_list else {}  # pragma: no cover
-        return json.dumps({"ok": True, "profile": profile}, indent=2)  # pragma: no cover
+        url = (
+            f"{_GRAPH_API_BASE}/{self._phone_number_id}/whatsapp_business_profile"
+            "?fields=about,address,description,email,websites,profile_picture_url,vertical"
+        )
+        try:
+            result = _api_request("GET", url, self._access_token)
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            data_list = result.get("data", [])  # pragma: no cover
+            profile = data_list[0] if data_list else {}  # pragma: no cover
+            return json.dumps({"ok": True, "profile": profile}, indent=2)  # pragma: no cover
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
     def update_business_profile(
-        about: str = "", address: str = "", description: str = "",
-        email: str = "", websites: str = "", vertical: str = "",
+        self,
+        about: str = "",
+        address: str = "",
+        description: str = "",
+        email: str = "",
+        websites: str = "",
+        vertical: str = "",
     ) -> str:
         """Update the WhatsApp Business profile.
 
@@ -403,33 +689,35 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
             description: Full business description (max 512 characters).
             email: Business email address.
             websites: Comma-separated list of website URLs (max 2).
-            vertical: Business category (e.g. "RETAIL", "FOOD",
-                "HEALTH", "TRAVEL", "EDU", "OTHER").
+            vertical: Business category (e.g. "RETAIL", "FOOD", "HEALTH").
 
         Returns:
             JSON string with ok status.
         """
-        url = f"{_GRAPH_API_BASE}/{phone_number_id}/whatsapp_business_profile"
-        body: dict[str, Any] = {"messaging_product": "whatsapp"}
-        if about:
-            body["about"] = about
-        if address:
-            body["address"] = address
-        if description:
-            body["description"] = description
-        if email:
-            body["email"] = email
-        if websites:
-            body["websites"] = [w.strip() for w in websites.split(",")]
-        if vertical:
-            body["vertical"] = vertical
-        result = _api_request("POST", url, access_token, json_body=body)
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        return json.dumps(  # pragma: no cover – needs live API
-            {"ok": True, "success": result.get("success", False)})
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/whatsapp_business_profile"
+        try:
+            body: dict[str, Any] = {"messaging_product": "whatsapp"}
+            if about:
+                body["about"] = about
+            if address:
+                body["address"] = address
+            if description:
+                body["description"] = description
+            if email:
+                body["email"] = email
+            if websites:
+                body["websites"] = [w.strip() for w in websites.split(",")]
+            if vertical:
+                body["vertical"] = vertical
+            result = _api_request("POST", url, self._access_token, json_body=body)
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            return json.dumps(  # pragma: no cover
+                {"ok": True, "success": result.get("success", False)})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def upload_media(file_path: str, mime_type: str) -> str:
+    def upload_media(self, file_path: str, mime_type: str) -> str:
         """Upload a media file for later sending.
 
         Args:
@@ -441,22 +729,26 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
             JSON string with ok status and media_id (use in
             send_media_message).
         """
-        url = f"{_GRAPH_API_BASE}/{phone_number_id}/media"
+        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/media"
         try:
             with open(file_path, "rb") as f:
                 result = _api_request(
-                    "POST", url, access_token,
+                    "POST",
+                    url,
+                    self._access_token,
                     data={"messaging_product": "whatsapp", "type": mime_type},
                     files={"file": (Path(file_path).name, f, mime_type)},
                 )
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            return json.dumps(  # pragma: no cover
+                {"ok": True, "media_id": result.get("id", "")})
         except OSError as e:
             return json.dumps({"ok": False, "error": str(e)})
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        return json.dumps(  # pragma: no cover – needs live API
-            {"ok": True, "media_id": result.get("id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def get_media_url(media_id: str) -> str:
+    def get_media_url(self, media_id: str) -> str:
         """Get the download URL for an uploaded media file.
 
         Args:
@@ -466,17 +758,20 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
             JSON string with ok status, url, mime_type, and file_size.
         """
         url = f"{_GRAPH_API_BASE}/{media_id}"
-        result = _api_request("GET", url, access_token)
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        return json.dumps({  # pragma: no cover – needs live API
-            "ok": True,
-            "url": result.get("url", ""),
-            "mime_type": result.get("mime_type", ""),
-            "file_size": result.get("file_size", 0),
-        })
+        try:
+            result = _api_request("GET", url, self._access_token)
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            return json.dumps({  # pragma: no cover
+                "ok": True,
+                "url": result.get("url", ""),
+                "mime_type": result.get("mime_type", ""),
+                "file_size": result.get("file_size", 0),
+            })
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def delete_media(media_id: str) -> str:
+    def delete_media(self, media_id: str) -> str:
         """Delete an uploaded media file.
 
         Args:
@@ -486,13 +781,16 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
             JSON string with ok status.
         """
         url = f"{_GRAPH_API_BASE}/{media_id}"
-        result = _api_request("DELETE", url, access_token)
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        return json.dumps(  # pragma: no cover – needs live API
-            {"ok": True, "success": result.get("success", False)})
+        try:
+            result = _api_request("DELETE", url, self._access_token)
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            return json.dumps(  # pragma: no cover
+                {"ok": True, "success": result.get("success", False)})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    def list_message_templates(limit: int = 20, status: str = "") -> str:
+    def list_message_templates(self, limit: int = 20, status: str = "") -> str:
         """List available message templates for the WhatsApp Business Account.
 
         Requires waba_id to be configured.
@@ -503,10 +801,9 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
                 If empty, returns all statuses.
 
         Returns:
-            JSON string with template list (name, status, category,
-            language, components).
+            JSON string with template list (name, status, category, language).
         """
-        if not waba_id:
+        if not self._waba_id:
             return json.dumps({
                 "ok": False,
                 "error": "waba_id not configured. Re-authenticate with "
@@ -515,38 +812,47 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
         params = f"?limit={limit}"
         if status:
             params += f"&status={status}"
-        url = f"{_GRAPH_API_BASE}/{waba_id}/message_templates{params}"
-        result = _api_request("GET", url, access_token)
-        if "error" in result:
-            return json.dumps({"ok": False, "error": result["error"]})
-        templates = [  # pragma: no cover – needs live API
-            {
-                "name": t.get("name", ""),
-                "status": t.get("status", ""),
-                "category": t.get("category", ""),
-                "language": t.get("language", ""),
-                "id": t.get("id", ""),
-            }
-            for t in result.get("data", [])
-        ]
-        return json.dumps({"ok": True, "templates": templates}, indent=2)[:8000]  # pragma: no cover
+        url = f"{_GRAPH_API_BASE}/{self._waba_id}/message_templates{params}"
+        try:
+            result = _api_request("GET", url, self._access_token)
+            if "error" in result:
+                return json.dumps({"ok": False, "error": result["error"]})
+            templates = [  # pragma: no cover
+                {
+                    "name": t.get("name", ""),
+                    "status": t.get("status", ""),
+                    "category": t.get("category", ""),
+                    "language": t.get("language", ""),
+                    "id": t.get("id", ""),
+                }
+                for t in result.get("data", [])
+            ]
+            # pragma: no cover
+            return json.dumps({"ok": True, "templates": templates}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
-    return [
-        send_text_message,
-        send_template_message,
-        send_media_message,
-        send_reaction,
-        send_location_message,
-        send_interactive_message,
-        send_contact_message,
-        mark_as_read,
-        get_business_profile,
-        update_business_profile,
-        upload_media,
-        get_media_url,
-        delete_media,
-        list_message_templates,
-    ]
+    def get_tool_methods(self) -> list:
+        """Return list of bound tool methods for use by the LLM agent.
+
+        Automatically discovers all public methods of this class,
+        excluding ChannelBackend protocol/infrastructure methods.
+
+        Returns:
+            List of callable tool methods for WhatsApp API operations.
+        """
+        non_tool = frozenset({
+            "connect", "find_channel", "find_user", "join_channel",
+            "poll_messages", "send_message", "wait_for_reply",
+            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+        })
+        return [
+            getattr(self, name)
+            for name in sorted(dir(self))
+            if not name.startswith("_")
+            and name not in non_tool
+            and callable(getattr(self, name))
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -554,71 +860,8 @@ def _make_whatsapp_tools(access_token: str, phone_number_id: str, waba_id: str) 
 # ---------------------------------------------------------------------------
 
 
-def _cli_wait_for_user(instruction: str, url: str) -> None:  # pragma: no cover
-    """CLI callback for browser-action prompts (prints and waits for Enter).
-
-    Args:
-        instruction: What the user should do.
-        url: Current browser URL (printed if non-empty).
-    """
-    print(f"\n>>> Browser action needed: {instruction}")
-    if url:
-        print(f"    Current URL: {url}")
-    input("Press Enter when done... ")
-
-
-def _cli_ask_user_question(question: str) -> str:  # pragma: no cover
-    """CLI callback for agent questions (prints and reads from stdin).
-
-    Args:
-        question: The question to display to the user.
-
-    Returns:
-        The user's typed response text.
-    """
-    print(f"\n>>> Agent asks: {question}")
-    return input("Your answer: ")
-
-
-class WhatsAppAgent(SorcarAgent):
-    def run(  # type: ignore[override]
-        self,
-        model_name: str | None = None,
-        prompt_template: str = "",
-        arguments: dict[str, str] | None = None,
-        max_steps: int | None = None,
-        max_budget: float | None = None,
-        work_dir: str | None = None,
-        printer: Any = None,
-        max_sub_sessions: int | None = None,
-        docker_image: str | None = None,
-        headless: bool | None = None,
-        verbose: bool | None = None,
-        current_editor_file: str | None = None,
-        attachments: list | None = None,
-        wait_for_user_callback: Callable[[str, str], None] | None = None,
-        ask_user_question_callback: Callable[[str], str] | None = None,
-    ) -> str:
-        """Run the WhatsApp agent with optional user-interaction callbacks."""
-        return super().run(
-            model_name=model_name,
-            prompt_template=prompt_template,
-            arguments=arguments,
-            max_steps=max_steps,
-            max_budget=max_budget,
-            work_dir=work_dir,
-            printer=printer,
-            max_sub_sessions=max_sub_sessions,
-            docker_image=docker_image,
-            headless=headless,
-            verbose=verbose,
-            current_editor_file=current_editor_file,
-            attachments=attachments,
-            wait_for_user_callback=wait_for_user_callback,
-            ask_user_question_callback=ask_user_question_callback,
-        )
-
-    """SorcarAgent extended with WhatsApp Business Cloud API tools.
+class WhatsAppAgent(StatefulSorcarAgent):
+    """StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
     browser automation) and adds authenticated WhatsApp API tools for
@@ -640,7 +883,12 @@ class WhatsAppAgent(SorcarAgent):
 
     def __init__(self) -> None:
         super().__init__("WhatsApp Agent")
-        self._whatsapp_config: dict[str, str] | None = _load_config()
+        self._backend = WhatsAppChannelBackend()
+        cfg = _load_config()
+        if cfg:
+            self._backend._access_token = cfg["access_token"]
+            self._backend._phone_number_id = cfg["phone_number_id"]
+            self._backend._waba_id = cfg.get("waba_id", "")
 
     def _get_tools(self) -> list:
         """Return SorcarAgent tools + WhatsApp auth tools + WhatsApp API tools."""
@@ -656,7 +904,7 @@ class WhatsAppAgent(SorcarAgent):
                 Authentication status with phone number info, or
                 instructions for how to authenticate.
             """
-            if agent._whatsapp_config is None:
+            if not agent._backend._access_token:
                 return (
                     "Not authenticated with WhatsApp. Use "
                     "authenticate_whatsapp(access_token=..., phone_number_id=...) "
@@ -664,21 +912,21 @@ class WhatsAppAgent(SorcarAgent):
                     "1. Go to https://developers.facebook.com/apps/\n"
                     "2. Create or select a Business app with WhatsApp product\n"
                     "3. Under WhatsApp > API Setup, find:\n"
-                    "   - Temporary access token (or create a System User token "
-                    "for permanent access)\n"
+                    "   - Temporary access token (or create a System User token)\n"
                     "   - Phone number ID (shown under 'From' phone number)\n"
                     "4. Call authenticate_whatsapp(access_token='...', "
                     "phone_number_id='...')"
                 )
-            token = agent._whatsapp_config["access_token"]
-            pn_id = agent._whatsapp_config["phone_number_id"]
-            url = f"{_GRAPH_API_BASE}/{pn_id}?fields=verified_name,display_phone_number"
-            result = _api_request("GET", url, token)
+            url = (
+                f"{_GRAPH_API_BASE}/{agent._backend._phone_number_id}"
+                "?fields=verified_name,display_phone_number"
+            )
+            result = _api_request("GET", url, agent._backend._access_token)
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps({  # pragma: no cover – needs live API
+            return json.dumps({  # pragma: no cover
                 "ok": True,
-                "phone_number_id": pn_id,
+                "phone_number_id": agent._backend._phone_number_id,
                 "verified_name": result.get("verified_name", ""),
                 "display_phone_number": result.get("display_phone_number", ""),
             })
@@ -692,14 +940,9 @@ class WhatsAppAgent(SorcarAgent):
             and validates them against the Meta Graph API.
 
             Args:
-                access_token: Meta Graph API access token. Get it from
-                    https://developers.facebook.com/apps/ > your app >
-                    WhatsApp > API Setup.
+                access_token: Meta Graph API access token.
                 phone_number_id: WhatsApp Business phone number ID.
-                    Shown under the 'From' phone number in API Setup.
-                waba_id: WhatsApp Business Account ID (optional, needed
-                    for listing message templates). Found in WhatsApp >
-                    API Setup or Business Settings.
+                waba_id: WhatsApp Business Account ID (optional).
 
             Returns:
                 Validation result with phone number info, or error.
@@ -708,20 +951,20 @@ class WhatsAppAgent(SorcarAgent):
             phone_number_id = phone_number_id.strip()
             if not access_token or not phone_number_id:
                 return "Both access_token and phone_number_id are required."
-            url = f"{_GRAPH_API_BASE}/{phone_number_id}?fields=verified_name,display_phone_number"
+            url = (
+                f"{_GRAPH_API_BASE}/{phone_number_id}"
+                "?fields=verified_name,display_phone_number"
+            )
             result = _api_request("GET", url, access_token)
             if "error" in result:
                 return json.dumps({
                     "ok": False,
                     "error": f"Credential validation failed: {result['error']}",
                 })
-            _save_config(  # pragma: no cover – needs live API
-                access_token, phone_number_id, waba_id)
-            agent._whatsapp_config = {  # pragma: no cover
-                "access_token": access_token,
-                "phone_number_id": phone_number_id,
-                "waba_id": waba_id.strip(),
-            }
+            _save_config(access_token, phone_number_id, waba_id)  # pragma: no cover
+            agent._backend._access_token = access_token  # pragma: no cover
+            agent._backend._phone_number_id = phone_number_id  # pragma: no cover
+            agent._backend._waba_id = waba_id.strip()  # pragma: no cover
             return json.dumps({  # pragma: no cover
                 "ok": True,
                 "message": "WhatsApp credentials saved and validated.",
@@ -736,81 +979,75 @@ class WhatsAppAgent(SorcarAgent):
                 Status message.
             """
             _clear_config()
-            agent._whatsapp_config = None
+            agent._backend._access_token = ""
+            agent._backend._phone_number_id = ""
+            agent._backend._waba_id = ""
             return "WhatsApp authentication cleared."
 
         tools.extend([check_whatsapp_auth, authenticate_whatsapp, clear_whatsapp_auth])
 
-        if agent._whatsapp_config is not None:
-            tools.extend(_make_whatsapp_tools(
-                agent._whatsapp_config["access_token"],
-                agent._whatsapp_config["phone_number_id"],
-                agent._whatsapp_config.get("waba_id", ""),
-            ))
+        if agent._backend._access_token:
+            tools.extend(agent._backend.get_tool_methods())
 
         return tools
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run the WhatsAppAgent from the command line with a --task argument."""
-    import argparse
+    """Run the WhatsAppAgent from the command line with chat persistence."""
     import os
-    import tempfile
+    import sys
     import time as time_mod
 
-    import yaml
+    if len(sys.argv) <= 1:
+        print(
+            "Usage: kiss-whatsapp [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n]"
+        )
+        sys.exit(1)
 
-    parser = argparse.ArgumentParser(description="Run WhatsAppAgent on a task")
-    parser.add_argument("--task", type=str, required=True, help="Task description for the agent")
-    parser.add_argument("--model_name", type=str, default=None, help="LLM model name")
-    parser.add_argument("--max_steps", type=int, default=30, help="Maximum number of steps")
-    parser.add_argument("--max_budget", type=float, default=5.0, help="Maximum budget in USD")
-    parser.add_argument("--work_dir", type=str, default=None, help="Working directory")
+    parser = _build_arg_parser()
     parser.add_argument(
-        "--headless",
-        type=lambda x: str(x).lower() == "true",
-        default=False,
-        help="Run browser headless (true/false)",
-    )
-    parser.add_argument(
-        "--verbose",
-        type=lambda x: str(x).lower() == "true",
-        default=True,
-        help="Print output to console (true/false)",
+        "-n", "--new", action="store_true",
+        help="Start a new chat session",
     )
     args = parser.parse_args()
 
-    if args.work_dir is not None:
-        work_dir = args.work_dir
-        Path(work_dir).mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = tempfile.mkdtemp()
-
     agent = WhatsAppAgent()
+
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.new:
+        agent.new_chat()
+    else:
+        agent.resume_chat(task_description)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
     old_cwd = os.getcwd()
     os.chdir(work_dir)
     start_time = time_mod.time()
     try:
-        result = agent.run(
-            prompt_template=args.task,
-            model_name=args.model_name,
-            max_steps=args.max_steps,
-            max_budget=args.max_budget,
-            work_dir=work_dir,
-            headless=args.headless,
-            verbose=args.verbose,
-            wait_for_user_callback=_cli_wait_for_user,
-            ask_user_question_callback=_cli_ask_user_question,
-        )
+        agent.run(**run_kwargs)
     finally:
         os.chdir(old_cwd)
     elapsed = time_mod.time() - start_time
 
-    print("FINAL RESULT:")
-    result_data = yaml.safe_load(result)
-    print("Completed successfully: " + str(result_data["success"]))
-    print(result_data["summary"])
-    print("Work directory was: " + work_dir)
     print(f"Time: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")
     print(f"Total tokens: {agent.total_tokens_used}")
