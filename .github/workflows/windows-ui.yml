@@ -1,0 +1,130 @@
+name: KISS Sorcar Windows UI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-ui:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── 1. Install VS Code ──────────────────────────────────────────────
+      - name: Install VS Code
+        shell: pwsh
+        run: |
+          $url = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
+          $installer = "$env:TEMP\vscode-installer.exe"
+          Write-Host "Downloading VS Code..."
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Write-Host "Installing VS Code silently..."
+          Start-Process -FilePath $installer `
+            -ArgumentList "/VERYSILENT", "/NORESTART", "/MERGETASKS=!runcode" `
+            -Wait
+          # Add VS Code to PATH for this session
+          $codePath = "$env:LOCALAPPDATA\Programs\Microsoft VS Code"
+          echo "$codePath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "VS Code installed to $codePath"
+
+      # ── 2. Install KISS Sorcar extension ──────────────────────────────
+      - name: Install KISS Sorcar extension
+        shell: pwsh
+        run: |
+          $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd"
+          Write-Host "Installing KISS Sorcar extension..."
+          & $code --install-extension "${{ github.workspace }}\kiss-sorcar.vsix" --force
+          Write-Host "Extension installed successfully"
+
+      # ── 3. Launch VS Code and capture screenshot ──────────────────────
+      - name: Launch VS Code and take screenshot
+        shell: pwsh
+        run: |
+          $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
+
+          # Create a temp workspace with a simple Python file so the editor has content
+          $workspace = "$env:TEMP\kiss-demo"
+          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+          Set-Content -Path "$workspace\hello.py" -Value @"
+          # Welcome to KISS Sorcar!
+          # This is an AI-powered IDE assistant.
+          print("Hello from KISS Sorcar!")
+          "@
+
+          Write-Host "Launching VS Code..."
+          $proc = Start-Process -FilePath $code `
+            -ArgumentList "--no-sandbox", "--disable-gpu", "$workspace" `
+            -PassThru
+
+          Write-Host "Waiting for VS Code to fully load (15 seconds)..."
+          Start-Sleep -Seconds 15
+
+          # Take screenshot using .NET System.Windows.Forms
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+
+          $screenWidth  = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
+          $screenHeight = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height
+          Write-Host "Screen: ${screenWidth}x${screenHeight}"
+
+          $bitmap = New-Object System.Drawing.Bitmap($screenWidth, $screenHeight)
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          $graphics.CopyFromScreen(0, 0, 0, 0,
+            [System.Drawing.Size]::new($screenWidth, $screenHeight))
+
+          $outPath = "${{ github.workspace }}\kiss-sorcar-windows-ui.png"
+          $bitmap.Save($outPath, [System.Drawing.Imaging.ImageFormat]::Png)
+          $graphics.Dispose()
+          $bitmap.Dispose()
+
+          Write-Host "Screenshot saved to $outPath"
+
+          # Give VS Code a moment then take another screenshot with KISS panel open
+          # Try to open the KISS Sorcar panel via keyboard shortcut
+          Start-Sleep -Seconds 3
+
+          # Click on VS Code window to ensure focus
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Win32 {
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr hWnd);
+              [DllImport("user32.dll")]
+              public static extern IntPtr FindWindow(string cls, string title);
+          }
+"@
+          $vsHwnd = $proc.MainWindowHandle
+          if ($vsHwnd -ne [IntPtr]::Zero) {
+              [Win32]::SetForegroundWindow($vsHwnd) | Out-Null
+              Start-Sleep -Seconds 1
+          }
+
+          # Send Ctrl+Shift+P to open command palette, then open KISS Sorcar
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("^+p")
+          Start-Sleep -Seconds 1
+          [System.Windows.Forms.SendKeys]::SendWait("KISS Sorcar")
+          Start-Sleep -Seconds 2
+
+          # Take another screenshot with command palette open
+          $bitmap2 = New-Object System.Drawing.Bitmap($screenWidth, $screenHeight)
+          $graphics2 = [System.Drawing.Graphics]::FromImage($bitmap2)
+          $graphics2.CopyFromScreen(0, 0, 0, 0,
+            [System.Drawing.Size]::new($screenWidth, $screenHeight))
+          $outPath2 = "${{ github.workspace }}\kiss-sorcar-windows-ui-command-palette.png"
+          $bitmap2.Save($outPath2, [System.Drawing.Imaging.ImageFormat]::Png)
+          $graphics2.Dispose()
+          $bitmap2.Dispose()
+          Write-Host "Second screenshot saved to $outPath2"
+
+      # ── 4. Upload screenshots as artifacts ────────────────────────────
+      - name: Upload UI Screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: kiss-sorcar-windows-ui
+          path: |
+            kiss-sorcar-windows-ui.png
+            kiss-sorcar-windows-ui-command-palette.png
+          retention-days: 7
