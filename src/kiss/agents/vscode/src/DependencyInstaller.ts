@@ -930,21 +930,57 @@ async function promptForApiKey(
 }
 
 /**
+ * Load API keys from the user's shell rc file into process.env.
+ * VS Code launched from macOS Dock/Spotlight does not source ~/.zshrc,
+ * so API keys set there are invisible to process.env.  This function
+ * reads the rc file and populates any missing env vars.
+ */
+function loadApiKeysFromShellRc(): void {
+  const rcPath = getShellRcPath();
+  const content = readShellRc(rcPath);
+  if (!content) return;
+
+  const isFish = rcPath.endsWith('config.fish');
+  // Match uncommented export lines: export KEY="value" or export KEY=value
+  // Fish: set -gx KEY "value" or set -gx KEY value
+  const pattern = isFish
+    ? /^\s*set\s+-gx\s+(\w+)\s+(.+)$/gm
+    : /^\s*export\s+(\w+)=(.+)$/gm;
+
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    const name = match[1];
+    let value = match[2].trim();
+    // Strip surrounding quotes
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (name && value && !process.env[name]) {
+      process.env[name] = value;
+    }
+  }
+}
+
+/**
  * Ensure all LLM API keys are configured.
- * Prompts the user for each missing key. Validates the Anthropic key.
+ * Loads existing keys from the shell rc file (needed on macOS Dock launch),
+ * then prompts the user for each missing key.  Validates the Anthropic key.
  * Saves provided keys to the user's shell rc file and current process env.
- * Writes a marker file (~/.kiss/.api-keys-prompted) after the first prompt
- * cycle so that users are not re-prompted on subsequent VS Code restarts.
- * Returns true when the required ANTHROPIC_API_KEY is available.
+ *
+ * Uses a marker file (~/.kiss/.api-keys-prompted) to suppress re-prompting
+ * for optional keys on subsequent VS Code restarts.  The required
+ * ANTHROPIC_API_KEY is always prompted for if it is not set.
+ *
+ * Returns true when ANTHROPIC_API_KEY is available.
  */
 async function ensureApiKeys(): Promise<boolean> {
-  const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
+  // Load keys from shell rc into process.env so that keys saved in
+  // ~/.zshrc are picked up even when VS Code wasn't launched from a shell.
+  loadApiKeysFromShellRc();
 
-  // If the user has already been prompted (marker exists), skip prompting.
-  if (fs.existsSync(markerPath)) {
-    log('API keys already prompted (marker exists), skipping prompts');
-    return !!process.env.ANTHROPIC_API_KEY;
-  }
+  const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
+  const alreadyPrompted = fs.existsSync(markerPath);
 
   const rcPath = getShellRcPath();
 
@@ -958,7 +994,11 @@ async function ensureApiKeys(): Promise<boolean> {
 
   for (const { envName, displayName, placeholder, validate, optional } of keys) {
     if (process.env[envName]) {
-      continue; // Already set in environment
+      continue; // Already set in environment (inherited or loaded from rc file)
+    }
+    // Skip optional keys if the user has already been prompted once before
+    if (alreadyPrompted && optional) {
+      continue;
     }
 
     const key = await promptForApiKey(
@@ -975,12 +1015,14 @@ async function ensureApiKeys(): Promise<boolean> {
     }
   }
 
-  // Write marker so prompts don't reappear on next restart
-  try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-    fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
-    log('API key prompt marker written');
-  } catch { /* ignore */ }
+  // Write marker so optional keys aren't re-prompted on next restart
+  if (!alreadyPrompted) {
+    try {
+      fs.mkdirSync(LOG_DIR, { recursive: true });
+      fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
+      log('API key prompt marker written');
+    } catch { /* ignore */ }
+  }
 
   return !!process.env.ANTHROPIC_API_KEY;
 }
