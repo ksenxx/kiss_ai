@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import { SorcarViewProvider } from './SorcarPanel';
 import { MergeManager } from './MergeManager';
-import { ensureDependencies } from './DependencyInstaller';
+import { ensureDependencies, ensureLocalBinInPath } from './DependencyInstaller';
 
 let primaryProvider: SorcarViewProvider | undefined;
 let secondaryProvider: SorcarViewProvider | undefined;
@@ -20,6 +20,9 @@ function getActiveMergeManager(): MergeManager | undefined {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  // Ensure ~/.local/bin is in PATH before any tool lookups or process spawns
+  ensureLocalBinInPath();
+
   console.log('KISS Sorcar extension activating...');
 
   // Check if VS Code supports secondary sidebar (1.98+)

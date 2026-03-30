@@ -12,10 +12,10 @@
 # 5. Commit changes with "Version bumped" (includes vsix)
 # 6. Push to origin
 # 7. Push to kiss_ai repo and tag with version
-# 8. Create GitHub release
+# 8. Create GitHub release and upload VSIX asset
 # 9. Publish to PyPI
 # 10. Publish VS Code extension to marketplace
-# 11. Install extension into local Cursor IDE (if installed)
+# 11. Install extension into local VS Code and Cursor IDE (if installed)
 # 12. Restore stashed changes
 
 set -e  # Exit on error
@@ -177,7 +177,8 @@ publish_to_pypi() {
 build_vscode_extension() {
     print_step "Building VS Code extension..."
     cd "$VSCODE_EXT_DIR"
-    vsce package --no-dependencies --allow-star-activation --allow-missing-repository -o kiss-sorcar.vsix
+    npm ci
+    npm run package
 
     if [[ ! -f "kiss-sorcar.vsix" ]]; then
         print_error "VSIX file not found: kiss-sorcar.vsix"
@@ -200,33 +201,54 @@ publish_vscode_extension() {
 
     print_step "Publishing VS Code extension..."
     cd "$VSCODE_EXT_DIR"
-    vsce publish --packagePath "kiss-sorcar.vsix" --pat "$VSCE_PAT"
+    npx @vscode/vsce publish --packagePath "kiss-sorcar.vsix" --pat "$VSCE_PAT"
     cd - > /dev/null
 
     print_info "Successfully published VS Code extension v$version"
     print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
 }
 
-install_cursor_extension() {
+install_local_extension() {
     local vsix_path="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
-    local cursor_cli=""
 
+    # Install into VS Code
+    local code_cli=""
+    for candidate in \
+        "$(command -v code 2>/dev/null || true)" \
+        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+        "$HOME/.local/bin/code"; do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            code_cli="$candidate"
+            break
+        fi
+    done
+    if [[ -n "$code_cli" ]]; then
+        print_step "Installing extension into VS Code..."
+        if "$code_cli" --install-extension "$vsix_path" --force 2>&1; then
+            print_info "Extension installed into VS Code"
+        else
+            print_warn "Failed to install extension into VS Code — continuing"
+        fi
+    else
+        print_info "VS Code CLI not found — skipping local VS Code install"
+    fi
+
+    # Install into Cursor
+    local cursor_cli=""
     if command -v cursor &>/dev/null; then
         cursor_cli="cursor"
     elif [[ -x "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" ]]; then
         cursor_cli="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
     fi
-
-    if [[ -z "$cursor_cli" ]]; then
-        print_info "Cursor IDE not found — skipping local extension install"
-        return 0
-    fi
-
-    print_step "Installing extension into Cursor IDE..."
-    if "$cursor_cli" --install-extension "$vsix_path" --force 2>&1; then
-        print_info "Extension installed into Cursor IDE"
+    if [[ -n "$cursor_cli" ]]; then
+        print_step "Installing extension into Cursor IDE..."
+        if "$cursor_cli" --install-extension "$vsix_path" --force 2>&1; then
+            print_info "Extension installed into Cursor IDE"
+        else
+            print_warn "Failed to install extension into Cursor IDE — continuing"
+        fi
     else
-        print_warn "Failed to install extension into Cursor IDE — continuing"
+        print_info "Cursor IDE not found — skipping local Cursor install"
     fi
 }
 
@@ -327,13 +349,20 @@ main() {
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
-    # Step 7: Create GitHub release
+    # Step 7: Create GitHub release and upload VSIX
     print_step "Creating GitHub release..."
     gh release create "$TAG_NAME" \
         --repo ksenxx/kiss_ai \
         --title "KISS $VERSION" \
         --notes "Release $VERSION"
     print_info "GitHub release created: https://github.com/ksenxx/kiss_ai/releases/tag/$TAG_NAME"
+
+    local vsix_asset="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
+    if [[ -f "$vsix_asset" ]]; then
+        print_step "Uploading VSIX to GitHub release..."
+        gh release upload "$TAG_NAME" "$vsix_asset" --repo ksenxx/kiss_ai
+        print_info "VSIX uploaded to release"
+    fi
 
     # Step 8: Publish to PyPI
     print_step "Publishing to PyPI..."
@@ -342,8 +371,8 @@ main() {
     # Step 9: Publish VS Code extension (already built in step 3)
     publish_vscode_extension "$VERSION"
 
-    # Step 10: Install extension into local Cursor IDE if available
-    install_cursor_extension
+    # Step 10: Install extension into local VS Code and Cursor IDE if available
+    install_local_extension
 
     # Restore stashed changes
     trap - EXIT
