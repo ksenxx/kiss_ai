@@ -1,0 +1,212 @@
+name: KISS Sorcar Windows Visual Workflow
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-workflow.yml'
+      - 'kiss-sorcar.vsix'
+
+jobs:
+  windows-workflow:
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install VS Code
+        shell: pwsh
+        run: |
+          $url = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
+          $installer = "$env:TEMP\vscode-installer.exe"
+          Write-Host "Downloading VS Code..."
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Write-Host "Installing VS Code silently..."
+          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT", "/NORESTART", "/MERGETASKS=!runcode" -Wait
+          $codePath = "$env:LOCALAPPDATA\Programs\Microsoft VS Code"
+          echo "$codePath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "VS Code installed"
+
+      - name: Install KISS Sorcar extension
+        shell: pwsh
+        run: |
+          $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd"
+          Write-Host "Installing KISS Sorcar extension..."
+          & $code --install-extension "${{ github.workspace }}\kiss-sorcar.vsix" --force
+          Write-Host "Extension installed"
+          & $code --list-extensions
+          Write-Host "Extension list complete"
+
+      - name: Write helper scripts
+        shell: pwsh
+        run: |
+          $ssScript = @"
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          `$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          `$bmp = New-Object System.Drawing.Bitmap(`$screen.Width, `$screen.Height)
+          `$g = [System.Drawing.Graphics]::FromImage(`$bmp)
+          `$g.CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(`$screen.Width, `$screen.Height))
+          `$bmp.Save(`$args[0], [System.Drawing.Imaging.ImageFormat]::Png)
+          `$g.Dispose()
+          `$bmp.Dispose()
+          "@
+          Set-Content -Path "${{ github.workspace }}\ss.ps1" -Value $ssScript
+          Write-Host "Screenshot script written"
+
+      - name: Create demo workspace
+        shell: pwsh
+        run: |
+          $dir = "$env:TEMP\kiss-workflow-demo"
+          New-Item -ItemType Directory -Force -Path $dir
+          Set-Content -Path "$dir\fibonacci.py" -Value @"
+          # Fibonacci calculator - to be improved by KISS Sorcar
+          def fib(n):
+              if n <= 1:
+                  return n
+              return fib(n-1) + fib(n-2)
+
+          if __name__ == '__main__':
+              for i in range(10):
+                  print(f'fib({i}) = {fib(i)}')
+          "@
+          Set-Content -Path "$dir\README.md" -Value @"
+          # KISS Sorcar Demo Workspace
+
+          This workspace demonstrates KISS Sorcar's AI agent capabilities.
+
+          ## Files
+          - `fibonacci.py` - A simple Fibonacci calculator to be optimized
+          "@
+          Write-Host "Demo workspace created at $dir"
+
+      - name: Launch VS Code and wait for full load
+        shell: pwsh
+        run: |
+          $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
+          $dir = "$env:TEMP\kiss-workflow-demo"
+          Write-Host "Launching VS Code with workspace..."
+          Start-Process -FilePath $code -ArgumentList "--no-sandbox", "--disable-gpu", $dir
+          Write-Host "Waiting 25 seconds for full load..."
+          Start-Sleep -Seconds 25
+          Write-Host "VS Code launched"
+
+      - name: Screenshot 1 - VS Code initial load
+        shell: pwsh
+        run: |
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\step1-vscode-loaded.png"
+          Write-Host "Step 1 screenshot captured"
+
+      - name: Open KISS Sorcar panel via command palette
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          $procs = Get-Process -Name "Code" -ErrorAction SilentlyContinue
+          Write-Host "VS Code processes running: $($procs.Count)"
+
+          # Focus on VS Code window
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Win32 {
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr hWnd);
+              [DllImport("user32.dll")]
+              public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+          }
+          "@
+          $vscode = Get-Process -Name "Code" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($vscode) {
+              [Win32]::SetForegroundWindow($vscode.MainWindowHandle) | Out-Null
+              Write-Host "Focused VS Code window"
+          }
+          Start-Sleep -Seconds 1
+
+          # Open command palette
+          [System.Windows.Forms.SendKeys]::SendWait("^+p")
+          Start-Sleep -Seconds 2
+
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\step2-command-palette-open.png"
+          Write-Host "Step 2 screenshot captured"
+
+      - name: Type KISS Sorcar command and open panel
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Start-Sleep -Seconds 1
+
+          # Type the command to open KISS Sorcar
+          [System.Windows.Forms.SendKeys]::SendWait("KISS Sorcar")
+          Start-Sleep -Seconds 2
+
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\step3-command-typed.png"
+          Write-Host "Step 3 screenshot captured - command typed"
+
+          # Press Enter to execute the first matching command (Open Panel or Focus)
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep -Seconds 5
+
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\step4-panel-opened.png"
+          Write-Host "Step 4 screenshot captured - panel opened"
+
+      - name: Interact with KISS Sorcar panel - type a task
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Start-Sleep -Seconds 2
+
+          # Click in the KISS Sorcar input area using Tab navigation
+          # First make sure VS Code is focused
+          $vscode = Get-Process -Name "Code" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($vscode -and $vscode.MainWindowHandle -ne [IntPtr]::Zero) {
+              Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Win32b {
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr hWnd);
+          }
+          "@
+              [Win32b]::SetForegroundWindow($vscode.MainWindowHandle) | Out-Null
+          }
+          Start-Sleep -Seconds 1
+
+          # Use Ctrl+Shift+P again to focus view then escape - then click the sidebar
+          # Actually, let's use the keyboard shortcut to focus the KISS Sorcar view
+          # The extension registers a view in the sidebar - use activity bar shortcut
+
+          # Take screenshot to see current state
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\step5-before-task.png"
+          Write-Host "Step 5 screenshot captured - before task input"
+
+          # Type a task into the KISS Sorcar text area using clipboard paste
+          $task = "Add memoization to the fibonacci function in fibonacci.py to make it more efficient"
+          [System.Windows.Forms.Clipboard]::SetText($task)
+          [System.Windows.Forms.SendKeys]::SendWait("^v")
+          Start-Sleep -Seconds 2
+
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\step6-task-typed.png"
+          Write-Host "Step 6 screenshot captured - task typed"
+
+      - name: Final state and upload
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Start-Sleep -Seconds 2
+
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\step7-final-state.png"
+          Write-Host "Step 7 - final screenshot"
+
+          # List all screenshots captured
+          Get-ChildItem "${{ github.workspace }}\step*.png" | ForEach-Object {
+              Write-Host "Captured: $($_.Name) ($([math]::Round($_.Length/1KB, 1)) KB)"
+          }
+
+      - name: Upload workflow screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: kiss-sorcar-workflow-screenshots
+          path: step*.png
+          retention-days: 7
