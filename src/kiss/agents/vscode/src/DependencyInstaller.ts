@@ -1,7 +1,7 @@
 /**
  * Auto-installation of binary dependencies for the KISS Sorcar extension.
- * Ensures uv, git, Python environment, and Playwright Chromium are available.
- * Called during extension activation.
+ * Ensures uv, git, Node.js, VS Code CLI, Python environment, and Playwright
+ * Chromium are available.  Called during extension activation.
  */
 
 import * as vscode from 'vscode';
@@ -11,23 +11,101 @@ import * as https from 'https';
 import { exec, execSync, spawn } from 'child_process';
 import { findKissProject, findUvPath } from './AgentProcess';
 
+const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
+const LOG_DIR = path.join(HOME_DIR, '.kiss');
+const LOG_FILE = path.join(LOG_DIR, 'install.log');
+const MIN_PYTHON_MAJOR = 3;
+const MIN_PYTHON_MINOR = 13;
+const UV_VERSION = '0.11.2';
+const NODE_VERSION = 'v22.16.0';
+
+/**
+ * Write a timestamped message to ~/.kiss/install.log and the developer console.
+ */
+function log(message: string): void {
+  const line = `[${new Date().toISOString()}] ${message}`;
+  console.log('[KISS Sorcar]', message);
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, line + '\n');
+  } catch { /* ignore write errors */ }
+}
+
+/**
+ * Prepend ~/.local/bin to process.env.PATH so that binaries installed by
+ * the extension (uv, node, sorcar) are found by all child processes.
+ * Safe to call multiple times — skips if already present.
+ */
+export function ensureLocalBinInPath(): void {
+  if (!HOME_DIR) return;
+  const localBin = path.join(HOME_DIR, '.local', 'bin');
+  const parts = (process.env.PATH || '').split(path.delimiter);
+  if (!parts.includes(localBin)) {
+    process.env.PATH = `${localBin}${path.delimiter}${process.env.PATH || ''}`;
+  }
+}
+
 /**
  * Ensure all required dependencies are installed.
  * Shows a progress notification during first-time installation.
  * Safe to call multiple times — skips already-installed dependencies.
  */
 export async function ensureDependencies(): Promise<void> {
+  ensureLocalBinInPath();
+  log('=== Dependency check started ===');
+
   const kissProjectPath = findKissProject();
   if (!kissProjectPath) {
-    return; // Can't set up without a project path; AgentProcess.start() will show error
+    log('KISS project not found — skipping dependency setup');
+    vscode.window.showErrorMessage(
+      'KISS Sorcar: Could not find the KISS project directory. ' +
+      'Please set "kissSorcar.kissProjectPath" in VS Code settings. ' +
+      'See ~/.kiss/install.log for details.'
+    );
+    return;
   }
+  log(`KISS project: ${kissProjectPath}`);
 
   let uvPath = findUvPath();
-  const venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
+  let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
+
+  // If .venv exists but Python is too old, remove it so uv sync recreates it
+  if (uvPath && venvExists && !checkPythonVersion(uvPath, kissProjectPath)) {
+    try {
+      fs.rmSync(path.join(kissProjectPath, '.venv'), { recursive: true, force: true });
+    } catch { /* ignored */ }
+    venvExists = false;
+  }
 
   // Fast path: everything looks ready, ensure playwright in background
   if (uvPath && venvExists) {
-    spawnBackground(uvPath, ['run', 'python', '-m', 'playwright', 'install', 'chromium'], kissProjectPath);
+    log('Fast path: uv and .venv present, ensuring Playwright in background');
+    runAsync(uvPath, ['run', 'python', '-m', 'playwright', 'install', 'chromium'], kissProjectPath).catch(err => {
+      log(`Fast-path Playwright install failed: ${err instanceof Error ? err.message : err}`);
+      vscode.window.showWarningMessage(
+        'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.'
+      );
+    });
+    // Ensure git, Node.js, and VS Code CLI are available even on fast path
+    if (!gitWorks()) {
+      installGit().then(installed => {
+        if (!installed) {
+          vscode.window.showWarningMessage(
+            `KISS Sorcar: git is not available. ${gitInstallHint()}`
+          );
+        }
+      });
+    }
+    if (!commandExists('node')) {
+      installNode().then(installed => {
+        if (!installed) {
+          vscode.window.showWarningMessage(
+            'KISS Sorcar: Node.js could not be installed automatically. Some agent tools may be unavailable.'
+          );
+        }
+      });
+    }
+    if (!commandExists('code')) { installCodeCli(); }
   } else {
     // Slow path: show progress bar and install missing deps
     const success = await vscode.window.withProgress(
@@ -35,6 +113,17 @@ export async function ensureDependencies(): Promise<void> {
       async (progress) => {
         // 1. Install uv if needed
         if (!uvPath) {
+          // curl and tar are required to download and extract uv
+          if (process.platform !== 'win32') {
+            for (const bin of ['curl', 'tar']) {
+              if (!commandExists(bin)) {
+                vscode.window.showErrorMessage(
+                  `KISS Sorcar: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`
+                );
+                return false;
+              }
+            }
+          }
           progress.report({ message: 'Installing uv package manager...', increment: 0 });
           uvPath = await installUv();
           if (!uvPath) {
@@ -46,43 +135,62 @@ export async function ensureDependencies(): Promise<void> {
           progress.report({ increment: 20 });
         }
 
-        // 2. Warn about git
-        if (!commandExists('git')) {
-          vscode.window.showWarningMessage(
-            'KISS Sorcar: git is required but not found. Please install git.'
-          );
+        // 2. Install git if needed
+        if (!gitWorks()) {
+          progress.report({ message: 'Installing git...' });
+          const gitInstalled = await installGit();
+          if (!gitInstalled) {
+            vscode.window.showWarningMessage(
+              `KISS Sorcar: git could not be installed automatically. ${gitInstallHint()}`
+            );
+          }
         }
 
-        // 3. Set up Python environment (installs Python 3.13+ and all pip dependencies)
+        // 3. Install Node.js if needed (provides node, npm, npx for agent tasks)
+        if (!commandExists('node')) {
+          progress.report({ message: 'Installing Node.js...' });
+          const nodeInstalled = await installNode();
+          if (!nodeInstalled) {
+            log('Node.js could not be installed automatically');
+            vscode.window.showWarningMessage(
+              'KISS Sorcar: Node.js could not be installed automatically. ' +
+              'Some agent tools may be unavailable. Install from https://nodejs.org'
+            );
+          }
+        }
+
+        // 4. Ensure VS Code CLI is on PATH
+        if (!commandExists('code')) {
+          progress.report({ message: 'Setting up VS Code CLI...' });
+          const codeInstalled = await installCodeCli();
+          if (!codeInstalled) {
+            log('VS Code CLI could not be set up on PATH');
+          }
+        }
+
+        // 5. Set up Python environment (installs Python 3.13+ and all pip dependencies)
         if (!venvExists) {
           progress.report({ message: 'Setting up Python environment (first time, may take a minute)...' });
-          try {
-            await runAsync(uvPath, ['sync'], kissProjectPath);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            vscode.window.showErrorMessage(
-              `KISS Sorcar: Python environment setup failed — ${msg}. Check ~/.kiss/install.log for details.`
-            );
-            return false;
-          }
+          await runAsync(uvPath, ['sync'], kissProjectPath);
           progress.report({ increment: 50 });
         }
 
-        // 4. Install Playwright Chromium
-        progress.report({ message: 'Installing Chromium browser...' });
-        try {
-          await runAsync(
-            uvPath,
-            ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
-            kissProjectPath
-          );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+        // 6. Verify Python version meets minimum requirement
+        if (!checkPythonVersion(uvPath, kissProjectPath)) {
           vscode.window.showErrorMessage(
-            `KISS Sorcar: Chromium browser installation failed — ${msg}. Check ~/.kiss/install.log for details.`
+            `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
+            `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`
           );
           return false;
         }
+
+        // 7. Install Playwright Chromium
+        progress.report({ message: 'Installing Chromium browser...' });
+        await runAsync(
+          uvPath,
+          ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
+          kissProjectPath
+        );
         progress.report({ increment: 30 });
         return true;
       }
@@ -105,6 +213,29 @@ export async function ensureDependencies(): Promise<void> {
   if (uvPath) {
     installCliScript(kissProjectPath, uvPath);
   }
+
+  // Persist PATH entries to the user's shell rc file so new terminals find
+  // installed binaries (uv, node, sorcar, etc.) without manual setup.
+  try {
+    const rcPath = getShellRcPath();
+    const localBin = path.join(HOME_DIR, '.local', 'bin');
+    ensurePathInShellRc(rcPath, localBin);
+    // If MinGit was installed on Windows, persist its PATH entry too
+    if (process.platform === 'win32') {
+      const gitCmdDir = path.join(HOME_DIR, '.local', 'git', 'cmd');
+      if (fs.existsSync(gitCmdDir)) {
+        ensurePathInShellRc(rcPath, gitCmdDir);
+      }
+      const nodeDir = path.join(HOME_DIR, '.local', 'node');
+      if (fs.existsSync(nodeDir)) {
+        ensurePathInShellRc(rcPath, nodeDir);
+      }
+    }
+  } catch (err) {
+    log(`Failed to update shell rc PATH: ${err instanceof Error ? err.message : err}`);
+  }
+
+  log('=== Dependency check finished ===');
 
   // Prompt for missing API keys
   await ensureApiKeys();
@@ -145,7 +276,7 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
     fs.mkdirSync(binDir, { recursive: true });
     fs.writeFileSync(scriptPath, script, { mode: 0o755 });
   } catch (err) {
-    console.error('[KISS Sorcar] Failed to install CLI script:', err);
+    log(`Failed to install CLI script: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -172,21 +303,21 @@ function uvAssetInfo(): { archName: string; triplet: string; ext: string } | nul
 }
 
 /**
- * Install uv from the latest GitHub binary release and return its path, or null on failure.
- * Downloads the platform-specific binary from https://github.com/astral-sh/uv/releases/latest
- * and extracts it to ~/.local/bin/.
+ * Install uv from a pinned GitHub binary release and return its path, or null on failure.
+ * Downloads the platform-specific binary from releases.astral.sh and extracts to ~/.local/bin/.
  */
 async function installUv(): Promise<string | null> {
   const asset = uvAssetInfo();
   if (!asset) {
-    console.error(`[KISS Sorcar] Unsupported platform/arch: ${process.platform}/${process.arch}`);
+    log(`Unsupported platform/arch for uv: ${process.platform}/${process.arch}`);
     return null;
   }
 
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
   const installDir = path.join(homeDir, '.local', 'bin');
   const assetName = `uv-${asset.triplet}`;
-  const url = `https://github.com/astral-sh/uv/releases/latest/download/${assetName}.${asset.ext}`;
+  const url = `https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/${assetName}.${asset.ext}`;
+  log(`Downloading uv ${UV_VERSION} from ${url}`);
 
   try {
     // Ensure install directory exists
@@ -213,10 +344,34 @@ async function installUv(): Promise<string | null> {
       );
     }
 
+    log('uv installed successfully');
     return findUvPath();
   } catch (err) {
-    console.error('[KISS Sorcar] Failed to install uv from GitHub release:', err);
+    log(`Failed to install uv: ${err instanceof Error ? err.message : err}`);
     return null;
+  }
+}
+
+/**
+ * Check that the Python version in the project's .venv is >= MIN_PYTHON.
+ * Runs `uv run python --version` and parses the output (e.g. "Python 3.13.2").
+ * Returns true if the version meets the requirement, false otherwise.
+ */
+function checkPythonVersion(uvPath: string, cwd: string): boolean {
+  try {
+    const output = execSync(`"${uvPath}" run python --version`, {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 30_000,
+    }).trim();
+    // Output format: "Python 3.13.2"
+    const match = output.match(/Python\s+(\d+)\.(\d+)/);
+    if (!match) return false;
+    const major = parseInt(match[1], 10);
+    const minor = parseInt(match[2], 10);
+    return major > MIN_PYTHON_MAJOR || (major === MIN_PYTHON_MAJOR && minor >= MIN_PYTHON_MINOR);
+  } catch {
+    return false;
   }
 }
 
@@ -235,40 +390,313 @@ function commandExists(cmd: string): boolean {
 }
 
 /**
+ * Check if git is functional (not just a macOS shim that triggers a CLT dialog).
+ * Returns true only if `git --version` actually succeeds and outputs a version string.
+ */
+function gitWorks(): boolean {
+  try {
+    const output = execSync('git --version', {
+      encoding: 'utf-8',
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.includes('git version');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Return a user-facing hint for how to install git manually on the current platform.
+ */
+function gitInstallHint(): string {
+  if (process.platform === 'darwin') {
+    return 'Run "xcode-select --install" in Terminal, or install Homebrew (https://brew.sh) and run "brew install git".';
+  } else if (process.platform === 'linux') {
+    return 'Run "sudo apt-get install git" (Debian/Ubuntu), "sudo dnf install git" (Fedora), or the equivalent for your distribution.';
+  } else if (process.platform === 'win32') {
+    return 'Download Git from https://git-scm.com/download/win';
+  }
+  return 'Download Git from https://git-scm.com';
+}
+
+/**
+ * Attempt to install git from prebuilt binaries.
+ * Returns true if git is available after the attempt.
+ *
+ * macOS: tries Homebrew (binary bottles), then triggers Xcode Command Line Tools.
+ * Linux: tries common package managers with non-interactive sudo.
+ * Windows: downloads MinGit portable from Git for Windows releases.
+ */
+async function installGit(): Promise<boolean> {
+  log('Git not found, attempting to install...');
+
+  if (process.platform === 'darwin') {
+    // Try Homebrew first — downloads a prebuilt bottle, no user interaction needed
+    if (commandExists('brew')) {
+      log('Installing git via Homebrew...');
+      try {
+        await execPromise('brew install git');
+        if (gitWorks()) {
+          log('Git installed via Homebrew');
+          return true;
+        }
+      } catch (err) {
+        log(`Homebrew git install failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    // Fall back to Xcode Command Line Tools (installs Apple's prebuilt git binary)
+    try {
+      execSync('xcode-select -p', { stdio: 'ignore' });
+      // CLT already installed but git not working — unusual, nothing more we can do
+      log('Xcode CLT present but git not working');
+      return false;
+    } catch {
+      // CLT not installed — trigger the system installer dialog
+    }
+
+    log('Triggering Xcode Command Line Tools installation...');
+    try {
+      execSync('xcode-select --install', { stdio: 'ignore', timeout: 5_000 });
+    } catch {
+      // Expected: opens a system dialog and may exit non-zero
+    }
+
+    // Poll for git to become available while the user completes the CLT dialog
+    for (let i = 0; i < 120; i++) {   // up to 10 minutes
+      await new Promise(resolve => setTimeout(resolve, 5_000));
+      if (gitWorks()) {
+        log('Git installed via Xcode Command Line Tools');
+        return true;
+      }
+    }
+    return false;
+
+  } else if (process.platform === 'linux') {
+    // Try common package managers with non-interactive sudo (-n)
+    const attempts: [string, string][] = [
+      ['apt-get', 'sudo -n sh -c "apt-get update -y && apt-get install -y git"'],
+      ['dnf',     'sudo -n dnf install -y git'],
+      ['yum',     'sudo -n yum install -y git'],
+      ['pacman',  'sudo -n pacman -S --noconfirm git'],
+      ['apk',     'sudo -n apk add git'],
+    ];
+    for (const [bin, cmd] of attempts) {
+      if (commandExists(bin)) {
+        log(`Installing git via ${bin}...`);
+        try {
+          await execPromise(cmd);
+          if (gitWorks()) {
+            log(`Git installed via ${bin}`);
+            return true;
+          }
+        } catch (err) {
+          log(`Failed via ${bin}: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    }
+    return false;
+
+  } else if (process.platform === 'win32') {
+    return installMinGitWindows();
+  }
+
+  return false;
+}
+
+/**
+ * Download MinGit (portable git for Windows) from Git for Windows releases
+ * and extract it to ~/.local/git/. Adds the git cmd directory to PATH.
+ */
+async function installMinGitWindows(): Promise<boolean> {
+  const GIT_VERSION = '2.49.0';
+  const archSuffix = process.arch === 'arm64' ? 'arm64' : '64';
+  const assetName = `MinGit-${GIT_VERSION}-${archSuffix}-bit`;
+  const url = `https://github.com/git-for-windows/git/releases/download/v${GIT_VERSION}.windows.1/${assetName}.zip`;
+  const gitDir = path.join(HOME_DIR, '.local', 'git');
+
+  log(`Downloading MinGit from ${url}`);
+
+  try {
+    fs.mkdirSync(gitDir, { recursive: true });
+
+    const zipPath = path.join(gitDir, `${assetName}.zip`);
+    await execPromise(
+      `powershell -Command "` +
+      `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
+      `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${gitDir}'; ` +
+      `Remove-Item -Force '${zipPath}'"`
+    );
+
+    // Add MinGit's cmd directory to PATH so git.exe is found
+    const gitCmdDir = path.join(gitDir, 'cmd');
+    if (fs.existsSync(path.join(gitCmdDir, 'git.exe'))) {
+      const parts = (process.env.PATH || '').split(path.delimiter);
+      if (!parts.includes(gitCmdDir)) {
+        process.env.PATH = `${gitCmdDir}${path.delimiter}${process.env.PATH || ''}`;
+      }
+      log('MinGit installed successfully');
+      return true;
+    }
+    log('MinGit extracted but git.exe not found in cmd/');
+  } catch (err) {
+    log(`MinGit installation failed: ${err instanceof Error ? err.message : err}`);
+  }
+  return false;
+}
+
+/**
+ * Install Node.js from the official binary tarball and return true on success.
+ * Downloads a platform-specific archive and extracts to ~/.local/ so that
+ * node, npm, and npx are available on PATH via ~/.local/bin/.
+ */
+async function installNode(): Promise<boolean> {
+  const archMap: Record<string, string> = { 'arm64': 'arm64', 'x64': 'x64' };
+  const arch = archMap[process.arch];
+  if (!arch) {
+    log(`Unsupported architecture for Node.js: ${process.arch}`);
+    return false;
+  }
+
+  if (process.platform === 'win32') {
+    const assetName = `node-${NODE_VERSION}-win-${arch}`;
+    const url = `https://nodejs.org/dist/${NODE_VERSION}/${assetName}.zip`;
+    const installDir = path.join(HOME_DIR, '.local', 'node');
+    log(`Downloading Node.js from ${url}`);
+    try {
+      fs.mkdirSync(installDir, { recursive: true });
+      const zipPath = path.join(installDir, `${assetName}.zip`);
+      await execPromise(
+        `powershell -Command "` +
+        `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
+        `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
+        `Remove-Item -Force '${zipPath}'"`
+      );
+      // Add node directory to PATH
+      const nodeDir = path.join(installDir, assetName);
+      if (fs.existsSync(path.join(nodeDir, 'node.exe'))) {
+        const parts = (process.env.PATH || '').split(path.delimiter);
+        if (!parts.includes(nodeDir)) {
+          process.env.PATH = `${nodeDir}${path.delimiter}${process.env.PATH || ''}`;
+        }
+        log('Node.js installed successfully (Windows)');
+        return true;
+      }
+    } catch (err) {
+      log(`Node.js installation failed: ${err instanceof Error ? err.message : err}`);
+    }
+    return false;
+  }
+
+  // macOS / Linux: download tar.gz and extract to ~/.local/
+  const osName = process.platform === 'darwin' ? 'darwin' : 'linux';
+  const assetName = `node-${NODE_VERSION}-${osName}-${arch}`;
+  const url = `https://nodejs.org/dist/${NODE_VERSION}/${assetName}.tar.gz`;
+  log(`Downloading Node.js from ${url}`);
+
+  try {
+    const installDir = path.join(HOME_DIR, '.local');
+    fs.mkdirSync(installDir, { recursive: true });
+    await execPromise(
+      `curl -fsSL '${url}' | tar xz -C '${installDir}' --strip-components=1`
+    );
+    log('Node.js installed successfully');
+    return commandExists('node');
+  } catch (err) {
+    log(`Node.js installation failed: ${err instanceof Error ? err.message : err}`);
+    return false;
+  }
+}
+
+/**
+ * Ensure the VS Code CLI (`code`) is available on PATH.
+ * On macOS, symlinks from the app bundle to ~/.local/bin/code.
+ * On Linux, attempts snap or apt installation.
+ * On Windows, VS Code's installer normally adds `code` to PATH.
+ * Returns true if `code` is available after the attempt.
+ */
+async function installCodeCli(): Promise<boolean> {
+  if (commandExists('code')) return true;
+
+  if (process.platform === 'darwin') {
+    const vscodeApp = '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code';
+    if (fs.existsSync(vscodeApp)) {
+      const binDir = path.join(HOME_DIR, '.local', 'bin');
+      try {
+        fs.mkdirSync(binDir, { recursive: true });
+        const linkPath = path.join(binDir, 'code');
+        try { fs.unlinkSync(linkPath); } catch { /* doesn't exist */ }
+        fs.symlinkSync(vscodeApp, linkPath);
+        log('VS Code CLI symlinked to ~/.local/bin/code');
+        return true;
+      } catch (err) {
+        log(`Failed to symlink VS Code CLI: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  } else if (process.platform === 'linux') {
+    // Try snap first, then apt with Microsoft repo
+    if (commandExists('snap')) {
+      try {
+        await execPromise('sudo -n snap install --classic code');
+        if (commandExists('code')) {
+          log('VS Code CLI installed via snap');
+          return true;
+        }
+      } catch (err) {
+        log(`snap install failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    if (commandExists('apt-get')) {
+      try {
+        await execPromise(
+          'curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo -n gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && ' +
+          'echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | ' +
+          'sudo -n tee /etc/apt/sources.list.d/vscode.list >/dev/null && ' +
+          'sudo -n apt-get update -y && sudo -n apt-get install -y code'
+        );
+        if (commandExists('code')) {
+          log('VS Code CLI installed via apt');
+          return true;
+        }
+      } catch (err) {
+        log(`apt install failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+  // Windows: VS Code installer normally adds `code` to PATH; nothing to do.
+  return commandExists('code');
+}
+
+/**
  * Run a command with args and return a promise that resolves on exit code 0.
  */
 function runAsync(cmd: string, args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
+    const cmdLine = `${cmd} ${args.join(' ')}`;
+    log(`Running: ${cmdLine}`);
     const proc = spawn(cmd, args, {
       cwd,
       stdio: 'pipe',
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
     });
-    let stderr = '';
-    proc.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
+    let output = '';
+    proc.stdout?.on('data', (d: Buffer) => { output += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { output += d.toString(); });
     proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${cmd} ${args.join(' ')} failed (code ${code}): ${stderr}`));
+      if (output.trim()) log(`Output [${cmdLine}]:\n${output.trim()}`);
+      if (code === 0) {
+        log(`Completed: ${cmdLine}`);
+        resolve();
+      } else {
+        reject(new Error(`${cmdLine} failed (exit code ${code}): ${output}`));
+      }
     });
-    proc.on('error', reject);
+    proc.on('error', (err) => {
+      log(`Spawn error [${cmdLine}]: ${err.message}`);
+      reject(err);
+    });
   });
-}
-
-/**
- * Spawn a command in the background (fire-and-forget).
- */
-function spawnBackground(cmd: string, args: string[], cwd: string): void {
-  const proc = spawn(cmd, args, {
-    cwd,
-    stdio: 'ignore',
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-  });
-  proc.on('error', (err) => {
-    console.error(`[KISS Sorcar] Background command failed: ${cmd} ${args.join(' ')}:`, err);
-  });
-  proc.unref();
 }
 
 /**
@@ -335,6 +763,29 @@ function validateAnthropicKey(key: string): Promise<boolean> {
 }
 
 /**
+ * Read the content of a shell rc file, creating its parent directory if needed.
+ * Returns an empty string if the file doesn't exist yet.
+ */
+function readShellRc(rcPath: string): string {
+  try {
+    return fs.readFileSync(rcPath, 'utf-8');
+  } catch {
+    fs.mkdirSync(path.dirname(rcPath), { recursive: true });
+    return '';
+  }
+}
+
+/**
+ * Write content to a shell rc file, ensuring a trailing newline.
+ */
+function writeShellRc(rcPath: string, content: string): void {
+  if (content.length > 0 && !content.endsWith('\n')) {
+    content += '\n';
+  }
+  fs.writeFileSync(rcPath, content);
+}
+
+/**
  * Add an environment variable export line to a shell rc file.
  * If the variable already exists in the file, replaces it. Otherwise appends.
  */
@@ -344,14 +795,7 @@ function addToShellRc(rcPath: string, envName: string, value: string): void {
     ? `set -gx ${envName} "${value}"`
     : `export ${envName}="${value}"`;
 
-  let content = '';
-  try {
-    content = fs.readFileSync(rcPath, 'utf-8');
-  } catch {
-    // File doesn't exist yet — will be created
-    const dir = path.dirname(rcPath);
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  let content = readShellRc(rcPath);
 
   // Check if an export for this variable already exists
   const linePattern = isFish
@@ -368,7 +812,47 @@ function addToShellRc(rcPath: string, envName: string, value: string): void {
     content += exportLine + '\n';
   }
 
-  fs.writeFileSync(rcPath, content);
+  writeShellRc(rcPath, content);
+}
+
+/**
+ * Ensure a directory is on PATH in the user's shell rc file.
+ * Adds an idempotent PATH export/prepend line if not already present.
+ * Uses $HOME instead of a hardcoded path for portability.
+ */
+function ensurePathInShellRc(rcPath: string, dirPath: string): void {
+  const isFish = rcPath.endsWith('config.fish');
+  // Use $HOME-relative form for portability
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  let dirRef = dirPath;
+  if (homeDir && dirPath.startsWith(homeDir)) {
+    dirRef = isFish
+      ? dirPath.replace(homeDir, '$HOME')
+      : dirPath.replace(homeDir, '$HOME');
+  }
+
+  let content = readShellRc(rcPath);
+
+  // Check if the directory is already referenced in a PATH line
+  const escaped = dirRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace('\\$HOME', '(\\$HOME|~)');
+  const alreadyPresent = isFish
+    ? new RegExp(`fish_add_path.*${escaped}`, 'm').test(content)
+    : new RegExp(`PATH.*${escaped}`, 'm').test(content);
+
+  if (alreadyPresent) return;
+
+  const exportLine = isFish
+    ? `fish_add_path "${dirRef}"`
+    : `export PATH="${dirRef}:$PATH"`;
+
+  if (content.length > 0 && !content.endsWith('\n')) {
+    content += '\n';
+  }
+  content += exportLine + '\n';
+
+  writeShellRc(rcPath, content);
+  log(`Added ${dirRef} to PATH in ${rcPath}`);
 }
 
 /**

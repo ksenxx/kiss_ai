@@ -21,5 +21,7 @@ kiss_project/src/kiss/agents/vscode/tsconfig.json
 kiss_project/src/kiss/agents/vscode/.vscodeignore
 kiss_project/src/kiss/agents/vscode/copy-kiss.sh
 
-# Build script
+# Build/install scripts
 copy-kiss.sh
+install.sh
+kiss_project/src/kiss/agents/vscode/install.sh
