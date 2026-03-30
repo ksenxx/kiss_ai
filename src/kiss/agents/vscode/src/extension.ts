@@ -207,7 +207,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Auto-install dependencies (uv, Python, Playwright Chromium) in background
   ensureDependencies().catch(err => {
+    const msg = err instanceof Error ? err.message : String(err);
     console.error('[KISS Sorcar] Dependency setup error:', err);
+    vscode.window.showErrorMessage(
+      `KISS Sorcar: Setup failed — ${msg}. Check ~/.kiss/install.log for details.`
+    );
   });
 
   console.log('KISS Sorcar extension activated');

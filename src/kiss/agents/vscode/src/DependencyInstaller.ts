@@ -56,17 +56,33 @@ export async function ensureDependencies(): Promise<void> {
         // 3. Set up Python environment (installs Python 3.13+ and all pip dependencies)
         if (!venvExists) {
           progress.report({ message: 'Setting up Python environment (first time, may take a minute)...' });
-          await runAsync(uvPath, ['sync'], kissProjectPath);
+          try {
+            await runAsync(uvPath, ['sync'], kissProjectPath);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(
+              `KISS Sorcar: Python environment setup failed — ${msg}. Check ~/.kiss/install.log for details.`
+            );
+            return false;
+          }
           progress.report({ increment: 50 });
         }
 
         // 4. Install Playwright Chromium
         progress.report({ message: 'Installing Chromium browser...' });
-        await runAsync(
-          uvPath,
-          ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
-          kissProjectPath
-        );
+        try {
+          await runAsync(
+            uvPath,
+            ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
+            kissProjectPath
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(
+            `KISS Sorcar: Chromium browser installation failed — ${msg}. Check ~/.kiss/install.log for details.`
+          );
+          return false;
+        }
         progress.report({ increment: 30 });
         return true;
       }
@@ -358,17 +374,22 @@ function addToShellRc(rcPath: string, envName: string, value: string): void {
 /**
  * Prompt the user for an API key. If a validate function is provided,
  * the key is validated and the user is re-prompted if invalid.
+ * When optional is true, the prompt indicates the key can be skipped with Esc.
  * Returns the key string, or undefined if the user cancelled.
  */
 async function promptForApiKey(
   displayName: string,
   placeholder: string,
-  validate?: (key: string) => Promise<boolean>
+  validate?: (key: string) => Promise<boolean>,
+  optional?: boolean
 ): Promise<string | undefined> {
   while (true) {
+    const prompt = optional
+      ? `${displayName} (optional — press Esc to skip):`
+      : `${displayName} is not set. Please enter your key:`;
     const key = await vscode.window.showInputBox({
       title: displayName,
-      prompt: `${displayName} is not set. Please enter your key:`,
+      prompt,
       placeHolder: placeholder,
       ignoreFocusOut: true,
     });
@@ -417,6 +438,8 @@ async function ensureApiKeys(): Promise<void> {
     { envName: 'ANTHROPIC_API_KEY', displayName: 'Anthropic API Key', placeholder: 'sk-ant-...', validate: true },
     { envName: 'OPENAI_API_KEY', displayName: 'OpenAI API Key', placeholder: 'sk-...', validate: false },
     { envName: 'GEMINI_API_KEY', displayName: 'Gemini API Key', placeholder: 'AI...', validate: false },
+    { envName: 'TOGETHER_API_KEY', displayName: 'Together API Key', placeholder: 'tok-...', validate: false },
+    { envName: 'OPENROUTER_API_KEY', displayName: 'OpenRouter API Key', placeholder: 'sk-or-...', validate: false },
   ];
 
   for (const { envName, displayName, placeholder, validate } of keys) {
@@ -427,7 +450,8 @@ async function ensureApiKeys(): Promise<void> {
     const key = await promptForApiKey(
       displayName,
       placeholder,
-      validate ? validateAnthropicKey : undefined
+      validate ? validateAnthropicKey : undefined,
+      true
     );
 
     if (key) {
