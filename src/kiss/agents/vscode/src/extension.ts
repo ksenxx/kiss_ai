@@ -10,6 +10,7 @@ import { ensureDependencies, ensureLocalBinInPath } from './DependencyInstaller'
 let primaryProvider: SorcarViewProvider | undefined;
 let secondaryProvider: SorcarViewProvider | undefined;
 let mergeManager: MergeManager | undefined;
+let mergeOwner: SorcarViewProvider | undefined;
 
 function getActiveProvider(): SorcarViewProvider | undefined {
   return secondaryProvider ?? primaryProvider;
@@ -30,13 +31,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
   mergeManager = new MergeManager();
   mergeManager.on('allDone', () => {
-    // Route to active provider only — avoids duplicate events (Race 17 fix)
-    getActiveProvider()?.sendMergeAllDone();
+    // X4 fix: route to merge owner, not just active provider
+    (mergeOwner ?? getActiveProvider())?.sendMergeAllDone();
+    mergeOwner = undefined;
   });
   context.subscriptions.push({ dispose: () => mergeManager?.dispose() });
 
+  const setMergeOwner = (provider: SorcarViewProvider) => { mergeOwner = provider; };
+
   // Create and register the primary (activitybar) webview provider
   primaryProvider = new SorcarViewProvider(context.extensionUri, mergeManager);
+  primaryProvider.mergeOwnerCallback = setMergeOwner;
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'kissSorcar.chatView',
@@ -47,6 +52,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Create and register the secondary sidebar webview provider
   secondaryProvider = new SorcarViewProvider(context.extensionUri, mergeManager);
+  secondaryProvider.mergeOwnerCallback = setMergeOwner;
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'kissSorcar.chatViewSecondary',

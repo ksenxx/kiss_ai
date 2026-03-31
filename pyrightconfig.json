@@ -1,0 +1,39 @@
+{
+  "pythonVersion": "3.13",
+  "exclude": [
+    "src/kiss/agents/vscode/kiss_project/"
+  ],
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "error",
+  "reportUnsupportedDunderAll": "none",
+  "executionEnvironments": [
+    {
+      "root": "src/kiss/channels/feishu_agent.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/channels/line_agent.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/channels/matrix_agent.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/channels/mattermost_agent.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/channels/nostr_agent.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/channels/sms_agent.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/channels/telegram_agent.py",
+      "reportMissingImports": "none"
+    }
+  ]
+}

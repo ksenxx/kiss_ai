@@ -1,0 +1,510 @@
+"""BlueBubbles Agent — StatefulSorcarAgent extension with BlueBubbles REST API tools.
+
+Provides access to iMessage via the BlueBubbles server running on a local Mac.
+macOS only. Stores config in ``~/.kiss/channels/bluebubbles/config.json``.
+
+Usage::
+
+    agent = BlueBubblesAgent()
+    agent.run(prompt_template="List recent iMessage conversations")
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from kiss.agents.sorcar.sorcar_agent import (
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+logger = logging.getLogger(__name__)
+
+_BB_DIR = Path.home() / ".kiss" / "channels" / "bluebubbles"
+
+_PLATFORM_ERROR = json.dumps({
+    "ok": False,
+    "error": "BlueBubbles requires macOS with a running BlueBubbles server.",
+})
+
+
+def _config_path() -> Path:
+    """Return the path to the stored BlueBubbles config file."""
+    return _BB_DIR / "config.json"
+
+
+def _load_config() -> dict[str, str] | None:
+    """Load stored BlueBubbles config from disk."""
+    path = _config_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and data.get("server_url") and data.get("password"):
+            return {"server_url": data["server_url"], "password": data["password"]}
+        return None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_config(server_url: str, password: str) -> None:
+    """Save BlueBubbles config to disk with restricted permissions."""
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {"server_url": server_url.strip(), "password": password.strip()}, indent=2
+    ))
+    if sys.platform != "win32":
+        path.chmod(0o600)
+
+
+def _clear_config() -> None:
+    """Delete the stored BlueBubbles config."""
+    path = _config_path()
+    if path.exists():
+        path.unlink()
+
+
+class BlueBubblesChannelBackend:
+    """ChannelBackend implementation for BlueBubbles REST API."""
+
+    def __init__(self) -> None:
+        self._server_url: str = ""
+        self._password: str = ""
+        self._last_ts: float = 0.0
+        self._connection_info: str = ""
+
+    def _url(self, path: str) -> str:
+        return f"{self._server_url}{path}"
+
+    def _params(self) -> dict[str, str]:
+        return {"password": self._password}
+
+    def connect(self) -> bool:
+        """Connect to BlueBubbles server."""
+        if sys.platform != "darwin":
+            self._connection_info = "BlueBubbles requires macOS."
+            return False
+        cfg = _load_config()
+        if not cfg:
+            self._connection_info = "No BlueBubbles config found."
+            return False
+        self._server_url = cfg["server_url"].rstrip("/")
+        self._password = cfg["password"]
+        try:
+            resp = requests.get(self._url("/api/v1/server/info"), params=self._params(), timeout=10)
+            data = resp.json()
+            if data.get("status") == 200:
+                self._connection_info = f"Connected to BlueBubbles at {self._server_url}"
+                self._last_ts = time.time() * 1000
+                return True
+            self._connection_info = f"BlueBubbles auth failed: {data}"
+            return False
+        except Exception as e:
+            self._connection_info = f"BlueBubbles connection failed: {e}"
+            return False
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Return chat GUID."""
+        return name if name else None
+
+    def find_user(self, username: str) -> str | None:
+        """Return username as user ID."""
+        return username if username else None
+
+    def join_channel(self, channel_id: str) -> None:
+        """No-op for BlueBubbles."""
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll BlueBubbles for new messages."""
+        try:
+            params = {**self._params(), "after": str(int(self._last_ts)), "limit": str(limit)}
+            resp = requests.get(self._url("/api/v1/message"), params=params, timeout=10)
+            data = resp.json()
+            messages: list[dict[str, Any]] = []
+            for msg in data.get("data", []):
+                ts = float(msg.get("dateCreated", 0))
+                if ts > self._last_ts:
+                    self._last_ts = ts
+                messages.append({
+                    "ts": str(ts),
+                    "user": msg.get("sender", {}).get("address", ""),
+                    "text": msg.get("text", "") or "",
+                    "guid": msg.get("guid", ""),
+                    "chat_guid": channel_id,
+                })
+            return messages, oldest
+        except Exception:
+            return [], oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a BlueBubbles message."""
+        requests.post(
+            self._url("/api/v1/message/text"),
+            params=self._params(),
+            json={"chatGuid": channel_id, "message": text, "method": "private-api"},
+            timeout=30,
+        )
+
+    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+        """Poll for a reply from a specific user."""
+        while True:
+            time.sleep(3.0)
+            msgs, _ = self.poll_messages(channel_id, "")
+            for msg in msgs:
+                if msg.get("user") == user_id:
+                    return str(msg.get("text", ""))
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if message is from the bot."""
+        return False
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Remove bot mentions from text."""
+        return text
+
+    def list_chats(self, limit: int = 25, offset: int = 0) -> str:
+        """List recent iMessage conversations.
+
+        Args:
+            limit: Maximum chats to return. Default: 25.
+            offset: Pagination offset. Default: 0.
+
+        Returns:
+            JSON string with chat list.
+        """
+        if sys.platform != "darwin":
+            return _PLATFORM_ERROR
+        try:
+            resp = requests.get(
+                self._url("/api/v1/chat"),
+                params={**self._params(), "limit": str(limit), "offset": str(offset)},
+                timeout=10,
+            )
+            data = resp.json()
+            chats = [
+                {
+                    "guid": c.get("guid", ""),
+                    "display_name": c.get("displayName", ""),
+                    "participants": [p.get("address", "") for p in c.get("participants", [])],
+                }
+                for c in data.get("data", [])
+            ]
+            return json.dumps({"ok": True, "chats": chats}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_chat(self, chat_guid: str) -> str:
+        """Get a specific iMessage conversation.
+
+        Args:
+            chat_guid: Chat GUID (from list_chats).
+
+        Returns:
+            JSON string with chat details.
+        """
+        if sys.platform != "darwin":
+            return _PLATFORM_ERROR
+        try:
+            resp = requests.get(
+                self._url(f"/api/v1/chat/{chat_guid}"),
+                params=self._params(), timeout=10
+            )
+            return json.dumps({"ok": True, "chat": resp.json().get("data", {})}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_chat_messages(
+        self, chat_guid: str, limit: int = 25, before: str = "", after: str = ""
+    ) -> str:
+        """Get messages from a specific conversation.
+
+        Args:
+            chat_guid: Chat GUID.
+            limit: Maximum messages to return. Default: 25.
+            before: Return messages before this timestamp (ms).
+            after: Return messages after this timestamp (ms).
+
+        Returns:
+            JSON string with message list.
+        """
+        if sys.platform != "darwin":
+            return _PLATFORM_ERROR
+        try:
+            params: dict[str, Any] = {**self._params(), "limit": limit}
+            if before:
+                params["before"] = before
+            if after:
+                params["after"] = after
+            resp = requests.get(
+                self._url(f"/api/v1/chat/{chat_guid}/message"),
+                params=params, timeout=10
+            )
+            messages = [
+                {
+                    "guid": m.get("guid", ""),
+                    "text": m.get("text", "") or "",
+                    "sender": m.get("sender", {}).get("address", ""),
+                    "date_created": m.get("dateCreated", 0),
+                    "is_from_me": m.get("isFromMe", False),
+                }
+                for m in resp.json().get("data", [])
+            ]
+            return json.dumps({"ok": True, "messages": messages}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def post_message(self, chat_guid: str, text: str) -> str:
+        """Send a message to an iMessage conversation.
+
+        Args:
+            chat_guid: Chat GUID to send to.
+            text: Message text.
+
+        Returns:
+            JSON string with ok status.
+        """
+        if sys.platform != "darwin":
+            return _PLATFORM_ERROR
+        try:
+            resp = requests.post(
+                self._url("/api/v1/message/text"),
+                params=self._params(),
+                json={"chatGuid": chat_guid, "message": text, "method": "private-api"},
+                timeout=30,
+            )
+            data = resp.json()
+            if data.get("status") == 200:
+                return json.dumps({"ok": True})
+            return json.dumps({"ok": False, "error": str(data)})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_server_info(self) -> str:
+        """Get BlueBubbles server information.
+
+        Returns:
+            JSON string with server info.
+        """
+        if sys.platform != "darwin":
+            return _PLATFORM_ERROR
+        try:
+            resp = requests.get(self._url("/api/v1/server/info"), params=self._params(), timeout=10)
+            return json.dumps({"ok": True, "info": resp.json().get("data", {})}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def mark_chat_read(self, chat_guid: str) -> str:
+        """Mark a chat as read.
+
+        Args:
+            chat_guid: Chat GUID to mark as read.
+
+        Returns:
+            JSON string with ok status.
+        """
+        if sys.platform != "darwin":
+            return _PLATFORM_ERROR
+        try:
+            resp = requests.post(
+                self._url(f"/api/v1/chat/{chat_guid}/read"),
+                params=self._params(), timeout=10
+            )
+            return json.dumps({"ok": resp.json().get("status") == 200})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_tool_methods(self) -> list:
+        """Return list of bound tool methods for use by the LLM agent."""
+        non_tool = frozenset({
+            "connect", "find_channel", "find_user", "join_channel",
+            "poll_messages", "send_message", "wait_for_reply",
+            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+        })
+        return [
+            getattr(self, name)
+            for name in sorted(dir(self))
+            if not name.startswith("_")
+            and name not in non_tool
+            and callable(getattr(self, name))
+        ]
+
+
+class BlueBubblesAgent(StatefulSorcarAgent):
+    """StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only)."""
+
+    def __init__(self) -> None:
+        super().__init__("BlueBubbles Agent")
+        self._backend = BlueBubblesChannelBackend()
+        cfg = _load_config()
+        if cfg:
+            self._backend._server_url = cfg["server_url"].rstrip("/")
+            self._backend._password = cfg["password"]
+
+    def _get_tools(self) -> list:
+        """Return SorcarAgent tools + BlueBubbles auth tools + API tools."""
+        tools = super()._get_tools()
+        agent = self
+
+        def check_bluebubbles_auth() -> str:
+            """Check if BlueBubbles is configured and reachable.
+
+            Returns:
+                Connection status or instructions.
+            """
+            if not agent._backend._server_url:
+                return (
+                    "Not configured for BlueBubbles. Use authenticate_bluebubbles() to configure.\n"
+                    "Requires BlueBubbles server running on a Mac."
+                )
+            return json.loads(agent._backend.get_server_info()).get("ok") and json.dumps({
+                "ok": True,
+                "server_url": agent._backend._server_url,
+            }) or agent._backend.get_server_info()
+
+        def authenticate_bluebubbles(server_url: str, password: str) -> str:
+            """Configure BlueBubbles connection.
+
+            Args:
+                server_url: BlueBubbles server URL (e.g. "http://localhost:1234").
+                password: BlueBubbles server password.
+
+            Returns:
+                Connection result or error message.
+            """
+            if sys.platform != "darwin":
+                return _PLATFORM_ERROR
+            for val, name in [(server_url, "server_url"), (password, "password")]:
+                if not val.strip():
+                    return f"{name} cannot be empty."
+            agent._backend._server_url = server_url.strip().rstrip("/")
+            agent._backend._password = password.strip()
+            result = json.loads(agent._backend.get_server_info())
+            if result.get("ok"):
+                _save_config(server_url, password)
+                return json.dumps({"ok": True, "message": "BlueBubbles configured."})
+            return json.dumps({"ok": False, "error": "Could not connect to BlueBubbles server."})
+
+        def clear_bluebubbles_auth() -> str:
+            """Clear the stored BlueBubbles configuration.
+
+            Returns:
+                Status message.
+            """
+            _clear_config()
+            agent._backend._server_url = ""
+            agent._backend._password = ""
+            return "BlueBubbles configuration cleared."
+
+        tools.extend([check_bluebubbles_auth, authenticate_bluebubbles, clear_bluebubbles_auth])
+
+        if agent._backend._server_url:
+            tools.extend(agent._backend.get_tool_methods())
+
+        return tools
+
+
+def main() -> None:
+    """Run the BlueBubblesAgent from the command line with chat persistence."""
+    import os
+    import sys
+    import time as time_mod
+
+    if len(sys.argv) <= 1:
+        print("Usage: kiss-bluebubbles [-m MODEL] [-t TASK] [-n] [--daemon]")
+        sys.exit(1)
+
+    parser = _build_arg_parser()
+    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
+    parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
+    parser.add_argument("--daemon-channel", default="", help="Chat GUID to monitor")
+    parser.add_argument("--allow-users", default="", help="Comma-separated addresses to allow")
+    args = parser.parse_args()
+
+    if args.daemon:
+        from kiss.channels.background_agent import ChannelDaemon
+
+        backend = BlueBubblesChannelBackend()
+        cfg = _load_config()
+        if not cfg:
+            print("Not configured. Run: kiss-bluebubbles -t 'authenticate'")
+            sys.exit(1)
+        backend._server_url = cfg["server_url"].rstrip("/")
+        backend._password = cfg["password"]
+        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
+        daemon = ChannelDaemon(
+            backend=backend,
+            channel_name=args.daemon_channel,
+            agent_name="BlueBubbles Background Agent",
+            extra_tools=backend.get_tool_methods(),
+            model_name=args.model_name,
+            max_budget=args.max_budget,
+            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
+            allow_users=allow_users,
+        )
+        print("Starting BlueBubbles daemon... (Ctrl+C to stop)")
+        try:
+            daemon.run()
+        except KeyboardInterrupt:
+            print("Daemon stopped.")
+        return
+
+    agent = BlueBubblesAgent()
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.new:
+        agent.new_chat()
+    else:
+        agent.resume_chat(task_description)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
+    try:
+        agent.run(**run_kwargs)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
+
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Cost: ${agent.budget_used:.4f}")
+    print(f"Total tokens: {agent.total_tokens_used}")
+
+
+if __name__ == "__main__":
+    main()

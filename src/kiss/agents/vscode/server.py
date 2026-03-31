@@ -13,6 +13,7 @@ import itertools
 import json
 import logging
 import os
+import queue
 import re
 import sys
 import threading
@@ -93,8 +94,7 @@ class VSCodeServer:
         self.agent = StatefulSorcarAgent("Sorcar VS Code")
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         self._stop_event: threading.Event | None = None
-        self._user_answer_event: threading.Event | None = None
-        self._user_answer: str = ""
+        self._user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         persisted = _load_last_model()
         self._selected_model = (
             persisted
@@ -104,9 +104,12 @@ class VSCodeServer:
         self._file_cache: list[str] = []
         self._last_active_file: str = ""
         self._last_active_content: str = ""
+        # Lock ordering: _state_lock < printer._lock < printer._stdout_lock < printer._bash_lock
         self._state_lock = threading.Lock()
         self._task_thread: threading.Thread | None = None
         self._merging = False
+        self._task_generation = 0
+        self._recording_id = 0
         self._complete_seq = itertools.count()
         self._complete_seq_latest = -1
         self._complete_lock = threading.Lock()
@@ -155,9 +158,13 @@ class VSCodeServer:
             if path:
                 _record_file_usage(path)
         elif cmd_type == "userAnswer":
-            self._user_answer = cmd.get("answer", "")
-            if self._user_answer_event:
-                self._user_answer_event.set()
+            # Drain any stale answer, then put the new one (P2/D3 fix)
+            while not self._user_answer_queue.empty():
+                try:
+                    self._user_answer_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._user_answer_queue.put(cmd.get("answer", ""))
         elif cmd_type == "resumeSession":
             if self._task_thread and self._task_thread.is_alive():
                 return
@@ -214,6 +221,8 @@ class VSCodeServer:
             self.printer.broadcast({"type": "status", "running": True})
             self._run_task_inner(cmd)
         finally:
+            with self._state_lock:
+                self._task_thread = None
             self.printer.broadcast({"type": "status", "running": False})
 
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
@@ -222,7 +231,8 @@ class VSCodeServer:
         model = cmd.get("model") or self._selected_model
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
-        self._last_active_file = active_file or ""
+        with self._state_lock:
+            self._last_active_file = active_file or ""
         raw_attachments = cmd.get("attachments", [])
 
         attachments: list[Attachment] | None = None
@@ -234,21 +244,36 @@ class VSCodeServer:
                 data = base64.b64decode(data_b64)
                 attachments.append(Attachment(data=data, mime_type=mime))
 
-        if self._merging:
-            self.printer.broadcast(
-                {
-                    "type": "error",
-                    "text": "Cannot run a task while merge review is in progress."
-                    " Accept or reject all changes first.",
-                }
-            )
-            return
+        with self._state_lock:
+            if self._merging:
+                self.printer.broadcast(
+                    {
+                        "type": "error",
+                        "text": "Cannot run a task while merge review is in progress."
+                        " Accept or reject all changes first.",
+                    }
+                )
+                return
 
         self._stop_event = threading.Event()
         self.printer._thread_local.stop_event = self._stop_event
-        self._user_answer_event = threading.Event()
+        # Drain stale answers from previous task (P2 fix)
+        while not self._user_answer_queue.empty():
+            try:
+                self._user_answer_queue.get_nowait()
+            except queue.Empty:
+                break
 
         self.printer.broadcast({"type": "clear"})
+
+        # Increment task generation so stale followups are suppressed (P12 fix)
+        with self._state_lock:
+            self._task_generation += 1
+            gen = self._task_generation
+
+        # Use a unique recording ID instead of thread ident (P16 fix)
+        self._recording_id += 1
+        rec_id = self._recording_id
 
         # Git snapshot captures pre-task state (may be slow for large repos)
         pre_hunks = _parse_diff_hunks(work_dir)
@@ -258,53 +283,63 @@ class VSCodeServer:
         )
         _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
 
-        self.printer.start_recording()
+        # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = ""
         task_end_event: dict[str, Any] | None = None
         try:
-            self.agent.run(
-                prompt_template=prompt,
-                model_name=model,
-                work_dir=work_dir,
-                printer=self.printer,
-                current_editor_file=active_file,
-                attachments=attachments,
-                wait_for_user_callback=self._wait_for_user,
-                ask_user_question_callback=self._ask_user_question,
-            )
-            _record_model_usage(model)
-            result_summary = self._extract_result_summary() or "No summary available"
-            task_end_event = {"type": "task_done"}
-        except KeyboardInterrupt:
-            task_end_event = {"type": "task_stopped"}
-        except Exception as e:  # pragma: no cover
-            task_end_event = {"type": "task_error", "text": str(e)}
-        finally:
-            chat_events = self.printer.stop_recording()
-            _set_latest_chat_events(chat_events, task=prompt, result=result_summary)
-            self.printer.broadcast({"type": "tasks_updated"})
-            self.printer.reset()
-            self._stop_event = None
-            self._user_answer_event = None
+            self.printer.start_recording(rec_id)
             try:
-                merge_dir = str(_merge_data_dir())
-                merge_result = _prepare_merge_view(
-                    work_dir,
-                    merge_dir,
-                    pre_hunks,
-                    pre_untracked,
-                    pre_file_hashes,
+                self.agent.run(
+                    prompt_template=prompt,
+                    model_name=model,
+                    work_dir=work_dir,
+                    printer=self.printer,
+                    current_editor_file=active_file,
+                    attachments=attachments,
+                    wait_for_user_callback=self._wait_for_user,
+                    ask_user_question_callback=self._ask_user_question,
                 )
-                if merge_result.get("status") == "opened":  # pragma: no cover
-                    merge_json = os.path.join(merge_dir, "pending-merge.json")
-                    self._start_merge_session(merge_json)
-            except Exception:  # pragma: no cover — merge view error handler
-                logger.debug("Merge view error", exc_info=True)
-            self._refresh_file_cache()
-            if task_end_event:  # pragma: no branch — always set by try/except above
-                self.printer.broadcast(task_end_event)
-            if result_summary:
-                self._generate_followup_async(prompt, result_summary, model)
+                _record_model_usage(model)
+                result_summary = self._extract_result_summary() or "No summary available"
+                task_end_event = {"type": "task_done"}
+            except KeyboardInterrupt:
+                task_end_event = {"type": "task_stopped"}
+            except Exception as e:  # pragma: no cover
+                task_end_event = {"type": "task_error", "text": str(e)}
+        except BaseException:
+            # P14: interrupt before inner try — ensure stop_recording runs
+            task_end_event = task_end_event or {"type": "task_stopped"}
+        finally:
+            # Entire cleanup wrapped in try/except BaseException (P13 fix)
+            try:
+                chat_events = self.printer.stop_recording(rec_id)
+                _set_latest_chat_events(chat_events, task=prompt, result=result_summary)
+                self.printer.broadcast({"type": "tasks_updated"})
+                self.printer.reset()
+                self._stop_event = None
+                try:
+                    merge_dir = str(_merge_data_dir())
+                    merge_result = _prepare_merge_view(
+                        work_dir,
+                        merge_dir,
+                        pre_hunks,
+                        pre_untracked,
+                        pre_file_hashes,
+                    )
+                    if merge_result.get("status") == "opened":  # pragma: no cover
+                        merge_json = os.path.join(merge_dir, "pending-merge.json")
+                        self._start_merge_session(merge_json)
+                except BaseException:  # pragma: no cover — merge view error handler
+                    logger.debug("Merge view error", exc_info=True)
+                self._refresh_file_cache()
+                if task_end_event:  # pragma: no branch — always set
+                    self.printer.broadcast(task_end_event)
+                if result_summary:
+                    self._generate_followup_async(prompt, result_summary, model, gen)
+            except BaseException:
+                logger.debug("Cleanup interrupted", exc_info=True)
+                if task_end_event:
+                    self.printer.broadcast(task_end_event)
 
     def _start_merge_session(self, merge_json_path: str) -> bool:
         """Load merge data from disk and broadcast merge_data + merge_started events.
@@ -324,7 +359,8 @@ class VSCodeServer:
             total_hunks = sum(len(f.get("hunks", [])) for f in files)
             if total_hunks == 0:
                 return False
-            self._merging = True
+            with self._state_lock:
+                self._merging = True
             self.printer.broadcast({
                 "type": "merge_data",
                 "data": merge_data,
@@ -348,7 +384,8 @@ class VSCodeServer:
 
     def _finish_merge(self) -> None:
         """End the merge session: reset state, notify clients, clean up data."""
-        self._merging = False
+        with self._state_lock:
+            self._merging = False
         self.printer.broadcast({"type": "merge_ended"})
         _cleanup_merge_data(str(_merge_data_dir()))
 
@@ -393,11 +430,22 @@ class VSCodeServer:
                 )
             task_thread.join(timeout=5)
 
-    def _await_user_response(self) -> None:
-        """Block until the user sends a response."""
-        if self._user_answer_event:
-            self._user_answer_event.clear()
-            self._user_answer_event.wait()
+    def _await_user_response(self) -> str:
+        """Block until the user sends a response, checking stop_event periodically.
+
+        Returns:
+            The user's answer string.
+
+        Raises:
+            KeyboardInterrupt: If the stop event is set before an answer arrives.
+        """
+        stop = getattr(self.printer._thread_local, "stop_event", None) or self.printer.stop_event
+        while True:
+            try:
+                return self._user_answer_queue.get(timeout=0.5)
+            except queue.Empty:
+                if stop.is_set():
+                    raise KeyboardInterrupt("Stopped while waiting for user")
 
     def _wait_for_user(self, instruction: str, url: str) -> None:
         """Callback for browser action prompts."""
@@ -414,8 +462,7 @@ class VSCodeServer:
             "type": "askUser",
             "question": question,
         })
-        self._await_user_response()
-        return self._user_answer
+        return self._await_user_response()
 
     def _get_models(self) -> None:
         """Send available models list with usage counts and pricing."""
@@ -513,16 +560,21 @@ class VSCodeServer:
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
-    def _generate_followup_async(self, task: str, result: str, model: str) -> None:
+    def _generate_followup_async(
+        self, task: str, result: str, model: str, gen: int
+    ) -> None:
         """Generate and broadcast a follow-up suggestion in a background thread.
 
         The suggestion is broadcast to the webview and also appended to
         the persisted chat events so it survives panel re-creation.
+        Stale followups from a previous task are suppressed by checking
+        the generation counter.
 
         Args:
             task: The completed task description.
             result: The task result summary.
             model: The model used for the task.
+            gen: Task generation counter at time of launch.
         """
         def _run() -> None:
             try:
@@ -530,6 +582,9 @@ class VSCodeServer:
                     task, result, fast_model_for(model)
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
+                    # P12 fix: only broadcast if still same task generation
+                    if self._task_generation != gen:
+                        return  # pragma: no cover
                     event: dict[str, object] = {
                         "type": "followup_suggestion",
                         "text": suggestion,
@@ -544,11 +599,12 @@ class VSCodeServer:
     def _extract_result_summary(self) -> str:
         """Extract result summary from the last recorded events."""
         with self.printer._lock:
-            for events_list in self.printer._recordings.values():
-                for ev in reversed(events_list):
-                    if ev.get("type") == "result":
-                        summary = ev.get("summary") or ev.get("text") or ""
-                        return str(summary)
+            snapshot = [list(v) for v in self.printer._recordings.values()]
+        for events_list in snapshot:
+            for ev in reversed(events_list):
+                if ev.get("type") == "result":
+                    summary = ev.get("summary") or ev.get("text") or ""
+                    return str(summary)
         return ""
 
     def _complete_from_active_file(
@@ -647,18 +703,21 @@ class VSCodeServer:
         """
         def _do_refresh() -> None:
             from kiss.agents.vscode.diff_merge import _scan_files
-            self._file_cache = _scan_files(self.work_dir)
+            result = _scan_files(self.work_dir)
+            with self._state_lock:
+                self._file_cache = result
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
     def _get_files(self, prefix: str) -> None:
         """Send file list for autocomplete with usage-based sorting."""
-        if not self._file_cache:
-            # First call: scan synchronously so we have data to return.
-            from kiss.agents.vscode.diff_merge import _scan_files
-            self._file_cache = _scan_files(self.work_dir)
+        with self._state_lock:
+            if not self._file_cache:
+                from kiss.agents.vscode.diff_merge import _scan_files
+                self._file_cache = _scan_files(self.work_dir)
+            cache = self._file_cache
         usage = _load_file_usage()
-        ranked = rank_file_suggestions(self._file_cache, prefix, usage)
+        ranked = rank_file_suggestions(cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
 
     def _generate_commit_message(self) -> None:

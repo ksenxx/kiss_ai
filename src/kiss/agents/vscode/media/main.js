@@ -380,7 +380,10 @@
       el.innerHTML = '<div class="' + cls + '-h">' + label + '</div>'
         + '<div class="' + cls + '-body md-body">' + body + '</div>';
       hlBlock(el);
-      target.appendChild(el); break;
+      target.appendChild(el);
+      var bodyEl = el.querySelector('.' + cls + '-body');
+      if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+      break;
     }
     case 'usage_info': {
       var u = mkEl('div', 'ev usage');
@@ -639,6 +642,8 @@
     stopBtn.style.display = running ? 'flex' : 'none';
     sendBtn.disabled = running || isMerging;
     statusDot.classList.toggle('running', running);
+    if (clearBtn) clearBtn.disabled = running;
+    if (historyBtn) historyBtn.disabled = running;
     if (runPromptBtn && running) runPromptBtn.disabled = true;
     updateInputDisabled();
     if (running) {

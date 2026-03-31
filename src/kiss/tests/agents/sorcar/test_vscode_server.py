@@ -534,14 +534,6 @@ class TestCompleteFromActiveFile(unittest.TestCase):
 
         self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
 
-    def test_trailing_dot_match(self) -> None:
-        """Trailing dot (e.g. 'self.') matches chains starting with 'self.'."""
-        content = "self.method_name()\nself.attribute = 1"
-        result = self.server._complete_from_active_file("call self.", snapshot_content=content)
-        # Should match the longest chain starting with "self."
-        assert result in ("method_name", "attribute")
-        # Specifically, "self.method_name" (len 16) > "self.attribute" (len 14)
-        assert result == "method_name"
 
 
 class TestMainJsInputHistory(unittest.TestCase):

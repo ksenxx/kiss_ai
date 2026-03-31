@@ -1,0 +1,441 @@
+"""Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.
+
+Provides access to Urbit/Tlon via the Eyre HTTP server. Stores config
+in ``~/.kiss/channels/tlon/config.json``.
+
+Usage::
+
+    agent = TlonAgent()
+    agent.run(prompt_template="List my Urbit groups")
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import queue
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from kiss.agents.sorcar.sorcar_agent import (
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+logger = logging.getLogger(__name__)
+
+_TLON_DIR = Path.home() / ".kiss" / "channels" / "tlon"
+
+
+def _config_path() -> Path:
+    """Return the path to the stored Tlon config file."""
+    return _TLON_DIR / "config.json"
+
+
+def _load_config() -> dict[str, str] | None:
+    """Load stored Tlon config from disk."""
+    path = _config_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and data.get("ship_url"):
+            return {"ship_url": data["ship_url"], "code": data.get("code", "")}
+        return None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_config(ship_url: str, code: str) -> None:
+    """Save Tlon config to disk with restricted permissions."""
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {"ship_url": ship_url.strip().rstrip("/"), "code": code.strip()}, indent=2
+    ))
+    if sys.platform != "win32":
+        path.chmod(0o600)
+
+
+def _clear_config() -> None:
+    """Delete the stored Tlon config."""
+    path = _config_path()
+    if path.exists():
+        path.unlink()
+
+
+class TlonChannelBackend:
+    """ChannelBackend implementation for Tlon/Urbit Eyre HTTP."""
+
+    def __init__(self) -> None:
+        self._ship_url: str = ""
+        self._session: requests.Session = requests.Session()
+        self._event_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._sse_thread: threading.Thread | None = None
+        self._channel_uid: str = ""
+        self._connection_info: str = ""
+
+    def connect(self) -> bool:
+        """Authenticate with Urbit ship."""
+        cfg = _load_config()
+        if not cfg:
+            self._connection_info = "No Tlon config found."
+            return False
+        self._ship_url = cfg["ship_url"]
+        try:
+            resp = self._session.post(
+                f"{self._ship_url}/~/login",
+                data={"password": cfg["code"]},
+                timeout=10,
+            )
+            if resp.status_code in (200, 204):
+                self._connection_info = f"Connected to {self._ship_url}"
+                return True
+            self._connection_info = f"Tlon login failed: {resp.status_code}"
+            return False
+        except Exception as e:
+            self._connection_info = f"Tlon connection failed: {e}"
+            return False
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Return channel name."""
+        return name if name else None
+
+    def find_user(self, username: str) -> str | None:
+        """Return username."""
+        return username if username else None
+
+    def join_channel(self, channel_id: str) -> None:
+        """No-op for Tlon."""
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll event queue for messages."""
+        messages: list[dict[str, Any]] = []
+        while not self._event_queue.empty() and len(messages) < limit:
+            messages.append(self._event_queue.get_nowait())
+        return messages, oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a Tlon/Urbit poke."""
+        parts = channel_id.split("/", 2)
+        if len(parts) >= 3:
+            group_path, channel_name = "/".join(parts[:2]), parts[2]
+            self.post_message(group_path, channel_name, text)
+
+    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+        """Poll for a reply from a specific user."""
+        while True:
+            time.sleep(3.0)
+            msgs, _ = self.poll_messages(channel_id, "")
+            for msg in msgs:
+                if msg.get("user") == user_id:
+                    return str(msg.get("text", ""))
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if message is from the bot."""
+        return False
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Remove bot mentions from text."""
+        return text
+
+    def list_groups(self) -> str:
+        """List Urbit groups.
+
+        Returns:
+            JSON string with group list.
+        """
+        try:
+            result = self.scry("groups", "/groups/light")
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_channels(self, group_path: str) -> str:
+        """List channels in an Urbit group.
+
+        Args:
+            group_path: Group path (e.g. "~sampel/my-group").
+
+        Returns:
+            JSON string with channel list.
+        """
+        try:
+            result = self.scry("channels", f"/channels/{group_path}/light")
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_messages(
+        self, group_path: str, channel_name: str, count: int = 20
+    ) -> str:
+        """Get recent messages from a Tlon channel.
+
+        Args:
+            group_path: Group path.
+            channel_name: Channel name within the group.
+            count: Number of messages to retrieve. Default: 20.
+
+        Returns:
+            JSON string with messages.
+        """
+        try:
+            path = f"/channel/{group_path}/{channel_name}/posts/newest/{count}/15"
+            result = self.scry("channels", path)
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def post_message(
+        self, group_path: str, channel_name: str, content: str
+    ) -> str:
+        """Post a message to a Tlon channel.
+
+        Args:
+            group_path: Group path (e.g. "~sampel/my-group").
+            channel_name: Channel name within the group.
+            content: Message content text.
+
+        Returns:
+            JSON string with ok status.
+        """
+        try:
+            result = self.poke(
+                "channels",
+                "channel-action",
+                json.dumps({
+                    "channel-action": {
+                        "post": {
+                            "group": group_path,
+                            "channel": channel_name,
+                            "action": {
+                                "add": {"memo": {"content": [{"inline": [content]}], "author": "~"}}
+                            }
+                        }
+                    }
+                }),
+            )
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_profile(self) -> str:
+        """Get the current ship's profile.
+
+        Returns:
+            JSON string with profile info.
+        """
+        try:
+            return self.scry("contacts", "/profile")
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def poke(self, app: str, mark: str, json_body: str) -> str:
+        """Send a poke to an Urbit app.
+
+        Args:
+            app: Gall agent name (e.g. "groups").
+            mark: Mark name (e.g. "groups-action").
+            json_body: JSON string of the poke body.
+
+        Returns:
+            JSON string with ok status.
+        """
+        try:
+            resp = self._session.post(
+                f"{self._ship_url}/~/channel",
+                json={
+                    "id": int(time.time() * 1000),
+                    "action": "poke",
+                    "ship": "",
+                    "app": app,
+                    "mark": mark,
+                    "json": json.loads(json_body),
+                },
+                timeout=30,
+            )
+            return json.dumps({"ok": resp.status_code in (200, 204)})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def scry(self, app: str, path: str) -> str:
+        """Perform a scry request on an Urbit app.
+
+        Args:
+            app: Gall agent name.
+            path: Scry path (starting with /).
+
+        Returns:
+            JSON string with scry result.
+        """
+        try:
+            resp = self._session.get(
+                f"{self._ship_url}/~/scry/{app}{path}.json",
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return json.dumps({"ok": True, "data": resp.json()}, indent=2)[:8000]
+            return json.dumps({"ok": False, "error": f"HTTP {resp.status_code}"})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_tool_methods(self) -> list:
+        """Return list of bound tool methods for use by the LLM agent."""
+        non_tool = frozenset({
+            "connect", "find_channel", "find_user", "join_channel",
+            "poll_messages", "send_message", "wait_for_reply",
+            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+        })
+        return [
+            getattr(self, name)
+            for name in sorted(dir(self))
+            if not name.startswith("_")
+            and name not in non_tool
+            and callable(getattr(self, name))
+        ]
+
+
+class TlonAgent(StatefulSorcarAgent):
+    """StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools."""
+
+    def __init__(self) -> None:
+        super().__init__("Tlon Agent")
+        self._backend = TlonChannelBackend()
+        cfg = _load_config()
+        if cfg:
+            self._backend._ship_url = cfg["ship_url"]
+
+    def _get_tools(self) -> list:
+        """Return SorcarAgent tools + Tlon auth tools + Tlon API tools."""
+        tools = super()._get_tools()
+        agent = self
+
+        def check_tlon_auth() -> str:
+            """Check if Tlon/Urbit is configured.
+
+            Returns:
+                Configuration status or instructions.
+            """
+            if not agent._backend._ship_url:
+                return (
+                    "Not configured for Tlon. Use authenticate_tlon(ship_url=..., code=...) "
+                    "to configure. You need your ship URL and +code from the Urbit terminal."
+                )
+            return json.dumps({"ok": True, "ship_url": agent._backend._ship_url})
+
+        def authenticate_tlon(ship_url: str, code: str) -> str:
+            """Configure Tlon/Urbit connection.
+
+            Args:
+                ship_url: URL of your Urbit ship (e.g. "http://localhost:8080").
+                code: Urbit access code from running +code in the terminal.
+
+            Returns:
+                Authentication result or error message.
+            """
+            for val, name in [(ship_url, "ship_url"), (code, "code")]:
+                if not val.strip():
+                    return f"{name} cannot be empty."
+            agent._backend._ship_url = ship_url.strip().rstrip("/")
+            try:
+                resp = agent._backend._session.post(
+                    f"{agent._backend._ship_url}/~/login",
+                    data={"password": code.strip()},
+                    timeout=10,
+                )
+                if resp.status_code in (200, 204):
+                    _save_config(ship_url, code)
+                    return json.dumps({"ok": True, "message": "Tlon configured."})
+                return json.dumps({"ok": False, "error": f"Login failed: {resp.status_code}"})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def clear_tlon_auth() -> str:
+            """Clear the stored Tlon configuration.
+
+            Returns:
+                Status message.
+            """
+            _clear_config()
+            agent._backend._ship_url = ""
+            return "Tlon configuration cleared."
+
+        tools.extend([check_tlon_auth, authenticate_tlon, clear_tlon_auth])
+
+        if agent._backend._ship_url:
+            tools.extend(agent._backend.get_tool_methods())
+
+        return tools
+
+
+def main() -> None:
+    """Run the TlonAgent from the command line with chat persistence."""
+    import os
+    import sys
+    import time as time_mod
+
+    if len(sys.argv) <= 1:
+        print("Usage: kiss-tlon [-m MODEL] [-t TASK] [-n]")
+        sys.exit(1)
+
+    parser = _build_arg_parser()
+    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
+    args = parser.parse_args()
+
+    agent = TlonAgent()
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.new:
+        agent.new_chat()
+    else:
+        agent.resume_chat(task_description)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
+    try:
+        agent.run(**run_kwargs)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
+
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Cost: ${agent.budget_used:.4f}")
+    print(f"Total tokens: {agent.total_tokens_used}")
+
+
+if __name__ == "__main__":
+    main()

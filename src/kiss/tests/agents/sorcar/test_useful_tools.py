@@ -3,6 +3,7 @@
 import os
 import shutil
 import signal
+import sys
 import tempfile
 from pathlib import Path
 
@@ -59,6 +60,7 @@ def any_tools(request, temp_test_dir):
     if request.param:
         return UsefulTools(stream_callback=lambda _: None), temp_test_dir
     return UsefulTools(), temp_test_dir
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
 class TestAdversarial:
     """Adversarial tests to try to break the Popen/killpg changes."""
 
@@ -139,6 +141,7 @@ class TestBugs:
         assert "exec" in names
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
 class TestStopEvent:
     """Tests that stop_event kills child processes promptly."""
 
@@ -232,6 +235,17 @@ class TestStopEvent:
         except ProcessLookupError:
             pass
         assert not alive, f"Child {child_pid} survived stop_event!"
+
+
+class TestStreamingTimeout:
+    """Test that streaming Bash correctly reports timeout."""
+
+    def test_streaming_bash_timeout(self, temp_test_dir):
+        """Streaming Bash must return timeout error when command exceeds timeout."""
+        streamed: list[str] = []
+        ut = UsefulTools(stream_callback=streamed.append)
+        result = ut.Bash("sleep 10", "should timeout", timeout_seconds=0.5)
+        assert "timeout" in result.lower()
 
 
 if __name__ == "__main__":

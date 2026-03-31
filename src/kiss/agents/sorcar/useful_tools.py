@@ -4,17 +4,69 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 def _log_exc() -> None:
     logger.debug("Exception caught", exc_info=True)
+
+
+def _find_windows_bash() -> str | None:
+    """Find bash.exe on Windows (Git for Windows, WSL, etc.)."""
+    found = shutil.which("bash")
+    if found:
+        return found
+    for candidate in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+_WINDOWS_BASH: str | None = _find_windows_bash() if sys.platform == "win32" else None
+
+
+def _popen_kwargs(command: str) -> dict[str, Any]:
+    """Return Popen kwargs appropriate for the current platform.
+
+    On Unix, uses ``shell=True`` with ``start_new_session=True``.
+    On Windows with bash available, invokes bash directly.
+    On Windows without bash, falls back to PowerShell.
+
+    Args:
+        command: The command string to execute.
+
+    Returns:
+        Dict of keyword arguments for ``subprocess.Popen``.
+    """
+    if sys.platform != "win32":
+        return {
+            "args": command,
+            "shell": True,
+            "start_new_session": True,
+        }
+    if _WINDOWS_BASH:
+        return {
+            "args": [_WINDOWS_BASH, "-c", command],
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+        }
+    ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+    return {
+        "args": [ps, "-NoProfile", "-Command", command],
+        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+    }
 
 
 def _truncate_output(output: str, max_chars: int) -> str:
@@ -39,6 +91,11 @@ DISALLOWED_BASH_COMMANDS = {
     "eval",
     "exec",
     "source",
+}
+
+DISALLOWED_PS_COMMANDS = {
+    "Invoke-Expression",
+    "iex",
 }
 
 
@@ -123,6 +180,19 @@ _PIPE_RE = re.compile(r"(?<!>)\|(?!\|)")
 
 
 def _extract_command_names(command: str) -> list[str]:
+    """Extract command names from a shell command string.
+
+    On Windows without bash (PowerShell fallback), uses a simple regex
+    since ``shlex.split()`` only handles POSIX quoting.
+
+    Args:
+        command: The command string to parse.
+
+    Returns:
+        List of command name strings found in the command.
+    """
+    if sys.platform == "win32" and _WINDOWS_BASH is None:
+        return re.findall(r"\b([A-Za-z_][\w.-]*)\b", command)
     names: list[str] = []
     stripped_command = _strip_heredocs(command)
     segments = _split_respecting_quotes(stripped_command, _CONTROL_RE)
@@ -181,13 +251,28 @@ def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> 
 
 
 def _kill_process_group(process: subprocess.Popen) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except OSError:
+    """Kill a subprocess and all its children.
+
+    On Windows, uses ``taskkill /T /F`` to kill the entire process tree.
+    On Unix, sends ``SIGKILL`` to the process group created by
+    ``start_new_session=True``, falling back to ``process.kill()``.
+
+    Args:
+        process: The subprocess to terminate.
+    """
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            capture_output=True,
+        )
+    else:
         try:
-            process.kill()
-        except OSError:  # pragma: no cover — Popen.send_signal polls first in Python 3.13+
-            pass
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                process.kill()
+            except OSError:  # pragma: no cover — Popen.send_signal polls first in Python 3.13+
+                pass
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:  # pragma: no cover — unreachable after SIGKILL
@@ -330,8 +415,11 @@ class UsefulTools:
         """
         del description
 
+        disallowed = DISALLOWED_BASH_COMMANDS
+        if sys.platform == "win32" and _WINDOWS_BASH is None:
+            disallowed = disallowed | DISALLOWED_PS_COMMANDS
         for command_name in _extract_command_names(command):
-            if command_name in DISALLOWED_BASH_COMMANDS:
+            if command_name in disallowed:
                 return f"Error: Command '{command_name}' is not allowed in Bash tool"
 
         if self.stream_callback:
@@ -341,12 +429,10 @@ class UsefulTools:
 
         try:
             process = subprocess.Popen(
-                command,
-                shell=True,
+                **_popen_kwargs(command),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                start_new_session=True,
                 env=env,
             )
             done = threading.Event()
@@ -384,12 +470,10 @@ class UsefulTools:
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
         assert self.stream_callback is not None
         process = subprocess.Popen(
-            command,
-            shell=True,
+            **_popen_kwargs(command),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            start_new_session=True,
             env=_clean_env(),
         )
         timed_out = False

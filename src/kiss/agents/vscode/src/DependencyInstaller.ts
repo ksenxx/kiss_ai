@@ -46,6 +46,21 @@ export function ensureLocalBinInPath(): void {
 }
 
 /**
+ * Find the actual Node.js directory inside the base install dir on Windows.
+ * Node.js extracts to a nested subdirectory like node-v22.16.0-win-x64/.
+ * Returns the nested directory containing node.exe, or baseDir as fallback.
+ */
+function findNodeDirWindows(baseDir: string): string {
+  try {
+    for (const entry of fs.readdirSync(baseDir)) {
+      const candidate = path.join(baseDir, entry);
+      if (fs.existsSync(path.join(candidate, 'node.exe'))) return candidate;
+    }
+  } catch { /* ignore */ }
+  return baseDir;
+}
+
+/**
  * Ensure all required dependencies are installed.
  * Shows a progress notification during first-time installation.
  * Safe to call multiple times — skips already-installed dependencies.
@@ -82,7 +97,12 @@ export async function ensureDependencies(): Promise<void> {
   // Fast path: everything looks ready, ensure playwright in background
   if (uvPath && venvExists) {
     log('Fast path: uv and .venv present, ensuring Playwright in background');
-    runAsync(uvPath, ['run', 'python', '-m', 'playwright', 'install', 'chromium'], kissProjectPath).catch(err => {
+    const uv = uvPath; // capture narrowed non-null type for closure
+    runAsync(uv, ['run', 'python', '-m', 'playwright', 'install', 'chromium'], kissProjectPath).then(() => {
+      if (process.platform === 'linux') {
+        return runAsync(uv, ['run', 'python', '-m', 'playwright', 'install-deps', 'chromium'], kissProjectPath);
+      }
+    }).catch(err => {
       log(`Fast-path Playwright install failed: ${err instanceof Error ? err.message : err}`);
       vscode.window.showWarningMessage(
         'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.'
@@ -193,6 +213,13 @@ export async function ensureDependencies(): Promise<void> {
           ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
           kissProjectPath
         );
+        if (process.platform === 'linux') {
+          await runAsync(
+            uvPath,
+            ['run', 'python', '-m', 'playwright', 'install-deps', 'chromium'],
+            kissProjectPath
+          ).catch(err => log(`Playwright deps install failed (may need sudo): ${err instanceof Error ? err.message : err}`));
+        }
         progress.report({ increment: 30 });
         return true;
       }
@@ -218,7 +245,9 @@ export async function ensureDependencies(): Promise<void> {
       if (fs.existsSync(gitCmdDir)) {
         ensurePathInShellRc(rcPath, gitCmdDir);
       }
-      const nodeDir = path.join(HOME_DIR, '.local', 'node');
+      // Find the actual nested node directory (e.g. node-v22.16.0-win-x64)
+      const nodeBaseDir = path.join(HOME_DIR, '.local', 'node');
+      const nodeDir = findNodeDirWindows(nodeBaseDir);
       if (fs.existsSync(nodeDir)) {
         ensurePathInShellRc(rcPath, nodeDir);
       }
@@ -259,34 +288,41 @@ export async function ensureDependencies(): Promise<void> {
  * The wrapper calls `uv run sorcar` from the bundled kiss_project directory.
  */
 function installCliScript(kissProjectPath: string, uvPath: string): void {
-  if (process.platform === 'win32') {
-    return; // TODO: Windows .cmd wrapper
-  }
-
-  const homeDir = process.env.HOME || '';
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
   if (!homeDir) return;
 
   const binDir = path.join(homeDir, '.local', 'bin');
-  const scriptPath = path.join(binDir, 'sorcar');
 
   // Resolve uv to an absolute path for the wrapper script
   let absUvPath = uvPath;
   if (uvPath === 'uv' || !path.isAbsolute(uvPath)) {
     try {
-      absUvPath = execSync(`which ${uvPath}`, { encoding: 'utf-8' }).trim();
+      const whichCmd = process.platform === 'win32' ? `where ${uvPath}` : `which ${uvPath}`;
+      absUvPath = execSync(whichCmd, { encoding: 'utf-8' }).trim().split('\n')[0];
     } catch {
-      absUvPath = path.join(homeDir, '.local', 'bin', 'uv');
+      const suffix = process.platform === 'win32' ? '.exe' : '';
+      absUvPath = path.join(homeDir, '.local', 'bin', `uv${suffix}`);
     }
   }
 
-  const script =
-    `#!/bin/bash\n` +
-    `# Installed by KISS Sorcar VS Code extension\n` +
-    `exec "${absUvPath}" run --directory "${kissProjectPath}" sorcar "$@"\n`;
-
   try {
     fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+
+    if (process.platform === 'win32') {
+      const cmdPath = path.join(binDir, 'sorcar.cmd');
+      const script =
+        `@echo off\r\n` +
+        `REM Installed by KISS Sorcar VS Code extension\r\n` +
+        `"${absUvPath}" run --directory "${kissProjectPath}" sorcar %*\r\n`;
+      fs.writeFileSync(cmdPath, script);
+    } else {
+      const scriptPath = path.join(binDir, 'sorcar');
+      const script =
+        `#!/bin/bash\n` +
+        `# Installed by KISS Sorcar VS Code extension\n` +
+        `exec "${absUvPath}" run --directory "${kissProjectPath}" sorcar "$@"\n`;
+      fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+    }
   } catch (err) {
     log(`Failed to install CLI script: ${err instanceof Error ? err.message : err}`);
   }
@@ -732,8 +768,14 @@ function execPromise(cmd: string): Promise<string> {
  */
 function getShellRcPath(): string {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const shell = process.env.SHELL || '';
 
+  if (process.platform === 'win32') {
+    // PowerShell profile
+    const docsDir = path.join(homeDir, 'Documents', 'PowerShell');
+    return path.join(docsDir, 'Microsoft.PowerShell_profile.ps1');
+  }
+
+  const shell = process.env.SHELL || '';
   if (shell.endsWith('/zsh') || shell.endsWith('/zsh-5')) {
     return path.join(homeDir, '.zshrc');
   } else if (shell.endsWith('/fish')) {
@@ -802,17 +844,22 @@ function writeShellRc(rcPath: string, content: string): void {
  * If the variable already exists in the file, replaces it. Otherwise appends.
  */
 function addToShellRc(rcPath: string, envName: string, value: string): void {
+  const isPs1 = rcPath.endsWith('.ps1');
   const isFish = rcPath.endsWith('config.fish');
-  const exportLine = isFish
-    ? `set -gx ${envName} "${value}"`
-    : `export ${envName}="${value}"`;
+  const exportLine = isPs1
+    ? `$env:${envName} = "${value}"`
+    : isFish
+      ? `set -gx ${envName} "${value}"`
+      : `export ${envName}="${value}"`;
 
   let content = readShellRc(rcPath);
 
   // Check if an export for this variable already exists
-  const linePattern = isFish
-    ? new RegExp(`^\\s*set\\s+-gx\\s+${envName}\\s.*$`, 'gm')
-    : new RegExp(`^\\s*export\\s+${envName}=.*$`, 'gm');
+  const linePattern = isPs1
+    ? new RegExp(`^\\s*\\$env:${envName}\\s*=.*$`, 'gm')
+    : isFish
+      ? new RegExp(`^\\s*set\\s+-gx\\s+${envName}\\s.*$`, 'gm')
+      : new RegExp(`^\\s*export\\s+${envName}=.*$`, 'gm');
 
   if (linePattern.test(content)) {
     linePattern.lastIndex = 0; // reset after test() so replace() starts from beginning
@@ -833,12 +880,13 @@ function addToShellRc(rcPath: string, envName: string, value: string): void {
  * Uses $HOME instead of a hardcoded path for portability.
  */
 function ensurePathInShellRc(rcPath: string, dirPath: string): void {
+  const isPs1 = rcPath.endsWith('.ps1');
   const isFish = rcPath.endsWith('config.fish');
   // Use $HOME-relative form for portability
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
   let dirRef = dirPath;
   if (homeDir && dirPath.startsWith(homeDir)) {
-    dirRef = isFish
+    dirRef = isPs1
       ? dirPath.replace(homeDir, '$HOME')
       : dirPath.replace(homeDir, '$HOME');
   }
@@ -848,15 +896,20 @@ function ensurePathInShellRc(rcPath: string, dirPath: string): void {
   // Check if the directory is already referenced in a PATH line
   const escaped = dirRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     .replace('\\$HOME', '(\\$HOME|~)');
-  const alreadyPresent = isFish
-    ? new RegExp(`fish_add_path.*${escaped}`, 'm').test(content)
-    : new RegExp(`PATH.*${escaped}`, 'm').test(content);
+  const alreadyPresent = isPs1
+    ? new RegExp(`\\$env:PATH.*${escaped}`, 'm').test(content)
+    : isFish
+      ? new RegExp(`fish_add_path.*${escaped}`, 'm').test(content)
+      : new RegExp(`PATH.*${escaped}`, 'm').test(content);
 
   if (alreadyPresent) return;
 
-  const exportLine = isFish
-    ? `fish_add_path "${dirRef}"`
-    : `export PATH="${dirRef}:$PATH"`;
+  const pathSep = isPs1 ? ';' : ':';
+  const exportLine = isPs1
+    ? `$env:PATH = "${dirRef};$env:PATH"`
+    : isFish
+      ? `fish_add_path "${dirRef}"`
+      : `export PATH="${dirRef}${pathSep}$PATH"`;
 
   if (content.length > 0 && !content.endsWith('\n')) {
     content += '\n';
@@ -940,12 +993,14 @@ function loadApiKeysFromShellRc(): void {
   const content = readShellRc(rcPath);
   if (!content) return;
 
+  const isPs1 = rcPath.endsWith('.ps1');
   const isFish = rcPath.endsWith('config.fish');
-  // Match uncommented export lines: export KEY="value" or export KEY=value
-  // Fish: set -gx KEY "value" or set -gx KEY value
-  const pattern = isFish
-    ? /^\s*set\s+-gx\s+(\w+)\s+(.+)$/gm
-    : /^\s*export\s+(\w+)=(.+)$/gm;
+  // Match uncommented export lines per shell syntax
+  const pattern = isPs1
+    ? /^\s*\$env:(\w+)\s*=\s*(.+)$/gm
+    : isFish
+      ? /^\s*set\s+-gx\s+(\w+)\s+(.+)$/gm
+      : /^\s*export\s+(\w+)=(.+)$/gm;
 
   let match;
   while ((match = pattern.exec(content)) !== null) {

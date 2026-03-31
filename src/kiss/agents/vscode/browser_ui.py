@@ -98,27 +98,33 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         if text:
             self.broadcast({"type": "system_output", "text": text})
 
-    def start_recording(self) -> None:
-        """Start recording broadcast events for the calling thread.
+    def start_recording(self, recording_id: int | None = None) -> None:
+        """Start recording broadcast events.
 
-        Each thread gets its own independent recording buffer, so concurrent
-        agent threads do not interfere with each other's recordings.
+        Uses an explicit *recording_id* to avoid thread-ID reuse corruption.
+        Falls back to thread ident when no ID is given (backward compat).
+
+        Args:
+            recording_id: Unique identifier for this recording session.
         """
-        tid = threading.current_thread().ident
+        key = recording_id if recording_id is not None else threading.current_thread().ident
         with self._lock:
-            if tid is not None:  # pragma: no branch – always set for alive threads
-                self._recordings[tid] = []
+            if key is not None:  # pragma: no branch – always set for alive threads
+                self._recordings[key] = []
 
-    def stop_recording(self) -> list[dict[str, Any]]:
-        """Stop recording for the calling thread and return its display events.
+    def stop_recording(self, recording_id: int | None = None) -> list[dict[str, Any]]:
+        """Stop recording and return its display events.
+
+        Args:
+            recording_id: The recording ID passed to start_recording.
 
         Returns:
             List of display-relevant events with consecutive deltas merged.
         """
-        tid = threading.current_thread().ident
-        assert tid is not None
+        key = recording_id if recording_id is not None else threading.current_thread().ident
+        assert key is not None
         with self._lock:
-            raw = self._recordings.pop(tid, [])
+            raw = self._recordings.pop(key, [])
         filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
         return _coalesce_events(filtered)
 

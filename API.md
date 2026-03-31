@@ -50,9 +50,30 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.helpers`](#kissagentsvscodekiss_projectsrckissagentsvscodehelpers)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.server`](#kissagentsvscodekiss_projectsrckissagentsvscodeserver)
           - [`kiss.agents.vscode.kiss_project.src.kiss.channels`](#kissagentsvscodekiss_projectsrckisschannels)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent`](#kissagentsvscodekiss_projectsrckisschannelsbackground_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.bluebubbles_agent`](#kissagentsvscodekiss_projectsrckisschannelsbluebubbles_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.discord_agent`](#kissagentsvscodekiss_projectsrckisschannelsdiscord_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.feishu_agent`](#kissagentsvscodekiss_projectsrckisschannelsfeishu_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.gmail_agent`](#kissagentsvscodekiss_projectsrckisschannelsgmail_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.googlechat_agent`](#kissagentsvscodekiss_projectsrckisschannelsgooglechat_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.imessage_agent`](#kissagentsvscodekiss_projectsrckisschannelsimessage_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.irc_agent`](#kissagentsvscodekiss_projectsrckisschannelsirc_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.line_agent`](#kissagentsvscodekiss_projectsrckisschannelsline_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.matrix_agent`](#kissagentsvscodekiss_projectsrckisschannelsmatrix_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.mattermost_agent`](#kissagentsvscodekiss_projectsrckisschannelsmattermost_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.msteams_agent`](#kissagentsvscodekiss_projectsrckisschannelsmsteams_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.nextcloud_talk_agent`](#kissagentsvscodekiss_projectsrckisschannelsnextcloud_talk_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.nostr_agent`](#kissagentsvscodekiss_projectsrckisschannelsnostr_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.phone_control_agent`](#kissagentsvscodekiss_projectsrckisschannelsphone_control_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.signal_agent`](#kissagentsvscodekiss_projectsrckisschannelssignal_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.slack_agent`](#kissagentsvscodekiss_projectsrckisschannelsslack_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.sms_agent`](#kissagentsvscodekiss_projectsrckisschannelssms_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.synology_chat_agent`](#kissagentsvscodekiss_projectsrckisschannelssynology_chat_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.telegram_agent`](#kissagentsvscodekiss_projectsrckisschannelstelegram_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.tlon_agent`](#kissagentsvscodekiss_projectsrckisschannelstlon_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.twitch_agent`](#kissagentsvscodekiss_projectsrckisschannelstwitch_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.whatsapp_agent`](#kissagentsvscodekiss_projectsrckisschannelswhatsapp_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels.zalo_agent`](#kissagentsvscodekiss_projectsrckisschannelszalo_agent)
           - [`kiss.agents.vscode.kiss_project.src.kiss.core`](#kissagentsvscodekiss_projectsrckisscore)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.base`](#kissagentsvscodekiss_projectsrckisscorebase)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.config`](#kissagentsvscodekiss_projectsrckisscoreconfig)
@@ -75,9 +96,30 @@
             - [`kiss.agents.vscode.kiss_project.src.kiss.docker.docker_tools`](#kissagentsvscodekiss_projectsrckissdockerdocker_tools)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.channels`](#kisschannels)
+    - [`kiss.channels.background_agent`](#kisschannelsbackground_agent)
+    - [`kiss.channels.bluebubbles_agent`](#kisschannelsbluebubbles_agent)
+    - [`kiss.channels.discord_agent`](#kisschannelsdiscord_agent)
+    - [`kiss.channels.feishu_agent`](#kisschannelsfeishu_agent)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
+    - [`kiss.channels.googlechat_agent`](#kisschannelsgooglechat_agent)
+    - [`kiss.channels.imessage_agent`](#kisschannelsimessage_agent)
+    - [`kiss.channels.irc_agent`](#kisschannelsirc_agent)
+    - [`kiss.channels.line_agent`](#kisschannelsline_agent)
+    - [`kiss.channels.matrix_agent`](#kisschannelsmatrix_agent)
+    - [`kiss.channels.mattermost_agent`](#kisschannelsmattermost_agent)
+    - [`kiss.channels.msteams_agent`](#kisschannelsmsteams_agent)
+    - [`kiss.channels.nextcloud_talk_agent`](#kisschannelsnextcloud_talk_agent)
+    - [`kiss.channels.nostr_agent`](#kisschannelsnostr_agent)
+    - [`kiss.channels.phone_control_agent`](#kisschannelsphone_control_agent)
+    - [`kiss.channels.signal_agent`](#kisschannelssignal_agent)
     - [`kiss.channels.slack_agent`](#kisschannelsslack_agent)
+    - [`kiss.channels.sms_agent`](#kisschannelssms_agent)
+    - [`kiss.channels.synology_chat_agent`](#kisschannelssynology_chat_agent)
+    - [`kiss.channels.telegram_agent`](#kisschannelstelegram_agent)
+    - [`kiss.channels.tlon_agent`](#kisschannelstlon_agent)
+    - [`kiss.channels.twitch_agent`](#kisschannelstwitch_agent)
     - [`kiss.channels.whatsapp_agent`](#kisschannelswhatsapp_agent)
+    - [`kiss.channels.zalo_agent`](#kisschannelszalo_agent)
       - [`kiss.core.models.novita_model`](#kisscoremodelsnovita_model)
     - [`kiss.docker.docker_tools`](#kissdockerdocker_tools)
 
@@ -505,10 +547,13 @@ ______________________________________________________________________
 
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-- **start_recording** — Start recording broadcast events for the calling thread. Each thread gets its own independent recording buffer, so concurrent agent threads do not interfere with each other's recordings.<br/>`start_recording() -> None`
+- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat).<br/>`start_recording(recording_id: int | None = None) -> None`
 
-- **stop_recording** — Stop recording for the calling thread and return its display events.<br/>`stop_recording() -> list[dict[str, Any]]`
+  - `recording_id`: Unique identifier for this recording session.
 
+- **stop_recording** — Stop recording and return its display events.<br/>`stop_recording(recording_id: int | None = None) -> list[dict[str, Any]]`
+
+  - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
 - **broadcast** — Send an SSE event dict to the connected client. The event is also appended to every active per-thread recording.<br/>`broadcast(event: dict[str, Any]) -> None`
@@ -1622,10 +1667,13 @@ ______________________________________________________________________
 
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-- **start_recording** — Start recording broadcast events for the calling thread. Each thread gets its own independent recording buffer, so concurrent agent threads do not interfere with each other's recordings.<br/>`start_recording() -> None`
+- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat).<br/>`start_recording(recording_id: int | None = None) -> None`
 
-- **stop_recording** — Stop recording for the calling thread and return its display events.<br/>`stop_recording() -> list[dict[str, Any]]`
+  - `recording_id`: Unique identifier for this recording session.
 
+- **stop_recording** — Stop recording and return its display events.<br/>`stop_recording(recording_id: int | None = None) -> list[dict[str, Any]]`
+
+  - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
 - **broadcast** — Send an SSE event dict to the connected client. The event is also appended to every active per-thread recording.<br/>`broadcast(event: dict[str, Any]) -> None`
@@ -1709,13 +1757,1312 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.channels.gmail_agent` — *Gmail Agent — SorcarAgent extension with Gmail API tools.*
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent` — *Background channel daemon — polls ChannelBackend and triggers agents.*
 
-##### `class GmailAgent(SorcarAgent)`
+##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
+
+**Constructor:** `ChannelDaemon(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', poll_interval: float = _POLL_INTERVAL, allow_users: list[str] | None = None) -> None`
+
+- **run** — Start the daemon loop. Blocks until stop() is called or fatal error.<br/>`run() -> None`
+- **stop** — Signal the daemon to stop after the current poll cycle.<br/>`stop() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.bluebubbles_agent` — *BlueBubbles Agent — StatefulSorcarAgent extension with BlueBubbles REST API tools.*
+
+##### `class BlueBubblesChannelBackend` — ChannelBackend implementation for BlueBubbles REST API.
+
+**Constructor:** `BlueBubblesChannelBackend() -> None`
+
+- **connect** — Connect to BlueBubbles server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return chat GUID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for BlueBubbles.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll BlueBubbles for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a BlueBubbles message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_chats** — List recent iMessage conversations.<br/>`list_chats(limit: int = 25, offset: int = 0) -> str`
+
+  - `limit`: Maximum chats to return. Default: 25.
+  - `offset`: Pagination offset. Default: 0.
+  - **Returns:** JSON string with chat list.
+
+- **get_chat** — Get a specific iMessage conversation.<br/>`get_chat(chat_guid: str) -> str`
+
+  - `chat_guid`: Chat GUID (from list_chats).
+  - **Returns:** JSON string with chat details.
+
+- **get_chat_messages** — Get messages from a specific conversation.<br/>`get_chat_messages(chat_guid: str, limit: int = 25, before: str = '', after: str = '') -> str`
+
+  - `chat_guid`: Chat GUID.
+  - `limit`: Maximum messages to return. Default: 25.
+  - `before`: Return messages before this timestamp (ms).
+  - `after`: Return messages after this timestamp (ms).
+  - **Returns:** JSON string with message list.
+
+- **post_message** — Send a message to an iMessage conversation.<br/>`post_message(chat_guid: str, text: str) -> str`
+
+  - `chat_guid`: Chat GUID to send to.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **get_server_info** — Get BlueBubbles server information.<br/>`get_server_info() -> str`
+
+  - **Returns:** JSON string with server info.
+
+- **mark_chat_read** — Mark a chat as read.<br/>`mark_chat_read(chat_guid: str) -> str`
+
+  - `chat_guid`: Chat GUID to mark as read.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class BlueBubblesAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only).
+
+**Constructor:** `BlueBubblesAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
+
+##### `class DiscordChannelBackend` — ChannelBackend implementation for Discord REST API v10.
+
+**Constructor:** `DiscordChannelBackend() -> None`
+
+- **connect** — Authenticate with Discord using the stored bot token.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Discord bots.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new Discord messages using REST API.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Discord message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_guilds** — List guilds (servers) the bot is a member of.<br/>`list_guilds(limit: int = 100) -> str`
+
+  - `limit`: Maximum guilds to return (1-200). Default: 100.
+  - **Returns:** JSON string with guild list (id, name, icon).
+
+- **list_channels** — List channels in a guild.<br/>`list_channels(guild_id: str, channel_type: str = '') -> str`
+
+  - `guild_id`: Guild (server) ID.
+  - `channel_type`: Optional filter by type (0=text, 2=voice, 4=category).
+  - **Returns:** JSON string with channel list (id, name, type, topic).
+
+- **get_channel** — Get information about a channel.<br/>`get_channel(channel_id: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - **Returns:** JSON string with channel details.
+
+- **get_channel_messages** — Get messages from a channel.<br/>`get_channel_messages(channel_id: str, limit: int = 50, before: str = '', after: str = '') -> str`
+
+  - `channel_id`: Channel ID.
+  - `limit`: Number of messages (1-100). Default: 50.
+  - `before`: Get messages before this message ID.
+  - `after`: Get messages after this message ID.
+  - **Returns:** JSON string with message list.
+
+- **post_message** — Send a message to a Discord channel.<br/>`post_message(channel_id: str, content: str, tts: bool = False, reply_to: str = '') -> str`
+
+  - `channel_id`: Channel ID.
+  - `content`: Message text (up to 2000 chars).
+  - `tts`: Text-to-speech flag. Default: False.
+  - `reply_to`: Optional message ID to reply to.
+  - **Returns:** JSON string with ok status and message id.
+
+- **edit_message** — Edit an existing Discord message.<br/>`edit_message(channel_id: str, message_id: str, content: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID.
+  - `content`: New content.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a Discord message.<br/>`delete_message(channel_id: str, message_id: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **add_reaction** — Add a reaction to a message.<br/>`add_reaction(channel_id: str, message_id: str, emoji: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID.
+  - `emoji`: Emoji (e.g. "👍" or "name:id" for custom emojis).
+  - **Returns:** JSON string with ok status.
+
+- **create_thread** — Create a thread from a message.<br/>`create_thread(channel_id: str, message_id: str, name: str, auto_archive_duration: int = 1440) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID to create thread from.
+  - `name`: Thread name.
+  - `auto_archive_duration`: Minutes before auto-archive (60/1440/4320/10080).
+  - **Returns:** JSON string with thread id and name.
+
+- **list_guild_members** — List members of a guild.<br/>`list_guild_members(guild_id: str, limit: int = 100, after: str = '') -> str`
+
+  - `guild_id`: Guild ID.
+  - `limit`: Max members to return (1-1000). Default: 100.
+  - `after`: User ID to start after (for pagination).
+  - **Returns:** JSON string with member list.
+
+- **create_invite** — Create an invite link for a channel.<br/>`create_invite(channel_id: str, max_age: int = 86400, max_uses: int = 0) -> str`
+
+  - `channel_id`: Channel ID.
+  - `max_age`: Invite expiry in seconds (0 = never). Default: 86400 (1 day).
+  - `max_uses`: Maximum uses (0 = unlimited). Default: 0.
+  - **Returns:** JSON string with invite code and URL.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
+
+**Constructor:** `DiscordAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.feishu_agent` — *Feishu/Lark Agent — StatefulSorcarAgent extension with Feishu Open Platform tools.*
+
+##### `class FeishuChannelBackend` — ChannelBackend implementation for Feishu/Lark Open Platform.
+
+**Constructor:** `FeishuChannelBackend() -> None`
+
+- **connect** — Authenticate with Feishu using stored app credentials.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as chat ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Feishu bots.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Feishu chat for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Feishu message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_text_message** — Send a text message to a Feishu chat or user.<br/>`send_text_message(receive_id: str, text: str, receive_id_type: str = 'chat_id') -> str`
+
+  - `receive_id`: Chat ID, user ID, or open ID depending on receive_id_type.
+  - `text`: Message text.
+  - `receive_id_type`: "chat_id", "user_id", "open_id", or "email". Default: "chat_id".
+  - **Returns:** JSON string with ok status and message id.
+
+- **reply_message** — Reply to an existing Feishu message.<br/>`reply_message(message_id: str, text: str) -> str`
+
+  - `message_id`: ID of the message to reply to.
+  - `text`: Reply text.
+  - **Returns:** JSON string with ok status and reply message id.
+
+- **delete_message** — Delete a Feishu message.<br/>`delete_message(message_id: str) -> str`
+
+  - `message_id`: Message ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **list_messages** — List messages in a Feishu chat.<br/>`list_messages(container_id: str, start_time: str = '', end_time: str = '', page_size: int = 20) -> str`
+
+  - `container_id`: Chat ID.
+  - `start_time`: Start Unix timestamp (seconds). Optional.
+  - `end_time`: End Unix timestamp (seconds). Optional.
+  - `page_size`: Maximum messages to return. Default: 20.
+  - **Returns:** JSON string with message list.
+
+- **list_chats** — List Feishu chats the bot is a member of.<br/>`list_chats(page_size: int = 20, page_token: str = '') -> str`
+
+  - `page_size`: Maximum chats to return. Default: 20.
+  - `page_token`: Pagination token.
+  - **Returns:** JSON string with chat list (chat_id, name, description).
+
+- **get_chat** — Get information about a Feishu chat.<br/>`get_chat(chat_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - **Returns:** JSON string with chat details.
+
+- **get_user_info** — Get Feishu user information.<br/>`get_user_info(user_id: str, user_id_type: str = 'open_id') -> str`
+
+  - `user_id`: User ID.
+  - `user_id_type`: ID type ("open_id", "user_id", "union_id"). Default: "open_id".
+  - **Returns:** JSON string with user info.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class FeishuAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Feishu/Lark Open Platform tools.
+
+**Constructor:** `FeishuAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.gmail_agent` — *Gmail Agent — StatefulSorcarAgent extension with Gmail API tools.*
+
+##### `class GmailChannelBackend` — ChannelBackend implementation for Gmail.
+
+**Constructor:** `GmailChannelBackend() -> None`
+
+- **connect** — Authenticate with Gmail using stored OAuth2 credentials.<br/>`connect() -> bool`
+
+  - **Returns:** True on success, False on failure.
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a Gmail label by name (used as channel ID).<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Label name to search for.
+  - **Returns:** Label ID string, or None if not found.
+
+- **find_user** — Find a user by email address (Gmail has no user directory).<br/>`find_user(username: str) -> str | None`
+
+  - `username`: Email address to return as user ID.
+  - **Returns:** The email address itself (Gmail uses email as user ID).
+
+- **join_channel** — No-op for Gmail — labels don't require joining.<br/>`join_channel(channel_id: str) -> None`
+
+  - `channel_id`: Label ID (unused).
+
+- **poll_messages** — Poll Gmail inbox for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Label ID to poll (use "INBOX" for inbox).
+  - `oldest`: History ID or timestamp string for incremental polling.
+  - `limit`: Maximum messages to return.
+  - **Returns:** Tuple of (messages, updated_oldest). Each message dict has: ts (date), user (from address), text (body).
+
+- **send_message** — Send an email (reply to a thread if thread_ts provided).<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+  - `channel_id`: Recipient email address.
+  - `text`: Email body text.
+  - `thread_ts`: Thread ID to reply to (optional).
+
+- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+  - `channel_id`: Label ID (unused for Gmail).
+  - `thread_ts`: Thread ID to poll.
+  - `user_id`: Email address of expected sender.
+  - **Returns:** The text of the user's reply.
+
+- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+  - `msg`: Message dict from poll_messages.
+  - **Returns:** True if the message is from the bot (always False for Gmail).
+
+- **strip_bot_mention** — Remove bot mention markers (no-op for Gmail).<br/>`strip_bot_mention(text: str) -> str`
+
+  - `text`: Raw message text.
+  - **Returns:** Unchanged text.
+
+- **get_profile** — Get the current user's Gmail profile.<br/>`get_profile() -> str`
+
+  - **Returns:** JSON string with email address, messages total, threads total, and history ID.
+
+- **list_messages** — List messages in the user's mailbox.<br/>`list_messages(query: str = '', max_results: int = 20, page_token: str = '', label_ids: str = '') -> str`
+
+  - `query`: Gmail search query (same syntax as Gmail search box). Examples: "is:unread", "from:alice@example.com", "subject:meeting", "newer_than:1d", "has:attachment".
+  - `max_results`: Maximum number of messages to return (1-500). Default: 20.
+  - `page_token`: Page token for pagination from a previous response.
+  - `label_ids`: Comma-separated label IDs to filter by (e.g. "INBOX", "UNREAD", "STARRED").
+  - **Returns:** JSON string with message IDs, snippet, and pagination token. Use get_message() with the ID to read full content.
+
+- **get_message** — Get a specific message by ID.<br/>`get_message(message_id: str, format: str = 'full') -> str`
+
+  - `message_id`: The message ID (from list_messages).
+  - `format`: Response format. Options: "full" — full message with parsed payload (default). "metadata" — headers only (faster). "raw" — raw RFC 2822 message. "minimal" — just IDs, labels, snippet.
+  - **Returns:** JSON string with message headers, body text, labels, and attachment info.
+
+- **send_email** — Send an email message.<br/>`send_email(to: str, subject: str, body: str, cc: str = '', bcc: str = '', html: bool = False) -> str`
+
+  - `to`: Recipient email address(es), comma-separated.
+  - `subject`: Email subject line.
+  - `body`: Email body text (plain text or HTML).
+  - `cc`: CC recipients, comma-separated. Optional.
+  - `bcc`: BCC recipients, comma-separated. Optional.
+  - `html`: If True, body is treated as HTML. Default: False.
+  - **Returns:** JSON string with ok status and the sent message ID.
+
+- **reply_to_message** — Reply to an existing email message.<br/>`reply_to_message(message_id: str, body: str, reply_all: bool = False, html: bool = False) -> str`
+
+  - `message_id`: ID of the message to reply to.
+  - `body`: Reply body text (plain text or HTML).
+  - `reply_all`: If True, reply to all recipients. Default: False.
+  - `html`: If True, body is treated as HTML. Default: False.
+  - **Returns:** JSON string with ok status and the reply message ID.
+
+- **create_draft** — Create a draft email.<br/>`create_draft(to: str, subject: str, body: str, cc: str = '', bcc: str = '', html: bool = False) -> str`
+
+  - `to`: Recipient email address(es), comma-separated.
+  - `subject`: Email subject line.
+  - `body`: Email body text (plain text or HTML).
+  - `cc`: CC recipients, comma-separated. Optional.
+  - `bcc`: BCC recipients, comma-separated. Optional.
+  - `html`: If True, body is treated as HTML. Default: False.
+  - **Returns:** JSON string with ok status and draft ID.
+
+- **trash_message** — Move a message to the trash.<br/>`trash_message(message_id: str) -> str`
+
+  - `message_id`: ID of the message to trash.
+  - **Returns:** JSON string with ok status.
+
+- **untrash_message** — Remove a message from the trash.<br/>`untrash_message(message_id: str) -> str`
+
+  - `message_id`: ID of the message to untrash.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Permanently delete a message (cannot be undone).<br/>`delete_message(message_id: str) -> str`
+
+  - `message_id`: ID of the message to permanently delete.
+  - **Returns:** JSON string with ok status.
+
+- **modify_labels** — Modify labels on a message (star, archive, mark read/unread, etc.). Common label IDs: INBOX, UNREAD, STARRED, IMPORTANT, SPAM, TRASH, CATEGORY_PERSONAL, CATEGORY_SOCIAL, CATEGORY_PROMOTIONS. To archive: remove "INBOX". To mark as read: remove "UNREAD". To star: add "STARRED".<br/>`modify_labels(message_id: str, add_label_ids: str = '', remove_label_ids: str = '') -> str`
+
+  - `message_id`: ID of the message to modify.
+  - `add_label_ids`: Comma-separated label IDs to add.
+  - `remove_label_ids`: Comma-separated label IDs to remove.
+  - **Returns:** JSON string with ok status and updated label list.
+
+- **list_labels** — List all labels in the user's mailbox.<br/>`list_labels() -> str`
+
+  - **Returns:** JSON string with label list (id, name, type).
+
+- **create_label** — Create a new label.<br/>`create_label(name: str, text_color: str = '', background_color: str = '') -> str`
+
+  - `name`: Label name (e.g. "Projects/Important"). Use "/" for nested labels.
+  - `text_color`: Optional hex text color (e.g. "#000000").
+  - `background_color`: Optional hex background color (e.g. "#16a765").
+  - **Returns:** JSON string with the new label's id and name.
+
+- **get_attachment** — Download a message attachment.<br/>`get_attachment(message_id: str, attachment_id: str) -> str`
+
+  - `message_id`: ID of the message containing the attachment.
+  - `attachment_id`: Attachment ID (from get_message response).
+  - **Returns:** JSON string with base64-encoded attachment data and size.
+
+- **get_thread** — Get all messages in an email thread/conversation.<br/>`get_thread(thread_id: str) -> str`
+
+  - `thread_id`: Thread ID (from list_messages or get_message).
+  - **Returns:** JSON string with all messages in the thread.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
+
+  - **Returns:** List of callable tool methods for Gmail API operations.
+
+##### `class GmailAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Gmail API tools.
 
 **Constructor:** `GmailAgent() -> None`
 
-- **run** — Run the Gmail agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.googlechat_agent` — *Google Chat Agent — StatefulSorcarAgent extension with Google Chat API tools.*
+
+##### `class GoogleChatChannelBackend` — ChannelBackend implementation for Google Chat API.
+
+**Constructor:** `GoogleChatChannelBackend() -> None`
+
+- **connect** — Authenticate with Google Chat.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a Google Chat space by display name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Google Chat — bots are added by admins.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll a Google Chat space for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Google Chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_spaces** — List Google Chat spaces (rooms and DMs).<br/>`list_spaces(page_size: int = 20, page_token: str = '') -> str`
+
+  - `page_size`: Maximum spaces to return. Default: 20.
+  - `page_token`: Pagination token from a previous response.
+  - **Returns:** JSON string with space list (name, displayName, type).
+
+- **get_space** — Get information about a Google Chat space.<br/>`get_space(space_name: str) -> str`
+
+  - `space_name`: Space resource name (e.g. "spaces/ABCDEF").
+  - **Returns:** JSON string with space details.
+
+- **list_members** — List members of a Google Chat space.<br/>`list_members(space_name: str, page_size: int = 20, page_token: str = '') -> str`
+
+  - `space_name`: Space resource name.
+  - `page_size`: Maximum members to return. Default: 20.
+  - `page_token`: Pagination token.
+  - **Returns:** JSON string with member list.
+
+- **list_messages** — List messages in a Google Chat space.<br/>`list_messages(space_name: str, page_size: int = 20, page_token: str = '', filter: str = '') -> str`
+
+  - `space_name`: Space resource name (e.g. "spaces/ABCDEF").
+  - `page_size`: Maximum messages to return. Default: 20.
+  - `page_token`: Pagination token.
+  - `filter`: Optional filter (e.g. 'createTime > "2024-01-01T00:00:00Z"').
+  - **Returns:** JSON string with message list.
+
+- **get_message** — Get a specific Google Chat message.<br/>`get_message(message_name: str) -> str`
+
+  - `message_name`: Message resource name (e.g. "spaces/X/messages/Y").
+  - **Returns:** JSON string with message details.
+
+- **post_message** — Send a message to a Google Chat space.<br/>`post_message(space_name: str, text: str, thread_key: str = '') -> str`
+
+  - `space_name`: Space resource name (e.g. "spaces/ABCDEF").
+  - `text`: Message text.
+  - `thread_key`: Optional thread key to reply in an existing thread.
+  - **Returns:** JSON string with ok status and message name.
+
+- **update_message** — Update an existing Google Chat message.<br/>`update_message(message_name: str, text: str) -> str`
+
+  - `message_name`: Message resource name.
+  - `text`: New message text.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a Google Chat message.<br/>`delete_message(message_name: str) -> str`
+
+  - `message_name`: Message resource name.
+  - **Returns:** JSON string with ok status.
+
+- **create_space** — Create a new Google Chat space.<br/>`create_space(display_name: str, space_type: str = 'SPACE') -> str`
+
+  - `display_name`: Space display name.
+  - `space_type`: Space type ("SPACE" or "GROUP_CHAT"). Default: "SPACE".
+  - **Returns:** JSON string with space name and display name.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class GoogleChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Google Chat API tools.
+
+**Constructor:** `GoogleChatAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.imessage_agent` — *iMessage Agent — StatefulSorcarAgent extension with iMessage tools via AppleScript.*
+
+##### `class IMessageChannelBackend` — ChannelBackend implementation for iMessage via AppleScript.
+
+**Constructor:** `IMessageChannelBackend() -> None`
+
+- **connect** — Check macOS and Messages.app availability.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number or email as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for iMessage.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll iMessage via AppleScript (basic implementation).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an iMessage.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Not implemented for iMessage via AppleScript.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_imessage** — Send an iMessage or SMS to a recipient.<br/>`send_imessage(recipient: str, text: str, service: str = 'iMessage') -> str`
+
+  - `recipient`: Phone number or Apple ID email to send to.
+  - `text`: Message text.
+  - `service`: "iMessage" or "SMS". Default: "iMessage".
+  - **Returns:** JSON string with ok status.
+
+- **send_attachment** — Send a file attachment via iMessage.<br/>`send_attachment(recipient: str, file_path: str, service: str = 'iMessage') -> str`
+
+  - `recipient`: Phone number or Apple ID email.
+  - `file_path`: Absolute path to the file to send.
+  - `service`: "iMessage" or "SMS". Default: "iMessage".
+  - **Returns:** JSON string with ok status.
+
+- **list_conversations** — List recent iMessage conversations.<br/>`list_conversations() -> str`
+
+  - **Returns:** JSON string with conversation list.
+
+- **get_messages** — Get recent messages with a recipient (basic implementation).<br/>`get_messages(recipient: str, limit: int = 20) -> str`
+
+  - `recipient`: Phone number or email to get messages for.
+  - `limit`: Maximum messages to return. Default: 20.
+  - **Returns:** JSON string with message list (basic).
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class IMessageAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with iMessage tools (macOS only).
+
+**Constructor:** `IMessageAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.irc_agent` — *IRC Agent — StatefulSorcarAgent extension with IRC tools.*
+
+##### `class IRCChannelBackend` — ChannelBackend implementation for IRC via raw socket.
+
+**Constructor:** `IRCChannelBackend() -> None`
+
+- **connect** — Connect to IRC server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — Join an IRC channel.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Return buffered IRC messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an IRC PRIVMSG.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mention from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **connect_irc** — Connect to an IRC server.<br/>`connect_irc(server: str, port: int = 6667, nick: str = 'KISSBot', realname: str = 'KISS Agent', password: str = '', use_tls: bool = False) -> str`
+
+  - `server`: IRC server hostname or IP.
+  - `port`: Server port. Default: 6667.
+  - `nick`: Nickname to use. Default: "KISSBot".
+  - `realname`: Real name. Default: "KISS Agent".
+  - `password`: Server password. Optional.
+  - `use_tls`: Use TLS encryption. Default: False.
+  - **Returns:** JSON string with ok status.
+
+- **join_irc_channel** — Join an IRC channel.<br/>`join_irc_channel(channel: str) -> str`
+
+  - `channel`: Channel name (e.g. "#general").
+  - **Returns:** JSON string with ok status.
+
+- **leave_channel** — Leave an IRC channel.<br/>`leave_channel(channel: str, reason: str = '') -> str`
+
+  - `channel`: Channel name.
+  - `reason`: Optional leave reason.
+  - **Returns:** JSON string with ok status.
+
+- **post_message** — Send a message to an IRC channel or user.<br/>`post_message(channel_or_nick: str, text: str) -> str`
+
+  - `channel_or_nick`: Target channel (e.g. "#general") or nick.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **send_notice** — Send a NOTICE to an IRC channel or user.<br/>`send_notice(channel_or_nick: str, text: str) -> str`
+
+  - `channel_or_nick`: Target channel or nick.
+  - `text`: Notice text.
+  - **Returns:** JSON string with ok status.
+
+- **get_topic** — Get the topic of an IRC channel.<br/>`get_topic(channel: str) -> str`
+
+  - `channel`: Channel name.
+  - **Returns:** JSON string with ok status (topic comes via server response).
+
+- **set_topic** — Set the topic of an IRC channel.<br/>`set_topic(channel: str, topic: str) -> str`
+
+  - `channel`: Channel name.
+  - `topic`: New topic text.
+  - **Returns:** JSON string with ok status.
+
+- **kick_user** — Kick a user from an IRC channel.<br/>`kick_user(channel: str, nick: str, reason: str = '') -> str`
+
+  - `channel`: Channel name.
+  - `nick`: Nickname to kick.
+  - `reason`: Optional kick reason.
+  - **Returns:** JSON string with ok status.
+
+- **whois** — Get WHOIS information about a user.<br/>`whois(nick: str) -> str`
+
+  - `nick`: Nickname to look up.
+  - **Returns:** JSON string with ok status (data comes via server response).
+
+- **identify_nickserv** — Identify to NickServ.<br/>`identify_nickserv(password: str) -> str`
+
+  - `password`: NickServ password.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class IRCAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with IRC tools.
+
+**Constructor:** `IRCAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.line_agent` — *LINE Agent — StatefulSorcarAgent extension with LINE Messaging API tools.*
+
+##### `class LineChannelBackend` — ChannelBackend implementation for LINE Messaging API.
+
+**Constructor:** `LineChannelBackend() -> None`
+
+- **connect** — Authenticate with LINE and start webhook server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as user/group ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for LINE.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a LINE push message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **push_text_message** — Send a push text message to a LINE user or group.<br/>`push_text_message(to: str, text: str) -> str`
+
+  - `to`: Target user ID, group ID, or room ID.
+  - `text`: Message text (up to 5000 characters).
+  - **Returns:** JSON string with ok status.
+
+- **reply_message** — Reply to a message using the reply token.<br/>`reply_message(reply_token: str, messages_json: str) -> str`
+
+  - `reply_token`: Reply token from an inbound message event.
+  - `messages_json`: JSON array of message objects. Example: '[{"type":"text","text":"Hello!"}]'
+  - **Returns:** JSON string with ok status.
+
+- **get_profile** — Get a LINE user's profile.<br/>`get_profile(user_id: str) -> str`
+
+  - `user_id`: LINE user ID.
+  - **Returns:** JSON string with user profile (displayName, pictureUrl, statusMessage).
+
+- **get_quota** — Get the LINE messaging quota for the current month.<br/>`get_quota() -> str`
+
+  - **Returns:** JSON string with quota information.
+
+- **leave_group** — Leave a LINE group.<br/>`leave_group(group_id: str) -> str`
+
+  - `group_id`: Group ID to leave.
+  - **Returns:** JSON string with ok status.
+
+- **push_image_message** — Send a push image message.<br/>`push_image_message(to: str, image_url: str, preview_url: str) -> str`
+
+  - `to`: Target user ID, group ID, or room ID.
+  - `image_url`: URL of the full-size image.
+  - `preview_url`: URL of the preview image.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class LineAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with LINE Messaging API tools.
+
+**Constructor:** `LineAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.matrix_agent` — *Matrix Agent — StatefulSorcarAgent extension with Matrix protocol tools.*
+
+##### `class MatrixChannelBackend` — ChannelBackend implementation for Matrix via matrix-nio.
+
+**Constructor:** `MatrixChannelBackend() -> None`
+
+- **connect** — Authenticate with Matrix using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return room alias or ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — Join a Matrix room.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new Matrix messages via sync.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Matrix text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_rooms** — List joined Matrix rooms.<br/>`list_rooms() -> str`
+
+  - **Returns:** JSON string with room list (id, name, topic).
+
+- **join_room** — Join a Matrix room.<br/>`join_room(room_id_or_alias: str) -> str`
+
+  - `room_id_or_alias`: Room ID (!room:server.org) or alias (#room:server.org).
+  - **Returns:** JSON string with ok status and room id.
+
+- **leave_room** — Leave a Matrix room.<br/>`leave_room(room_id: str) -> str`
+
+  - `room_id`: Room ID to leave.
+  - **Returns:** JSON string with ok status.
+
+- **send_text_message** — Send a text message to a Matrix room.<br/>`send_text_message(room_id: str, text: str) -> str`
+
+  - `room_id`: Room ID.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status and event id.
+
+- **send_notice** — Send a notice (bot message) to a Matrix room.<br/>`send_notice(room_id: str, text: str) -> str`
+
+  - `room_id`: Room ID.
+  - `text`: Notice text.
+  - **Returns:** JSON string with ok status and event id.
+
+- **get_room_members** — Get members of a Matrix room.<br/>`get_room_members(room_id: str) -> str`
+
+  - `room_id`: Room ID.
+  - **Returns:** JSON string with member list.
+
+- **invite_user** — Invite a user to a Matrix room.<br/>`invite_user(room_id: str, user_id: str) -> str`
+
+  - `room_id`: Room ID.
+  - `user_id`: User ID to invite (@user:server.org).
+  - **Returns:** JSON string with ok status.
+
+- **kick_user** — Kick a user from a Matrix room.<br/>`kick_user(room_id: str, user_id: str, reason: str = '') -> str`
+
+  - `room_id`: Room ID.
+  - `user_id`: User ID to kick.
+  - `reason`: Optional reason for kick.
+  - **Returns:** JSON string with ok status.
+
+- **create_room** — Create a new Matrix room.<br/>`create_room(name: str = '', topic: str = '', is_public: bool = False, alias: str = '') -> str`
+
+  - `name`: Room display name.
+  - `topic`: Room topic.
+  - `is_public`: Whether the room is publicly joinable. Default: False.
+  - `alias`: Optional local alias (without server part).
+  - **Returns:** JSON string with room id.
+
+- **get_profile** — Get a Matrix user's profile.<br/>`get_profile(user_id: str) -> str`
+
+  - `user_id`: User ID (@user:server.org).
+  - **Returns:** JSON string with display name and avatar.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class MatrixAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Matrix protocol tools.
+
+**Constructor:** `MatrixAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.mattermost_agent` — *Mattermost Agent — StatefulSorcarAgent extension with Mattermost REST API tools.*
+
+##### `class MattermostChannelBackend` — ChannelBackend implementation for Mattermost REST API.
+
+**Constructor:** `MattermostChannelBackend() -> None`
+
+- **connect** — Authenticate with Mattermost using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Mattermost (bots are added to channels by admins).<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Mattermost channel for new posts.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Mattermost post.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_teams** — List Mattermost teams.<br/>`list_teams() -> str`
+
+  - **Returns:** JSON string with team list (id, name, display_name).
+
+- **list_channels** — List channels in a Mattermost team.<br/>`list_channels(team_id: str, page: int = 0, per_page: int = 60) -> str`
+
+  - `team_id`: Team ID.
+  - `page`: Page number for pagination. Default: 0.
+  - `per_page`: Channels per page. Default: 60.
+  - **Returns:** JSON string with channel list.
+
+- **get_channel** — Get information about a Mattermost channel.<br/>`get_channel(channel_id: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - **Returns:** JSON string with channel details.
+
+- **list_channel_posts** — List posts in a Mattermost channel.<br/>`list_channel_posts(channel_id: str, page: int = 0, per_page: int = 30) -> str`
+
+  - `channel_id`: Channel ID.
+  - `page`: Page number. Default: 0.
+  - `per_page`: Posts per page. Default: 30.
+  - **Returns:** JSON string with post list.
+
+- **create_post** — Create a post in a Mattermost channel.<br/>`create_post(channel_id: str, message: str, root_id: str = '', file_ids: str = '') -> str`
+
+  - `channel_id`: Channel ID.
+  - `message`: Post message text.
+  - `root_id`: Root post ID if this is a reply.
+  - `file_ids`: Comma-separated file IDs to attach.
+  - **Returns:** JSON string with ok status and post id.
+
+- **delete_post** — Delete a Mattermost post.<br/>`delete_post(post_id: str) -> str`
+
+  - `post_id`: Post ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **get_user** — Get a Mattermost user's information.<br/>`get_user(user_id_or_username: str) -> str`
+
+  - `user_id_or_username`: User ID or username. Use "me" for current user.
+  - **Returns:** JSON string with user details.
+
+- **list_users** — List Mattermost users.<br/>`list_users(page: int = 0, per_page: int = 60, in_team: str = '', in_channel: str = '') -> str`
+
+  - `page`: Page number. Default: 0.
+  - `per_page`: Users per page. Default: 60.
+  - `in_team`: Optional team ID to filter by.
+  - `in_channel`: Optional channel ID to filter by.
+  - **Returns:** JSON string with user list.
+
+- **create_direct_message_channel** — Create a direct message channel between two users.<br/>`create_direct_message_channel(user1_id: str, user2_id: str) -> str`
+
+  - `user1_id`: First user ID.
+  - `user2_id`: Second user ID.
+  - **Returns:** JSON string with channel id.
+
+- **add_reaction** — Add a reaction to a post.<br/>`add_reaction(user_id: str, post_id: str, emoji_name: str) -> str`
+
+  - `user_id`: User ID adding the reaction.
+  - `post_id`: Post ID.
+  - `emoji_name`: Emoji name (without colons, e.g. "thumbsup").
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class MattermostAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Mattermost REST API tools.
+
+**Constructor:** `MattermostAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.msteams_agent` — *Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.*
+
+##### `class MSTeamsChannelBackend` — ChannelBackend implementation for Microsoft Teams via Graph API.
+
+**Constructor:** `MSTeamsChannelBackend() -> None`
+
+- **connect** — Authenticate with Microsoft Graph API.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for MS Teams.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll MS Teams channel for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Teams channel message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_teams** — List Microsoft Teams the bot/user is a member of.<br/>`list_teams(limit: int = 20) -> str`
+
+  - `limit`: Maximum teams to return. Default: 20.
+  - **Returns:** JSON string with team list (id, displayName, description).
+
+- **get_team** — Get details about a Microsoft Team.<br/>`get_team(team_id: str) -> str`
+
+  - `team_id`: Team ID.
+  - **Returns:** JSON string with team details.
+
+- **list_channels** — List channels in a Microsoft Team.<br/>`list_channels(team_id: str) -> str`
+
+  - `team_id`: Team ID.
+  - **Returns:** JSON string with channel list (id, displayName, membershipType).
+
+- **list_channel_messages** — List messages in a Teams channel.<br/>`list_channel_messages(team_id: str, channel_id: str, top: int = 20) -> str`
+
+  - `team_id`: Team ID.
+  - `channel_id`: Channel ID.
+  - `top`: Maximum messages to return. Default: 20.
+  - **Returns:** JSON string with message list.
+
+- **post_channel_message** — Post a message to a Teams channel.<br/>`post_channel_message(team_id: str, channel_id: str, content: str, content_type: str = 'html') -> str`
+
+  - `team_id`: Team ID.
+  - `channel_id`: Channel ID.
+  - `content`: Message content.
+  - `content_type`: "html" or "text". Default: "html".
+  - **Returns:** JSON string with ok status and message id.
+
+- **reply_to_message** — Reply to a Teams channel message.<br/>`reply_to_message(team_id: str, channel_id: str, message_id: str, content: str) -> str`
+
+  - `team_id`: Team ID.
+  - `channel_id`: Channel ID.
+  - `message_id`: Parent message ID.
+  - `content`: Reply content.
+  - **Returns:** JSON string with ok status and reply id.
+
+- **list_chats** — List chats for the authenticated user.<br/>`list_chats(top: int = 20) -> str`
+
+  - `top`: Maximum chats to return. Default: 20.
+  - **Returns:** JSON string with chat list.
+
+- **post_chat_message** — Post a message to a Teams chat.<br/>`post_chat_message(chat_id: str, content: str, content_type: str = 'text') -> str`
+
+  - `chat_id`: Chat ID.
+  - `content`: Message content.
+  - `content_type`: "text" or "html". Default: "text".
+  - **Returns:** JSON string with ok status and message id.
+
+- **list_team_members** — List members of a Microsoft Team.<br/>`list_team_members(team_id: str, top: int = 50) -> str`
+
+  - `team_id`: Team ID.
+  - `top`: Maximum members to return. Default: 50.
+  - **Returns:** JSON string with member list.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class MSTeamsAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Microsoft Teams Graph API tools.
+
+**Constructor:** `MSTeamsAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.nextcloud_talk_agent` — *Nextcloud Talk Agent — StatefulSorcarAgent extension with Nextcloud Talk API tools.*
+
+##### `class NextcloudTalkChannelBackend` — ChannelBackend implementation for Nextcloud Talk REST API.
+
+**Constructor:** `NextcloudTalkChannelBackend() -> None`
+
+- **connect** — Authenticate with Nextcloud Talk.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return room token.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — Join a Nextcloud Talk room.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll a Nextcloud Talk room for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Nextcloud Talk message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_rooms** — List Nextcloud Talk rooms.<br/>`list_rooms() -> str`
+
+  - **Returns:** JSON string with room list (token, displayName, type).
+
+- **get_room** — Get information about a Nextcloud Talk room.<br/>`get_room(token: str) -> str`
+
+  - `token`: Room token.
+  - **Returns:** JSON string with room details.
+
+- **create_room** — Create a Nextcloud Talk room.<br/>`create_room(room_type: int = 3, invite: str = '', room_name: str = '') -> str`
+
+  - `room_type`: 1=one-to-one, 2=group, 3=public. Default: 3.
+  - `invite`: User ID, group ID, or circle ID to invite.
+  - `room_name`: Room display name.
+  - **Returns:** JSON string with room token.
+
+- **list_participants** — List participants in a room.<br/>`list_participants(token: str) -> str`
+
+  - `token`: Room token.
+  - **Returns:** JSON string with participant list.
+
+- **list_messages** — List messages in a Nextcloud Talk room.<br/>`list_messages(token: str, look_into_future: int = 0, limit: int = 100, last_known_message_id: int = 0) -> str`
+
+  - `token`: Room token.
+  - `look_into_future`: 0 for history, 1 for new messages. Default: 0.
+  - `limit`: Maximum messages. Default: 100.
+  - `last_known_message_id`: Last message ID seen (for pagination).
+  - **Returns:** JSON string with message list.
+
+- **post_message** — Post a message to a Nextcloud Talk room.<br/>`post_message(token: str, message: str, reply_to: int = 0) -> str`
+
+  - `token`: Room token.
+  - `message`: Message text.
+  - `reply_to`: Message ID to reply to. Default: 0 (no reply).
+  - **Returns:** JSON string with ok status and message id.
+
+- **set_room_name** — Set the name of a Nextcloud Talk room.<br/>`set_room_name(token: str, name: str) -> str`
+
+  - `token`: Room token.
+  - `name`: New room name.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a message from a room.<br/>`delete_message(token: str, message_id: int) -> str`
+
+  - `token`: Room token.
+  - `message_id`: Message ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class NextcloudTalkAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nextcloud Talk API tools.
+
+**Constructor:** `NextcloudTalkAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.nostr_agent` — *Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.*
+
+##### `class NostrChannelBackend` — ChannelBackend implementation for Nostr protocol via pynostr.
+
+**Constructor:** `NostrChannelBackend() -> None`
+
+- **connect** — Load Nostr keys from stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel/relay name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as public key.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Nostr.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Nostr relays for new events (basic implementation).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Publish a Nostr note.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Not fully implemented for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if event is from this key.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **publish_note** — Publish a text note (kind 1) to Nostr.<br/>`publish_note(content: str) -> str`
+
+  - `content`: Note content text.
+  - **Returns:** JSON string with ok status and event id.
+
+- **publish_reply** — Publish a reply to an existing Nostr event.<br/>`publish_reply(content: str, reply_to_event_id: str) -> str`
+
+  - `content`: Reply content.
+  - `reply_to_event_id`: Event ID to reply to.
+  - **Returns:** JSON string with ok status and event id.
+
+- **send_dm** — Send an encrypted direct message (NIP-04).<br/>`send_dm(recipient_pubkey: str, content: str) -> str`
+
+  - `recipient_pubkey`: Recipient's public key (hex).
+  - `content`: Message content (will be encrypted).
+  - **Returns:** JSON string with ok status and event id.
+
+- **get_profile** — Get the current user's Nostr profile.<br/>`get_profile() -> str`
+
+  - **Returns:** JSON string with public key info.
+
+- **set_profile** — Set the Nostr user profile (kind 0).<br/>`set_profile(name: str = '', about: str = '', picture: str = '', nip05: str = '') -> str`
+
+  - `name`: Display name.
+  - `about`: Bio/about text.
+  - `picture`: Profile picture URL.
+  - `nip05`: NIP-05 identifier (user@domain.com).
+  - **Returns:** JSON string with ok status and event id.
+
+- **list_relays** — List configured Nostr relays.<br/>`list_relays() -> str`
+
+  - **Returns:** JSON string with relay list.
+
+- **add_relay** — Add a Nostr relay to the configuration.<br/>`add_relay(relay_url: str) -> str`
+
+  - `relay_url`: WebSocket URL of the relay (wss://...).
+  - **Returns:** JSON string with ok status.
+
+- **remove_relay** — Remove a Nostr relay from the configuration.<br/>`remove_relay(relay_url: str) -> str`
+
+  - `relay_url`: Relay URL to remove.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class NostrAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nostr protocol tools.
+
+**Constructor:** `NostrAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.phone_control_agent` — *Phone Control Agent — StatefulSorcarAgent extension with Android phone control tools.*
+
+##### `class PhoneControlChannelBackend` — ChannelBackend implementation for Android phone control via REST API.
+
+**Constructor:** `PhoneControlChannelBackend() -> None`
+
+- **connect** — Connect to phone companion app.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for phone control.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new SMS messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the phone itself (sent).<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_sms** — Send an SMS message.<br/>`send_sms(to: str, text: str) -> str`
+
+  - `to`: Recipient phone number.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **make_call** — Make a phone call.<br/>`make_call(to: str) -> str`
+
+  - `to`: Phone number to call.
+  - **Returns:** JSON string with ok status.
+
+- **end_call** — End the current active call.<br/>`end_call() -> str`
+
+  - **Returns:** JSON string with ok status.
+
+- **list_sms_conversations** — List recent SMS conversations.<br/>`list_sms_conversations(limit: int = 20) -> str`
+
+  - `limit`: Maximum conversations to return. Default: 20.
+  - **Returns:** JSON string with conversation list.
+
+- **get_sms_messages** — Get messages in an SMS thread.<br/>`get_sms_messages(thread_id: str, limit: int = 50) -> str`
+
+  - `thread_id`: Thread ID from list_sms_conversations.
+  - `limit`: Maximum messages to return. Default: 50.
+  - **Returns:** JSON string with message list.
+
+- **get_call_log** — Get recent call log.<br/>`get_call_log(limit: int = 20) -> str`
+
+  - `limit`: Maximum calls to return. Default: 20.
+  - **Returns:** JSON string with call list.
+
+- **get_device_info** — Get phone device information.<br/>`get_device_info() -> str`
+
+  - **Returns:** JSON string with device info (model, battery, etc).
+
+- **list_notifications** — List current phone notifications.<br/>`list_notifications() -> str`
+
+  - **Returns:** JSON string with notification list.
+
+- **dismiss_notification** — Dismiss a phone notification.<br/>`dismiss_notification(notification_id: str) -> str`
+
+  - `notification_id`: Notification ID to dismiss.
+  - **Returns:** JSON string with ok status.
+
+- **send_notification_reply** — Reply to a phone notification (e.g. WhatsApp, Signal).<br/>`send_notification_reply(notification_id: str, text: str) -> str`
+
+  - `notification_id`: Notification ID to reply to.
+  - `text`: Reply text.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class PhoneControlAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Android phone control tools.
+
+**Constructor:** `PhoneControlAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.signal_agent` — *Signal Agent — StatefulSorcarAgent extension with Signal CLI tools.*
+
+##### `class SignalChannelBackend` — ChannelBackend implementation for Signal via signal-cli.
+
+**Constructor:** `SignalChannelBackend() -> None`
+
+- **connect** — Load Signal config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Signal.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Receive pending Signal messages via signal-cli.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Signal message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_signal_message** — Send a Signal text message.<br/>`send_signal_message(recipient: str, message: str) -> str`
+
+  - `recipient`: Recipient phone number in E.164 format.
+  - `message`: Message text to send.
+  - **Returns:** JSON string with ok status.
+
+- **receive_messages** — Receive pending Signal messages.<br/>`receive_messages(timeout: int = 5) -> str`
+
+  - `timeout`: Seconds to wait for messages. Default: 5.
+  - **Returns:** JSON string with list of received messages.
+
+- **send_attachment** — Send a Signal message with an attachment.<br/>`send_attachment(recipient: str, message: str, file_path: str) -> str`
+
+  - `recipient`: Recipient phone number.
+  - `message`: Message text.
+  - `file_path`: Local path to the file to attach.
+  - **Returns:** JSON string with ok status.
+
+- **list_contacts** — List Signal contacts.<br/>`list_contacts() -> str`
+
+  - **Returns:** JSON string with contact list.
+
+- **list_groups** — List Signal groups.<br/>`list_groups() -> str`
+
+  - **Returns:** JSON string with group list.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class SignalAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Signal CLI tools.
+
+**Constructor:** `SignalAgent() -> None`
 
 ______________________________________________________________________
 
@@ -1887,13 +3234,680 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.channels.whatsapp_agent` — *WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.*
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.sms_agent` — *SMS Agent — StatefulSorcarAgent extension with Twilio SMS tools.*
 
-##### `class WhatsAppAgent(SorcarAgent)`
+##### `class SMSChannelBackend` — ChannelBackend implementation for Twilio SMS.
+
+**Constructor:** `SMSChannelBackend() -> None`
+
+- **connect** — Authenticate with Twilio using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for SMS.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Twilio for recent inbound messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot's number.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_sms** — Send an SMS message via Twilio.<br/>`send_sms(to: str, body: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `body`: Message text (up to 1600 characters).
+  - **Returns:** JSON string with ok status and message SID.
+
+- **send_mms** — Send an MMS message with media via Twilio.<br/>`send_mms(to: str, body: str, media_url: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `body`: Message text.
+  - `media_url`: Publicly accessible URL of the media file.
+  - **Returns:** JSON string with ok status and message SID.
+
+- **list_messages** — List Twilio messages.<br/>`list_messages(to: str = '', from_: str = '', limit: int = 20, page_token: str = '') -> str`
+
+  - `to`: Filter by recipient phone number. Optional.
+  - `from_`: Filter by sender phone number. Optional.
+  - `limit`: Maximum messages to return. Default: 20.
+  - `page_token`: Pagination token. Optional.
+  - **Returns:** JSON string with message list.
+
+- **get_message** — Get details about a specific Twilio message.<br/>`get_message(message_sid: str) -> str`
+
+  - `message_sid`: Message SID (e.g. "SM...").
+  - **Returns:** JSON string with message details.
+
+- **list_phone_numbers** — List Twilio phone numbers on the account.<br/>`list_phone_numbers(limit: int = 20) -> str`
+
+  - `limit`: Maximum numbers to return. Default: 20.
+  - **Returns:** JSON string with phone number list.
+
+- **get_account_info** — Get Twilio account information.<br/>`get_account_info() -> str`
+
+  - **Returns:** JSON string with account details.
+
+- **send_whatsapp_message** — Send a WhatsApp message via Twilio.<br/>`send_whatsapp_message(to: str, body: str) -> str`
+
+  - `to`: Recipient WhatsApp number in format "whatsapp:+14155238886".
+  - `body`: Message text.
+  - **Returns:** JSON string with ok status and message SID.
+
+- **create_call** — Create a Twilio voice call.<br/>`create_call(to: str, url: str, method: str = 'GET') -> str`
+
+  - `to`: Phone number to call.
+  - `url`: TwiML URL for the call instructions.
+  - `method`: HTTP method for the URL. Default: "GET".
+  - **Returns:** JSON string with ok status and call SID.
+
+- **list_calls** — List recent Twilio calls.<br/>`list_calls(to: str = '', from_: str = '', limit: int = 20) -> str`
+
+  - `to`: Filter by recipient phone number. Optional.
+  - `from_`: Filter by caller phone number. Optional.
+  - `limit`: Maximum calls to return. Default: 20.
+  - **Returns:** JSON string with call list.
+
+- **get_call** — Get details about a specific Twilio call.<br/>`get_call(call_sid: str) -> str`
+
+  - `call_sid`: Call SID (e.g. "CA...").
+  - **Returns:** JSON string with call details.
+
+- **cancel_message** — Cancel a queued or scheduled Twilio message.<br/>`cancel_message(message_sid: str) -> str`
+
+  - `message_sid`: Message SID to cancel.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class SMSAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twilio SMS tools.
+
+**Constructor:** `SMSAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.synology_chat_agent` — *Synology Chat Agent — StatefulSorcarAgent extension with Synology Chat webhook API.*
+
+##### `class SynologyChatChannelBackend` — ChannelBackend implementation for Synology Chat webhooks.
+
+**Constructor:** `SynologyChatChannelBackend() -> None`
+
+- **connect** — Load Synology config and start webhook server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Synology Chat.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Synology Chat message via incoming webhook.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **post_message** — Send a message to Synology Chat via incoming webhook.<br/>`post_message(text: str, user_ids: str = '') -> str`
+
+  - `text`: Message text.
+  - `user_ids`: Comma-separated user IDs to send to (optional). If empty, sends to the default channel.
+  - **Returns:** JSON string with ok status.
+
+- **send_file_message** — Send a message with a file attachment.<br/>`send_file_message(text: str, file_url: str) -> str`
+
+  - `text`: Message text.
+  - `file_url`: URL of the file to attach.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class SynologyChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Synology Chat webhook tools.
+
+**Constructor:** `SynologyChatAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
+
+##### `class TelegramChannelBackend` — ChannelBackend implementation for Telegram Bot API.
+
+**Constructor:** `TelegramChannelBackend() -> None`
+
+- **connect** — Authenticate with Telegram using the stored bot token.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID (Telegram uses chat_id).<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Telegram bots.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new Telegram updates via getUpdates.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Telegram message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot @mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_text** — Send a text message to a Telegram chat.<br/>`send_text(chat_id: str, text: str, reply_to_message_id: str = '') -> str`
+
+  - `chat_id`: Chat ID (integer as string) or @username.
+  - `text`: Message text (supports Markdown).
+  - `reply_to_message_id`: Optional message ID to reply to.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_photo** — Send a photo to a Telegram chat.<br/>`send_photo(chat_id: str, photo_url_or_path: str, caption: str = '') -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - `photo_url_or_path`: URL or local file path of the photo.
+  - `caption`: Optional caption text.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_document** — Send a document/file to a Telegram chat.<br/>`send_document(chat_id: str, document_path: str, caption: str = '') -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - `document_path`: Local file path to send.
+  - `caption`: Optional caption text.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **edit_message_text** — Edit an existing message text.<br/>`edit_message_text(chat_id: str, message_id: str, text: str) -> str`
+
+  - `chat_id`: Chat ID where the message is.
+  - `message_id`: ID of the message to edit.
+  - `text`: New message text.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a message.<br/>`delete_message(chat_id: str, message_id: str) -> str`
+
+  - `chat_id`: Chat ID where the message is.
+  - `message_id`: ID of the message to delete.
+  - **Returns:** JSON string with ok status.
+
+- **pin_message** — Pin a message in a chat.<br/>`pin_message(chat_id: str, message_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `message_id`: ID of the message to pin.
+  - **Returns:** JSON string with ok status.
+
+- **unpin_message** — Unpin a message (or all messages) in a chat.<br/>`unpin_message(chat_id: str, message_id: str = '') -> str`
+
+  - `chat_id`: Chat ID.
+  - `message_id`: ID of specific message to unpin. If empty, unpins all.
+  - **Returns:** JSON string with ok status.
+
+- **get_chat** — Get information about a chat.<br/>`get_chat(chat_id: str) -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - **Returns:** JSON string with chat info (id, title, type, members_count).
+
+- **get_chat_members_count** — Get the number of members in a chat.<br/>`get_chat_members_count(chat_id: str) -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - **Returns:** JSON string with member count.
+
+- **get_chat_member** — Get information about a chat member.<br/>`get_chat_member(chat_id: str, user_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `user_id`: User ID.
+  - **Returns:** JSON string with member info (user, status).
+
+- **ban_chat_member** — Ban a user from a chat.<br/>`ban_chat_member(chat_id: str, user_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `user_id`: User ID to ban.
+  - **Returns:** JSON string with ok status.
+
+- **unban_chat_member** — Unban a user from a chat.<br/>`unban_chat_member(chat_id: str, user_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `user_id`: User ID to unban.
+  - **Returns:** JSON string with ok status.
+
+- **get_updates** — Get recent updates (messages) from the bot.<br/>`get_updates(offset: str = '', limit: int = 10) -> str`
+
+  - `offset`: Update ID offset for pagination.
+  - `limit`: Maximum number of updates to return (1-100).
+  - **Returns:** JSON string with list of update objects.
+
+- **send_poll** — Send a poll to a chat.<br/>`send_poll(chat_id: str, question: str, options_json: str, is_anonymous: bool = True) -> str`
+
+  - `chat_id`: Chat ID.
+  - `question`: Poll question.
+  - `options_json`: JSON array of option strings (2-10 options).
+  - `is_anonymous`: Whether the poll is anonymous. Default: True.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **forward_message** — Forward a message to another chat.<br/>`forward_message(chat_id: str, from_chat_id: str, message_id: str) -> str`
+
+  - `chat_id`: Target chat ID.
+  - `from_chat_id`: Source chat ID.
+  - `message_id`: ID of the message to forward.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class TelegramAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Telegram Bot API tools.
+
+**Constructor:** `TelegramAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.tlon_agent` — *Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.*
+
+##### `class TlonChannelBackend` — ChannelBackend implementation for Tlon/Urbit Eyre HTTP.
+
+**Constructor:** `TlonChannelBackend() -> None`
+
+- **connect** — Authenticate with Urbit ship.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Tlon.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll event queue for messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Tlon/Urbit poke.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_groups** — List Urbit groups.<br/>`list_groups() -> str`
+
+  - **Returns:** JSON string with group list.
+
+- **list_channels** — List channels in an Urbit group.<br/>`list_channels(group_path: str) -> str`
+
+  - `group_path`: Group path (e.g. "~sampel/my-group").
+  - **Returns:** JSON string with channel list.
+
+- **get_messages** — Get recent messages from a Tlon channel.<br/>`get_messages(group_path: str, channel_name: str, count: int = 20) -> str`
+
+  - `group_path`: Group path.
+  - `channel_name`: Channel name within the group.
+  - `count`: Number of messages to retrieve. Default: 20.
+  - **Returns:** JSON string with messages.
+
+- **post_message** — Post a message to a Tlon channel.<br/>`post_message(group_path: str, channel_name: str, content: str) -> str`
+
+  - `group_path`: Group path (e.g. "~sampel/my-group").
+  - `channel_name`: Channel name within the group.
+  - `content`: Message content text.
+  - **Returns:** JSON string with ok status.
+
+- **get_profile** — Get the current ship's profile.<br/>`get_profile() -> str`
+
+  - **Returns:** JSON string with profile info.
+
+- **poke** — Send a poke to an Urbit app.<br/>`poke(app: str, mark: str, json_body: str) -> str`
+
+  - `app`: Gall agent name (e.g. "groups").
+  - `mark`: Mark name (e.g. "groups-action").
+  - `json_body`: JSON string of the poke body.
+  - **Returns:** JSON string with ok status.
+
+- **scry** — Perform a scry request on an Urbit app.<br/>`scry(app: str, path: str) -> str`
+
+  - `app`: Gall agent name.
+  - `path`: Scry path (starting with /).
+  - **Returns:** JSON string with scry result.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class TlonAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools.
+
+**Constructor:** `TlonAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.twitch_agent` — *Twitch Agent — StatefulSorcarAgent extension with Twitch Helix API + Chat tools.*
+
+##### `class TwitchChannelBackend` — ChannelBackend implementation for Twitch Helix API.
+
+**Constructor:** `TwitchChannelBackend() -> None`
+
+- **connect** — Authenticate with Twitch using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Twitch.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for Twitch events (basic REST polling).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Twitch chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Not fully implemented for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **get_stream_info** — Get live stream information for a Twitch channel.<br/>`get_stream_info(broadcaster_login: str) -> str`
+
+  - `broadcaster_login`: Twitch channel username.
+  - **Returns:** JSON string with stream info (game, title, viewer count, etc).
+
+- **get_channel_info** — Get channel information for a Twitch broadcaster.<br/>`get_channel_info(broadcaster_id: str) -> str`
+
+  - `broadcaster_id`: Twitch broadcaster ID.
+  - **Returns:** JSON string with channel info.
+
+- **get_user_info** — Get Twitch user information.<br/>`get_user_info(login_or_id: str) -> str`
+
+  - `login_or_id`: Twitch username (login) or user ID.
+  - **Returns:** JSON string with user info.
+
+- **get_chatters** — Get current chatters in a Twitch channel.<br/>`get_chatters(broadcaster_id: str, moderator_id: str = '') -> str`
+
+  - `broadcaster_id`: Broadcaster user ID.
+  - `moderator_id`: Moderator user ID (optional, defaults to broadcaster).
+  - **Returns:** JSON string with chatters list.
+
+- **send_chat_message** — Send a message to a Twitch chat.<br/>`send_chat_message(broadcaster_id: str, sender_id: str, message: str) -> str`
+
+  - `broadcaster_id`: Broadcaster channel ID.
+  - `sender_id`: Sender user ID.
+  - `message`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **ban_user** — Ban or timeout a Twitch user.<br/>`ban_user(broadcaster_id: str, moderator_id: str, user_id: str, duration: int = 0, reason: str = '') -> str`
+
+  - `broadcaster_id`: Broadcaster channel ID.
+  - `moderator_id`: Moderator user ID.
+  - `user_id`: User ID to ban.
+  - `duration`: Timeout duration in seconds (0 = permanent ban).
+  - `reason`: Optional ban reason.
+  - **Returns:** JSON string with ok status.
+
+- **search_channels** — Search for Twitch channels by name.<br/>`search_channels(query: str, limit: int = 10) -> str`
+
+  - `query`: Search query.
+  - `limit`: Maximum channels to return. Default: 10.
+  - **Returns:** JSON string with matching channels.
+
+- **get_clips** — Get clips from a Twitch channel.<br/>`get_clips(broadcaster_id: str, limit: int = 20) -> str`
+
+  - `broadcaster_id`: Broadcaster ID.
+  - `limit`: Maximum clips to return. Default: 20.
+  - **Returns:** JSON string with clip list.
+
+- **create_clip** — Create a clip from a live stream.<br/>`create_clip(broadcaster_id: str, has_delay: bool = False) -> str`
+
+  - `broadcaster_id`: Broadcaster ID.
+  - `has_delay`: Whether to add a 5-second delay. Default: False.
+  - **Returns:** JSON string with clip edit URL.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class TwitchAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twitch Helix API tools.
+
+**Constructor:** `TwitchAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
+
+##### `class WhatsAppChannelBackend` — ChannelBackend implementation for WhatsApp Business Cloud API.
+
+**Constructor:** `WhatsAppChannelBackend() -> None`
+
+- **connect** — Authenticate with WhatsApp using stored config and start webhook server.<br/>`connect() -> bool`
+
+  - **Returns:** True on success, False on failure.
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a WhatsApp channel by name (returns name as channel ID).<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name / phone number.
+  - **Returns:** The name itself as the channel ID.
+
+- **find_user** — Find a user by phone number (returns phone number as user ID).<br/>`find_user(username: str) -> str | None`
+
+  - `username`: Phone number in E.164 format.
+  - **Returns:** The phone number itself as user ID.
+
+- **join_channel** — No-op for WhatsApp — no channel joining required.<br/>`join_channel(channel_id: str) -> None`
+
+  - `channel_id`: Phone number (unused).
+
+- **poll_messages** — Drain the webhook message queue and return new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Recipient phone number (unused — all messages returned).
+  - `oldest`: Unused for push-mode channels.
+  - `limit`: Maximum messages to return.
+  - **Returns:** Tuple of (messages, oldest). Each message dict has at minimum: ts, user (from), text.
+
+- **send_message** — Send a text message to a WhatsApp number.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+  - `channel_id`: Recipient phone number in E.164 format.
+  - `text`: Message text.
+  - `thread_ts`: Unused for WhatsApp.
+
+- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+  - `channel_id`: Unused for WhatsApp.
+  - `thread_ts`: Unused for WhatsApp.
+  - `user_id`: Phone number to wait for.
+  - **Returns:** The text of the user's reply.
+
+- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+  - `msg`: Message dict from poll_messages.
+  - **Returns:** Always False — WhatsApp webhooks only deliver inbound messages.
+
+- **strip_bot_mention** — Remove bot mention markers (no-op for WhatsApp).<br/>`strip_bot_mention(text: str) -> str`
+
+  - `text`: Raw message text.
+  - **Returns:** Unchanged text.
+
+- **send_text_message** — Send a text message to a WhatsApp number.<br/>`send_text_message(to: str, body: str, preview_url: bool = False) -> str`
+
+  - `to`: Recipient phone number in E.164 format (e.g. "+14155238886"). Include country code, no spaces or dashes.
+  - `body`: Message text (up to 4096 characters).
+  - `preview_url`: If True, URLs in the body will show a preview. Default: False.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_template_message** — Send a pre-approved template message. Template messages are required to initiate conversations outside the 24-hour customer service window.<br/>`send_template_message(to: str, template_name: str, language_code: str = 'en_US', components: str = '') -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `template_name`: Name of the approved message template.
+  - `language_code`: Template language code (e.g. "en_US"). Default: "en_US".
+  - `components`: Optional JSON string of template components (header, body, button parameters).
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_media_message** — Send a media message (image, document, audio, video, sticker). Provide either media_id (from upload_media) or link (public URL).<br/>`send_media_message(to: str, media_type: str, media_id: str = '', link: str = '', caption: str = '', filename: str = '') -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `media_type`: Type of media. Options: "image", "document", "audio", "video", "sticker".
+  - `media_id`: Media ID from a previous upload_media call.
+  - `link`: Public URL of the media file. Used if media_id is empty.
+  - `caption`: Optional caption (supported for image, video, document).
+  - `filename`: Optional filename (for document type).
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_reaction** — React to a message with an emoji.<br/>`send_reaction(to: str, message_id: str, emoji: str) -> str`
+
+  - `to`: Phone number of the message recipient.
+  - `message_id`: ID of the message to react to.
+  - `emoji`: Emoji character (e.g. "👍", "❤️", "😂").
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_location_message** — Send a location message.<br/>`send_location_message(to: str, latitude: str, longitude: str, name: str = '', address: str = '') -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `latitude`: Latitude of the location (e.g. "37.7749").
+  - `longitude`: Longitude of the location (e.g. "-122.4194").
+  - `name`: Optional name of the location.
+  - `address`: Optional address of the location.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_interactive_message** — Send an interactive message (buttons, lists, or product messages).<br/>`send_interactive_message(to: str, interactive_json: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `interactive_json`: JSON string of the interactive object.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_contact_message** — Send a contact card message.<br/>`send_contact_message(to: str, contacts_json: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `contacts_json`: JSON string of contacts array.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **mark_as_read** — Mark a received message as read.<br/>`mark_as_read(message_id: str) -> str`
+
+  - `message_id`: ID of the message to mark as read.
+  - **Returns:** JSON string with ok status.
+
+- **get_business_profile** — Get the WhatsApp Business profile information.<br/>`get_business_profile() -> str`
+
+  - **Returns:** JSON string with business profile data (about, address, description, email, websites, profile_picture_url).
+
+- **update_business_profile** — Update the WhatsApp Business profile.<br/>`update_business_profile(about: str = '', address: str = '', description: str = '', email: str = '', websites: str = '', vertical: str = '') -> str`
+
+  - `about`: Short description (max 139 characters).
+  - `address`: Business address.
+  - `description`: Full business description (max 512 characters).
+  - `email`: Business email address.
+  - `websites`: Comma-separated list of website URLs (max 2).
+  - `vertical`: Business category (e.g. "RETAIL", "FOOD", "HEALTH").
+  - **Returns:** JSON string with ok status.
+
+- **upload_media** — Upload a media file for later sending.<br/>`upload_media(file_path: str, mime_type: str) -> str`
+
+  - `file_path`: Local path to the file to upload.
+  - `mime_type`: MIME type of the file (e.g. "image/jpeg", "application/pdf", "video/mp4", "audio/ogg").
+  - **Returns:** JSON string with ok status and media_id (use in send_media_message).
+
+- **get_media_url** — Get the download URL for an uploaded media file.<br/>`get_media_url(media_id: str) -> str`
+
+  - `media_id`: Media ID from upload_media or a received message.
+  - **Returns:** JSON string with ok status, url, mime_type, and file_size.
+
+- **delete_media** — Delete an uploaded media file.<br/>`delete_media(media_id: str) -> str`
+
+  - `media_id`: Media ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **list_message_templates** — List available message templates for the WhatsApp Business Account. Requires waba_id to be configured.<br/>`list_message_templates(limit: int = 20, status: str = '') -> str`
+
+  - `limit`: Maximum number of templates to return. Default: 20.
+  - `status`: Filter by status ("APPROVED", "PENDING", "REJECTED"). If empty, returns all statuses.
+  - **Returns:** JSON string with template list (name, status, category, language).
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
+
+  - **Returns:** List of callable tool methods for WhatsApp API operations.
+
+##### `class WhatsAppAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 
 **Constructor:** `WhatsAppAgent() -> None`
 
-- **run** — Run the WhatsApp agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.zalo_agent` — *Zalo Agent — StatefulSorcarAgent extension with Zalo Official Account API tools.*
+
+##### `class ZaloChannelBackend` — ChannelBackend implementation for Zalo OA API.
+
+**Constructor:** `ZaloChannelBackend() -> None`
+
+- **connect** — Load Zalo config and start webhook server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as user ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Zalo.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Zalo text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_text_message** — Send a text message to a Zalo user.<br/>`send_text_message(to_user_id: str, text: str) -> str`
+
+  - `to_user_id`: Zalo user ID.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **send_image_message** — Send an image message to a Zalo user.<br/>`send_image_message(to_user_id: str, image_url: str, caption: str = '') -> str`
+
+  - `to_user_id`: Zalo user ID.
+  - `image_url`: URL of the image to send.
+  - `caption`: Optional image caption.
+  - **Returns:** JSON string with ok status.
+
+- **get_follower_profile** — Get a Zalo follower's profile.<br/>`get_follower_profile(user_id: str) -> str`
+
+  - `user_id`: Zalo user ID.
+  - **Returns:** JSON string with user profile.
+
+- **get_followers** — Get followers of the Zalo OA.<br/>`get_followers(offset: int = 0, count: int = 50) -> str`
+
+  - `offset`: Pagination offset. Default: 0.
+  - `count`: Number of followers to return (max 50). Default: 50.
+  - **Returns:** JSON string with follower list.
+
+- **get_oa_info** — Get Zalo Official Account information.<br/>`get_oa_info() -> str`
+
+  - **Returns:** JSON string with OA info (name, id, description, etc).
+
+- **get_recent_messages** — Get recent messages from the OA.<br/>`get_recent_messages(offset: int = 0, count: int = 10) -> str`
+
+  - `offset`: Pagination offset. Default: 0.
+  - `count`: Number of messages. Default: 10.
+  - **Returns:** JSON string with message list.
+
+- **get_conversation** — Get conversation history with a specific user.<br/>`get_conversation(user_id: str, offset: int = 0, count: int = 20) -> str`
+
+  - `user_id`: Zalo user ID.
+  - `offset`: Pagination offset. Default: 0.
+  - `count`: Number of messages. Default: 20.
+  - **Returns:** JSON string with conversation messages.
+
+- **upload_image** — Upload an image file to Zalo.<br/>`upload_image(file_path: str) -> str`
+
+  - `file_path`: Local path to the image file.
+  - **Returns:** JSON string with ok status and attachment_id.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class ZaloAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
+
+**Constructor:** `ZaloAgent() -> None`
 
 ______________________________________________________________________
 
@@ -2587,13 +4601,1312 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.gmail_agent` — *Gmail Agent — SorcarAgent extension with Gmail API tools.*
+#### `kiss.channels.background_agent` — *Background channel daemon — polls ChannelBackend and triggers agents.*
 
-##### `class GmailAgent(SorcarAgent)`
+##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
+
+**Constructor:** `ChannelDaemon(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', poll_interval: float = _POLL_INTERVAL, allow_users: list[str] | None = None) -> None`
+
+- **run** — Start the daemon loop. Blocks until stop() is called or fatal error.<br/>`run() -> None`
+- **stop** — Signal the daemon to stop after the current poll cycle.<br/>`stop() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.bluebubbles_agent` — *BlueBubbles Agent — StatefulSorcarAgent extension with BlueBubbles REST API tools.*
+
+##### `class BlueBubblesChannelBackend` — ChannelBackend implementation for BlueBubbles REST API.
+
+**Constructor:** `BlueBubblesChannelBackend() -> None`
+
+- **connect** — Connect to BlueBubbles server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return chat GUID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for BlueBubbles.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll BlueBubbles for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a BlueBubbles message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_chats** — List recent iMessage conversations.<br/>`list_chats(limit: int = 25, offset: int = 0) -> str`
+
+  - `limit`: Maximum chats to return. Default: 25.
+  - `offset`: Pagination offset. Default: 0.
+  - **Returns:** JSON string with chat list.
+
+- **get_chat** — Get a specific iMessage conversation.<br/>`get_chat(chat_guid: str) -> str`
+
+  - `chat_guid`: Chat GUID (from list_chats).
+  - **Returns:** JSON string with chat details.
+
+- **get_chat_messages** — Get messages from a specific conversation.<br/>`get_chat_messages(chat_guid: str, limit: int = 25, before: str = '', after: str = '') -> str`
+
+  - `chat_guid`: Chat GUID.
+  - `limit`: Maximum messages to return. Default: 25.
+  - `before`: Return messages before this timestamp (ms).
+  - `after`: Return messages after this timestamp (ms).
+  - **Returns:** JSON string with message list.
+
+- **post_message** — Send a message to an iMessage conversation.<br/>`post_message(chat_guid: str, text: str) -> str`
+
+  - `chat_guid`: Chat GUID to send to.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **get_server_info** — Get BlueBubbles server information.<br/>`get_server_info() -> str`
+
+  - **Returns:** JSON string with server info.
+
+- **mark_chat_read** — Mark a chat as read.<br/>`mark_chat_read(chat_guid: str) -> str`
+
+  - `chat_guid`: Chat GUID to mark as read.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class BlueBubblesAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only).
+
+**Constructor:** `BlueBubblesAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
+
+##### `class DiscordChannelBackend` — ChannelBackend implementation for Discord REST API v10.
+
+**Constructor:** `DiscordChannelBackend() -> None`
+
+- **connect** — Authenticate with Discord using the stored bot token.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Discord bots.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new Discord messages using REST API.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Discord message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_guilds** — List guilds (servers) the bot is a member of.<br/>`list_guilds(limit: int = 100) -> str`
+
+  - `limit`: Maximum guilds to return (1-200). Default: 100.
+  - **Returns:** JSON string with guild list (id, name, icon).
+
+- **list_channels** — List channels in a guild.<br/>`list_channels(guild_id: str, channel_type: str = '') -> str`
+
+  - `guild_id`: Guild (server) ID.
+  - `channel_type`: Optional filter by type (0=text, 2=voice, 4=category).
+  - **Returns:** JSON string with channel list (id, name, type, topic).
+
+- **get_channel** — Get information about a channel.<br/>`get_channel(channel_id: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - **Returns:** JSON string with channel details.
+
+- **get_channel_messages** — Get messages from a channel.<br/>`get_channel_messages(channel_id: str, limit: int = 50, before: str = '', after: str = '') -> str`
+
+  - `channel_id`: Channel ID.
+  - `limit`: Number of messages (1-100). Default: 50.
+  - `before`: Get messages before this message ID.
+  - `after`: Get messages after this message ID.
+  - **Returns:** JSON string with message list.
+
+- **post_message** — Send a message to a Discord channel.<br/>`post_message(channel_id: str, content: str, tts: bool = False, reply_to: str = '') -> str`
+
+  - `channel_id`: Channel ID.
+  - `content`: Message text (up to 2000 chars).
+  - `tts`: Text-to-speech flag. Default: False.
+  - `reply_to`: Optional message ID to reply to.
+  - **Returns:** JSON string with ok status and message id.
+
+- **edit_message** — Edit an existing Discord message.<br/>`edit_message(channel_id: str, message_id: str, content: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID.
+  - `content`: New content.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a Discord message.<br/>`delete_message(channel_id: str, message_id: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **add_reaction** — Add a reaction to a message.<br/>`add_reaction(channel_id: str, message_id: str, emoji: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID.
+  - `emoji`: Emoji (e.g. "👍" or "name:id" for custom emojis).
+  - **Returns:** JSON string with ok status.
+
+- **create_thread** — Create a thread from a message.<br/>`create_thread(channel_id: str, message_id: str, name: str, auto_archive_duration: int = 1440) -> str`
+
+  - `channel_id`: Channel ID.
+  - `message_id`: Message ID to create thread from.
+  - `name`: Thread name.
+  - `auto_archive_duration`: Minutes before auto-archive (60/1440/4320/10080).
+  - **Returns:** JSON string with thread id and name.
+
+- **list_guild_members** — List members of a guild.<br/>`list_guild_members(guild_id: str, limit: int = 100, after: str = '') -> str`
+
+  - `guild_id`: Guild ID.
+  - `limit`: Max members to return (1-1000). Default: 100.
+  - `after`: User ID to start after (for pagination).
+  - **Returns:** JSON string with member list.
+
+- **create_invite** — Create an invite link for a channel.<br/>`create_invite(channel_id: str, max_age: int = 86400, max_uses: int = 0) -> str`
+
+  - `channel_id`: Channel ID.
+  - `max_age`: Invite expiry in seconds (0 = never). Default: 86400 (1 day).
+  - `max_uses`: Maximum uses (0 = unlimited). Default: 0.
+  - **Returns:** JSON string with invite code and URL.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
+
+**Constructor:** `DiscordAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.feishu_agent` — *Feishu/Lark Agent — StatefulSorcarAgent extension with Feishu Open Platform tools.*
+
+##### `class FeishuChannelBackend` — ChannelBackend implementation for Feishu/Lark Open Platform.
+
+**Constructor:** `FeishuChannelBackend() -> None`
+
+- **connect** — Authenticate with Feishu using stored app credentials.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as chat ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Feishu bots.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Feishu chat for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Feishu message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_text_message** — Send a text message to a Feishu chat or user.<br/>`send_text_message(receive_id: str, text: str, receive_id_type: str = 'chat_id') -> str`
+
+  - `receive_id`: Chat ID, user ID, or open ID depending on receive_id_type.
+  - `text`: Message text.
+  - `receive_id_type`: "chat_id", "user_id", "open_id", or "email". Default: "chat_id".
+  - **Returns:** JSON string with ok status and message id.
+
+- **reply_message** — Reply to an existing Feishu message.<br/>`reply_message(message_id: str, text: str) -> str`
+
+  - `message_id`: ID of the message to reply to.
+  - `text`: Reply text.
+  - **Returns:** JSON string with ok status and reply message id.
+
+- **delete_message** — Delete a Feishu message.<br/>`delete_message(message_id: str) -> str`
+
+  - `message_id`: Message ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **list_messages** — List messages in a Feishu chat.<br/>`list_messages(container_id: str, start_time: str = '', end_time: str = '', page_size: int = 20) -> str`
+
+  - `container_id`: Chat ID.
+  - `start_time`: Start Unix timestamp (seconds). Optional.
+  - `end_time`: End Unix timestamp (seconds). Optional.
+  - `page_size`: Maximum messages to return. Default: 20.
+  - **Returns:** JSON string with message list.
+
+- **list_chats** — List Feishu chats the bot is a member of.<br/>`list_chats(page_size: int = 20, page_token: str = '') -> str`
+
+  - `page_size`: Maximum chats to return. Default: 20.
+  - `page_token`: Pagination token.
+  - **Returns:** JSON string with chat list (chat_id, name, description).
+
+- **get_chat** — Get information about a Feishu chat.<br/>`get_chat(chat_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - **Returns:** JSON string with chat details.
+
+- **get_user_info** — Get Feishu user information.<br/>`get_user_info(user_id: str, user_id_type: str = 'open_id') -> str`
+
+  - `user_id`: User ID.
+  - `user_id_type`: ID type ("open_id", "user_id", "union_id"). Default: "open_id".
+  - **Returns:** JSON string with user info.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class FeishuAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Feishu/Lark Open Platform tools.
+
+**Constructor:** `FeishuAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.gmail_agent` — *Gmail Agent — StatefulSorcarAgent extension with Gmail API tools.*
+
+##### `class GmailChannelBackend` — ChannelBackend implementation for Gmail.
+
+**Constructor:** `GmailChannelBackend() -> None`
+
+- **connect** — Authenticate with Gmail using stored OAuth2 credentials.<br/>`connect() -> bool`
+
+  - **Returns:** True on success, False on failure.
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a Gmail label by name (used as channel ID).<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Label name to search for.
+  - **Returns:** Label ID string, or None if not found.
+
+- **find_user** — Find a user by email address (Gmail has no user directory).<br/>`find_user(username: str) -> str | None`
+
+  - `username`: Email address to return as user ID.
+  - **Returns:** The email address itself (Gmail uses email as user ID).
+
+- **join_channel** — No-op for Gmail — labels don't require joining.<br/>`join_channel(channel_id: str) -> None`
+
+  - `channel_id`: Label ID (unused).
+
+- **poll_messages** — Poll Gmail inbox for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Label ID to poll (use "INBOX" for inbox).
+  - `oldest`: History ID or timestamp string for incremental polling.
+  - `limit`: Maximum messages to return.
+  - **Returns:** Tuple of (messages, updated_oldest). Each message dict has: ts (date), user (from address), text (body).
+
+- **send_message** — Send an email (reply to a thread if thread_ts provided).<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+  - `channel_id`: Recipient email address.
+  - `text`: Email body text.
+  - `thread_ts`: Thread ID to reply to (optional).
+
+- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+  - `channel_id`: Label ID (unused for Gmail).
+  - `thread_ts`: Thread ID to poll.
+  - `user_id`: Email address of expected sender.
+  - **Returns:** The text of the user's reply.
+
+- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+  - `msg`: Message dict from poll_messages.
+  - **Returns:** True if the message is from the bot (always False for Gmail).
+
+- **strip_bot_mention** — Remove bot mention markers (no-op for Gmail).<br/>`strip_bot_mention(text: str) -> str`
+
+  - `text`: Raw message text.
+  - **Returns:** Unchanged text.
+
+- **get_profile** — Get the current user's Gmail profile.<br/>`get_profile() -> str`
+
+  - **Returns:** JSON string with email address, messages total, threads total, and history ID.
+
+- **list_messages** — List messages in the user's mailbox.<br/>`list_messages(query: str = '', max_results: int = 20, page_token: str = '', label_ids: str = '') -> str`
+
+  - `query`: Gmail search query (same syntax as Gmail search box). Examples: "is:unread", "from:alice@example.com", "subject:meeting", "newer_than:1d", "has:attachment".
+  - `max_results`: Maximum number of messages to return (1-500). Default: 20.
+  - `page_token`: Page token for pagination from a previous response.
+  - `label_ids`: Comma-separated label IDs to filter by (e.g. "INBOX", "UNREAD", "STARRED").
+  - **Returns:** JSON string with message IDs, snippet, and pagination token. Use get_message() with the ID to read full content.
+
+- **get_message** — Get a specific message by ID.<br/>`get_message(message_id: str, format: str = 'full') -> str`
+
+  - `message_id`: The message ID (from list_messages).
+  - `format`: Response format. Options: "full" — full message with parsed payload (default). "metadata" — headers only (faster). "raw" — raw RFC 2822 message. "minimal" — just IDs, labels, snippet.
+  - **Returns:** JSON string with message headers, body text, labels, and attachment info.
+
+- **send_email** — Send an email message.<br/>`send_email(to: str, subject: str, body: str, cc: str = '', bcc: str = '', html: bool = False) -> str`
+
+  - `to`: Recipient email address(es), comma-separated.
+  - `subject`: Email subject line.
+  - `body`: Email body text (plain text or HTML).
+  - `cc`: CC recipients, comma-separated. Optional.
+  - `bcc`: BCC recipients, comma-separated. Optional.
+  - `html`: If True, body is treated as HTML. Default: False.
+  - **Returns:** JSON string with ok status and the sent message ID.
+
+- **reply_to_message** — Reply to an existing email message.<br/>`reply_to_message(message_id: str, body: str, reply_all: bool = False, html: bool = False) -> str`
+
+  - `message_id`: ID of the message to reply to.
+  - `body`: Reply body text (plain text or HTML).
+  - `reply_all`: If True, reply to all recipients. Default: False.
+  - `html`: If True, body is treated as HTML. Default: False.
+  - **Returns:** JSON string with ok status and the reply message ID.
+
+- **create_draft** — Create a draft email.<br/>`create_draft(to: str, subject: str, body: str, cc: str = '', bcc: str = '', html: bool = False) -> str`
+
+  - `to`: Recipient email address(es), comma-separated.
+  - `subject`: Email subject line.
+  - `body`: Email body text (plain text or HTML).
+  - `cc`: CC recipients, comma-separated. Optional.
+  - `bcc`: BCC recipients, comma-separated. Optional.
+  - `html`: If True, body is treated as HTML. Default: False.
+  - **Returns:** JSON string with ok status and draft ID.
+
+- **trash_message** — Move a message to the trash.<br/>`trash_message(message_id: str) -> str`
+
+  - `message_id`: ID of the message to trash.
+  - **Returns:** JSON string with ok status.
+
+- **untrash_message** — Remove a message from the trash.<br/>`untrash_message(message_id: str) -> str`
+
+  - `message_id`: ID of the message to untrash.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Permanently delete a message (cannot be undone).<br/>`delete_message(message_id: str) -> str`
+
+  - `message_id`: ID of the message to permanently delete.
+  - **Returns:** JSON string with ok status.
+
+- **modify_labels** — Modify labels on a message (star, archive, mark read/unread, etc.). Common label IDs: INBOX, UNREAD, STARRED, IMPORTANT, SPAM, TRASH, CATEGORY_PERSONAL, CATEGORY_SOCIAL, CATEGORY_PROMOTIONS. To archive: remove "INBOX". To mark as read: remove "UNREAD". To star: add "STARRED".<br/>`modify_labels(message_id: str, add_label_ids: str = '', remove_label_ids: str = '') -> str`
+
+  - `message_id`: ID of the message to modify.
+  - `add_label_ids`: Comma-separated label IDs to add.
+  - `remove_label_ids`: Comma-separated label IDs to remove.
+  - **Returns:** JSON string with ok status and updated label list.
+
+- **list_labels** — List all labels in the user's mailbox.<br/>`list_labels() -> str`
+
+  - **Returns:** JSON string with label list (id, name, type).
+
+- **create_label** — Create a new label.<br/>`create_label(name: str, text_color: str = '', background_color: str = '') -> str`
+
+  - `name`: Label name (e.g. "Projects/Important"). Use "/" for nested labels.
+  - `text_color`: Optional hex text color (e.g. "#000000").
+  - `background_color`: Optional hex background color (e.g. "#16a765").
+  - **Returns:** JSON string with the new label's id and name.
+
+- **get_attachment** — Download a message attachment.<br/>`get_attachment(message_id: str, attachment_id: str) -> str`
+
+  - `message_id`: ID of the message containing the attachment.
+  - `attachment_id`: Attachment ID (from get_message response).
+  - **Returns:** JSON string with base64-encoded attachment data and size.
+
+- **get_thread** — Get all messages in an email thread/conversation.<br/>`get_thread(thread_id: str) -> str`
+
+  - `thread_id`: Thread ID (from list_messages or get_message).
+  - **Returns:** JSON string with all messages in the thread.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
+
+  - **Returns:** List of callable tool methods for Gmail API operations.
+
+##### `class GmailAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Gmail API tools.
 
 **Constructor:** `GmailAgent() -> None`
 
-- **run** — Run the Gmail agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+______________________________________________________________________
+
+#### `kiss.channels.googlechat_agent` — *Google Chat Agent — StatefulSorcarAgent extension with Google Chat API tools.*
+
+##### `class GoogleChatChannelBackend` — ChannelBackend implementation for Google Chat API.
+
+**Constructor:** `GoogleChatChannelBackend() -> None`
+
+- **connect** — Authenticate with Google Chat.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a Google Chat space by display name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Google Chat — bots are added by admins.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll a Google Chat space for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Google Chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_spaces** — List Google Chat spaces (rooms and DMs).<br/>`list_spaces(page_size: int = 20, page_token: str = '') -> str`
+
+  - `page_size`: Maximum spaces to return. Default: 20.
+  - `page_token`: Pagination token from a previous response.
+  - **Returns:** JSON string with space list (name, displayName, type).
+
+- **get_space** — Get information about a Google Chat space.<br/>`get_space(space_name: str) -> str`
+
+  - `space_name`: Space resource name (e.g. "spaces/ABCDEF").
+  - **Returns:** JSON string with space details.
+
+- **list_members** — List members of a Google Chat space.<br/>`list_members(space_name: str, page_size: int = 20, page_token: str = '') -> str`
+
+  - `space_name`: Space resource name.
+  - `page_size`: Maximum members to return. Default: 20.
+  - `page_token`: Pagination token.
+  - **Returns:** JSON string with member list.
+
+- **list_messages** — List messages in a Google Chat space.<br/>`list_messages(space_name: str, page_size: int = 20, page_token: str = '', filter: str = '') -> str`
+
+  - `space_name`: Space resource name (e.g. "spaces/ABCDEF").
+  - `page_size`: Maximum messages to return. Default: 20.
+  - `page_token`: Pagination token.
+  - `filter`: Optional filter (e.g. 'createTime > "2024-01-01T00:00:00Z"').
+  - **Returns:** JSON string with message list.
+
+- **get_message** — Get a specific Google Chat message.<br/>`get_message(message_name: str) -> str`
+
+  - `message_name`: Message resource name (e.g. "spaces/X/messages/Y").
+  - **Returns:** JSON string with message details.
+
+- **post_message** — Send a message to a Google Chat space.<br/>`post_message(space_name: str, text: str, thread_key: str = '') -> str`
+
+  - `space_name`: Space resource name (e.g. "spaces/ABCDEF").
+  - `text`: Message text.
+  - `thread_key`: Optional thread key to reply in an existing thread.
+  - **Returns:** JSON string with ok status and message name.
+
+- **update_message** — Update an existing Google Chat message.<br/>`update_message(message_name: str, text: str) -> str`
+
+  - `message_name`: Message resource name.
+  - `text`: New message text.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a Google Chat message.<br/>`delete_message(message_name: str) -> str`
+
+  - `message_name`: Message resource name.
+  - **Returns:** JSON string with ok status.
+
+- **create_space** — Create a new Google Chat space.<br/>`create_space(display_name: str, space_type: str = 'SPACE') -> str`
+
+  - `display_name`: Space display name.
+  - `space_type`: Space type ("SPACE" or "GROUP_CHAT"). Default: "SPACE".
+  - **Returns:** JSON string with space name and display name.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class GoogleChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Google Chat API tools.
+
+**Constructor:** `GoogleChatAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.imessage_agent` — *iMessage Agent — StatefulSorcarAgent extension with iMessage tools via AppleScript.*
+
+##### `class IMessageChannelBackend` — ChannelBackend implementation for iMessage via AppleScript.
+
+**Constructor:** `IMessageChannelBackend() -> None`
+
+- **connect** — Check macOS and Messages.app availability.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number or email as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for iMessage.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll iMessage via AppleScript (basic implementation).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an iMessage.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Not implemented for iMessage via AppleScript.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_imessage** — Send an iMessage or SMS to a recipient.<br/>`send_imessage(recipient: str, text: str, service: str = 'iMessage') -> str`
+
+  - `recipient`: Phone number or Apple ID email to send to.
+  - `text`: Message text.
+  - `service`: "iMessage" or "SMS". Default: "iMessage".
+  - **Returns:** JSON string with ok status.
+
+- **send_attachment** — Send a file attachment via iMessage.<br/>`send_attachment(recipient: str, file_path: str, service: str = 'iMessage') -> str`
+
+  - `recipient`: Phone number or Apple ID email.
+  - `file_path`: Absolute path to the file to send.
+  - `service`: "iMessage" or "SMS". Default: "iMessage".
+  - **Returns:** JSON string with ok status.
+
+- **list_conversations** — List recent iMessage conversations.<br/>`list_conversations() -> str`
+
+  - **Returns:** JSON string with conversation list.
+
+- **get_messages** — Get recent messages with a recipient (basic implementation).<br/>`get_messages(recipient: str, limit: int = 20) -> str`
+
+  - `recipient`: Phone number or email to get messages for.
+  - `limit`: Maximum messages to return. Default: 20.
+  - **Returns:** JSON string with message list (basic).
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class IMessageAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with iMessage tools (macOS only).
+
+**Constructor:** `IMessageAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.irc_agent` — *IRC Agent — StatefulSorcarAgent extension with IRC tools.*
+
+##### `class IRCChannelBackend` — ChannelBackend implementation for IRC via raw socket.
+
+**Constructor:** `IRCChannelBackend() -> None`
+
+- **connect** — Connect to IRC server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — Join an IRC channel.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Return buffered IRC messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an IRC PRIVMSG.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mention from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **connect_irc** — Connect to an IRC server.<br/>`connect_irc(server: str, port: int = 6667, nick: str = 'KISSBot', realname: str = 'KISS Agent', password: str = '', use_tls: bool = False) -> str`
+
+  - `server`: IRC server hostname or IP.
+  - `port`: Server port. Default: 6667.
+  - `nick`: Nickname to use. Default: "KISSBot".
+  - `realname`: Real name. Default: "KISS Agent".
+  - `password`: Server password. Optional.
+  - `use_tls`: Use TLS encryption. Default: False.
+  - **Returns:** JSON string with ok status.
+
+- **join_irc_channel** — Join an IRC channel.<br/>`join_irc_channel(channel: str) -> str`
+
+  - `channel`: Channel name (e.g. "#general").
+  - **Returns:** JSON string with ok status.
+
+- **leave_channel** — Leave an IRC channel.<br/>`leave_channel(channel: str, reason: str = '') -> str`
+
+  - `channel`: Channel name.
+  - `reason`: Optional leave reason.
+  - **Returns:** JSON string with ok status.
+
+- **post_message** — Send a message to an IRC channel or user.<br/>`post_message(channel_or_nick: str, text: str) -> str`
+
+  - `channel_or_nick`: Target channel (e.g. "#general") or nick.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **send_notice** — Send a NOTICE to an IRC channel or user.<br/>`send_notice(channel_or_nick: str, text: str) -> str`
+
+  - `channel_or_nick`: Target channel or nick.
+  - `text`: Notice text.
+  - **Returns:** JSON string with ok status.
+
+- **get_topic** — Get the topic of an IRC channel.<br/>`get_topic(channel: str) -> str`
+
+  - `channel`: Channel name.
+  - **Returns:** JSON string with ok status (topic comes via server response).
+
+- **set_topic** — Set the topic of an IRC channel.<br/>`set_topic(channel: str, topic: str) -> str`
+
+  - `channel`: Channel name.
+  - `topic`: New topic text.
+  - **Returns:** JSON string with ok status.
+
+- **kick_user** — Kick a user from an IRC channel.<br/>`kick_user(channel: str, nick: str, reason: str = '') -> str`
+
+  - `channel`: Channel name.
+  - `nick`: Nickname to kick.
+  - `reason`: Optional kick reason.
+  - **Returns:** JSON string with ok status.
+
+- **whois** — Get WHOIS information about a user.<br/>`whois(nick: str) -> str`
+
+  - `nick`: Nickname to look up.
+  - **Returns:** JSON string with ok status (data comes via server response).
+
+- **identify_nickserv** — Identify to NickServ.<br/>`identify_nickserv(password: str) -> str`
+
+  - `password`: NickServ password.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class IRCAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with IRC tools.
+
+**Constructor:** `IRCAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.line_agent` — *LINE Agent — StatefulSorcarAgent extension with LINE Messaging API tools.*
+
+##### `class LineChannelBackend` — ChannelBackend implementation for LINE Messaging API.
+
+**Constructor:** `LineChannelBackend() -> None`
+
+- **connect** — Authenticate with LINE and start webhook server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as user/group ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for LINE.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a LINE push message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **push_text_message** — Send a push text message to a LINE user or group.<br/>`push_text_message(to: str, text: str) -> str`
+
+  - `to`: Target user ID, group ID, or room ID.
+  - `text`: Message text (up to 5000 characters).
+  - **Returns:** JSON string with ok status.
+
+- **reply_message** — Reply to a message using the reply token.<br/>`reply_message(reply_token: str, messages_json: str) -> str`
+
+  - `reply_token`: Reply token from an inbound message event.
+  - `messages_json`: JSON array of message objects. Example: '[{"type":"text","text":"Hello!"}]'
+  - **Returns:** JSON string with ok status.
+
+- **get_profile** — Get a LINE user's profile.<br/>`get_profile(user_id: str) -> str`
+
+  - `user_id`: LINE user ID.
+  - **Returns:** JSON string with user profile (displayName, pictureUrl, statusMessage).
+
+- **get_quota** — Get the LINE messaging quota for the current month.<br/>`get_quota() -> str`
+
+  - **Returns:** JSON string with quota information.
+
+- **leave_group** — Leave a LINE group.<br/>`leave_group(group_id: str) -> str`
+
+  - `group_id`: Group ID to leave.
+  - **Returns:** JSON string with ok status.
+
+- **push_image_message** — Send a push image message.<br/>`push_image_message(to: str, image_url: str, preview_url: str) -> str`
+
+  - `to`: Target user ID, group ID, or room ID.
+  - `image_url`: URL of the full-size image.
+  - `preview_url`: URL of the preview image.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class LineAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with LINE Messaging API tools.
+
+**Constructor:** `LineAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.matrix_agent` — *Matrix Agent — StatefulSorcarAgent extension with Matrix protocol tools.*
+
+##### `class MatrixChannelBackend` — ChannelBackend implementation for Matrix via matrix-nio.
+
+**Constructor:** `MatrixChannelBackend() -> None`
+
+- **connect** — Authenticate with Matrix using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return room alias or ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — Join a Matrix room.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new Matrix messages via sync.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Matrix text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_rooms** — List joined Matrix rooms.<br/>`list_rooms() -> str`
+
+  - **Returns:** JSON string with room list (id, name, topic).
+
+- **join_room** — Join a Matrix room.<br/>`join_room(room_id_or_alias: str) -> str`
+
+  - `room_id_or_alias`: Room ID (!room:server.org) or alias (#room:server.org).
+  - **Returns:** JSON string with ok status and room id.
+
+- **leave_room** — Leave a Matrix room.<br/>`leave_room(room_id: str) -> str`
+
+  - `room_id`: Room ID to leave.
+  - **Returns:** JSON string with ok status.
+
+- **send_text_message** — Send a text message to a Matrix room.<br/>`send_text_message(room_id: str, text: str) -> str`
+
+  - `room_id`: Room ID.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status and event id.
+
+- **send_notice** — Send a notice (bot message) to a Matrix room.<br/>`send_notice(room_id: str, text: str) -> str`
+
+  - `room_id`: Room ID.
+  - `text`: Notice text.
+  - **Returns:** JSON string with ok status and event id.
+
+- **get_room_members** — Get members of a Matrix room.<br/>`get_room_members(room_id: str) -> str`
+
+  - `room_id`: Room ID.
+  - **Returns:** JSON string with member list.
+
+- **invite_user** — Invite a user to a Matrix room.<br/>`invite_user(room_id: str, user_id: str) -> str`
+
+  - `room_id`: Room ID.
+  - `user_id`: User ID to invite (@user:server.org).
+  - **Returns:** JSON string with ok status.
+
+- **kick_user** — Kick a user from a Matrix room.<br/>`kick_user(room_id: str, user_id: str, reason: str = '') -> str`
+
+  - `room_id`: Room ID.
+  - `user_id`: User ID to kick.
+  - `reason`: Optional reason for kick.
+  - **Returns:** JSON string with ok status.
+
+- **create_room** — Create a new Matrix room.<br/>`create_room(name: str = '', topic: str = '', is_public: bool = False, alias: str = '') -> str`
+
+  - `name`: Room display name.
+  - `topic`: Room topic.
+  - `is_public`: Whether the room is publicly joinable. Default: False.
+  - `alias`: Optional local alias (without server part).
+  - **Returns:** JSON string with room id.
+
+- **get_profile** — Get a Matrix user's profile.<br/>`get_profile(user_id: str) -> str`
+
+  - `user_id`: User ID (@user:server.org).
+  - **Returns:** JSON string with display name and avatar.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class MatrixAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Matrix protocol tools.
+
+**Constructor:** `MatrixAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.mattermost_agent` — *Mattermost Agent — StatefulSorcarAgent extension with Mattermost REST API tools.*
+
+##### `class MattermostChannelBackend` — ChannelBackend implementation for Mattermost REST API.
+
+**Constructor:** `MattermostChannelBackend() -> None`
+
+- **connect** — Authenticate with Mattermost using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Mattermost (bots are added to channels by admins).<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Mattermost channel for new posts.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Mattermost post.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_teams** — List Mattermost teams.<br/>`list_teams() -> str`
+
+  - **Returns:** JSON string with team list (id, name, display_name).
+
+- **list_channels** — List channels in a Mattermost team.<br/>`list_channels(team_id: str, page: int = 0, per_page: int = 60) -> str`
+
+  - `team_id`: Team ID.
+  - `page`: Page number for pagination. Default: 0.
+  - `per_page`: Channels per page. Default: 60.
+  - **Returns:** JSON string with channel list.
+
+- **get_channel** — Get information about a Mattermost channel.<br/>`get_channel(channel_id: str) -> str`
+
+  - `channel_id`: Channel ID.
+  - **Returns:** JSON string with channel details.
+
+- **list_channel_posts** — List posts in a Mattermost channel.<br/>`list_channel_posts(channel_id: str, page: int = 0, per_page: int = 30) -> str`
+
+  - `channel_id`: Channel ID.
+  - `page`: Page number. Default: 0.
+  - `per_page`: Posts per page. Default: 30.
+  - **Returns:** JSON string with post list.
+
+- **create_post** — Create a post in a Mattermost channel.<br/>`create_post(channel_id: str, message: str, root_id: str = '', file_ids: str = '') -> str`
+
+  - `channel_id`: Channel ID.
+  - `message`: Post message text.
+  - `root_id`: Root post ID if this is a reply.
+  - `file_ids`: Comma-separated file IDs to attach.
+  - **Returns:** JSON string with ok status and post id.
+
+- **delete_post** — Delete a Mattermost post.<br/>`delete_post(post_id: str) -> str`
+
+  - `post_id`: Post ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **get_user** — Get a Mattermost user's information.<br/>`get_user(user_id_or_username: str) -> str`
+
+  - `user_id_or_username`: User ID or username. Use "me" for current user.
+  - **Returns:** JSON string with user details.
+
+- **list_users** — List Mattermost users.<br/>`list_users(page: int = 0, per_page: int = 60, in_team: str = '', in_channel: str = '') -> str`
+
+  - `page`: Page number. Default: 0.
+  - `per_page`: Users per page. Default: 60.
+  - `in_team`: Optional team ID to filter by.
+  - `in_channel`: Optional channel ID to filter by.
+  - **Returns:** JSON string with user list.
+
+- **create_direct_message_channel** — Create a direct message channel between two users.<br/>`create_direct_message_channel(user1_id: str, user2_id: str) -> str`
+
+  - `user1_id`: First user ID.
+  - `user2_id`: Second user ID.
+  - **Returns:** JSON string with channel id.
+
+- **add_reaction** — Add a reaction to a post.<br/>`add_reaction(user_id: str, post_id: str, emoji_name: str) -> str`
+
+  - `user_id`: User ID adding the reaction.
+  - `post_id`: Post ID.
+  - `emoji_name`: Emoji name (without colons, e.g. "thumbsup").
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class MattermostAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Mattermost REST API tools.
+
+**Constructor:** `MattermostAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.msteams_agent` — *Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.*
+
+##### `class MSTeamsChannelBackend` — ChannelBackend implementation for Microsoft Teams via Graph API.
+
+**Constructor:** `MSTeamsChannelBackend() -> None`
+
+- **connect** — Authenticate with Microsoft Graph API.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for MS Teams.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll MS Teams channel for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Teams channel message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_teams** — List Microsoft Teams the bot/user is a member of.<br/>`list_teams(limit: int = 20) -> str`
+
+  - `limit`: Maximum teams to return. Default: 20.
+  - **Returns:** JSON string with team list (id, displayName, description).
+
+- **get_team** — Get details about a Microsoft Team.<br/>`get_team(team_id: str) -> str`
+
+  - `team_id`: Team ID.
+  - **Returns:** JSON string with team details.
+
+- **list_channels** — List channels in a Microsoft Team.<br/>`list_channels(team_id: str) -> str`
+
+  - `team_id`: Team ID.
+  - **Returns:** JSON string with channel list (id, displayName, membershipType).
+
+- **list_channel_messages** — List messages in a Teams channel.<br/>`list_channel_messages(team_id: str, channel_id: str, top: int = 20) -> str`
+
+  - `team_id`: Team ID.
+  - `channel_id`: Channel ID.
+  - `top`: Maximum messages to return. Default: 20.
+  - **Returns:** JSON string with message list.
+
+- **post_channel_message** — Post a message to a Teams channel.<br/>`post_channel_message(team_id: str, channel_id: str, content: str, content_type: str = 'html') -> str`
+
+  - `team_id`: Team ID.
+  - `channel_id`: Channel ID.
+  - `content`: Message content.
+  - `content_type`: "html" or "text". Default: "html".
+  - **Returns:** JSON string with ok status and message id.
+
+- **reply_to_message** — Reply to a Teams channel message.<br/>`reply_to_message(team_id: str, channel_id: str, message_id: str, content: str) -> str`
+
+  - `team_id`: Team ID.
+  - `channel_id`: Channel ID.
+  - `message_id`: Parent message ID.
+  - `content`: Reply content.
+  - **Returns:** JSON string with ok status and reply id.
+
+- **list_chats** — List chats for the authenticated user.<br/>`list_chats(top: int = 20) -> str`
+
+  - `top`: Maximum chats to return. Default: 20.
+  - **Returns:** JSON string with chat list.
+
+- **post_chat_message** — Post a message to a Teams chat.<br/>`post_chat_message(chat_id: str, content: str, content_type: str = 'text') -> str`
+
+  - `chat_id`: Chat ID.
+  - `content`: Message content.
+  - `content_type`: "text" or "html". Default: "text".
+  - **Returns:** JSON string with ok status and message id.
+
+- **list_team_members** — List members of a Microsoft Team.<br/>`list_team_members(team_id: str, top: int = 50) -> str`
+
+  - `team_id`: Team ID.
+  - `top`: Maximum members to return. Default: 50.
+  - **Returns:** JSON string with member list.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class MSTeamsAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Microsoft Teams Graph API tools.
+
+**Constructor:** `MSTeamsAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.nextcloud_talk_agent` — *Nextcloud Talk Agent — StatefulSorcarAgent extension with Nextcloud Talk API tools.*
+
+##### `class NextcloudTalkChannelBackend` — ChannelBackend implementation for Nextcloud Talk REST API.
+
+**Constructor:** `NextcloudTalkChannelBackend() -> None`
+
+- **connect** — Authenticate with Nextcloud Talk.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return room token.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — Join a Nextcloud Talk room.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll a Nextcloud Talk room for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Nextcloud Talk message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_rooms** — List Nextcloud Talk rooms.<br/>`list_rooms() -> str`
+
+  - **Returns:** JSON string with room list (token, displayName, type).
+
+- **get_room** — Get information about a Nextcloud Talk room.<br/>`get_room(token: str) -> str`
+
+  - `token`: Room token.
+  - **Returns:** JSON string with room details.
+
+- **create_room** — Create a Nextcloud Talk room.<br/>`create_room(room_type: int = 3, invite: str = '', room_name: str = '') -> str`
+
+  - `room_type`: 1=one-to-one, 2=group, 3=public. Default: 3.
+  - `invite`: User ID, group ID, or circle ID to invite.
+  - `room_name`: Room display name.
+  - **Returns:** JSON string with room token.
+
+- **list_participants** — List participants in a room.<br/>`list_participants(token: str) -> str`
+
+  - `token`: Room token.
+  - **Returns:** JSON string with participant list.
+
+- **list_messages** — List messages in a Nextcloud Talk room.<br/>`list_messages(token: str, look_into_future: int = 0, limit: int = 100, last_known_message_id: int = 0) -> str`
+
+  - `token`: Room token.
+  - `look_into_future`: 0 for history, 1 for new messages. Default: 0.
+  - `limit`: Maximum messages. Default: 100.
+  - `last_known_message_id`: Last message ID seen (for pagination).
+  - **Returns:** JSON string with message list.
+
+- **post_message** — Post a message to a Nextcloud Talk room.<br/>`post_message(token: str, message: str, reply_to: int = 0) -> str`
+
+  - `token`: Room token.
+  - `message`: Message text.
+  - `reply_to`: Message ID to reply to. Default: 0 (no reply).
+  - **Returns:** JSON string with ok status and message id.
+
+- **set_room_name** — Set the name of a Nextcloud Talk room.<br/>`set_room_name(token: str, name: str) -> str`
+
+  - `token`: Room token.
+  - `name`: New room name.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a message from a room.<br/>`delete_message(token: str, message_id: int) -> str`
+
+  - `token`: Room token.
+  - `message_id`: Message ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class NextcloudTalkAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nextcloud Talk API tools.
+
+**Constructor:** `NextcloudTalkAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.nostr_agent` — *Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.*
+
+##### `class NostrChannelBackend` — ChannelBackend implementation for Nostr protocol via pynostr.
+
+**Constructor:** `NostrChannelBackend() -> None`
+
+- **connect** — Load Nostr keys from stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel/relay name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as public key.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Nostr.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Nostr relays for new events (basic implementation).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Publish a Nostr note.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Not fully implemented for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if event is from this key.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **publish_note** — Publish a text note (kind 1) to Nostr.<br/>`publish_note(content: str) -> str`
+
+  - `content`: Note content text.
+  - **Returns:** JSON string with ok status and event id.
+
+- **publish_reply** — Publish a reply to an existing Nostr event.<br/>`publish_reply(content: str, reply_to_event_id: str) -> str`
+
+  - `content`: Reply content.
+  - `reply_to_event_id`: Event ID to reply to.
+  - **Returns:** JSON string with ok status and event id.
+
+- **send_dm** — Send an encrypted direct message (NIP-04).<br/>`send_dm(recipient_pubkey: str, content: str) -> str`
+
+  - `recipient_pubkey`: Recipient's public key (hex).
+  - `content`: Message content (will be encrypted).
+  - **Returns:** JSON string with ok status and event id.
+
+- **get_profile** — Get the current user's Nostr profile.<br/>`get_profile() -> str`
+
+  - **Returns:** JSON string with public key info.
+
+- **set_profile** — Set the Nostr user profile (kind 0).<br/>`set_profile(name: str = '', about: str = '', picture: str = '', nip05: str = '') -> str`
+
+  - `name`: Display name.
+  - `about`: Bio/about text.
+  - `picture`: Profile picture URL.
+  - `nip05`: NIP-05 identifier (user@domain.com).
+  - **Returns:** JSON string with ok status and event id.
+
+- **list_relays** — List configured Nostr relays.<br/>`list_relays() -> str`
+
+  - **Returns:** JSON string with relay list.
+
+- **add_relay** — Add a Nostr relay to the configuration.<br/>`add_relay(relay_url: str) -> str`
+
+  - `relay_url`: WebSocket URL of the relay (wss://...).
+  - **Returns:** JSON string with ok status.
+
+- **remove_relay** — Remove a Nostr relay from the configuration.<br/>`remove_relay(relay_url: str) -> str`
+
+  - `relay_url`: Relay URL to remove.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class NostrAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nostr protocol tools.
+
+**Constructor:** `NostrAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.phone_control_agent` — *Phone Control Agent — StatefulSorcarAgent extension with Android phone control tools.*
+
+##### `class PhoneControlChannelBackend` — ChannelBackend implementation for Android phone control via REST API.
+
+**Constructor:** `PhoneControlChannelBackend() -> None`
+
+- **connect** — Connect to phone companion app.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for phone control.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new SMS messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the phone itself (sent).<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_sms** — Send an SMS message.<br/>`send_sms(to: str, text: str) -> str`
+
+  - `to`: Recipient phone number.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **make_call** — Make a phone call.<br/>`make_call(to: str) -> str`
+
+  - `to`: Phone number to call.
+  - **Returns:** JSON string with ok status.
+
+- **end_call** — End the current active call.<br/>`end_call() -> str`
+
+  - **Returns:** JSON string with ok status.
+
+- **list_sms_conversations** — List recent SMS conversations.<br/>`list_sms_conversations(limit: int = 20) -> str`
+
+  - `limit`: Maximum conversations to return. Default: 20.
+  - **Returns:** JSON string with conversation list.
+
+- **get_sms_messages** — Get messages in an SMS thread.<br/>`get_sms_messages(thread_id: str, limit: int = 50) -> str`
+
+  - `thread_id`: Thread ID from list_sms_conversations.
+  - `limit`: Maximum messages to return. Default: 50.
+  - **Returns:** JSON string with message list.
+
+- **get_call_log** — Get recent call log.<br/>`get_call_log(limit: int = 20) -> str`
+
+  - `limit`: Maximum calls to return. Default: 20.
+  - **Returns:** JSON string with call list.
+
+- **get_device_info** — Get phone device information.<br/>`get_device_info() -> str`
+
+  - **Returns:** JSON string with device info (model, battery, etc).
+
+- **list_notifications** — List current phone notifications.<br/>`list_notifications() -> str`
+
+  - **Returns:** JSON string with notification list.
+
+- **dismiss_notification** — Dismiss a phone notification.<br/>`dismiss_notification(notification_id: str) -> str`
+
+  - `notification_id`: Notification ID to dismiss.
+  - **Returns:** JSON string with ok status.
+
+- **send_notification_reply** — Reply to a phone notification (e.g. WhatsApp, Signal).<br/>`send_notification_reply(notification_id: str, text: str) -> str`
+
+  - `notification_id`: Notification ID to reply to.
+  - `text`: Reply text.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class PhoneControlAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Android phone control tools.
+
+**Constructor:** `PhoneControlAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.signal_agent` — *Signal Agent — StatefulSorcarAgent extension with Signal CLI tools.*
+
+##### `class SignalChannelBackend` — ChannelBackend implementation for Signal via signal-cli.
+
+**Constructor:** `SignalChannelBackend() -> None`
+
+- **connect** — Load Signal config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Signal.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Receive pending Signal messages via signal-cli.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Signal message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_signal_message** — Send a Signal text message.<br/>`send_signal_message(recipient: str, message: str) -> str`
+
+  - `recipient`: Recipient phone number in E.164 format.
+  - `message`: Message text to send.
+  - **Returns:** JSON string with ok status.
+
+- **receive_messages** — Receive pending Signal messages.<br/>`receive_messages(timeout: int = 5) -> str`
+
+  - `timeout`: Seconds to wait for messages. Default: 5.
+  - **Returns:** JSON string with list of received messages.
+
+- **send_attachment** — Send a Signal message with an attachment.<br/>`send_attachment(recipient: str, message: str, file_path: str) -> str`
+
+  - `recipient`: Recipient phone number.
+  - `message`: Message text.
+  - `file_path`: Local path to the file to attach.
+  - **Returns:** JSON string with ok status.
+
+- **list_contacts** — List Signal contacts.<br/>`list_contacts() -> str`
+
+  - **Returns:** JSON string with contact list.
+
+- **list_groups** — List Signal groups.<br/>`list_groups() -> str`
+
+  - **Returns:** JSON string with group list.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class SignalAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Signal CLI tools.
+
+**Constructor:** `SignalAgent() -> None`
 
 ______________________________________________________________________
 
@@ -2765,13 +6078,680 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.*
+#### `kiss.channels.sms_agent` — *SMS Agent — StatefulSorcarAgent extension with Twilio SMS tools.*
 
-##### `class WhatsAppAgent(SorcarAgent)`
+##### `class SMSChannelBackend` — ChannelBackend implementation for Twilio SMS.
+
+**Constructor:** `SMSChannelBackend() -> None`
+
+- **connect** — Authenticate with Twilio using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for SMS.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll Twilio for recent inbound messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot's number.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_sms** — Send an SMS message via Twilio.<br/>`send_sms(to: str, body: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `body`: Message text (up to 1600 characters).
+  - **Returns:** JSON string with ok status and message SID.
+
+- **send_mms** — Send an MMS message with media via Twilio.<br/>`send_mms(to: str, body: str, media_url: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `body`: Message text.
+  - `media_url`: Publicly accessible URL of the media file.
+  - **Returns:** JSON string with ok status and message SID.
+
+- **list_messages** — List Twilio messages.<br/>`list_messages(to: str = '', from_: str = '', limit: int = 20, page_token: str = '') -> str`
+
+  - `to`: Filter by recipient phone number. Optional.
+  - `from_`: Filter by sender phone number. Optional.
+  - `limit`: Maximum messages to return. Default: 20.
+  - `page_token`: Pagination token. Optional.
+  - **Returns:** JSON string with message list.
+
+- **get_message** — Get details about a specific Twilio message.<br/>`get_message(message_sid: str) -> str`
+
+  - `message_sid`: Message SID (e.g. "SM...").
+  - **Returns:** JSON string with message details.
+
+- **list_phone_numbers** — List Twilio phone numbers on the account.<br/>`list_phone_numbers(limit: int = 20) -> str`
+
+  - `limit`: Maximum numbers to return. Default: 20.
+  - **Returns:** JSON string with phone number list.
+
+- **get_account_info** — Get Twilio account information.<br/>`get_account_info() -> str`
+
+  - **Returns:** JSON string with account details.
+
+- **send_whatsapp_message** — Send a WhatsApp message via Twilio.<br/>`send_whatsapp_message(to: str, body: str) -> str`
+
+  - `to`: Recipient WhatsApp number in format "whatsapp:+14155238886".
+  - `body`: Message text.
+  - **Returns:** JSON string with ok status and message SID.
+
+- **create_call** — Create a Twilio voice call.<br/>`create_call(to: str, url: str, method: str = 'GET') -> str`
+
+  - `to`: Phone number to call.
+  - `url`: TwiML URL for the call instructions.
+  - `method`: HTTP method for the URL. Default: "GET".
+  - **Returns:** JSON string with ok status and call SID.
+
+- **list_calls** — List recent Twilio calls.<br/>`list_calls(to: str = '', from_: str = '', limit: int = 20) -> str`
+
+  - `to`: Filter by recipient phone number. Optional.
+  - `from_`: Filter by caller phone number. Optional.
+  - `limit`: Maximum calls to return. Default: 20.
+  - **Returns:** JSON string with call list.
+
+- **get_call** — Get details about a specific Twilio call.<br/>`get_call(call_sid: str) -> str`
+
+  - `call_sid`: Call SID (e.g. "CA...").
+  - **Returns:** JSON string with call details.
+
+- **cancel_message** — Cancel a queued or scheduled Twilio message.<br/>`cancel_message(message_sid: str) -> str`
+
+  - `message_sid`: Message SID to cancel.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class SMSAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twilio SMS tools.
+
+**Constructor:** `SMSAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.synology_chat_agent` — *Synology Chat Agent — StatefulSorcarAgent extension with Synology Chat webhook API.*
+
+##### `class SynologyChatChannelBackend` — ChannelBackend implementation for Synology Chat webhooks.
+
+**Constructor:** `SynologyChatChannelBackend() -> None`
+
+- **connect** — Load Synology config and start webhook server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Synology Chat.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Synology Chat message via incoming webhook.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **post_message** — Send a message to Synology Chat via incoming webhook.<br/>`post_message(text: str, user_ids: str = '') -> str`
+
+  - `text`: Message text.
+  - `user_ids`: Comma-separated user IDs to send to (optional). If empty, sends to the default channel.
+  - **Returns:** JSON string with ok status.
+
+- **send_file_message** — Send a message with a file attachment.<br/>`send_file_message(text: str, file_url: str) -> str`
+
+  - `text`: Message text.
+  - `file_url`: URL of the file to attach.
+  - **Returns:** JSON string with ok status.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class SynologyChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Synology Chat webhook tools.
+
+**Constructor:** `SynologyChatAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
+
+##### `class TelegramChannelBackend` — ChannelBackend implementation for Telegram Bot API.
+
+**Constructor:** `TelegramChannelBackend() -> None`
+
+- **connect** — Authenticate with Telegram using the stored bot token.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as channel ID (Telegram uses chat_id).<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Telegram bots.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for new Telegram updates via getUpdates.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Telegram message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot @mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_text** — Send a text message to a Telegram chat.<br/>`send_text(chat_id: str, text: str, reply_to_message_id: str = '') -> str`
+
+  - `chat_id`: Chat ID (integer as string) or @username.
+  - `text`: Message text (supports Markdown).
+  - `reply_to_message_id`: Optional message ID to reply to.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_photo** — Send a photo to a Telegram chat.<br/>`send_photo(chat_id: str, photo_url_or_path: str, caption: str = '') -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - `photo_url_or_path`: URL or local file path of the photo.
+  - `caption`: Optional caption text.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_document** — Send a document/file to a Telegram chat.<br/>`send_document(chat_id: str, document_path: str, caption: str = '') -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - `document_path`: Local file path to send.
+  - `caption`: Optional caption text.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **edit_message_text** — Edit an existing message text.<br/>`edit_message_text(chat_id: str, message_id: str, text: str) -> str`
+
+  - `chat_id`: Chat ID where the message is.
+  - `message_id`: ID of the message to edit.
+  - `text`: New message text.
+  - **Returns:** JSON string with ok status.
+
+- **delete_message** — Delete a message.<br/>`delete_message(chat_id: str, message_id: str) -> str`
+
+  - `chat_id`: Chat ID where the message is.
+  - `message_id`: ID of the message to delete.
+  - **Returns:** JSON string with ok status.
+
+- **pin_message** — Pin a message in a chat.<br/>`pin_message(chat_id: str, message_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `message_id`: ID of the message to pin.
+  - **Returns:** JSON string with ok status.
+
+- **unpin_message** — Unpin a message (or all messages) in a chat.<br/>`unpin_message(chat_id: str, message_id: str = '') -> str`
+
+  - `chat_id`: Chat ID.
+  - `message_id`: ID of specific message to unpin. If empty, unpins all.
+  - **Returns:** JSON string with ok status.
+
+- **get_chat** — Get information about a chat.<br/>`get_chat(chat_id: str) -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - **Returns:** JSON string with chat info (id, title, type, members_count).
+
+- **get_chat_members_count** — Get the number of members in a chat.<br/>`get_chat_members_count(chat_id: str) -> str`
+
+  - `chat_id`: Chat ID or @username.
+  - **Returns:** JSON string with member count.
+
+- **get_chat_member** — Get information about a chat member.<br/>`get_chat_member(chat_id: str, user_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `user_id`: User ID.
+  - **Returns:** JSON string with member info (user, status).
+
+- **ban_chat_member** — Ban a user from a chat.<br/>`ban_chat_member(chat_id: str, user_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `user_id`: User ID to ban.
+  - **Returns:** JSON string with ok status.
+
+- **unban_chat_member** — Unban a user from a chat.<br/>`unban_chat_member(chat_id: str, user_id: str) -> str`
+
+  - `chat_id`: Chat ID.
+  - `user_id`: User ID to unban.
+  - **Returns:** JSON string with ok status.
+
+- **get_updates** — Get recent updates (messages) from the bot.<br/>`get_updates(offset: str = '', limit: int = 10) -> str`
+
+  - `offset`: Update ID offset for pagination.
+  - `limit`: Maximum number of updates to return (1-100).
+  - **Returns:** JSON string with list of update objects.
+
+- **send_poll** — Send a poll to a chat.<br/>`send_poll(chat_id: str, question: str, options_json: str, is_anonymous: bool = True) -> str`
+
+  - `chat_id`: Chat ID.
+  - `question`: Poll question.
+  - `options_json`: JSON array of option strings (2-10 options).
+  - `is_anonymous`: Whether the poll is anonymous. Default: True.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **forward_message** — Forward a message to another chat.<br/>`forward_message(chat_id: str, from_chat_id: str, message_id: str) -> str`
+
+  - `chat_id`: Target chat ID.
+  - `from_chat_id`: Source chat ID.
+  - `message_id`: ID of the message to forward.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class TelegramAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Telegram Bot API tools.
+
+**Constructor:** `TelegramAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.tlon_agent` — *Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.*
+
+##### `class TlonChannelBackend` — ChannelBackend implementation for Tlon/Urbit Eyre HTTP.
+
+**Constructor:** `TlonChannelBackend() -> None`
+
+- **connect** — Authenticate with Urbit ship.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Tlon.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll event queue for messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Tlon/Urbit poke.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **list_groups** — List Urbit groups.<br/>`list_groups() -> str`
+
+  - **Returns:** JSON string with group list.
+
+- **list_channels** — List channels in an Urbit group.<br/>`list_channels(group_path: str) -> str`
+
+  - `group_path`: Group path (e.g. "~sampel/my-group").
+  - **Returns:** JSON string with channel list.
+
+- **get_messages** — Get recent messages from a Tlon channel.<br/>`get_messages(group_path: str, channel_name: str, count: int = 20) -> str`
+
+  - `group_path`: Group path.
+  - `channel_name`: Channel name within the group.
+  - `count`: Number of messages to retrieve. Default: 20.
+  - **Returns:** JSON string with messages.
+
+- **post_message** — Post a message to a Tlon channel.<br/>`post_message(group_path: str, channel_name: str, content: str) -> str`
+
+  - `group_path`: Group path (e.g. "~sampel/my-group").
+  - `channel_name`: Channel name within the group.
+  - `content`: Message content text.
+  - **Returns:** JSON string with ok status.
+
+- **get_profile** — Get the current ship's profile.<br/>`get_profile() -> str`
+
+  - **Returns:** JSON string with profile info.
+
+- **poke** — Send a poke to an Urbit app.<br/>`poke(app: str, mark: str, json_body: str) -> str`
+
+  - `app`: Gall agent name (e.g. "groups").
+  - `mark`: Mark name (e.g. "groups-action").
+  - `json_body`: JSON string of the poke body.
+  - **Returns:** JSON string with ok status.
+
+- **scry** — Perform a scry request on an Urbit app.<br/>`scry(app: str, path: str) -> str`
+
+  - `app`: Gall agent name.
+  - `path`: Scry path (starting with /).
+  - **Returns:** JSON string with scry result.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class TlonAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools.
+
+**Constructor:** `TlonAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.twitch_agent` — *Twitch Agent — StatefulSorcarAgent extension with Twitch Helix API + Chat tools.*
+
+##### `class TwitchChannelBackend` — ChannelBackend implementation for Twitch Helix API.
+
+**Constructor:** `TwitchChannelBackend() -> None`
+
+- **connect** — Authenticate with Twitch using stored config.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Twitch.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Poll for Twitch events (basic REST polling).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Twitch chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Not fully implemented for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **get_stream_info** — Get live stream information for a Twitch channel.<br/>`get_stream_info(broadcaster_login: str) -> str`
+
+  - `broadcaster_login`: Twitch channel username.
+  - **Returns:** JSON string with stream info (game, title, viewer count, etc).
+
+- **get_channel_info** — Get channel information for a Twitch broadcaster.<br/>`get_channel_info(broadcaster_id: str) -> str`
+
+  - `broadcaster_id`: Twitch broadcaster ID.
+  - **Returns:** JSON string with channel info.
+
+- **get_user_info** — Get Twitch user information.<br/>`get_user_info(login_or_id: str) -> str`
+
+  - `login_or_id`: Twitch username (login) or user ID.
+  - **Returns:** JSON string with user info.
+
+- **get_chatters** — Get current chatters in a Twitch channel.<br/>`get_chatters(broadcaster_id: str, moderator_id: str = '') -> str`
+
+  - `broadcaster_id`: Broadcaster user ID.
+  - `moderator_id`: Moderator user ID (optional, defaults to broadcaster).
+  - **Returns:** JSON string with chatters list.
+
+- **send_chat_message** — Send a message to a Twitch chat.<br/>`send_chat_message(broadcaster_id: str, sender_id: str, message: str) -> str`
+
+  - `broadcaster_id`: Broadcaster channel ID.
+  - `sender_id`: Sender user ID.
+  - `message`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **ban_user** — Ban or timeout a Twitch user.<br/>`ban_user(broadcaster_id: str, moderator_id: str, user_id: str, duration: int = 0, reason: str = '') -> str`
+
+  - `broadcaster_id`: Broadcaster channel ID.
+  - `moderator_id`: Moderator user ID.
+  - `user_id`: User ID to ban.
+  - `duration`: Timeout duration in seconds (0 = permanent ban).
+  - `reason`: Optional ban reason.
+  - **Returns:** JSON string with ok status.
+
+- **search_channels** — Search for Twitch channels by name.<br/>`search_channels(query: str, limit: int = 10) -> str`
+
+  - `query`: Search query.
+  - `limit`: Maximum channels to return. Default: 10.
+  - **Returns:** JSON string with matching channels.
+
+- **get_clips** — Get clips from a Twitch channel.<br/>`get_clips(broadcaster_id: str, limit: int = 20) -> str`
+
+  - `broadcaster_id`: Broadcaster ID.
+  - `limit`: Maximum clips to return. Default: 20.
+  - **Returns:** JSON string with clip list.
+
+- **create_clip** — Create a clip from a live stream.<br/>`create_clip(broadcaster_id: str, has_delay: bool = False) -> str`
+
+  - `broadcaster_id`: Broadcaster ID.
+  - `has_delay`: Whether to add a 5-second delay. Default: False.
+  - **Returns:** JSON string with clip edit URL.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class TwitchAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twitch Helix API tools.
+
+**Constructor:** `TwitchAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
+
+##### `class WhatsAppChannelBackend` — ChannelBackend implementation for WhatsApp Business Cloud API.
+
+**Constructor:** `WhatsAppChannelBackend() -> None`
+
+- **connect** — Authenticate with WhatsApp using stored config and start webhook server.<br/>`connect() -> bool`
+
+  - **Returns:** True on success, False on failure.
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Find a WhatsApp channel by name (returns name as channel ID).<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name / phone number.
+  - **Returns:** The name itself as the channel ID.
+
+- **find_user** — Find a user by phone number (returns phone number as user ID).<br/>`find_user(username: str) -> str | None`
+
+  - `username`: Phone number in E.164 format.
+  - **Returns:** The phone number itself as user ID.
+
+- **join_channel** — No-op for WhatsApp — no channel joining required.<br/>`join_channel(channel_id: str) -> None`
+
+  - `channel_id`: Phone number (unused).
+
+- **poll_messages** — Drain the webhook message queue and return new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Recipient phone number (unused — all messages returned).
+  - `oldest`: Unused for push-mode channels.
+  - `limit`: Maximum messages to return.
+  - **Returns:** Tuple of (messages, oldest). Each message dict has at minimum: ts, user (from), text.
+
+- **send_message** — Send a text message to a WhatsApp number.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+  - `channel_id`: Recipient phone number in E.164 format.
+  - `text`: Message text.
+  - `thread_ts`: Unused for WhatsApp.
+
+- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+  - `channel_id`: Unused for WhatsApp.
+  - `thread_ts`: Unused for WhatsApp.
+  - `user_id`: Phone number to wait for.
+  - **Returns:** The text of the user's reply.
+
+- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+  - `msg`: Message dict from poll_messages.
+  - **Returns:** Always False — WhatsApp webhooks only deliver inbound messages.
+
+- **strip_bot_mention** — Remove bot mention markers (no-op for WhatsApp).<br/>`strip_bot_mention(text: str) -> str`
+
+  - `text`: Raw message text.
+  - **Returns:** Unchanged text.
+
+- **send_text_message** — Send a text message to a WhatsApp number.<br/>`send_text_message(to: str, body: str, preview_url: bool = False) -> str`
+
+  - `to`: Recipient phone number in E.164 format (e.g. "+14155238886"). Include country code, no spaces or dashes.
+  - `body`: Message text (up to 4096 characters).
+  - `preview_url`: If True, URLs in the body will show a preview. Default: False.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_template_message** — Send a pre-approved template message. Template messages are required to initiate conversations outside the 24-hour customer service window.<br/>`send_template_message(to: str, template_name: str, language_code: str = 'en_US', components: str = '') -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `template_name`: Name of the approved message template.
+  - `language_code`: Template language code (e.g. "en_US"). Default: "en_US".
+  - `components`: Optional JSON string of template components (header, body, button parameters).
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_media_message** — Send a media message (image, document, audio, video, sticker). Provide either media_id (from upload_media) or link (public URL).<br/>`send_media_message(to: str, media_type: str, media_id: str = '', link: str = '', caption: str = '', filename: str = '') -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `media_type`: Type of media. Options: "image", "document", "audio", "video", "sticker".
+  - `media_id`: Media ID from a previous upload_media call.
+  - `link`: Public URL of the media file. Used if media_id is empty.
+  - `caption`: Optional caption (supported for image, video, document).
+  - `filename`: Optional filename (for document type).
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_reaction** — React to a message with an emoji.<br/>`send_reaction(to: str, message_id: str, emoji: str) -> str`
+
+  - `to`: Phone number of the message recipient.
+  - `message_id`: ID of the message to react to.
+  - `emoji`: Emoji character (e.g. "👍", "❤️", "😂").
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_location_message** — Send a location message.<br/>`send_location_message(to: str, latitude: str, longitude: str, name: str = '', address: str = '') -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `latitude`: Latitude of the location (e.g. "37.7749").
+  - `longitude`: Longitude of the location (e.g. "-122.4194").
+  - `name`: Optional name of the location.
+  - `address`: Optional address of the location.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_interactive_message** — Send an interactive message (buttons, lists, or product messages).<br/>`send_interactive_message(to: str, interactive_json: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `interactive_json`: JSON string of the interactive object.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **send_contact_message** — Send a contact card message.<br/>`send_contact_message(to: str, contacts_json: str) -> str`
+
+  - `to`: Recipient phone number in E.164 format.
+  - `contacts_json`: JSON string of contacts array.
+  - **Returns:** JSON string with ok status and message_id.
+
+- **mark_as_read** — Mark a received message as read.<br/>`mark_as_read(message_id: str) -> str`
+
+  - `message_id`: ID of the message to mark as read.
+  - **Returns:** JSON string with ok status.
+
+- **get_business_profile** — Get the WhatsApp Business profile information.<br/>`get_business_profile() -> str`
+
+  - **Returns:** JSON string with business profile data (about, address, description, email, websites, profile_picture_url).
+
+- **update_business_profile** — Update the WhatsApp Business profile.<br/>`update_business_profile(about: str = '', address: str = '', description: str = '', email: str = '', websites: str = '', vertical: str = '') -> str`
+
+  - `about`: Short description (max 139 characters).
+  - `address`: Business address.
+  - `description`: Full business description (max 512 characters).
+  - `email`: Business email address.
+  - `websites`: Comma-separated list of website URLs (max 2).
+  - `vertical`: Business category (e.g. "RETAIL", "FOOD", "HEALTH").
+  - **Returns:** JSON string with ok status.
+
+- **upload_media** — Upload a media file for later sending.<br/>`upload_media(file_path: str, mime_type: str) -> str`
+
+  - `file_path`: Local path to the file to upload.
+  - `mime_type`: MIME type of the file (e.g. "image/jpeg", "application/pdf", "video/mp4", "audio/ogg").
+  - **Returns:** JSON string with ok status and media_id (use in send_media_message).
+
+- **get_media_url** — Get the download URL for an uploaded media file.<br/>`get_media_url(media_id: str) -> str`
+
+  - `media_id`: Media ID from upload_media or a received message.
+  - **Returns:** JSON string with ok status, url, mime_type, and file_size.
+
+- **delete_media** — Delete an uploaded media file.<br/>`delete_media(media_id: str) -> str`
+
+  - `media_id`: Media ID to delete.
+  - **Returns:** JSON string with ok status.
+
+- **list_message_templates** — List available message templates for the WhatsApp Business Account. Requires waba_id to be configured.<br/>`list_message_templates(limit: int = 20, status: str = '') -> str`
+
+  - `limit`: Maximum number of templates to return. Default: 20.
+  - `status`: Filter by status ("APPROVED", "PENDING", "REJECTED"). If empty, returns all statuses.
+  - **Returns:** JSON string with template list (name, status, category, language).
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
+
+  - **Returns:** List of callable tool methods for WhatsApp API operations.
+
+##### `class WhatsAppAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 
 **Constructor:** `WhatsAppAgent() -> None`
 
-- **run** — Run the WhatsApp agent with optional user-interaction callbacks.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, max_steps: int | None = None, max_budget: float | None = None, work_dir: str | None = None, printer: Any = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+______________________________________________________________________
+
+#### `kiss.channels.zalo_agent` — *Zalo Agent — StatefulSorcarAgent extension with Zalo Official Account API tools.*
+
+##### `class ZaloChannelBackend` — ChannelBackend implementation for Zalo OA API.
+
+**Constructor:** `ZaloChannelBackend() -> None`
+
+- **connect** — Load Zalo config and start webhook server.<br/>`connect() -> bool`
+
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return channel name as user ID.<br/>`find_channel(name: str) -> str | None`
+
+- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
+
+- **join_channel** — No-op for Zalo.<br/>`join_channel(channel_id: str) -> None`
+
+- **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+- **send_message** — Send a Zalo text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
+
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+
+- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
+
+- **send_text_message** — Send a text message to a Zalo user.<br/>`send_text_message(to_user_id: str, text: str) -> str`
+
+  - `to_user_id`: Zalo user ID.
+  - `text`: Message text.
+  - **Returns:** JSON string with ok status.
+
+- **send_image_message** — Send an image message to a Zalo user.<br/>`send_image_message(to_user_id: str, image_url: str, caption: str = '') -> str`
+
+  - `to_user_id`: Zalo user ID.
+  - `image_url`: URL of the image to send.
+  - `caption`: Optional image caption.
+  - **Returns:** JSON string with ok status.
+
+- **get_follower_profile** — Get a Zalo follower's profile.<br/>`get_follower_profile(user_id: str) -> str`
+
+  - `user_id`: Zalo user ID.
+  - **Returns:** JSON string with user profile.
+
+- **get_followers** — Get followers of the Zalo OA.<br/>`get_followers(offset: int = 0, count: int = 50) -> str`
+
+  - `offset`: Pagination offset. Default: 0.
+  - `count`: Number of followers to return (max 50). Default: 50.
+  - **Returns:** JSON string with follower list.
+
+- **get_oa_info** — Get Zalo Official Account information.<br/>`get_oa_info() -> str`
+
+  - **Returns:** JSON string with OA info (name, id, description, etc).
+
+- **get_recent_messages** — Get recent messages from the OA.<br/>`get_recent_messages(offset: int = 0, count: int = 10) -> str`
+
+  - `offset`: Pagination offset. Default: 0.
+  - `count`: Number of messages. Default: 10.
+  - **Returns:** JSON string with message list.
+
+- **get_conversation** — Get conversation history with a specific user.<br/>`get_conversation(user_id: str, offset: int = 0, count: int = 20) -> str`
+
+  - `user_id`: Zalo user ID.
+  - `offset`: Pagination offset. Default: 0.
+  - `count`: Number of messages. Default: 20.
+  - **Returns:** JSON string with conversation messages.
+
+- **upload_image** — Upload an image file to Zalo.<br/>`upload_image(file_path: str) -> str`
+
+  - `file_path`: Local path to the image file.
+  - **Returns:** JSON string with ok status and attachment_id.
+
+- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
+
+##### `class ZaloAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
+
+**Constructor:** `ZaloAgent() -> None`
 
 ______________________________________________________________________
 
