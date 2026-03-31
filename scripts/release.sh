@@ -176,6 +176,8 @@ publish_to_pypi() {
 
 build_vscode_extension() {
     print_step "Building VS Code extension..."
+    cp "$README_FILE" "$VSCODE_EXT_DIR/README.md"
+    print_info "Copied $README_FILE to $VSCODE_EXT_DIR/README.md"
     cd "$VSCODE_EXT_DIR"
     npm ci
     npm run package
