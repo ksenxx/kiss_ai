@@ -340,7 +340,7 @@ class AnthropicModel(Model):
             )
         return 0, 0, 0, 0
 
-    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
+    def get_embedding(self, _text: str, _embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.
 
         Args:

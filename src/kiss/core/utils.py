@@ -210,10 +210,9 @@ def read_project_file(file_path_relative_to_project_root: str) -> str:
     try:
         if pkg:
             return importlib.resources.read_text(pkg, file, encoding="utf-8")
-        else:
-            # If no package, try relative to this module's package
-            package = __package__ or "kiss.core"
-            return importlib.resources.read_text(package, file, encoding="utf-8")
+        # If no package, try relative to this module's package
+        package = __package__ or "kiss.core"
+        return importlib.resources.read_text(package, file, encoding="utf-8")
     except Exception as e:
         logger.debug("Exception caught", exc_info=True)
         raise KISSError(

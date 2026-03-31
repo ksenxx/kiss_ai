@@ -355,7 +355,7 @@ class Model(ABC):
             if stripped.lower().startswith("args:"):
                 in_args_section = True
                 continue
-            elif stripped.lower().startswith(("returns:", "raises:", "example:")):
+            if stripped.lower().startswith(("returns:", "raises:", "example:")):
                 in_args_section = False
                 continue
 
