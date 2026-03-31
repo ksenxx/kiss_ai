@@ -249,7 +249,7 @@ def main() -> int:
         print("✅ All checks passed!")
         print("=" * 60 + "\n")
         return 0
-    
+
     print("\n" + "=" * 60)
     print("❌ Some checks failed. Please fix the errors above.")
     print("=" * 60 + "\n")
