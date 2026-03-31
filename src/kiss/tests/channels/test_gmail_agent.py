@@ -11,14 +11,14 @@ import json
 import stat
 
 import pytest
-from googleapiclient.discovery import build
 
 from kiss.channels.gmail_agent import (
     GmailAgent,
+    GmailChannelBackend,
+    _build_service,
     _credentials_path,
     _extract_attachments,
     _extract_body,
-    _make_gmail_tools,
     _save_credentials,
     _token_path,
     main,
@@ -175,8 +175,8 @@ class TestBodyExtraction:
         assert result[0]["filename"] == "image.png"
 
 
-def _make_error_service() -> object:
-    """Create a Gmail service with invalid credentials for error testing.
+def _make_error_backend() -> GmailChannelBackend:
+    """Create a GmailChannelBackend with invalid credentials for error testing.
 
     Uses the real googleapiclient to test error handling — API calls
     will fail with HttpError because the token is invalid.
@@ -184,14 +184,16 @@ def _make_error_service() -> object:
     from google.oauth2.credentials import Credentials
 
     creds = Credentials(token="invalid-token-for-test")
-    return build("gmail", "v1", credentials=creds)
+    backend = GmailChannelBackend()
+    backend._service = _build_service(creds)
+    return backend
 
 
 _GMAIL_TOOL_ERROR_CASES = [
     ("get_profile", {}),
     ("list_messages", {}),
     ("get_message", {"message_id": "fake-id"}),
-    ("send_message", {"to": "test@example.com", "subject": "Test", "body": "Hello"}),
+    ("send_email", {"to": "test@example.com", "subject": "Test", "body": "Hello"}),
     ("reply_to_message", {"message_id": "fake-id", "body": "Reply"}),
     ("create_draft", {"to": "test@example.com", "subject": "Test", "body": "Draft"}),
     ("trash_message", {"message_id": "fake-id"}),
@@ -206,15 +208,15 @@ _GMAIL_TOOL_ERROR_CASES = [
 
 
 class TestGmailTools:
-    """Tests for _make_gmail_tools tool creation and error handling."""
+    """Tests for GmailChannelBackend tool creation and error handling."""
 
     @pytest.mark.parametrize("tool_name,kwargs", _GMAIL_TOOL_ERROR_CASES)
     def test_tool_returns_error_on_invalid_token(
         self, tool_name: str, kwargs: dict
     ) -> None:
         """Every Gmail tool returns {ok: false, error: ...} with invalid credentials."""
-        service = _make_error_service()
-        tools = _make_gmail_tools(service)
+        backend = _make_error_backend()
+        tools = backend.get_tool_methods()
         fn = next(t for t in tools if t.__name__ == tool_name)
         result = json.loads(fn(**kwargs))
         assert result["ok"] is False
@@ -270,7 +272,7 @@ class TestGmailAgent:
         result = clear()
         assert "cleared" in result.lower()
         assert not tp.exists()
-        assert agent._gmail_service is None
+        assert agent._backend._service is None
 
     def test_clear_auth_when_not_authenticated(self) -> None:
         agent = GmailAgent()
@@ -284,7 +286,7 @@ class TestGmailAgent:
         """check_gmail_auth with an invalid token returns an error."""
         agent = GmailAgent()
         agent.web_use_tool = None
-        agent._gmail_service = _make_error_service()
+        agent._backend = _make_error_backend()
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_gmail_auth")
         result = json.loads(check())
@@ -302,6 +304,6 @@ class TestCLIMain:
             main()
             assert False, "Should have raised SystemExit"
         except SystemExit as e:
-            assert e.code == 2
+            assert e.code == 1
         finally:
             sys.argv = original_argv

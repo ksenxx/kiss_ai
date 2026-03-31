@@ -468,6 +468,7 @@ header {
   display: flex; align-items: center;
 }
 #history-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+#history-btn:disabled, #clear-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 #run-prompt-btn:not(:disabled) { color: color-mix(in srgb, var(--green) 72%, transparent); }
 #run-prompt-btn:not(:disabled):hover { color: color-mix(in srgb, var(--green) 91%, transparent); }
 #run-prompt-btn:disabled { opacity: 0.15; cursor: not-allowed; }

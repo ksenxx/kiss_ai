@@ -11,10 +11,13 @@ import queue
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -421,12 +424,10 @@ class TestVSCodeServerBranches:
         assert "/test/file.py" in usage
 
     def test_user_answer_command(self) -> None:
-        """userAnswer command sets the answer and signals the event."""
+        """userAnswer command puts the answer on the queue."""
         server = VSCodeServer()
-        server._user_answer_event = threading.Event()
         server._handle_command({"type": "userAnswer", "answer": "yes"})
-        assert server._user_answer == "yes"
-        assert server._user_answer_event.is_set()
+        assert server._user_answer_queue.get_nowait() == "yes"
 
     def test_get_input_history(self) -> None:
         """getInputHistory command returns deduplicated tasks."""
@@ -513,6 +514,7 @@ class TestDiffMergeBranches:
             # Should detect the modification
             assert result.get("status") == "opened" or "error" not in result
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses chmod)")
     def test_save_untracked_base_oserror(self) -> None:
         """_save_untracked_base handles OSError on copy (lines 203-204)."""
         with tempfile.TemporaryDirectory() as tmpdir:

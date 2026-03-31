@@ -1,0 +1,498 @@
+"""Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.
+
+Provides access to the Nostr decentralized protocol via pynostr.
+Stores config in ``~/.kiss/channels/nostr/config.json``.
+
+Usage::
+
+    agent = NostrAgent()
+    agent.run(prompt_template="Post a note saying hello")
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from kiss.agents.sorcar.sorcar_agent import (
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+logger = logging.getLogger(__name__)
+
+_NOSTR_DIR = Path.home() / ".kiss" / "channels" / "nostr"
+
+
+def _config_path() -> Path:
+    """Return the path to the stored Nostr config file."""
+    return _NOSTR_DIR / "config.json"
+
+
+def _load_config() -> dict[str, Any] | None:
+    """Load stored Nostr config from disk."""
+    path = _config_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and data.get("private_key"):
+            return {
+                "private_key": data["private_key"],
+                "relays": data.get("relays", "wss://relay.damus.io"),
+            }
+        return None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_config(private_key: str, relays: str = "wss://relay.damus.io") -> None:
+    """Save Nostr config to disk with restricted permissions."""
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "private_key": private_key.strip(),
+        "relays": relays,
+    }, indent=2))
+    if sys.platform != "win32":
+        path.chmod(0o600)
+
+
+def _clear_config() -> None:
+    """Delete the stored Nostr config."""
+    path = _config_path()
+    if path.exists():
+        path.unlink()
+
+
+class NostrChannelBackend:
+    """ChannelBackend implementation for Nostr protocol via pynostr."""
+
+    def __init__(self) -> None:
+        self._private_key: Any = None
+        self._public_key: str = ""
+        self._relays: list[str] = []
+        self._connection_info: str = ""
+
+    def connect(self) -> bool:
+        """Load Nostr keys from stored config."""
+        cfg = _load_config()
+        if not cfg:
+            self._connection_info = "No Nostr config found."
+            return False
+        try:
+            from pynostr.key import PrivateKey
+
+            pk_str = cfg["private_key"]
+            if pk_str.startswith("nsec"):
+                self._private_key = PrivateKey.from_nsec(pk_str)
+            else:
+                self._private_key = PrivateKey.from_hex(pk_str)
+            self._public_key = self._private_key.public_key.hex()
+            relays_str = cfg.get("relays", "wss://relay.damus.io")
+            self._relays = [r.strip() for r in relays_str.split(",") if r.strip()]
+            self._connection_info = f"Nostr key loaded, pubkey: {self._public_key[:16]}..."
+            return True
+        except Exception as e:
+            self._connection_info = f"Nostr key load failed: {e}"
+            return False
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Return channel/relay name."""
+        return name if name else None
+
+    def find_user(self, username: str) -> str | None:
+        """Return username as public key."""
+        return username if username else None
+
+    def join_channel(self, channel_id: str) -> None:
+        """No-op for Nostr."""
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll Nostr relays for new events (basic implementation)."""
+        return [], oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Publish a Nostr note."""
+        self.publish_note(text)
+
+    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+        """Not fully implemented for Nostr."""
+        return ""
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if event is from this key."""
+        return bool(msg.get("pubkey", "") == self._public_key)
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Remove bot mentions from text."""
+        return text
+
+    def _publish_event(self, kind: int, content: str, tags: list | None = None) -> dict[str, Any]:
+        """Publish a Nostr event to all configured relays."""
+        from pynostr.event import Event
+        from pynostr.relay_manager import RelayManager
+
+        event = Event(kind=kind, content=content, tags=tags or [])
+        event.sign(self._private_key.hex())
+
+        manager = RelayManager()
+        for relay_url in self._relays:
+            manager.add_relay(relay_url)
+
+        manager.open_connections({"cert_reqs": False})
+        time.sleep(1.0)
+        manager.publish_event(event)
+        time.sleep(1.0)
+        manager.close_connections()
+        return {"event_id": event.id}
+
+    def publish_note(self, content: str) -> str:
+        """Publish a text note (kind 1) to Nostr.
+
+        Args:
+            content: Note content text.
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            result = self._publish_event(1, content)
+            return json.dumps({"ok": True, "event_id": result.get("event_id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def publish_reply(self, content: str, reply_to_event_id: str) -> str:
+        """Publish a reply to an existing Nostr event.
+
+        Args:
+            content: Reply content.
+            reply_to_event_id: Event ID to reply to.
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            tags = [["e", reply_to_event_id, "", "reply"]]
+            result = self._publish_event(1, content, tags)
+            return json.dumps({"ok": True, "event_id": result.get("event_id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def send_dm(self, recipient_pubkey: str, content: str) -> str:
+        """Send an encrypted direct message (NIP-04).
+
+        Args:
+            recipient_pubkey: Recipient's public key (hex).
+            content: Message content (will be encrypted).
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            from pynostr.encrypted_dm import EncryptedDirectMessage
+
+            dm = EncryptedDirectMessage(
+                recipient_pubkey=recipient_pubkey,
+            )
+            dm.encrypt(self._private_key.hex(), cleartext_content=content)
+            event = dm.to_event()
+            event.sign(self._private_key.hex())
+
+            from pynostr.relay_manager import RelayManager
+            manager = RelayManager()
+            for relay_url in self._relays:
+                manager.add_relay(relay_url)
+            manager.open_connections({"cert_reqs": False})
+            time.sleep(1.0)
+            manager.publish_event(event)
+            time.sleep(1.0)
+            manager.close_connections()
+            return json.dumps({"ok": True, "event_id": event.id})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_profile(self) -> str:
+        """Get the current user's Nostr profile.
+
+        Returns:
+            JSON string with public key info.
+        """
+        if not self._private_key:
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+
+            pub = self._private_key.public_key
+            return json.dumps({
+                "ok": True,
+                "pubkey_hex": pub.hex(),
+                "pubkey_npub": pub.bech32(),
+            })
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def set_profile(
+        self,
+        name: str = "",
+        about: str = "",
+        picture: str = "",
+        nip05: str = "",
+    ) -> str:
+        """Set the Nostr user profile (kind 0).
+
+        Args:
+            name: Display name.
+            about: Bio/about text.
+            picture: Profile picture URL.
+            nip05: NIP-05 identifier (user@domain.com).
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            profile: dict[str, str] = {}
+            if name:
+                profile["name"] = name
+            if about:
+                profile["about"] = about
+            if picture:
+                profile["picture"] = picture
+            if nip05:
+                profile["nip05"] = nip05
+            result = self._publish_event(0, json.dumps(profile))
+            return json.dumps({"ok": True, "event_id": result.get("event_id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_relays(self) -> str:
+        """List configured Nostr relays.
+
+        Returns:
+            JSON string with relay list.
+        """
+        return json.dumps({"ok": True, "relays": self._relays})
+
+    def add_relay(self, relay_url: str) -> str:
+        """Add a Nostr relay to the configuration.
+
+        Args:
+            relay_url: WebSocket URL of the relay (wss://...).
+
+        Returns:
+            JSON string with ok status.
+        """
+        if relay_url not in self._relays:
+            self._relays.append(relay_url)
+        cfg = _load_config()
+        if cfg:
+            cfg["relays"] = ",".join(self._relays)
+            _save_config(cfg["private_key"], cfg["relays"])
+        return json.dumps({"ok": True, "relays": self._relays})
+
+    def remove_relay(self, relay_url: str) -> str:
+        """Remove a Nostr relay from the configuration.
+
+        Args:
+            relay_url: Relay URL to remove.
+
+        Returns:
+            JSON string with ok status.
+        """
+        self._relays = [r for r in self._relays if r != relay_url]
+        cfg = _load_config()
+        if cfg:
+            cfg["relays"] = ",".join(self._relays)
+            _save_config(cfg["private_key"], cfg["relays"])
+        return json.dumps({"ok": True, "relays": self._relays})
+
+    def get_tool_methods(self) -> list:
+        """Return list of bound tool methods for use by the LLM agent."""
+        non_tool = frozenset({
+            "connect", "find_channel", "find_user", "join_channel",
+            "poll_messages", "send_message", "wait_for_reply",
+            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+        })
+        return [
+            getattr(self, name)
+            for name in sorted(dir(self))
+            if not name.startswith("_")
+            and name not in non_tool
+            and callable(getattr(self, name))
+        ]
+
+
+class NostrAgent(StatefulSorcarAgent):
+    """StatefulSorcarAgent extended with Nostr protocol tools."""
+
+    def __init__(self) -> None:
+        super().__init__("Nostr Agent")
+        self._backend = NostrChannelBackend()
+        cfg = _load_config()
+        if cfg:
+            try:
+                from pynostr.key import PrivateKey
+
+                pk_str = cfg["private_key"]
+                if pk_str.startswith("nsec"):
+                    self._backend._private_key = PrivateKey.from_nsec(pk_str)
+                else:
+                    self._backend._private_key = PrivateKey.from_hex(pk_str)
+                self._backend._public_key = self._backend._private_key.public_key.hex()
+                relays_str = cfg.get("relays", "wss://relay.damus.io")
+                self._backend._relays = [r.strip() for r in relays_str.split(",") if r.strip()]
+            except Exception:
+                pass
+
+    def _get_tools(self) -> list:
+        """Return SorcarAgent tools + Nostr auth tools + Nostr API tools."""
+        tools = super()._get_tools()
+        agent = self
+
+        def check_nostr_auth() -> str:
+            """Check if Nostr key is configured.
+
+            Returns:
+                Key status or instructions.
+            """
+            if agent._backend._private_key is None:
+                return (
+                    "Not configured for Nostr. Use authenticate_nostr(private_key=...) "
+                    "to configure. Provide an nsec... key or hex private key."
+                )
+            return json.loads(agent._backend.get_profile()).get("ok") and json.dumps({
+                "ok": True,
+                "pubkey": agent._backend._public_key[:16] + "...",
+                "relays": agent._backend._relays,
+            }) or json.dumps({"ok": False, "error": "Key error"})
+
+        def authenticate_nostr(
+            private_key: str, relays: str = "wss://relay.damus.io"
+        ) -> str:
+            """Configure Nostr with a private key.
+
+            Args:
+                private_key: nsec bech32 or hex private key.
+                relays: Comma-separated relay WebSocket URLs.
+
+            Returns:
+                Configuration result or error message.
+            """
+            if not private_key.strip():
+                return "private_key cannot be empty."
+            try:
+                from pynostr.key import PrivateKey
+
+                pk_str = private_key.strip()
+                if pk_str.startswith("nsec"):
+                    pk = PrivateKey.from_nsec(pk_str)
+                else:
+                    pk = PrivateKey.from_hex(pk_str)
+                agent._backend._private_key = pk
+                agent._backend._public_key = pk.public_key.hex()
+                agent._backend._relays = [r.strip() for r in relays.split(",") if r.strip()]
+                _save_config(pk_str, relays)
+                return json.dumps({
+                    "ok": True,
+                    "message": "Nostr key configured.",
+                    "pubkey": pk.public_key.hex()[:16] + "...",
+                })
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def clear_nostr_auth() -> str:
+            """Clear the stored Nostr configuration.
+
+            Returns:
+                Status message.
+            """
+            _clear_config()
+            agent._backend._private_key = None
+            agent._backend._public_key = ""
+            return "Nostr configuration cleared."
+
+        tools.extend([check_nostr_auth, authenticate_nostr, clear_nostr_auth])
+
+        if agent._backend._private_key is not None:
+            tools.extend(agent._backend.get_tool_methods())
+
+        return tools
+
+
+def main() -> None:
+    """Run the NostrAgent from the command line with chat persistence."""
+    import os
+    import sys
+    import time as time_mod
+
+    if len(sys.argv) <= 1:
+        print("Usage: kiss-nostr [-m MODEL] [-t TASK] [-n]")
+        sys.exit(1)
+
+    parser = _build_arg_parser()
+    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
+    args = parser.parse_args()
+
+    agent = NostrAgent()
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.new:
+        agent.new_chat()
+    else:
+        agent.resume_chat(task_description)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
+    try:
+        agent.run(**run_kwargs)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
+
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Cost: ${agent.budget_used:.4f}")
+    print(f"Total tokens: {agent.total_tokens_used}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,136 @@
+#!/bin/bash
+# Launch KISS Sorcar in a Linux Docker container and open it in the browser.
+#
+# Usage:
+#   ./sorcar-linux [PORT]
+#
+# The script:
+#   1. Builds the Docker image (kiss-sorcar-linux) if not already built.
+#   2. Stops and removes any previous kiss-sorcar-demo container.
+#   3. Starts a new container, forwarding API keys from the host environment.
+#   4. Waits for code-server to be ready, then opens http://localhost:PORT.
+#
+# API keys are read from environment variables:
+#   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY,
+#   TOGETHER_API_KEY, OPENROUTER_API_KEY  (optional)
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PORT="${1:-8080}"
+IMAGE="kiss-sorcar-linux"
+CONTAINER="kiss-sorcar-demo"
+
+# ---------------------------------------------------------------------------
+# Colors
+# ---------------------------------------------------------------------------
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+step()  { echo -e "${BLUE}[STEP]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+
+# ---------------------------------------------------------------------------
+# 1. Pre-flight checks
+# ---------------------------------------------------------------------------
+if ! command -v docker &>/dev/null; then
+    echo "ERROR: docker is not installed or not on PATH. Install Docker Desktop or Docker Engine first."
+    exit 1
+fi
+
+if ! docker info &>/dev/null 2>&1; then
+    echo "ERROR: Docker daemon is not running. Please start Docker and try again."
+    exit 1
+fi
+
+cd "$SCRIPT_DIR"
+
+# ---------------------------------------------------------------------------
+# 2. Build the VS Code extension VSIX if needed, then build Docker image
+# ---------------------------------------------------------------------------
+VSIX="src/kiss/agents/vscode/kiss-sorcar.vsix"
+
+if [[ ! -f "$VSIX" ]]; then
+    step "Building VS Code extension (kiss-sorcar.vsix)..."
+    cd src/kiss/agents/vscode
+    npm ci
+    npm run package
+    cd "$SCRIPT_DIR"
+fi
+
+step "Building Docker image '$IMAGE' (uses cache if unchanged)..."
+docker build -t "$IMAGE" . 2>&1
+
+# ---------------------------------------------------------------------------
+# 3. Stop / remove any existing container
+# ---------------------------------------------------------------------------
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+    step "Removing existing container '$CONTAINER'..."
+    docker rm -f "$CONTAINER" >/dev/null
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Collect API keys from environment
+# ---------------------------------------------------------------------------
+ENV_ARGS=()
+for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY TOGETHER_API_KEY OPENROUTER_API_KEY; do
+    if [[ -n "${!key:-}" ]]; then
+        ENV_ARGS+=(-e "${key}=${!key}")
+    fi
+done
+
+if [[ ${#ENV_ARGS[@]} -eq 0 ]]; then
+    warn "No API keys found in environment. KISS Sorcar needs at least one of:"
+    warn "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Start container
+# ---------------------------------------------------------------------------
+step "Starting container '$CONTAINER' on port $PORT..."
+docker run -d \
+    --name "$CONTAINER" \
+    -p "${PORT}:8080" \
+    "${ENV_ARGS[@]}" \
+    "$IMAGE" >/dev/null
+
+info "Container started. Waiting for KISS Sorcar to be ready..."
+
+# ---------------------------------------------------------------------------
+# 6. Wait for code-server to respond
+# ---------------------------------------------------------------------------
+URL="http://localhost:${PORT}"
+for i in $(seq 1 30); do
+    if curl -sf "${URL}" -o /dev/null 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+# ---------------------------------------------------------------------------
+# 7. Open the browser
+# ---------------------------------------------------------------------------
+info "KISS Sorcar is ready at ${URL}"
+info "Opening browser..."
+
+case "$(uname -s)" in
+    Darwin) open "$URL" ;;
+    Linux)
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "$URL" &
+        else
+            warn "Cannot open browser automatically. Visit: $URL"
+        fi
+        ;;
+esac
+
+echo ""
+echo "  ┌─────────────────────────────────────────────────────┐"
+echo "  │  KISS Sorcar is running at: ${URL}           │"
+echo "  │                                                     │"
+echo "  │  To stop:   docker stop ${CONTAINER}               │"
+echo "  │  To remove: docker rm   ${CONTAINER}               │"
+echo "  └─────────────────────────────────────────────────────┘"
