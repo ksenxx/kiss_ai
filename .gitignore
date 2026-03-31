@@ -35,6 +35,7 @@ bin/
 env.sh
 node_modules/
 src/kiss/agents/vscode/out/
+src/kiss/agents/vscode/README.md
 LESSONS.md
 kiss_project/
 tmp/
