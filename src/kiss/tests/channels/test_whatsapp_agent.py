@@ -16,9 +16,9 @@ import pytest
 
 from kiss.channels.whatsapp_agent import (
     WhatsAppAgent,
+    WhatsAppChannelBackend,
     _config_path,
     _load_config,
-    _make_whatsapp_tools,
     _save_config,
     main,
 )
@@ -118,11 +118,21 @@ _WHATSAPP_TOOL_ERROR_CASES = [
 ]
 
 
+def _make_error_backend(waba_id: str = "") -> WhatsAppChannelBackend:
+    """Create a WhatsAppChannelBackend with invalid credentials for error testing."""
+    backend = WhatsAppChannelBackend()
+    backend._access_token = "invalid-token"
+    backend._phone_number_id = "invalid-phone-id"
+    backend._waba_id = waba_id
+    return backend
+
+
 class TestWhatsAppTools:
-    """Tests for _make_whatsapp_tools — all return errors with invalid tokens."""
+    """Tests for WhatsAppChannelBackend tools — all return errors with invalid tokens."""
 
     def _get_tool(self, name: str) -> object:
-        tools = _make_whatsapp_tools("invalid-token", "invalid-phone-id", "")
+        backend = _make_error_backend()
+        tools = backend.get_tool_methods()
         return next(t for t in tools if t.__name__ == name)
 
     @pytest.mark.parametrize("tool_name,kwargs", _WHATSAPP_TOOL_ERROR_CASES)
@@ -152,7 +162,8 @@ class TestWhatsAppTools:
         assert "waba_id" in result["error"]
 
     def test_list_templates_with_waba_id(self) -> None:
-        tools = _make_whatsapp_tools("invalid-token", "invalid-phone-id", "waba-123")
+        backend = _make_error_backend(waba_id="waba-123")
+        tools = backend.get_tool_methods()
         fn = next(t for t in tools if t.__name__ == "list_message_templates")
         for kwargs in [{"status": "APPROVED"}, {}]:
             result = json.loads(fn(**kwargs))  # type: ignore[operator]
@@ -212,7 +223,7 @@ class TestWhatsAppAgent:
         result = clear()
         assert "cleared" in result.lower()
         assert _load_config() is None
-        assert agent._whatsapp_config is None
+        assert agent._backend._access_token == ""
 
     def test_clear_auth_when_not_authenticated(self) -> None:
         agent = WhatsAppAgent()
@@ -231,6 +242,6 @@ class TestCLIMain:
             main()
             assert False, "Should have raised SystemExit"
         except SystemExit as e:
-            assert e.code == 2
+            assert e.code == 1
         finally:
             sys.argv = original_argv

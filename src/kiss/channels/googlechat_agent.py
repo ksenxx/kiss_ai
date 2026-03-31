@@ -1,0 +1,682 @@
+"""Google Chat Agent — StatefulSorcarAgent extension with Google Chat API tools.
+
+Provides authenticated access to Google Chat via Service Account or OAuth2.
+Stores credentials in ``~/.kiss/channels/googlechat/``.
+
+Usage::
+
+    agent = GoogleChatAgent()
+    agent.run(prompt_template="List all spaces I'm a member of")
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+from kiss.agents.sorcar.sorcar_agent import (
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+logger = logging.getLogger(__name__)
+
+_GCHAT_DIR = Path.home() / ".kiss" / "channels" / "googlechat"
+_SCOPES = [
+    "https://www.googleapis.com/auth/chat.messages",
+    "https://www.googleapis.com/auth/chat.spaces",
+    "https://www.googleapis.com/auth/chat.memberships",
+]
+
+
+# ---------------------------------------------------------------------------
+# Config persistence
+# ---------------------------------------------------------------------------
+
+
+def _token_path() -> Path:
+    """Return the path to the stored OAuth2 token file."""
+    return _GCHAT_DIR / "token.json"
+
+
+def _credentials_path() -> Path:
+    """Return the path to the OAuth2 client credentials file."""
+    return _GCHAT_DIR / "credentials.json"
+
+
+def _service_account_path() -> Path:
+    """Return the path to the service account JSON file."""
+    return _GCHAT_DIR / "service_account.json"
+
+
+def _load_service(sa_path: str = "") -> Any:
+    """Load a Google Chat API service using service account or OAuth2.
+
+    Args:
+        sa_path: Path to service account JSON. If empty, uses OAuth2.
+
+    Returns:
+        Google Chat API service resource, or None on failure.
+    """
+    from googleapiclient.discovery import build
+
+    sa_file = Path(sa_path) if sa_path else _service_account_path()
+    if sa_file.exists():
+        try:
+            from google.oauth2 import service_account
+            creds = service_account.Credentials.from_service_account_file(
+                str(sa_file), scopes=_SCOPES
+            )
+            return build("chat", "v1", credentials=creds)
+        except Exception:
+            pass
+
+    # Fall back to OAuth2
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
+    token_file = _token_path()
+    if not token_file.exists():
+        return None
+    try:
+        creds = Credentials.from_authorized_user_file(str(token_file), _SCOPES)
+        if creds.valid:
+            return build("chat", "v1", credentials=creds)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            token_file.write_text(creds.to_json())
+            if sys.platform != "win32":
+                token_file.chmod(0o600)
+            return build("chat", "v1", credentials=creds)
+    except Exception:
+        pass
+    return None
+
+
+def _run_oauth_flow() -> Any:
+    """Run OAuth2 flow for Google Chat.
+
+    Returns:
+        Google Chat API service resource, or None on failure.
+    """
+    from typing import cast
+
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+
+    creds_path = _credentials_path()
+    if not creds_path.exists():
+        return None
+    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
+    creds = cast(Credentials, flow.run_local_server(port=0))
+    token_file = _token_path()
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(creds.to_json())
+    if sys.platform != "win32":
+        token_file.chmod(0o600)
+    return build("chat", "v1", credentials=creds)
+
+
+def _clear_config() -> None:
+    """Delete the stored Google Chat credentials."""
+    for path in [_token_path()]:
+        if path.exists():
+            path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# GoogleChatChannelBackend
+# ---------------------------------------------------------------------------
+
+
+class GoogleChatChannelBackend:
+    """ChannelBackend implementation for Google Chat API."""
+
+    def __init__(self) -> None:
+        self._service: Any = None
+        self._connection_info: str = ""
+
+    def connect(self) -> bool:
+        """Authenticate with Google Chat."""
+        service = _load_service()
+        if not service:
+            self._connection_info = "No Google Chat credentials found."
+            return False
+        self._service = service
+        self._connection_info = "Authenticated with Google Chat"
+        return True
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Find a Google Chat space by display name."""
+        if not self._service:
+            return None
+        try:
+            resp = self._service.spaces().list(pageSize=100).execute()
+            for space in resp.get("spaces", []):
+                if space.get("displayName") == name:
+                    return str(space["name"])
+        except Exception:
+            pass
+        return None
+
+    def find_user(self, username: str) -> str | None:
+        """Return username as user ID."""
+        return username if username else None
+
+    def join_channel(self, channel_id: str) -> None:
+        """No-op for Google Chat — bots are added by admins."""
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll a Google Chat space for new messages."""
+        if not self._service or not channel_id:
+            return [], oldest
+        try:
+            kwargs: dict[str, Any] = {
+                "parent": channel_id,
+                "pageSize": limit,
+                "orderBy": "createTime asc",
+            }
+            if oldest:
+                kwargs["filter"] = f'createTime > "{oldest}"'
+            resp = self._service.spaces().messages().list(**kwargs).execute()
+            raw_msgs = resp.get("messages", [])
+            messages: list[dict[str, Any]] = []
+            new_oldest = oldest
+            for msg in raw_msgs:
+                ts = msg.get("createTime", "")
+                new_oldest = ts
+                messages.append({
+                    "ts": ts,
+                    "user": msg.get("sender", {}).get("name", ""),
+                    "text": msg.get("text", ""),
+                    "name": msg.get("name", ""),
+                    "thread": msg.get("thread", {}).get("name", ""),
+                })
+            return messages, new_oldest
+        except Exception:
+            return [], oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a Google Chat message."""
+        if not self._service:
+            return
+        body: dict[str, Any] = {"text": text}
+        if thread_ts:
+            body["thread"] = {"name": thread_ts}
+        self._service.spaces().messages().create(parent=channel_id, body=body).execute()
+
+    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+        """Poll for a reply from a specific user."""
+        import time
+        oldest = ""
+        while True:
+            time.sleep(3.0)
+            msgs, oldest = self.poll_messages(channel_id, oldest)
+            for msg in msgs:
+                if msg.get("user") == user_id:
+                    return str(msg.get("text", ""))
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if a message is from a bot."""
+        return False
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Remove bot mentions from text."""
+        return text
+
+    # -------------------------------------------------------------------
+    # Google Chat API tool methods
+    # -------------------------------------------------------------------
+
+    def list_spaces(self, page_size: int = 20, page_token: str = "") -> str:
+        """List Google Chat spaces (rooms and DMs).
+
+        Args:
+            page_size: Maximum spaces to return. Default: 20.
+            page_token: Pagination token from a previous response.
+
+        Returns:
+            JSON string with space list (name, displayName, type).
+        """
+        assert self._service is not None
+        try:
+            kwargs: dict[str, Any] = {"pageSize": page_size}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = self._service.spaces().list(**kwargs).execute()
+            spaces = [
+                {
+                    "name": s.get("name", ""),
+                    "display_name": s.get("displayName", ""),
+                    "type": s.get("type", ""),
+                }
+                for s in resp.get("spaces", [])
+            ]
+            result: dict[str, Any] = {"ok": True, "spaces": spaces}
+            if resp.get("nextPageToken"):
+                result["next_page_token"] = resp["nextPageToken"]
+            return json.dumps(result, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_space(self, space_name: str) -> str:
+        """Get information about a Google Chat space.
+
+        Args:
+            space_name: Space resource name (e.g. "spaces/ABCDEF").
+
+        Returns:
+            JSON string with space details.
+        """
+        assert self._service is not None
+        try:
+            space = self._service.spaces().get(name=space_name).execute()
+            return json.dumps({"ok": True, "space": space}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_members(
+        self, space_name: str, page_size: int = 20, page_token: str = ""
+    ) -> str:
+        """List members of a Google Chat space.
+
+        Args:
+            space_name: Space resource name.
+            page_size: Maximum members to return. Default: 20.
+            page_token: Pagination token.
+
+        Returns:
+            JSON string with member list.
+        """
+        assert self._service is not None
+        try:
+            kwargs: dict[str, Any] = {"parent": space_name, "pageSize": page_size}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = self._service.spaces().members().list(**kwargs).execute()
+            members = resp.get("memberships", [])
+            result: dict[str, Any] = {"ok": True, "members": members}
+            if resp.get("nextPageToken"):
+                result["next_page_token"] = resp["nextPageToken"]
+            return json.dumps(result, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_messages(
+        self,
+        space_name: str,
+        page_size: int = 20,
+        page_token: str = "",
+        filter: str = "",
+    ) -> str:
+        """List messages in a Google Chat space.
+
+        Args:
+            space_name: Space resource name (e.g. "spaces/ABCDEF").
+            page_size: Maximum messages to return. Default: 20.
+            page_token: Pagination token.
+            filter: Optional filter (e.g. 'createTime > "2024-01-01T00:00:00Z"').
+
+        Returns:
+            JSON string with message list.
+        """
+        assert self._service is not None
+        try:
+            kwargs: dict[str, Any] = {
+                "parent": space_name,
+                "pageSize": page_size,
+                "orderBy": "createTime desc",
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+            if filter:
+                kwargs["filter"] = filter
+            resp = self._service.spaces().messages().list(**kwargs).execute()
+            messages = [
+                {
+                    "name": m.get("name", ""),
+                    "text": m.get("text", ""),
+                    "sender": m.get("sender", {}).get("displayName", ""),
+                    "create_time": m.get("createTime", ""),
+                    "thread": m.get("thread", {}).get("name", ""),
+                }
+                for m in resp.get("messages", [])
+            ]
+            result: dict[str, Any] = {"ok": True, "messages": messages}
+            if resp.get("nextPageToken"):
+                result["next_page_token"] = resp["nextPageToken"]
+            return json.dumps(result, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_message(self, message_name: str) -> str:
+        """Get a specific Google Chat message.
+
+        Args:
+            message_name: Message resource name (e.g. "spaces/X/messages/Y").
+
+        Returns:
+            JSON string with message details.
+        """
+        assert self._service is not None
+        try:
+            msg = self._service.spaces().messages().get(name=message_name).execute()
+            return json.dumps({"ok": True, "message": msg}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def post_message(
+        self, space_name: str, text: str, thread_key: str = ""
+    ) -> str:
+        """Send a message to a Google Chat space.
+
+        Args:
+            space_name: Space resource name (e.g. "spaces/ABCDEF").
+            text: Message text.
+            thread_key: Optional thread key to reply in an existing thread.
+
+        Returns:
+            JSON string with ok status and message name.
+        """
+        assert self._service is not None
+        try:
+            body: dict[str, Any] = {"text": text}
+            if thread_key:
+                body["thread"] = {"name": thread_key}
+            msg = self._service.spaces().messages().create(
+                parent=space_name, body=body
+            ).execute()
+            return json.dumps({
+                "ok": True,
+                "name": msg.get("name", ""),
+                "create_time": msg.get("createTime", ""),
+            })
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def update_message(self, message_name: str, text: str) -> str:
+        """Update an existing Google Chat message.
+
+        Args:
+            message_name: Message resource name.
+            text: New message text.
+
+        Returns:
+            JSON string with ok status.
+        """
+        assert self._service is not None
+        try:
+            self._service.spaces().messages().update(
+                name=message_name,
+                body={"text": text},
+                updateMask="text",
+            ).execute()
+            return json.dumps({"ok": True})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def delete_message(self, message_name: str) -> str:
+        """Delete a Google Chat message.
+
+        Args:
+            message_name: Message resource name.
+
+        Returns:
+            JSON string with ok status.
+        """
+        assert self._service is not None
+        try:
+            self._service.spaces().messages().delete(name=message_name).execute()
+            return json.dumps({"ok": True})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def create_space(self, display_name: str, space_type: str = "SPACE") -> str:
+        """Create a new Google Chat space.
+
+        Args:
+            display_name: Space display name.
+            space_type: Space type ("SPACE" or "GROUP_CHAT"). Default: "SPACE".
+
+        Returns:
+            JSON string with space name and display name.
+        """
+        assert self._service is not None
+        try:
+            space = self._service.spaces().create(body={
+                "displayName": display_name,
+                "spaceType": space_type,
+            }).execute()
+            return json.dumps({
+                "ok": True,
+                "name": space.get("name", ""),
+                "display_name": space.get("displayName", ""),
+            })
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_tool_methods(self) -> list:
+        """Return list of bound tool methods for use by the LLM agent."""
+        non_tool = frozenset({
+            "connect", "find_channel", "find_user", "join_channel",
+            "poll_messages", "send_message", "wait_for_reply",
+            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+        })
+        return [
+            getattr(self, name)
+            for name in sorted(dir(self))
+            if not name.startswith("_")
+            and name not in non_tool
+            and callable(getattr(self, name))
+        ]
+
+
+# ---------------------------------------------------------------------------
+# GoogleChatAgent
+# ---------------------------------------------------------------------------
+
+
+class GoogleChatAgent(StatefulSorcarAgent):
+    """StatefulSorcarAgent extended with Google Chat API tools.
+
+    Example::
+
+        agent = GoogleChatAgent()
+        result = agent.run(prompt_template="List all spaces")
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Google Chat Agent")
+        self._backend = GoogleChatChannelBackend()
+        service = _load_service()
+        if service:
+            self._backend._service = service
+
+    def _get_tools(self) -> list:
+        """Return SorcarAgent tools + Google Chat auth tools + API tools."""
+        tools = super()._get_tools()
+        agent = self
+
+        def check_googlechat_auth() -> str:
+            """Check if Google Chat credentials are configured and valid.
+
+            Returns:
+                Authentication status or instructions for how to authenticate.
+            """
+            if agent._backend._service is None:
+                sa_exists = _service_account_path().exists()
+                creds_exists = _credentials_path().exists()
+                if sa_exists:
+                    return (
+                        "Not authenticated. A service_account.json file exists. "
+                        "Call authenticate_googlechat() to load it."
+                    )
+                if creds_exists:
+                    return (
+                        "Not authenticated. A credentials.json file exists. "
+                        "Call authenticate_googlechat() to start OAuth2 flow."
+                    )
+                return (
+                    "Not authenticated with Google Chat. To set up:\n"
+                    "Option 1 (Bot): Save service account JSON to "
+                    f"{_service_account_path()}\n"
+                    "Option 2 (OAuth): Save credentials JSON to "
+                    f"{_credentials_path()}\n"
+                    "Then call authenticate_googlechat()."
+                )
+            try:
+                resp = agent._backend._service.spaces().list(pageSize=1).execute()
+                return json.dumps({"ok": True, "space_count": len(resp.get("spaces", []))})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def authenticate_googlechat(service_account_json_path: str = "") -> str:
+            """Authenticate with Google Chat using service account or OAuth2.
+
+            Args:
+                service_account_json_path: Path to service account JSON file.
+                    If empty, uses OAuth2 with credentials.json.
+
+            Returns:
+                Authentication result or error message.
+            """
+            service = _load_service(service_account_json_path)
+            if service is None and not service_account_json_path:
+                service = _run_oauth_flow()
+            if service is None:
+                return (
+                    f"Authentication failed. Ensure credentials exist at "
+                    f"{_service_account_path()} or {_credentials_path()}"
+                )
+            agent._backend._service = service
+            try:
+                resp = agent._backend._service.spaces().list(pageSize=1).execute()
+                return json.dumps({
+                    "ok": True,
+                    "message": "Google Chat authentication successful.",
+                    "space_count": len(resp.get("spaces", [])),
+                })
+            except Exception as e:
+                return json.dumps({"ok": True, "message": "Authenticated.", "error": str(e)})
+
+        def clear_googlechat_auth() -> str:
+            """Clear the stored Google Chat credentials.
+
+            Returns:
+                Status message.
+            """
+            _clear_config()
+            agent._backend._service = None
+            return "Google Chat authentication cleared."
+
+        tools.extend([check_googlechat_auth, authenticate_googlechat, clear_googlechat_auth])
+
+        if agent._backend._service is not None:
+            tools.extend(agent._backend.get_tool_methods())
+
+        return tools
+
+
+def main() -> None:
+    """Run the GoogleChatAgent from the command line with chat persistence."""
+    import os
+    import sys
+    import time as time_mod
+
+    if len(sys.argv) <= 1:
+        print(
+            "Usage: kiss-gchat [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--daemon]"
+        )
+        sys.exit(1)
+
+    parser = _build_arg_parser()
+    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
+    parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
+    parser.add_argument("--daemon-channel", default="", help="Space name to monitor")
+    parser.add_argument("--allow-users", default="", help="Comma-separated user IDs to allow")
+    args = parser.parse_args()
+
+    if args.daemon:
+        from kiss.channels.background_agent import ChannelDaemon
+
+        backend = GoogleChatChannelBackend()
+        service = _load_service()
+        if not service:
+            print("Not authenticated. Run: kiss-gchat -t 'authenticate'")
+            sys.exit(1)
+        backend._service = service
+        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
+        daemon = ChannelDaemon(
+            backend=backend,
+            channel_name=args.daemon_channel,
+            agent_name="Google Chat Background Agent",
+            extra_tools=backend.get_tool_methods(),
+            model_name=args.model_name,
+            max_budget=args.max_budget,
+            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
+            allow_users=allow_users,
+        )
+        print("Starting Google Chat daemon... (Ctrl+C to stop)")
+        try:
+            daemon.run()
+        except KeyboardInterrupt:
+            print("Daemon stopped.")
+        return
+
+    agent = GoogleChatAgent()
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.new:
+        agent.new_chat()
+    else:
+        agent.resume_chat(task_description)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
+    try:
+        agent.run(**run_kwargs)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
+
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Cost: ${agent.budget_used:.4f}")
+    print(f"Total tokens: {agent.total_tokens_used}")
+
+
+if __name__ == "__main__":
+    main()

@@ -34,6 +34,8 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _activeEditorDisposable?: vscode.Disposable;
   private _commitPending: boolean = false;
+  private _pendingNewChat: boolean = false;
+  private _mergeOwnerCallback?: (provider: SorcarViewProvider) => void;
 
   constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
     this._extensionUri = extensionUri;
@@ -49,6 +51,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     // Listen for agent events
     this._agentProcess.on('message', (msg: ToWebviewMessage) => {
       if (msg.type === 'merge_data') {
+        this._mergeOwnerCallback?.(this);
         this._mergeManager.openMerge((msg as any).data).catch((err) => {
           console.error('[SorcarPanel] merge open failed:', err);
         });
@@ -61,6 +64,16 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._isRunning = msg.running;
         if (!msg.running) {
           this._sendActiveFileInfo();
+          // T9 fix: send deferred newChat when stop completes
+          if (this._pendingNewChat) {
+            this._pendingNewChat = false;
+            this._agentProcess.sendCommand({ type: 'newChat' });
+            this.sendToWebview({ type: 'clearChat' });
+          }
+          // T10 fix: reset _commitPending on process death/stop
+          if (this._commitPending) {
+            this._onCommitMessage.fire({ message: '', error: 'Process stopped' });
+          }
         }
       }
     });
@@ -68,6 +81,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   get mergeManager(): MergeManager {
     return this._mergeManager;
+  }
+
+  /** Register a callback invoked when this provider starts a merge session (X4 fix). */
+  set mergeOwnerCallback(cb: ((provider: SorcarViewProvider) => void) | undefined) {
+    this._mergeOwnerCallback = cb;
   }
 
   public resolveWebviewView(
@@ -124,14 +142,19 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this.sendToWebview({
       type: 'activeFileInfo',
       isPrompt,
-      filename: isPrompt ? fpath.split('/').pop() || '' : '',
+      filename: isPrompt ? path.basename(fpath) : '',
       path: fpath,
     } as ToWebviewMessage);
   }
 
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
     const workDir = this._getWorkDir();
-    this._agentProcess.start(workDir);
+    const started = this._agentProcess.start(workDir);
+    if (!started) {
+      this._isRunning = false;
+      this.sendToWebview({ type: 'status', running: false });
+      return;
+    }
     this.sendToWebview({ type: 'status', running: true });
     this._agentProcess.sendCommand({
       type: 'run',
@@ -312,12 +335,13 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
 
   public newConversation(): void {
     if (this._isRunning) {
-      this._agentProcess.stop();  // Stop running task first (Race 15 fix)
+      // T9 fix: queue newChat to be sent once running=false arrives
+      this._pendingNewChat = true;
+      this._agentProcess.stop();
+    } else {
+      this._agentProcess.sendCommand({ type: 'newChat' });
+      this.sendToWebview({ type: 'clearChat' });
     }
-    this._isRunning = false;
-    this._agentProcess.sendCommand({ type: 'newChat' });
-    this.sendToWebview({ type: 'status', running: false });
-    this.sendToWebview({ type: 'clearChat' });
   }
 
   public stopTask(): void {
@@ -420,7 +444,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         <div id="input-wrap">
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
-            <textarea id="task-input" placeholder="Ask anything... (@ for files, ⌘D toggle between editor and chat, ⌘T new chat, ⌘L run selected text in editor as task)" rows="1"></textarea>
+            <textarea id="task-input" placeholder="Ask anything... (@ for files, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}D toggle between editor and chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}T new chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}L run selected text in editor as task)" rows="1"></textarea>
             <button id="input-clear-btn" style="display:none;">&times;</button>
           </div>
         </div>

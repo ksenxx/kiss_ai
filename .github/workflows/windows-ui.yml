@@ -1,0 +1,96 @@
+name: KISS Sorcar Windows UI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-ui.yml'
+      - 'kiss-sorcar.vsix'
+
+jobs:
+  windows-ui:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install VS Code
+        shell: pwsh
+        run: |
+          $url = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
+          $installer = "$env:TEMP\vscode-installer.exe"
+          Write-Host "Downloading VS Code..."
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Write-Host "Installing VS Code silently..."
+          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT", "/NORESTART", "/MERGETASKS=!runcode" -Wait
+          $codePath = "$env:LOCALAPPDATA\Programs\Microsoft VS Code"
+          echo "$codePath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "VS Code installed to $codePath"
+
+      - name: Install KISS Sorcar extension
+        shell: pwsh
+        run: |
+          $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd"
+          Write-Host "Installing KISS Sorcar extension..."
+          & $code --install-extension "${{ github.workspace }}\kiss-sorcar.vsix" --force
+          Write-Host "Extension installed"
+
+      - name: Write screenshot helper script
+        shell: pwsh
+        run: |
+          $script = @"
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          `$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          `$bmp = New-Object System.Drawing.Bitmap(`$screen.Width, `$screen.Height)
+          `$g = [System.Drawing.Graphics]::FromImage(`$bmp)
+          `$g.CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(`$screen.Width, `$screen.Height))
+          `$bmp.Save(`$args[0], [System.Drawing.Imaging.ImageFormat]::Png)
+          `$g.Dispose()
+          `$bmp.Dispose()
+          Write-Host "Screenshot saved to `$(`$args[0])"
+          "@
+          Set-Content -Path "${{ github.workspace }}\screenshot.ps1" -Value $script
+          Write-Host "Screenshot helper written"
+
+      - name: Launch VS Code and capture UI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:TEMP\kiss-demo"
+          Set-Content -Path "$env:TEMP\kiss-demo\hello.py" -Value "# KISS Sorcar Demo`nprint('Hello!')"
+
+          $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
+          Write-Host "Launching VS Code..."
+          Start-Process -FilePath $code -ArgumentList "--no-sandbox", "--disable-gpu", "$env:TEMP\kiss-demo"
+          Write-Host "Waiting 20 seconds for VS Code to load..."
+          Start-Sleep -Seconds 20
+
+          $out1 = "${{ github.workspace }}\kiss-sorcar-windows-ui.png"
+          & "${{ github.workspace }}\screenshot.ps1" $out1
+
+      - name: Open KISS Sorcar command palette and take second screenshot
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+
+          $procs = Get-Process -Name "Code" -ErrorAction SilentlyContinue
+          Write-Host "VS Code processes: $($procs.Count)"
+
+          [System.Windows.Forms.SendKeys]::SendWait("^+p")
+          Start-Sleep -Seconds 1
+          [System.Windows.Forms.SendKeys]::SendWait("KISS Sorcar: Open Panel")
+          Start-Sleep -Seconds 2
+
+          $out2 = "${{ github.workspace }}\kiss-sorcar-windows-command-palette.png"
+          & "${{ github.workspace }}\screenshot.ps1" $out2
+
+      - name: Upload UI Screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: kiss-sorcar-windows-ui
+          path: |
+            kiss-sorcar-windows-ui.png
+            kiss-sorcar-windows-command-palette.png
+          retention-days: 7

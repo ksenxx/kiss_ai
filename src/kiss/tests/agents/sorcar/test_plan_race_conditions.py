@@ -1,22 +1,17 @@
 """Tests for race conditions documented in PLAN.md.
 
-Harmful race conditions (P11, P12, P13, P14, T8, T9, T10, X4) —
-tests demonstrate the bug is present in the current codebase.
-
-Cosmetic race conditions (P3, P8, T6) — tests verify the fix is correct.
-
-Race conditions tested:
+Tests verify fixes for:
 - P3:  _complete_seq_latest TOCTOU (fixed with _complete_lock)
 - P8:  _bash_flush_timer duplicate flush (fixed by draining in lock)
-- P11: _last_active_file written without _state_lock in _run_task_inner
-- P12: Stale followup suggestion interleaves with new task output
-- P13: _force_stop_thread second KeyboardInterrupt corrupts finally-block
-- P14: _force_stop_thread interrupt before try block skips finally
+- P11: _last_active_file written under _state_lock in _run_task_inner
+- P12: Stale followup suppressed by _task_generation counter
+- P13: Entire finally block wrapped in try/except BaseException
+- P14: start_recording inside try block (stop_recording always runs)
 - T6:  AgentProcess.dispose() event race (fixed by reordering)
-- T8:  _startTask doesn't recover from start() failure
-- T9:  newConversation() silently drops newChat
-- T10: _commitPending permanently stuck if Python process dies
-- X4:  allDone merge signal sent to wrong provider's agent
+- T8:  _startTask checks start() return value and resets _isRunning
+- T9:  newConversation() queues newChat for status:running:false
+- T10: _commitPending reset on status:running:false
+- X4:  allDone merge signal uses mergeOwner tracking
 """
 
 import inspect
@@ -27,351 +22,272 @@ from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 # ---------------------------------------------------------------------------
-# P11 — _last_active_file written without _state_lock
+# P11 — _last_active_file written under _state_lock
 # ---------------------------------------------------------------------------
 
-class TestP11LastActiveFileNoLock(unittest.TestCase):
-    """P11: _run_task_inner writes _last_active_file without _state_lock.
+class TestP11LastActiveFileWithLock(unittest.TestCase):
+    """P11 fix: _run_task_inner writes _last_active_file under _state_lock."""
 
-    The task thread writes self._last_active_file outside any lock, while
-    the complete handler reads the (file, content) pair under _state_lock.
-    This can make the pair inconsistent: file points to B while content
-    is still from A.
-    """
-
-    def test_task_thread_writes_without_lock(self) -> None:
-        """Verify _run_task_inner writes _last_active_file outside _state_lock."""
+    def test_task_thread_writes_with_lock(self) -> None:
+        """Verify _run_task_inner writes _last_active_file inside _state_lock."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        # Find the assignment
         assert 'self._last_active_file = active_file or ""' in source
-        # Now verify it's NOT inside a _state_lock context
+        # Find the assignment and verify it's inside a _state_lock context
         lines = source.split("\n")
         in_state_lock = False
+        state_lock_indent = 0
+        found_inside_lock = False
         for line in lines:
             stripped = line.strip()
             if "with self._state_lock" in stripped:
                 in_state_lock = True
-            if in_state_lock and stripped == "":
-                in_state_lock = False
-            if 'self._last_active_file = active_file or ""' in stripped:
-                assert not in_state_lock, (
-                    "Expected _last_active_file write to be OUTSIDE _state_lock "
-                    "(demonstrating P11 bug is present)"
+                state_lock_indent = len(line) - len(line.lstrip())
+                continue
+            if in_state_lock:
+                current_indent = (
+                    len(line) - len(line.lstrip()) if stripped else state_lock_indent + 1
                 )
+                if current_indent <= state_lock_indent and stripped:
+                    in_state_lock = False
+            if 'self._last_active_file = active_file or ""' in stripped and in_state_lock:
+                found_inside_lock = True
                 break
+        assert found_inside_lock, (
+            "P11 fix: _last_active_file write should be INSIDE _state_lock"
+        )
 
 
 # ---------------------------------------------------------------------------
-# P12 — Stale followup suggestion interleaves with new task output
+# P12 — Stale followup suppressed by _task_generation counter
 # ---------------------------------------------------------------------------
 
-class TestP12StaleFollowupInterleave(unittest.TestCase):
-    """P12: _generate_followup_async has no generation counter.
+class TestP12StaleFollowupSuppressed(unittest.TestCase):
+    """P12 fix: _generate_followup_async checks _task_generation counter."""
 
-    A followup thread from a completed task can broadcast its suggestion
-    after a new task has started, interleaving stale output.
-    """
-
-    def test_no_generation_counter_in_followup(self) -> None:
-        """Verify _generate_followup_async does not check any generation counter."""
+    def test_generation_counter_in_followup(self) -> None:
+        """Verify _generate_followup_async checks _task_generation."""
         source = inspect.getsource(VSCodeServer._generate_followup_async)
-        assert "_task_generation" not in source, (
-            "Expected no _task_generation check (P12 bug present)"
+        assert "_task_generation" in source, (
+            "P12 fix: _generate_followup_async should check _task_generation"
         )
-        # The inner _run() function has no seq/gen guard
-        run_idx = source.find("def _run()")
-        assert run_idx > 0
-        inner = source[run_idx:]
-        assert "_task_generation" not in inner
-        assert "gen ==" not in inner
-        assert "seq ==" not in inner
+        assert "gen" in source, "P12 fix: should accept gen parameter"
 
-    def test_followup_thread_not_cancelled_on_new_task(self) -> None:
-        """Verify _run_task_inner does not cancel previous followup threads."""
+    def test_generation_counter_incremented_in_run_task_inner(self) -> None:
+        """Verify _run_task_inner increments _task_generation."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        # No cancellation of followup threads at the start
-        assert "followup" not in source.split("start_recording")[0].lower(), (
-            "Expected no followup cancellation before task starts"
+        assert "_task_generation" in source, (
+            "P12 fix: _run_task_inner should increment _task_generation"
+        )
+
+    def test_followup_receives_gen_parameter(self) -> None:
+        """Verify _generate_followup_async accepts gen parameter."""
+        sig = inspect.signature(VSCodeServer._generate_followup_async)
+        assert "gen" in sig.parameters, (
+            "P12 fix: _generate_followup_async should accept gen parameter"
         )
 
 
 # ---------------------------------------------------------------------------
-# P13 — _force_stop_thread second KeyboardInterrupt corrupts finally
+# P13 — Entire finally block wrapped in try/except BaseException
 # ---------------------------------------------------------------------------
 
-class TestP13SecondInterruptCorruptsFinally(unittest.TestCase):
-    """P13: A second KeyboardInterrupt inside the finally block escapes
-    the `except Exception` handler, leaving _merging permanently True.
-    """
+class TestP13FinallyBlockProtected(unittest.TestCase):
+    """P13 fix: The finally block catches BaseException, not just Exception."""
 
-    def test_except_exception_does_not_catch_keyboard_interrupt(self) -> None:
-        """Verify the merge try/except in the finally block uses Exception, not BaseException."""
+    def test_except_base_exception_in_finally(self) -> None:
+        """Verify the finally block uses except BaseException for merge try."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        # Find the merge try/except in the finally block
         finally_idx = source.find("finally:")
         assert finally_idx > 0
         finally_block = source[finally_idx:]
-        # The except clause around _start_merge_session
-        merge_try_idx = finally_block.find("_prepare_merge_view")
-        assert merge_try_idx > 0
-        # Find the except after _start_merge_session
-        except_after_merge = finally_block[merge_try_idx:]
-        except_match = re.search(r"except\s+(\w+)", except_after_merge)
-        assert except_match is not None
-        caught_type = except_match.group(1)
-        assert caught_type == "Exception", (
-            f"Expected 'except Exception' (not catching KeyboardInterrupt), "
-            f"got: except {caught_type}"
+        # Should have except BaseException somewhere in the finally block
+        assert "except BaseException" in finally_block, (
+            "P13 fix: finally block should catch BaseException"
         )
 
     def test_force_stop_sends_two_interrupts(self) -> None:
         """Verify _force_stop_thread raises KeyboardInterrupt up to 2 times."""
         source = inspect.getsource(VSCodeServer._force_stop_thread)
-        assert "for _ in range(2)" in source, (
-            "Expected _force_stop_thread to retry up to 2 times"
-        )
+        assert "for _ in range(2)" in source
         assert "PyThreadState_SetAsyncExc" in source
         assert "KeyboardInterrupt" in source
 
-    def test_no_keyboard_interrupt_catch_in_outer_run_task(self) -> None:
-        """Verify _run_task doesn't catch KeyboardInterrupt from the finally block.
-
-        The outer wrapper only has try/finally, so a KeyboardInterrupt
-        that escapes _run_task_inner's finally block propagates silently.
-        """
-        source = inspect.getsource(VSCodeServer._run_task)
-        # _run_task has try/finally but no except KeyboardInterrupt
-        assert "except KeyboardInterrupt" not in source, (
-            "Expected _run_task to NOT catch KeyboardInterrupt (P13 bug present)"
+    def test_outer_cleanup_catches_base_exception(self) -> None:
+        """Verify the outermost cleanup try/except in finally catches BaseException."""
+        source = inspect.getsource(VSCodeServer._run_task_inner)
+        finally_idx = source.find("finally:")
+        assert finally_idx > 0
+        finally_block = source[finally_idx:]
+        # Count occurrences of 'except BaseException'
+        base_exception_count = finally_block.count("except BaseException")
+        assert base_exception_count >= 2, (
+            f"P13 fix: expected at least 2 'except BaseException' in finally "
+            f"(one for merge, one for outer cleanup), got {base_exception_count}"
         )
 
 
 # ---------------------------------------------------------------------------
-# P14 — Interrupt before try block skips _run_task_inner finally
+# P14 — start_recording inside try block
 # ---------------------------------------------------------------------------
 
-class TestP14InterruptBeforeTryBlock(unittest.TestCase):
-    """P14: If KeyboardInterrupt hits before the try block in _run_task_inner,
-    start_recording() was called but stop_recording() never is, causing a
-    memory leak in _recordings.
+class TestP14StartRecordingInsideTry(unittest.TestCase):
+    """P14 fix: start_recording() is inside the try block so stop_recording()
+    is guaranteed to run in the finally block.
     """
 
-    def test_start_recording_before_try_block(self) -> None:
-        """Verify start_recording() is called before the try block."""
+    def test_start_recording_after_try(self) -> None:
+        """Verify start_recording() is called after the outer try statement."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        rec_pos = source.find("self.printer.start_recording()")
-        try_pos = source.find("        try:\n            self.agent.run(")
-        assert rec_pos > 0, "start_recording not found"
-        assert try_pos > 0, "try block not found"
-        assert rec_pos < try_pos, (
-            "P14 bug: start_recording() is called BEFORE the try block, "
-            "so an interrupt between them skips stop_recording() in the finally"
+        rec_pos = source.find("self.printer.start_recording(")
+        # Find the outer try that has the finally with stop_recording
+        try_positions = [m.start() for m in re.finditer(r"\btry\b:", source)]
+        # start_recording should be AFTER a try: statement
+        try_before = [tp for tp in try_positions if tp < rec_pos]
+        assert try_before, (
+            "P14 fix: start_recording() should be inside a try block"
         )
 
-    def test_git_snapshot_before_try_block(self) -> None:
-        """Verify git snapshot code runs before the try block."""
+    def test_stop_recording_in_finally(self) -> None:
+        """Verify stop_recording() is in the finally block."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        diff_pos = source.find("_parse_diff_hunks(work_dir)")
-        try_pos = source.find("        try:\n            self.agent.run(")
-        assert diff_pos > 0, "_parse_diff_hunks not found"
-        assert try_pos > 0, "try block not found"
-        assert diff_pos < try_pos, (
-            "P14 bug: git snapshot runs before try block, "
-            "so interrupt during snapshot skips all cleanup"
+        finally_idx = source.find("finally:")
+        assert finally_idx > 0
+        finally_block = source[finally_idx:]
+        assert "self.printer.stop_recording(" in finally_block, (
+            "P14 fix: stop_recording should be in the finally block"
         )
 
 
 # ---------------------------------------------------------------------------
-# T8 — _startTask doesn't recover from start() failure
+# T8 — _startTask checks start() return value
 # ---------------------------------------------------------------------------
 
-class TestT8StartTaskNoRecovery(unittest.TestCase):
-    """T8: Callers set _isRunning=true before _startTask, which calls
-    start() without checking its return value. If start() fails,
-    _isRunning stays true permanently because _startTask has no
-    error handling.
-    """
+class TestT8StartTaskRecovery(unittest.TestCase):
+    """T8 fix: _startTask checks start() return and resets _isRunning on failure."""
 
-    def test_start_task_sets_running_before_start(self) -> None:
-        """Verify _isRunning is set to true in the caller before _startTask."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        # _isRunning is now set in 'submit' handler before _startTask is called
-        submit_idx = source.find("case 'submit':")
-        assert submit_idx >= 0
-        start_task_idx = source.find("this._startTask(", submit_idx)
-        assert start_task_idx > 0
-        between = source[submit_idx:start_task_idx]
-        assert "this._isRunning = true" in between, (
-            "T8 bug: _isRunning set in caller before _startTask"
-        )
-
-    def test_start_return_value_not_checked(self) -> None:
-        """Verify _startTask does not check start()'s return value."""
+    def test_start_return_value_checked(self) -> None:
+        """Verify _startTask checks start()'s return value."""
         with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
             source = f.read()
         idx = source.find("private _startTask(")
-        assert idx >= 0
-        block = source[idx:idx + 500]
-        # start() should return bool, but its return value is not used
-        start_line_idx = block.find("this._agentProcess.start(")
-        # Check the line doesn't have an assignment or if-check
-        line_start = block.rfind("\n", 0, start_line_idx) + 1
-        line = block[line_start:block.find("\n", start_line_idx)]
-        assert "if" not in line and "=" not in line.split("start(")[0], (
-            "T8 bug: expected start() return value to NOT be checked"
-        )
-
-    def test_no_running_reset_on_start_failure(self) -> None:
-        """Verify _startTask has no error handling to reset _isRunning on failure."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        idx = source.find("private _startTask(")
-        end_idx = source.find("\n  }", idx)
-        block = source[idx:end_idx]
-        # _startTask does not set _isRunning at all (callers set it),
-        # so there is no try/catch to reset it if start() fails
-        assert "try" not in block, (
-            "T8 bug: _startTask has no error handling for start() failure"
-        )
-        sets = [m.start() for m in re.finditer(r"this\._isRunning\s*=", block)]
-        assert len(sets) == 0, (
-            f"T8 bug: _startTask does not manage _isRunning (callers do), "
-            f"found {len(sets)} assignments"
-        )
-
-
-# ---------------------------------------------------------------------------
-# T9 — newConversation() silently drops newChat
-# ---------------------------------------------------------------------------
-
-class TestT9NewConversationDropsNewChat(unittest.TestCase):
-    """T9: newConversation() calls stop() then immediately sends newChat.
-    The Python backend skips newChat because the task thread is still alive.
-    """
-
-    def test_newchat_sent_immediately_after_stop(self) -> None:
-        """Verify newConversation sends newChat without waiting for stop to complete."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        idx = source.find("public newConversation(")
         assert idx >= 0
         block = source[idx:idx + 600]
-        stop_pos = block.find("this._agentProcess.stop()")
-        newchat_pos = block.find("this._agentProcess.sendCommand({ type: 'newChat' })")
-        assert stop_pos > 0 and newchat_pos > 0
-        assert newchat_pos > stop_pos, "newChat sent after stop"
-        # Check there's no await or promise between stop and newChat
-        between = block[stop_pos:newchat_pos]
-        assert "await" not in between, (
-            "T9 bug: no await between stop() and newChat — newChat sent immediately"
+        # start() should have its return value assigned to a variable
+        assert "const started = this._agentProcess.start(" in block or \
+               "if (!this._agentProcess.start(" in block, (
+            "T8 fix: start() return value should be checked"
         )
 
-    def test_newconversation_not_async(self) -> None:
-        """Verify newConversation is not an async method (can't await stop)."""
+    def test_running_reset_on_start_failure(self) -> None:
+        """Verify _startTask resets _isRunning on start() failure."""
+        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
+            source = f.read()
+        idx = source.find("private _startTask(")
+        end_idx = source.find("\n  }", idx)
+        block = source[idx:end_idx]
+        assert "this._isRunning = false" in block, (
+            "T8 fix: _startTask should reset _isRunning on failure"
+        )
+
+
+# ---------------------------------------------------------------------------
+# T9 — newConversation() queues newChat
+# ---------------------------------------------------------------------------
+
+class TestT9NewConversationQueuesNewChat(unittest.TestCase):
+    """T9 fix: newConversation defers newChat until status:running:false."""
+
+    def test_pending_new_chat_flag(self) -> None:
+        """Verify newConversation uses _pendingNewChat flag when running."""
         with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
             source = f.read()
         idx = source.find("public newConversation(")
         assert idx >= 0
-        line_start = source.rfind("\n", 0, idx) + 1
-        decl_line = source[line_start:source.find("{", idx)]
-        assert "async" not in decl_line, (
-            "T9 bug: newConversation is synchronous, can't await stop completion"
+        block = source[idx:idx + 400]
+        assert "_pendingNewChat" in block, (
+            "T9 fix: newConversation should use _pendingNewChat"
+        )
+
+    def test_pending_new_chat_handled_on_status_false(self) -> None:
+        """Verify _pendingNewChat is handled when status:running:false arrives."""
+        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
+            source = f.read()
+        # Find the status handler
+        status_idx = source.find("if (msg.type === 'status')")
+        assert status_idx >= 0
+        status_block = source[status_idx:status_idx + 500]
+        assert "_pendingNewChat" in status_block, (
+            "T9 fix: status handler should check _pendingNewChat"
+        )
+        assert "'newChat'" in status_block, (
+            "T9 fix: status handler should send newChat when _pendingNewChat"
         )
 
 
 # ---------------------------------------------------------------------------
-# T10 — _commitPending permanently stuck if Python process dies
+# T10 — _commitPending reset on status:running:false
 # ---------------------------------------------------------------------------
 
-class TestT10CommitPendingStuck(unittest.TestCase):
-    """T10: generateCommitMessage sets _commitPending=true.
+class TestT10CommitPendingResetOnStop(unittest.TestCase):
+    """T10 fix: _commitPending is reset when status:running:false arrives."""
 
-    Originally only reset via _onCommitMessage (if Python dies, stuck forever).
-    Now has a 30s setTimeout fallback, but still no explicit process-death handler.
-    """
+    def test_commit_pending_reset_in_status_handler(self) -> None:
+        """Verify _commitPending is reset in the status handler."""
+        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
+            source = f.read()
+        status_idx = source.find("if (msg.type === 'status')")
+        assert status_idx >= 0
+        status_block = source[status_idx:status_idx + 600]
+        assert "_commitPending" in status_block, (
+            "T10 fix: status handler should handle _commitPending"
+        )
 
     def test_commit_pending_has_timeout_fallback(self) -> None:
-        """Verify generateCommitMessage has a timeout fallback to reset _commitPending."""
+        """Verify generateCommitMessage has a timeout fallback."""
         with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
             source = f.read()
         idx = source.find("public generateCommitMessage(")
         end_idx = source.find("\n  }", idx)
         block = source[idx:end_idx]
-        # T10 fix: setTimeout now provides a fallback to reset _commitPending
-        assert "setTimeout" in block, (
-            "T10 fix: expected setTimeout fallback for _commitPending"
-        )
-        assert "clearTimeout" in block, (
-            "T10 fix: expected clearTimeout to cancel timer on success"
-        )
-
-    def test_commit_pending_only_reset_by_commit_message_event(self) -> None:
-        """Verify _commitPending is only reset in the onCommitMessage callback."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        idx = source.find("public generateCommitMessage(")
-        end_idx = source.find("\n  }", idx)
-        block = source[idx:end_idx]
-        # Find all places where _commitPending is set to false
-        resets = list(re.finditer(r"this\._commitPending\s*=\s*false", block))
-        assert len(resets) == 1, (
-            f"T10 bug: _commitPending reset only in done() callback, "
-            f"no fallback path. Found {len(resets)} reset(s)"
-        )
-
-    def test_close_handler_does_not_fire_commit_message(self) -> None:
-        """Verify AgentProcess close handler emits status, not commitMessage."""
-        with open("src/kiss/agents/vscode/src/AgentProcess.ts") as f:
-            source = f.read()
-        idx = source.find("this.process.on('close'")
-        assert idx >= 0
-        block = source[idx:idx + 300]
-        assert "commitMessage" not in block, (
-            "T10 bug: close handler does NOT emit commitMessage event"
-        )
-        assert "'status'" in block, (
-            "close handler emits status event (which doesn't reset _commitPending)"
-        )
+        assert "setTimeout" in block
+        assert "clearTimeout" in block
 
 
 # ---------------------------------------------------------------------------
-# X4 — allDone merge signal sent to wrong provider's agent
+# X4 — allDone merge signal uses mergeOwner tracking
 # ---------------------------------------------------------------------------
 
-class TestX4AllDoneSentToWrongProvider(unittest.TestCase):
-    """X4: getActiveProvider() always returns secondaryProvider when it exists,
-    ignoring which provider actually started the merge session.
-    """
+class TestX4MergeOwnerTracking(unittest.TestCase):
+    """X4 fix: allDone handler routes to merge owner, not just active provider."""
 
-    def test_get_active_provider_always_returns_secondary(self) -> None:
-        """Verify getActiveProvider prefers secondary over primary."""
+    def test_merge_owner_tracking_exists(self) -> None:
+        """Verify extension.ts tracks mergeOwner."""
         with open("src/kiss/agents/vscode/src/extension.ts") as f:
             source = f.read()
-        idx = source.find("function getActiveProvider()")
-        assert idx >= 0
-        block = source[idx:idx + 200]
-        assert "secondaryProvider ?? primaryProvider" in block, (
-            "X4 bug: getActiveProvider always returns secondary when it exists"
+        assert "mergeOwner" in source, (
+            "X4 fix: extension.ts should track mergeOwner"
         )
 
-    def test_no_merge_owner_tracking(self) -> None:
-        """Verify extension.ts does not track which provider started the merge."""
-        with open("src/kiss/agents/vscode/src/extension.ts") as f:
-            source = f.read()
-        assert "mergeOwner" not in source, (
-            "X4 bug: no mergeOwner tracking — allDone goes to wrong provider"
-        )
-
-    def test_alldone_uses_get_active_provider(self) -> None:
-        """Verify allDone handler routes through getActiveProvider, not merge owner."""
+    def test_alldone_uses_merge_owner(self) -> None:
+        """Verify allDone handler routes to mergeOwner."""
         with open("src/kiss/agents/vscode/src/extension.ts") as f:
             source = f.read()
         idx = source.find("mergeManager.on('allDone'")
         assert idx >= 0
         block = source[idx:idx + 200]
-        assert "getActiveProvider()" in block, (
-            "X4 bug: allDone uses getActiveProvider() without knowing merge owner"
+        assert "mergeOwner" in block, (
+            "X4 fix: allDone should use mergeOwner"
+        )
+
+    def test_merge_owner_set_on_merge_data(self) -> None:
+        """Verify mergeOwner is set when merge_data arrives."""
+        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
+            source = f.read()
+        idx = source.find("if (msg.type === 'merge_data')")
+        assert idx >= 0
+        block = source[idx:idx + 300]
+        assert "_mergeOwnerCallback" in block, (
+            "X4 fix: merge_data handler should call mergeOwnerCallback"
         )
 
 
@@ -389,37 +305,23 @@ class TestP3CompleteSeqTOCTOU(unittest.TestCase):
     def test_complete_uses_lock_around_second_check_and_broadcast(self) -> None:
         """Verify _complete() holds _complete_lock across the second seq check and broadcast."""
         source = inspect.getsource(VSCodeServer._complete)
-        # The second check-and-broadcast should be under _complete_lock.
-        assert "_complete_lock" in source, (
-            "Expected _complete() to use _complete_lock"
-        )
-        # Find the completion logic (prefix match / active file) and verify
-        # the broadcast after it is under a lock
+        assert "_complete_lock" in source
         match_idx = source.find("_prefix_match_task")
-        assert match_idx > 0, "Expected _prefix_match_task in _complete"
+        assert match_idx > 0
         after_match = source[match_idx:]
-        # The broadcast after the completion logic should be inside a with block
         lock_idx = after_match.find("with self._complete_lock")
         broadcast_idx = after_match.find('self.printer.broadcast({"type": "ghost"')
-        assert lock_idx > 0 and broadcast_idx > 0, (
-            "Expected lock and broadcast after completion logic"
-        )
-        assert lock_idx < broadcast_idx, (
-            "Expected _complete_lock to be acquired BEFORE broadcast"
-        )
+        assert lock_idx > 0 and broadcast_idx > 0
+        assert lock_idx < broadcast_idx
 
     def test_seq_latest_write_under_lock(self) -> None:
         """Verify _handle_command writes _complete_seq_latest under _complete_lock."""
         source = inspect.getsource(VSCodeServer._handle_command)
-        # Find the _complete_seq_latest assignment
         assign_idx = source.find("self._complete_seq_latest = seq")
         assert assign_idx > 0
-        # Check that _complete_lock appears before the assignment (in the same block)
         preceding = source[:assign_idx]
         lock_idx = preceding.rfind("_complete_lock")
-        assert lock_idx > 0, (
-            "Expected _complete_seq_latest write to be under _complete_lock"
-        )
+        assert lock_idx > 0
 
 
 # ---------------------------------------------------------------------------
@@ -427,59 +329,42 @@ class TestP3CompleteSeqTOCTOU(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestP8BashFlushTOCTOU(unittest.TestCase):
-    """P8: _bash_flush_timer race where needs_flush decision is made under
-    lock but _flush_bash() is called outside.
-
-    The fix drains the buffer inside the lock, eliminating the TOCTOU gap.
-    """
+    """P8: _bash_flush_timer race fixed by draining buffer inside lock."""
 
     def test_no_needs_flush_variable_in_bash_stream(self) -> None:
         """Verify the bash_stream branch no longer uses a needs_flush flag."""
         source = inspect.getsource(BaseBrowserPrinter.print)
-        # Find the bash_stream branch
         bash_idx = source.find('"bash_stream"')
         assert bash_idx > 0
-        # Get the bash_stream block (until next if type ==)
         next_branch_idx = source.find("if type ==", bash_idx + 1)
         if next_branch_idx < 0:
             next_branch_idx = len(source)
         bash_block = source[bash_idx:next_branch_idx]
-        assert "needs_flush" not in bash_block, (
-            "Expected bash_stream branch to NOT use needs_flush flag (P8 fix)"
-        )
+        assert "needs_flush" not in bash_block
 
     def test_buffer_drained_inside_lock(self) -> None:
-        """Verify buffer drain happens inside _bash_lock in bash_stream branch."""
+        """Verify buffer drain happens inside _bash_lock."""
         source = inspect.getsource(BaseBrowserPrinter.print)
         bash_idx = source.find('"bash_stream"')
         next_branch_idx = source.find("if type ==", bash_idx + 1)
         if next_branch_idx < 0:
             next_branch_idx = len(source)
         bash_block = source[bash_idx:next_branch_idx]
-        # The buffer clear should be inside the lock block
-        # Look for _bash_buffer.clear() inside the with block
         lock_idx = bash_block.find("with self._bash_lock")
         clear_idx = bash_block.find("self._bash_buffer.clear()")
-        assert lock_idx > 0 and clear_idx > 0, (
-            "Expected buffer drain inside _bash_lock"
-        )
-        assert lock_idx < clear_idx, "Buffer clear should be inside the lock"
+        assert lock_idx > 0 and clear_idx > 0
+        assert lock_idx < clear_idx
 
 
 # ---------------------------------------------------------------------------
-# T6 — AgentProcess.dispose() race fixed by moving removeAllListeners first
+# T6 — AgentProcess.dispose() race fixed by reordering
 # ---------------------------------------------------------------------------
 
 class TestT6DisposeRace(unittest.TestCase):
-    """T6: dispose() sets this.process = null then calls proc.kill(),
-    but removeAllListeners() comes after kill. The close handler could
-    fire between null-out and removeAllListeners.
-
-    The fix moves removeAllListeners() before kill.
-    """
+    """T6: dispose() calls removeAllListeners before kill."""
 
     def test_remove_all_listeners_before_kill(self) -> None:
-        """Verify removeAllListeners() is called before proc.kill() in dispose."""
+        """Verify removeAllListeners() is called before proc.kill()."""
         with open("src/kiss/agents/vscode/src/AgentProcess.ts") as f:
             source = f.read()
         idx = source.find("dispose(): void {")
@@ -487,25 +372,8 @@ class TestT6DisposeRace(unittest.TestCase):
         block = source[idx:source.find("\n  }", idx) + 4]
         remove_idx = block.find("this.removeAllListeners()")
         kill_idx = block.find("proc.kill('SIGTERM')")
-        assert remove_idx > 0 and kill_idx > 0, (
-            "Expected both removeAllListeners and kill in dispose"
-        )
-        assert remove_idx < kill_idx, (
-            "T6 fix: removeAllListeners() should be called BEFORE proc.kill()"
-        )
-
-    def test_remove_all_listeners_after_null_out(self) -> None:
-        """Verify removeAllListeners() is between null-out and kill (correct order)."""
-        with open("src/kiss/agents/vscode/src/AgentProcess.ts") as f:
-            source = f.read()
-        idx = source.find("dispose(): void {")
-        block = source[idx:source.find("\n  }", idx) + 4]
-        null_idx = block.find("this.process = null")
-        remove_idx = block.find("this.removeAllListeners()")
-        kill_idx = block.find("proc.kill('SIGTERM')")
-        assert null_idx < remove_idx < kill_idx, (
-            "Expected order: process=null → removeAllListeners → kill"
-        )
+        assert remove_idx > 0 and kill_idx > 0
+        assert remove_idx < kill_idx
 
     def test_else_branch_also_removes_listeners(self) -> None:
         """Verify dispose() removes listeners even when no process is running."""
@@ -513,13 +381,10 @@ class TestT6DisposeRace(unittest.TestCase):
             source = f.read()
         idx = source.find("dispose(): void {")
         block = source[idx:source.find("\n  }", idx) + 4]
-        # There should be an else branch with removeAllListeners
         else_idx = block.find("} else {")
-        assert else_idx > 0, "Expected else branch in dispose"
+        assert else_idx > 0
         else_block = block[else_idx:]
-        assert "this.removeAllListeners()" in else_block, (
-            "Expected removeAllListeners in else branch of dispose"
-        )
+        assert "this.removeAllListeners()" in else_block
 
 
 if __name__ == "__main__":

@@ -1,0 +1,632 @@
+"""Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.
+
+Provides authenticated access to Microsoft Teams via Azure AD client credentials.
+Stores config in ``~/.kiss/channels/msteams/config.json``.
+
+Usage::
+
+    agent = MSTeamsAgent()
+    agent.run(prompt_template="List all teams I'm a member of")
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from kiss.agents.sorcar.sorcar_agent import (
+    _build_arg_parser,
+    _resolve_task,
+    cli_ask_user_question,
+    cli_wait_for_user,
+)
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+logger = logging.getLogger(__name__)
+
+_MSTEAMS_DIR = Path.home() / ".kiss" / "channels" / "msteams"
+_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+
+def _config_path() -> Path:
+    """Return the path to the stored MS Teams config file."""
+    return _MSTEAMS_DIR / "config.json"
+
+
+def _load_config() -> dict[str, str] | None:
+    """Load stored MS Teams config from disk."""
+    path = _config_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and data.get("tenant_id") and data.get("client_id"):
+            return {
+                "tenant_id": data["tenant_id"],
+                "client_id": data["client_id"],
+                "client_secret": data["client_secret"],
+                "bot_id": data.get("bot_id", ""),
+            }
+        return None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_config(
+    tenant_id: str, client_id: str, client_secret: str, bot_id: str = ""
+) -> None:
+    """Save MS Teams config to disk with restricted permissions."""
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "tenant_id": tenant_id.strip(),
+        "client_id": client_id.strip(),
+        "client_secret": client_secret.strip(),
+        "bot_id": bot_id.strip(),
+    }, indent=2))
+    if sys.platform != "win32":
+        path.chmod(0o600)
+
+
+def _clear_config() -> None:
+    """Delete the stored MS Teams config."""
+    path = _config_path()
+    if path.exists():
+        path.unlink()
+
+
+def _get_access_token(tenant_id: str, client_id: str, client_secret: str) -> str:
+    """Get an OAuth2 access token via client credentials flow."""
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    resp = requests.post(url, data={
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": "https://graph.microsoft.com/.default",
+    }, timeout=30)
+    data = resp.json()
+    return str(data.get("access_token", ""))
+
+
+class MSTeamsChannelBackend:
+    """ChannelBackend implementation for Microsoft Teams via Graph API."""
+
+    def __init__(self) -> None:
+        self._tenant_id: str = ""
+        self._client_id: str = ""
+        self._client_secret: str = ""
+        self._bot_id: str = ""
+        self._access_token: str = ""
+        self._token_expiry: float = 0.0
+        self._connection_info: str = ""
+
+    def _token(self) -> str:
+        """Get a valid access token, refreshing if needed."""
+        if time.time() >= self._token_expiry - 60:
+            self._access_token = _get_access_token(
+                self._tenant_id, self._client_id, self._client_secret
+            )
+            self._token_expiry = time.time() + 3600
+        return self._access_token
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token()}", "Content-Type": "application/json"}
+
+    def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        resp = requests.get(
+            f"{_GRAPH_BASE}{path}", headers=self._headers(), params=params, timeout=30
+        )
+        return resp.json()  # type: ignore[no-any-return]
+
+    def _post(self, path: str, body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        resp = requests.post(
+            f"{_GRAPH_BASE}{path}", headers=self._headers(), json=body, timeout=30
+        )
+        return resp.json() if resp.content else {"ok": True}  # type: ignore[no-any-return]
+
+    def connect(self) -> bool:
+        """Authenticate with Microsoft Graph API."""
+        cfg = _load_config()
+        if not cfg:
+            self._connection_info = "No MS Teams config found."
+            return False
+        self._tenant_id = cfg["tenant_id"]
+        self._client_id = cfg["client_id"]
+        self._client_secret = cfg["client_secret"]
+        self._bot_id = cfg.get("bot_id", "")
+        try:
+            token = self._token()
+            if not token:
+                self._connection_info = "MS Teams auth failed: no token"
+                return False
+            self._connection_info = "Authenticated with Microsoft Teams"
+            return True
+        except Exception as e:
+            self._connection_info = f"MS Teams auth failed: {e}"
+            return False
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Return channel name as channel ID."""
+        return name if name else None
+
+    def find_user(self, username: str) -> str | None:
+        """Return username as user ID."""
+        return username if username else None
+
+    def join_channel(self, channel_id: str) -> None:
+        """No-op for MS Teams."""
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll MS Teams channel for new messages."""
+        # channel_id format: "team_id:channel_id"
+        if not channel_id or ":" not in channel_id:
+            return [], oldest
+        team_id, chan_id = channel_id.split(":", 1)
+        try:
+            params: dict[str, Any] = {"$top": limit, "$orderby": "lastModifiedDateTime asc"}
+            if oldest:
+                params["$filter"] = f"lastModifiedDateTime gt {oldest}"
+            result = self._get(f"/teams/{team_id}/channels/{chan_id}/messages", params=params)
+            msgs = result.get("value", [])
+            messages: list[dict[str, Any]] = []
+            new_oldest = oldest
+            for msg in msgs:
+                ts = msg.get("lastModifiedDateTime", "")
+                new_oldest = ts
+                body = msg.get("body", {})
+                messages.append({
+                    "ts": ts,
+                    "user": msg.get("from", {}).get("user", {}).get("id", ""),
+                    "text": body.get("content", ""),
+                    "id": msg.get("id", ""),
+                })
+            return messages, new_oldest
+        except Exception:
+            return [], oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a Teams channel message."""
+        if ":" not in channel_id:
+            return
+        team_id, chan_id = channel_id.split(":", 1)
+        if thread_ts:
+            self._post(
+                f"/teams/{team_id}/channels/{chan_id}/messages/{thread_ts}/replies",
+                {"body": {"content": text, "contentType": "html"}},
+            )
+        else:
+            self._post(
+                f"/teams/{team_id}/channels/{chan_id}/messages",
+                {"body": {"content": text, "contentType": "html"}},
+            )
+
+    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+        """Poll for a reply from a specific user."""
+        oldest = ""
+        while True:
+            time.sleep(3.0)
+            msgs, oldest = self.poll_messages(channel_id, oldest)
+            for msg in msgs:
+                if msg.get("user") == user_id:
+                    return str(msg.get("text", ""))
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if a message is from the bot."""
+        return bool(msg.get("user", "") == self._bot_id)
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Remove bot mentions from text."""
+        return text
+
+    def list_teams(self, limit: int = 20) -> str:
+        """List Microsoft Teams the bot/user is a member of.
+
+        Args:
+            limit: Maximum teams to return. Default: 20.
+
+        Returns:
+            JSON string with team list (id, displayName, description).
+        """
+        try:
+            result = self._get("/me/joinedTeams", params={"$top": limit})
+            teams = [
+                {"id": t.get("id", ""), "name": t.get("displayName", "")}
+                for t in result.get("value", [])
+            ]
+            return json.dumps({"ok": True, "teams": teams}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_team(self, team_id: str) -> str:
+        """Get details about a Microsoft Team.
+
+        Args:
+            team_id: Team ID.
+
+        Returns:
+            JSON string with team details.
+        """
+        try:
+            result = self._get(f"/teams/{team_id}")
+            return json.dumps({"ok": True, **result}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_channels(self, team_id: str) -> str:
+        """List channels in a Microsoft Team.
+
+        Args:
+            team_id: Team ID.
+
+        Returns:
+            JSON string with channel list (id, displayName, membershipType).
+        """
+        try:
+            result = self._get(f"/teams/{team_id}/channels")
+            channels = [
+                {
+                    "id": c.get("id", ""),
+                    "name": c.get("displayName", ""),
+                    "type": c.get("membershipType", ""),
+                    "description": c.get("description", ""),
+                }
+                for c in result.get("value", [])
+            ]
+            return json.dumps({"ok": True, "channels": channels}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_channel_messages(
+        self, team_id: str, channel_id: str, top: int = 20
+    ) -> str:
+        """List messages in a Teams channel.
+
+        Args:
+            team_id: Team ID.
+            channel_id: Channel ID.
+            top: Maximum messages to return. Default: 20.
+
+        Returns:
+            JSON string with message list.
+        """
+        try:
+            result = self._get(
+                f"/teams/{team_id}/channels/{channel_id}/messages",
+                params={"$top": top},
+            )
+            messages = [
+                {
+                    "id": m.get("id", ""),
+                    "from": m.get("from", {}).get("user", {}).get("displayName", ""),
+                    "body": m.get("body", {}).get("content", ""),
+                    "created": m.get("createdDateTime", ""),
+                }
+                for m in result.get("value", [])
+            ]
+            return json.dumps({"ok": True, "messages": messages}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def post_channel_message(
+        self, team_id: str, channel_id: str, content: str, content_type: str = "html"
+    ) -> str:
+        """Post a message to a Teams channel.
+
+        Args:
+            team_id: Team ID.
+            channel_id: Channel ID.
+            content: Message content.
+            content_type: "html" or "text". Default: "html".
+
+        Returns:
+            JSON string with ok status and message id.
+        """
+        try:
+            result = self._post(
+                f"/teams/{team_id}/channels/{channel_id}/messages",
+                {"body": {"content": content, "contentType": content_type}},
+            )
+            return json.dumps({"ok": True, "id": result.get("id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def reply_to_message(
+        self, team_id: str, channel_id: str, message_id: str, content: str
+    ) -> str:
+        """Reply to a Teams channel message.
+
+        Args:
+            team_id: Team ID.
+            channel_id: Channel ID.
+            message_id: Parent message ID.
+            content: Reply content.
+
+        Returns:
+            JSON string with ok status and reply id.
+        """
+        try:
+            result = self._post(
+                f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies",
+                {"body": {"content": content, "contentType": "html"}},
+            )
+            return json.dumps({"ok": True, "id": result.get("id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_chats(self, top: int = 20) -> str:
+        """List chats for the authenticated user.
+
+        Args:
+            top: Maximum chats to return. Default: 20.
+
+        Returns:
+            JSON string with chat list.
+        """
+        try:
+            result = self._get("/me/chats", params={"$top": top})
+            chats = [
+                {"id": c.get("id", ""), "topic": c.get("topic", ""), "type": c.get("chatType", "")}
+                for c in result.get("value", [])
+            ]
+            return json.dumps({"ok": True, "chats": chats}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def post_chat_message(
+        self, chat_id: str, content: str, content_type: str = "text"
+    ) -> str:
+        """Post a message to a Teams chat.
+
+        Args:
+            chat_id: Chat ID.
+            content: Message content.
+            content_type: "text" or "html". Default: "text".
+
+        Returns:
+            JSON string with ok status and message id.
+        """
+        try:
+            result = self._post(
+                f"/me/chats/{chat_id}/messages",
+                {"body": {"content": content, "contentType": content_type}},
+            )
+            return json.dumps({"ok": True, "id": result.get("id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_team_members(self, team_id: str, top: int = 50) -> str:
+        """List members of a Microsoft Team.
+
+        Args:
+            team_id: Team ID.
+            top: Maximum members to return. Default: 50.
+
+        Returns:
+            JSON string with member list.
+        """
+        try:
+            result = self._get(f"/teams/{team_id}/members", params={"$top": top})
+            members = [
+                {
+                    "id": m.get("id", ""),
+                    "display_name": m.get("displayName", ""),
+                    "email": m.get("email", ""),
+                    "roles": m.get("roles", []),
+                }
+                for m in result.get("value", [])
+            ]
+            return json.dumps({"ok": True, "members": members}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_tool_methods(self) -> list:
+        """Return list of bound tool methods for use by the LLM agent."""
+        non_tool = frozenset({
+            "connect", "find_channel", "find_user", "join_channel",
+            "poll_messages", "send_message", "wait_for_reply",
+            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+        })
+        return [
+            getattr(self, name)
+            for name in sorted(dir(self))
+            if not name.startswith("_")
+            and name not in non_tool
+            and callable(getattr(self, name))
+        ]
+
+
+class MSTeamsAgent(StatefulSorcarAgent):
+    """StatefulSorcarAgent extended with Microsoft Teams Graph API tools."""
+
+    def __init__(self) -> None:
+        super().__init__("MS Teams Agent")
+        self._backend = MSTeamsChannelBackend()
+        cfg = _load_config()
+        if cfg:
+            self._backend._tenant_id = cfg["tenant_id"]
+            self._backend._client_id = cfg["client_id"]
+            self._backend._client_secret = cfg["client_secret"]
+            self._backend._bot_id = cfg.get("bot_id", "")
+
+    def _get_tools(self) -> list:
+        """Return SorcarAgent tools + MS Teams auth tools + MS Teams API tools."""
+        tools = super()._get_tools()
+        agent = self
+
+        def check_msteams_auth() -> str:
+            """Check if MS Teams credentials are configured and valid.
+
+            Returns:
+                Authentication status or instructions.
+            """
+            if not agent._backend._client_id:
+                return (
+                    "Not authenticated with MS Teams. Use authenticate_msteams() to configure.\n"
+                    "You need: tenant_id, client_id, client_secret from Azure portal."
+                )
+            try:
+                token = agent._backend._token()
+                if token:
+                    return json.dumps({"ok": True, "message": "MS Teams authenticated."})
+                return json.dumps({"ok": False, "error": "Could not obtain access token."})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def authenticate_msteams(
+            tenant_id: str,
+            client_id: str,
+            client_secret: str,
+            bot_id: str = "",
+        ) -> str:
+            """Store and validate MS Teams Azure AD credentials.
+
+            Args:
+                tenant_id: Azure tenant ID.
+                client_id: Azure app client ID.
+                client_secret: Azure app client secret.
+                bot_id: Optional bot user ID for message filtering.
+
+            Returns:
+                Validation result or error message.
+            """
+            cred_pairs = [
+                (tenant_id, "tenant_id"), (client_id, "client_id"), (client_secret, "client_secret")
+            ]
+            for val, name in cred_pairs:
+                if not val.strip():
+                    return f"{name} cannot be empty."
+            agent._backend._tenant_id = tenant_id.strip()
+            agent._backend._client_id = client_id.strip()
+            agent._backend._client_secret = client_secret.strip()
+            agent._backend._bot_id = bot_id.strip()
+            try:
+                token = agent._backend._token()
+                if not token:
+                    return json.dumps({"ok": False, "error": "Could not obtain access token."})
+                _save_config(tenant_id, client_id, client_secret, bot_id)
+                return json.dumps({"ok": True, "message": "MS Teams credentials saved."})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def clear_msteams_auth() -> str:
+            """Clear the stored MS Teams credentials.
+
+            Returns:
+                Status message.
+            """
+            _clear_config()
+            agent._backend._client_id = ""
+            agent._backend._client_secret = ""
+            agent._backend._tenant_id = ""
+            return "MS Teams authentication cleared."
+
+        tools.extend([check_msteams_auth, authenticate_msteams, clear_msteams_auth])
+
+        if agent._backend._client_id:
+            tools.extend(agent._backend.get_tool_methods())
+
+        return tools
+
+
+def main() -> None:
+    """Run the MSTeamsAgent from the command line with chat persistence."""
+    import os
+    import sys
+    import time as time_mod
+
+    if len(sys.argv) <= 1:
+        print("Usage: kiss-msteams [-m MODEL] [-t TASK] [-n] [--daemon]")
+        sys.exit(1)
+
+    parser = _build_arg_parser()
+    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
+    parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
+    parser.add_argument("--daemon-channel", default="", help="team_id:channel_id to monitor")
+    parser.add_argument("--allow-users", default="", help="Comma-separated user IDs to allow")
+    args = parser.parse_args()
+
+    if args.daemon:
+        from kiss.channels.background_agent import ChannelDaemon
+
+        backend = MSTeamsChannelBackend()
+        cfg = _load_config()
+        if not cfg:
+            print("Not authenticated. Run: kiss-msteams -t 'authenticate'")
+            sys.exit(1)
+        backend._tenant_id = cfg["tenant_id"]
+        backend._client_id = cfg["client_id"]
+        backend._client_secret = cfg["client_secret"]
+        backend._bot_id = cfg.get("bot_id", "")
+        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
+        daemon = ChannelDaemon(
+            backend=backend,
+            channel_name=args.daemon_channel,
+            agent_name="MS Teams Background Agent",
+            extra_tools=backend.get_tool_methods(),
+            model_name=args.model_name,
+            max_budget=args.max_budget,
+            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
+            allow_users=allow_users,
+        )
+        print("Starting MS Teams daemon... (Ctrl+C to stop)")
+        try:
+            daemon.run()
+        except KeyboardInterrupt:
+            print("Daemon stopped.")
+        return
+
+    agent = MSTeamsAgent()
+    task_description = _resolve_task(args)
+    work_dir = args.work_dir or str(Path(".").resolve())
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.new:
+        agent.new_chat()
+    else:
+        agent.resume_chat(task_description)
+
+    model_config: dict[str, Any] = {}
+    if args.endpoint:
+        model_config["base_url"] = args.endpoint
+
+    run_kwargs: dict[str, Any] = {
+        "prompt_template": task_description,
+        "model_name": args.model_name,
+        "max_budget": args.max_budget,
+        "model_config": model_config,
+        "work_dir": work_dir,
+        "headless": args.headless,
+        "verbose": args.verbose,
+        "wait_for_user_callback": cli_wait_for_user,
+        "ask_user_question_callback": cli_ask_user_question,
+    }
+
+    old_cwd = os.getcwd()
+    os.chdir(work_dir)
+    start_time = time_mod.time()
+    try:
+        agent.run(**run_kwargs)
+    finally:
+        os.chdir(old_cwd)
+    elapsed = time_mod.time() - start_time
+
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Cost: ${agent.budget_used:.4f}")
+    print(f"Total tokens: {agent.total_tokens_used}")
+
+
+if __name__ == "__main__":
+    main()

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -69,11 +71,11 @@ def _scan_files(work_dir: str) -> list[str]:
                 and str(rel_root / d) not in skip
             )
             for name in sorted(files):
-                paths.append(str(rel_root / name))
+                paths.append(str(rel_root / name).replace(os.sep, "/"))
                 if len(paths) >= 2000:
                     return paths
             for d in dirs:
-                paths.append(str(rel_root / d) + "/")
+                paths.append(str(rel_root / d).replace(os.sep, "/") + "/")
     except OSError:  # pragma: no cover — Path.walk swallows OSErrors internally
         _log_exc()
     return paths
@@ -216,7 +218,12 @@ def _cleanup_merge_data(data_dir: str) -> None:
 
 
 def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, int]]:
-    """Compute diff hunks between two files using diff -U0.
+    """Compute diff hunks between two files.
+
+    Uses Python's ``difflib.SequenceMatcher`` so no external ``diff``
+    binary is required.  The output matches the ``diff -U0`` unified-diff
+    hunk conventions (1-based line numbers, special handling for zero-count
+    hunks on pure insertions/deletions).
 
     Args:
         base_path: Path to the base (pre-task) file.
@@ -225,12 +232,36 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
     Returns:
         List of (base_start, base_count, current_start, current_count) tuples.
     """
-    result = subprocess.run(
-        ["diff", "-U0", base_path, current_path],
-        capture_output=True,
-        text=True,
-    )
-    return [h for line in result.stdout.split("\n") if (h := _parse_hunk_line(line))]
+    try:
+        base_lines = Path(base_path).read_text().splitlines(keepends=True)
+    except OSError:
+        base_lines = []
+    try:
+        current_lines = Path(current_path).read_text().splitlines(keepends=True)
+    except OSError:
+        current_lines = []
+    hunks: list[tuple[int, int, int, int]] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, base_lines, current_lines
+    ).get_opcodes():
+        if tag == "equal":
+            continue
+        old_count = i2 - i1
+        new_count = j2 - j1
+        if old_count == 0:
+            # Pure insertion: diff -U0 reports old_start as the line
+            # before the insertion (1-based), or 0 for empty base files.
+            old_start = i1 if not base_lines or i1 > 0 else 1
+        else:
+            old_start = i1 + 1
+        if new_count == 0:
+            # Pure deletion: diff -U0 reports new_start as 0 when the
+            # result is empty; otherwise the first surviving line position.
+            new_start = j1 if not current_lines or j1 > 0 else 1
+        else:
+            new_start = j1 + 1
+        hunks.append((old_start, old_count, new_start, new_count))
+    return hunks
 
 
 def _hunk_to_dict(bs: int, bc: int, cs: int, cc: int) -> dict[str, int]:

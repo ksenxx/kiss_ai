@@ -941,6 +941,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
+    { name = "requests" },
     { name = "rich" },
     { name = "slack-sdk" },
 ]
@@ -1009,6 +1010,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "requests", specifier = ">=2.28.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "slack-sdk", specifier = ">=3.30.0" },
 ]
