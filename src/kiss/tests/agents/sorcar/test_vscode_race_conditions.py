@@ -325,6 +325,56 @@ class TestTypescriptRaceFixesCodeInspection(unittest.TestCase):
         assert "if (this._isRunning)" in block
 
 
+class TestNewChatHistoryButtonsDisabledWhileRunning(unittest.TestCase):
+    """New chat and history buttons are disabled while a task is running."""
+
+    def _read_main_js(self) -> str:
+        with open("src/kiss/agents/vscode/media/main.js") as f:
+            return f.read()
+
+    def test_set_running_state_disables_clear_btn(self) -> None:
+        """setRunningState disables clearBtn when running=true."""
+        source = self._read_main_js()
+        # Find setRunningState function body
+        idx = source.find("function setRunningState(running)")
+        assert idx >= 0
+        block = source[idx:idx + 600]
+        assert "clearBtn.disabled = running" in block
+
+    def test_set_running_state_disables_history_btn(self) -> None:
+        """setRunningState disables historyBtn when running=true."""
+        source = self._read_main_js()
+        idx = source.find("function setRunningState(running)")
+        assert idx >= 0
+        block = source[idx:idx + 600]
+        assert "historyBtn.disabled = running" in block
+
+    def test_disabled_in_same_function_as_stop_btn(self) -> None:
+        """Button disabling is in setRunningState, co-located with stopBtn toggle (no race)."""
+        source = self._read_main_js()
+        idx = source.find("function setRunningState(running)")
+        assert idx >= 0
+        block = source[idx:idx + 600]
+        # All button state changes are in the same synchronous function
+        assert "stopBtn.style.display" in block
+        assert "clearBtn.disabled" in block
+        assert "historyBtn.disabled" in block
+
+    def test_css_has_disabled_styles_for_buttons(self) -> None:
+        """CSS provides visual disabled feedback for new chat and history buttons."""
+        with open("src/kiss/agents/vscode/media/main.css") as f:
+            css = f.read()
+        assert "#history-btn:disabled" in css
+        assert "#clear-btn:disabled" in css
+
+    def test_status_running_false_always_sent(self) -> None:
+        """status:running:false is always broadcast (try/finally), so buttons always re-enable."""
+        source = inspect.getsource(VSCodeServer._run_task)
+        assert "try:" in source
+        assert "finally:" in source
+        assert '"running": False' in source
+
+
 class TestExistingBehavior(unittest.TestCase):
     """Tests ensuring fixes don't break existing functionality."""
 
@@ -380,6 +430,37 @@ class TestStatusAlwaysSentOnExit(unittest.TestCase):
         assert "finally:" in source
         assert '"running": False' in source
         assert "_run_task_inner" in source
+
+
+class TestPromptPanelScrollToBottom(unittest.TestCase):
+    """Verify system_prompt and prompt panels scroll to the bottom after rendering."""
+
+    def _get_main_js(self) -> str:
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "../../../agents/vscode/media/main.js",
+        )
+        with open(os.path.normpath(path)) as f:
+            return f.read()
+
+    def test_system_prompt_body_scrolled_to_bottom(self) -> None:
+        """system-prompt-body is scrolled to bottom after rendering."""
+        source = self._get_main_js()
+        assert "bodyEl.scrollTop = bodyEl.scrollHeight" in source
+
+    def test_scroll_uses_queried_body_element(self) -> None:
+        """Scroll uses querySelector to get the body element, not the outer panel."""
+        source = self._get_main_js()
+        assert "el.querySelector('.' + cls + '-body')" in source
+
+    def test_scroll_in_system_prompt_case(self) -> None:
+        """Scroll code is co-located with the system_prompt/prompt case."""
+        source = self._get_main_js()
+        case_idx = source.index("case 'system_prompt':")
+        break_idx = source.index("break;", case_idx)
+        snippet = source[case_idx:break_idx]
+        assert "scrollTop = bodyEl.scrollHeight" in snippet
 
 
 if __name__ == "__main__":
