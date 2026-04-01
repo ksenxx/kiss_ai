@@ -110,14 +110,27 @@ jobs:
           New-Item -ItemType Directory -Force -Path $kissDir | Out-Null
           Set-Content -Path "$kissDir\.api-keys-prompted" -Value (Get-Date -Format o)
 
-      # ── TEST 1: Backend functional test (Python server + real LLM task) ──
+      # ── TEST 1: Verify KISS package imports and agent works on Windows ──
+      - name: Verify KISS package on Windows
+        shell: pwsh
+        run: |
+          $kissProject = $env:KISS_PROJECT
+          $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
+          Write-Host "Testing KISS package imports..."
+          & $uvExe run --directory $kissProject python -c "from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent; print('StatefulSorcarAgent import OK')" 2>&1
+          & $uvExe run --directory $kissProject python -c "from kiss.agents.vscode.server import Server; print('Server import OK')" 2>&1
+          & $uvExe run --directory $kissProject python -c "import platform; print(f'Python {platform.python_version()} on {platform.system()} {platform.machine()}')" 2>&1
+
+      # ── TEST 2: Backend functional test (Python server + real LLM task) ──
       - name: Run backend task test via Python server
         shell: pwsh
         timeout-minutes: 10
         run: |
           $kissProject = $env:KISS_PROJECT
           $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
-          $workDir = "$env:TEMP\kiss-test-workspace"
+          # Use the full path (avoid 8.3 short names)
+          $workDir = (Get-Item "$env:TEMP\kiss-test-workspace").FullName
+          Write-Host "Work dir (full path): $workDir"
 
           # Write the test driver script
           $testScript = @'
@@ -130,6 +143,7 @@ jobs:
           print(f"Starting server from {kiss_project}")
           print(f"Work dir: {work_dir}")
           print(f"uv: {uv_exe}")
+          print(f"ANTHROPIC_API_KEY set: {'ANTHROPIC_API_KEY' in os.environ}")
 
           proc = subprocess.Popen(
               [uv_exe, "run", "python", "-u", "-m", "kiss.agents.vscode.server"],
@@ -140,7 +154,6 @@ jobs:
               env={**os.environ, "PYTHONUNBUFFERED": "1", "KISS_WORKDIR": work_dir},
           )
 
-          # Collect all stdout events in a list
           events = []
           stderr_lines = []
           task_done = threading.Event()
@@ -154,7 +167,8 @@ jobs:
                       evt = json.loads(text)
                       events.append(evt)
                       etype = evt.get("type", "")
-                      print(f"  EVENT: {etype}", flush=True)
+                      etext = evt.get("text", "")[:100]
+                      print(f"  EVENT: {etype} {etext}", flush=True)
                       if etype in ("task_done", "task_error", "task_stopped"):
                           task_done.set()
                   except json.JSONDecodeError:
@@ -165,17 +179,19 @@ jobs:
                   text = line.decode("utf-8", errors="replace").strip()
                   if text:
                       stderr_lines.append(text)
-                      print(f"  STDERR: {text[:200]}", flush=True)
+                      print(f"  STDERR: {text[:300]}", flush=True)
 
           t1 = threading.Thread(target=read_stdout, daemon=True)
           t2 = threading.Thread(target=read_stderr, daemon=True)
           t1.start()
           t2.start()
 
-          # Wait a moment for server to initialize
-          time.sleep(3)
+          time.sleep(5)
+          print(f"Server started, events so far: {len(events)}", flush=True)
+          print(f"Stderr so far: {len(stderr_lines)}", flush=True)
+          for s in stderr_lines:
+              print(f"  PRE-STDERR: {s[:300]}", flush=True)
 
-          # Send the run command
           cmd = {
               "type": "run",
               "prompt": "Create a file called hello.txt containing exactly: Hello from Windows!",
@@ -186,27 +202,31 @@ jobs:
           proc.stdin.write((json.dumps(cmd) + "\n").encode())
           proc.stdin.flush()
 
-          # Wait for task completion (up to 5 minutes)
-          if task_done.wait(timeout=300):
-              print("\nTask completed!", flush=True)
+          # Wait up to 5 minutes, with periodic status updates
+          for i in range(30):
+              if task_done.wait(timeout=10):
+                  print(f"\nTask completed after ~{(i+1)*10}s!", flush=True)
+                  break
+              print(f"  ... waiting ({(i+1)*10}s, events={len(events)}, stderr={len(stderr_lines)})", flush=True)
           else:
               print("\nTask timed out after 5 minutes!", flush=True)
 
-          # Send stop and close
+          # Stop and close
           try:
               proc.stdin.write(b'{"type":"stop"}\n')
               proc.stdin.flush()
               proc.stdin.close()
           except:
               pass
-          proc.wait(timeout=10)
+          try:
+              proc.wait(timeout=15)
+          except:
+              proc.kill()
 
-          # Print summary
           print(f"\n{'='*60}")
           print(f"Total events: {len(events)}")
           print(f"Stderr lines: {len(stderr_lines)}")
 
-          # Check for task_done event
           done_events = [e for e in events if e.get("type") in ("task_done", "task_error", "task_stopped")]
           if done_events:
               print(f"Task result: {done_events[0].get('type')}")
@@ -215,7 +235,6 @@ jobs:
           else:
               print("No task completion event found!")
 
-          # Check if hello.txt was created
           hello_path = os.path.join(work_dir, "hello.txt")
           if os.path.exists(hello_path):
               content = open(hello_path).read()
@@ -225,21 +244,15 @@ jobs:
               print("Files in workspace:")
               for root, dirs, files in os.walk(work_dir):
                   for f in files:
-                      fp = os.path.join(root, f)
-                      print(f"  {fp}")
+                      if ".git" not in root:
+                          print(f"  {os.path.join(root, f)}")
 
-          # Print event types for debugging
-          print(f"\nEvent types: {[e.get('type') for e in events]}")
+          print(f"\nAll event types: {[e.get('type') for e in events]}")
 
-          # Write events to file for artifact upload
           with open(os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "backend-events.json"), "w") as f:
               json.dump(events, f, indent=2)
 
-          # Exit with appropriate code
-          if os.path.exists(hello_path):
-              sys.exit(0)
-          else:
-              sys.exit(1)
+          sys.exit(0 if os.path.exists(hello_path) else 1)
           '@
 
           Set-Content -Path "${{ github.workspace }}\test_backend.py" -Value $testScript
