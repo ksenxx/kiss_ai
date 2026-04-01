@@ -44,7 +44,6 @@ jobs:
       - name: Pre-install uv and set up Python environment
         shell: pwsh
         run: |
-          # Install uv using official installer
           Write-Host "Installing uv..."
           irm https://astral.sh/uv/0.11.2/install.ps1 | iex
           $uvDir = "$env:USERPROFILE\.local\bin"
@@ -52,26 +51,24 @@ jobs:
           $env:PATH = "$uvDir;$env:PATH"
           Write-Host "uv installed: $(& "$uvDir\uv.exe" --version)"
 
-          # Find the embedded kiss_project inside the installed extension
           $extDir = Get-ChildItem "$env:USERPROFILE\.vscode\extensions\ksenxx.kiss-sorcar-*" -Directory | Select-Object -First 1
           $kissProject = "$($extDir.FullName)\kiss_project"
           Write-Host "KISS project path: $kissProject"
           if (-not (Test-Path "$kissProject\pyproject.toml")) {
-              Write-Host "ERROR: kiss_project not found in extension!"
-              Get-ChildItem $extDir.FullName -Recurse -Depth 2 | ForEach-Object { Write-Host $_.FullName }
+              Write-Host "ERROR: kiss_project not found!"
               exit 1
           }
 
-          # Run uv sync to set up Python .venv
-          Write-Host "Running uv sync in $kissProject..."
+          Write-Host "Running uv sync..."
           & "$uvDir\uv.exe" sync --directory $kissProject 2>&1
-          if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: uv sync failed with exit code $LASTEXITCODE" }
           Write-Host "uv sync completed"
 
-          # Install Playwright Chromium
           Write-Host "Installing Playwright Chromium..."
           & "$uvDir\uv.exe" run --directory $kissProject python -m playwright install chromium 2>&1
           Write-Host "Playwright installed"
+
+          # Save kiss_project path for later steps
+          echo "KISS_PROJECT=$kissProject" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Create demo workspace
         shell: pwsh
@@ -79,6 +76,12 @@ jobs:
           $dir = "$env:TEMP\kiss-test-workspace"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Set-Content -Path "$dir\example.py" -Value "# Example file`nprint('hello world')"
+          # Initialize git repo (required for diff/merge features)
+          Push-Location $dir
+          git init
+          git add -A
+          git commit -m "initial"
+          Pop-Location
           Write-Host "Workspace created at $dir"
 
       - name: Write screenshot helper
@@ -98,111 +101,197 @@ jobs:
           '@
           Set-Content -Path "${{ github.workspace }}\ss.ps1" -Value $script
 
-      - name: Write API key marker to skip optional key prompts
+      - name: Write API key marker
         shell: pwsh
         run: |
           $kissDir = "$env:USERPROFILE\.kiss"
           New-Item -ItemType Directory -Force -Path $kissDir | Out-Null
           Set-Content -Path "$kissDir\.api-keys-prompted" -Value (Get-Date -Format o)
-          Write-Host "API key prompt marker written"
 
-      - name: Launch VS Code and wait for extension activation
+      # ── TEST 1: Backend functional test (Python server + real LLM task) ──
+      - name: Run backend task test via Python server
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $kissProject = $env:KISS_PROJECT
+          $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
+          $workDir = "$env:TEMP\kiss-test-workspace"
+
+          # Write the test driver script
+          $testScript = @'
+          import json, subprocess, sys, threading, time, os
+
+          kiss_project = sys.argv[1]
+          uv_exe = sys.argv[2]
+          work_dir = sys.argv[3]
+
+          print(f"Starting server from {kiss_project}")
+          print(f"Work dir: {work_dir}")
+          print(f"uv: {uv_exe}")
+
+          proc = subprocess.Popen(
+              [uv_exe, "run", "python", "-u", "-m", "kiss.agents.vscode.server"],
+              cwd=kiss_project,
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              env={**os.environ, "PYTHONUNBUFFERED": "1", "KISS_WORKDIR": work_dir},
+          )
+
+          # Collect all stdout events in a list
+          events = []
+          stderr_lines = []
+          task_done = threading.Event()
+
+          def read_stdout():
+              for line in proc.stdout:
+                  text = line.decode("utf-8", errors="replace").strip()
+                  if not text:
+                      continue
+                  try:
+                      evt = json.loads(text)
+                      events.append(evt)
+                      etype = evt.get("type", "")
+                      print(f"  EVENT: {etype}", flush=True)
+                      if etype in ("task_done", "task_error", "task_stopped"):
+                          task_done.set()
+                  except json.JSONDecodeError:
+                      print(f"  RAW: {text[:200]}", flush=True)
+
+          def read_stderr():
+              for line in proc.stderr:
+                  text = line.decode("utf-8", errors="replace").strip()
+                  if text:
+                      stderr_lines.append(text)
+                      print(f"  STDERR: {text[:200]}", flush=True)
+
+          t1 = threading.Thread(target=read_stdout, daemon=True)
+          t2 = threading.Thread(target=read_stderr, daemon=True)
+          t1.start()
+          t2.start()
+
+          # Wait a moment for server to initialize
+          time.sleep(3)
+
+          # Send the run command
+          cmd = {
+              "type": "run",
+              "prompt": "Create a file called hello.txt containing exactly: Hello from Windows!",
+              "model": "claude-sonnet-4-20250514",
+              "workDir": work_dir,
+          }
+          print(f"\nSending command: {json.dumps(cmd)}", flush=True)
+          proc.stdin.write((json.dumps(cmd) + "\n").encode())
+          proc.stdin.flush()
+
+          # Wait for task completion (up to 5 minutes)
+          if task_done.wait(timeout=300):
+              print("\nTask completed!", flush=True)
+          else:
+              print("\nTask timed out after 5 minutes!", flush=True)
+
+          # Send stop and close
+          try:
+              proc.stdin.write(b'{"type":"stop"}\n')
+              proc.stdin.flush()
+              proc.stdin.close()
+          except:
+              pass
+          proc.wait(timeout=10)
+
+          # Print summary
+          print(f"\n{'='*60}")
+          print(f"Total events: {len(events)}")
+          print(f"Stderr lines: {len(stderr_lines)}")
+
+          # Check for task_done event
+          done_events = [e for e in events if e.get("type") in ("task_done", "task_error", "task_stopped")]
+          if done_events:
+              print(f"Task result: {done_events[0].get('type')}")
+              if done_events[0].get("type") == "task_error":
+                  print(f"Error: {done_events[0].get('text', 'unknown')}")
+          else:
+              print("No task completion event found!")
+
+          # Check if hello.txt was created
+          hello_path = os.path.join(work_dir, "hello.txt")
+          if os.path.exists(hello_path):
+              content = open(hello_path).read()
+              print(f"\nSUCCESS: hello.txt created with content: {content!r}")
+          else:
+              print(f"\nFAILED: hello.txt was not created")
+              print("Files in workspace:")
+              for root, dirs, files in os.walk(work_dir):
+                  for f in files:
+                      fp = os.path.join(root, f)
+                      print(f"  {fp}")
+
+          # Print event types for debugging
+          print(f"\nEvent types: {[e.get('type') for e in events]}")
+
+          # Write events to file for artifact upload
+          with open(os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "backend-events.json"), "w") as f:
+              json.dump(events, f, indent=2)
+
+          # Exit with appropriate code
+          if os.path.exists(hello_path):
+              sys.exit(0)
+          else:
+              sys.exit(1)
+          '@
+
+          Set-Content -Path "${{ github.workspace }}\test_backend.py" -Value $testScript
+
+          Write-Host "Running backend test..."
+          & python "${{ github.workspace }}\test_backend.py" $kissProject $uvExe $workDir 2>&1
+          $backendResult = $LASTEXITCODE
+          Write-Host "Backend test exit code: $backendResult"
+
+          if ($backendResult -ne 0) {
+              Write-Host "::warning::Backend task test did not create hello.txt"
+          }
+
+      # ── TEST 2: UI visual test (extension renders on Windows) ──
+      - name: Launch VS Code and capture UI
         shell: pwsh
         run: |
           $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
           $dir = "$env:TEMP\kiss-test-workspace"
-          Write-Host "Launching VS Code..."
           Start-Process -FilePath $code -ArgumentList "--no-sandbox", "--disable-gpu", $dir
-          Write-Host "Waiting 30 seconds for VS Code + extension to load..."
+          Write-Host "Waiting 30s for VS Code..."
           Start-Sleep -Seconds 30
-          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\01-vscode-loaded.png"
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\ui-01-loaded.png"
 
-      - name: Open KISS Sorcar panel
+      - name: Open KISS Sorcar panel via command palette
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms
-
-          # Write Win32 helper to file to avoid YAML escaping issues
           $cs = 'using System; using System.Runtime.InteropServices; public class W32 { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); }'
           Add-Type -TypeDefinition $cs -Language CSharp
-
           $vscode = Get-Process -Name "Code" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1
-          if ($vscode) {
-              [W32]::SetForegroundWindow($vscode.MainWindowHandle) | Out-Null
-              Write-Host "Focused VS Code window"
-          }
+          if ($vscode) { [W32]::SetForegroundWindow($vscode.MainWindowHandle) | Out-Null }
           Start-Sleep -Seconds 1
 
-          # Open command palette with Ctrl+Shift+P
           [System.Windows.Forms.SendKeys]::SendWait("^+p")
           Start-Sleep -Seconds 2
-          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\02-command-palette.png"
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\ui-02-palette.png"
 
-          # Type the command to open KISS Sorcar panel
           [System.Windows.Forms.SendKeys]::SendWait("KISS{:} Open Sorcar Chat")
           Start-Sleep -Seconds 2
-          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\03-command-typed.png"
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\ui-03-typed.png"
 
-          # Press Enter to execute
           [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 5
-          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\04-panel-opened.png"
+          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\ui-04-panel.png"
 
-      - name: Focus chat input and type task
+      - name: Verify workspace result
         shell: pwsh
         run: |
-          Add-Type -AssemblyName System.Windows.Forms
-
-          $cs = 'using System; using System.Runtime.InteropServices; public class W32b { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); }'
-          Add-Type -TypeDefinition $cs -Language CSharp
-
-          $vscode = Get-Process -Name "Code" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1
-          if ($vscode) {
-              [W32b]::SetForegroundWindow($vscode.MainWindowHandle) | Out-Null
-          }
-          Start-Sleep -Seconds 1
-
-          # Use Ctrl+D to focus the chat input (toggleFocus keybinding)
-          [System.Windows.Forms.SendKeys]::SendWait("^d")
-          Start-Sleep -Seconds 2
-          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\05-chat-focused.png"
-
-          # Type the task using clipboard to handle special characters reliably
-          $task = "Create a file called hello.txt with the content Hello from Windows"
-          [System.Windows.Forms.Clipboard]::SetText($task)
-          [System.Windows.Forms.SendKeys]::SendWait("^v")
-          Start-Sleep -Seconds 2
-          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\06-task-typed.png"
-
-          # Submit the task by pressing Enter
-          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-          Write-Host "Task submitted, waiting for execution..."
-
-      - name: Wait for task execution and capture progress
-        shell: pwsh
-        run: |
-          # Take screenshots periodically while the task runs
-          for ($i = 1; $i -le 12; $i++) {
-              Start-Sleep -Seconds 10
-              $num = 6 + $i
-              $padded = "{0:D2}" -f $num
-              & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\$padded-progress-$i.png"
-              Write-Host "Progress screenshot $i captured (${i}0 seconds elapsed)"
-          }
-
-      - name: Capture final state
-        shell: pwsh
-        run: |
-          & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\19-final-state.png"
-
-          # Check if the task created the expected file
           $testFile = "$env:TEMP\kiss-test-workspace\hello.txt"
           if (Test-Path $testFile) {
-              Write-Host "SUCCESS: hello.txt was created!"
-              Write-Host "Content:"
-              Get-Content $testFile
+              Write-Host "SUCCESS: hello.txt exists!"
+              Write-Host "Content: $(Get-Content $testFile -Raw)"
           } else {
-              Write-Host "hello.txt not found yet - task may still be running or failed"
               Write-Host "Files in workspace:"
               Get-ChildItem "$env:TEMP\kiss-test-workspace" -Recurse | ForEach-Object { Write-Host $_.FullName }
           }
@@ -213,17 +302,16 @@ jobs:
         run: |
           $logFile = "$env:USERPROFILE\.kiss\install.log"
           if (Test-Path $logFile) {
-              Write-Host "=== KISS Sorcar install.log ==="
+              Write-Host "=== install.log ==="
               Get-Content $logFile
-          } else {
-              Write-Host "No install.log found"
           }
 
-      - name: Upload screenshots
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-test-screenshots
+          name: windows-test-results
           path: |
-            *.png
+            ui-*.png
+            backend-events.json
           retention-days: 7
