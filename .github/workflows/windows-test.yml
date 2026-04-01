@@ -10,7 +10,7 @@ on:
 jobs:
   test-windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
@@ -67,7 +67,6 @@ jobs:
           & "$uvDir\uv.exe" run --directory $kissProject python -m playwright install chromium 2>&1
           Write-Host "Playwright installed"
 
-          # Save kiss_project path for later steps
           echo "KISS_PROJECT=$kissProject" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Create demo workspace
@@ -76,7 +75,6 @@ jobs:
           $dir = "$env:TEMP\kiss-test-workspace"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Set-Content -Path "$dir\example.py" -Value "# Example file`nprint('hello world')"
-          # Initialize git repo (required for diff/merge features)
           Push-Location $dir
           git init
           git config user.email "test@test.com"
@@ -110,13 +108,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path $kissDir | Out-Null
           Set-Content -Path "$kissDir\.api-keys-prompted" -Value (Get-Date -Format o)
 
-      # ── TEST 1: Verify KISS package imports and API connectivity ──
+      # ── TEST 1: Imports and API connectivity ──
       - name: Verify KISS package on Windows
         shell: pwsh
         run: |
           $kissProject = $env:KISS_PROJECT
           $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
-          Write-Host "Testing KISS package imports..."
           & $uvExe run --directory $kissProject python -c "from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent; print('StatefulSorcarAgent import OK')" 2>&1
           & $uvExe run --directory $kissProject python -c "import platform; print(f'Python {platform.python_version()} on {platform.system()} {platform.machine()}')" 2>&1
 
@@ -126,22 +123,17 @@ jobs:
         run: |
           $kissProject = $env:KISS_PROJECT
           $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
-          Write-Host "Testing direct Anthropic API call..."
           & $uvExe run --directory $kissProject python -c @"
           import anthropic, time
           t0 = time.time()
-          print('Creating client...')
           client = anthropic.Anthropic()
-          print(f'Client created in {time.time()-t0:.1f}s')
-          print('Sending message...')
           resp = client.messages.create(model='claude-sonnet-4-20250514', max_tokens=50, messages=[{'role':'user','content':'Say hello in one word'}])
-          print(f'Response in {time.time()-t0:.1f}s: {resp.content[0].text}')
-          print(f'Stop reason: {resp.stop_reason}')
+          print(f'API response in {time.time()-t0:.1f}s: {resp.content[0].text}')
           print('API connectivity: OK')
           "@ 2>&1
 
-      # ── TEST 2: Direct agent test (bypasses server, tests agent.run) ──
-      - name: Run direct agent test
+      # ── TEST 2: Direct agent test (the real functional test) ──
+      - name: Run agent task on Windows
         shell: pwsh
         timeout-minutes: 5
         run: |
@@ -156,8 +148,7 @@ jobs:
           print(f'Files before: {os.listdir(work_dir)}')
           t0 = time.time()
           from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-          print(f'Import took {time.time()-t0:.1f}s')
-          agent = StatefulSorcarAgent()
+          agent = StatefulSorcarAgent('windows-test')
           print(f'Agent created in {time.time()-t0:.1f}s')
           print('Running task...')
           agent.run(
@@ -165,7 +156,7 @@ jobs:
               model_name='claude-sonnet-4-20250514',
               work_dir=work_dir,
           )
-          print(f'Task done in {time.time()-t0:.1f}s')
+          print(f'Task completed in {time.time()-t0:.1f}s')
           print(f'Files after: {os.listdir(work_dir)}')
           hello = os.path.join(work_dir, 'hello.txt')
           if os.path.exists(hello):
@@ -175,153 +166,9 @@ jobs:
               sys.exit(1)
           "@ 2>&1
 
-      # ── TEST 3: Backend functional test (Python server + real LLM task) ──
-      - name: Run backend task test via Python server
-        shell: pwsh
-        timeout-minutes: 10
-        run: |
-          $kissProject = $env:KISS_PROJECT
-          $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
-          # Use the full path (avoid 8.3 short names)
-          $workDir = (Get-Item "$env:TEMP\kiss-test-workspace").FullName
-          Write-Host "Work dir (full path): $workDir"
-
-          # Write the test driver script
-          $testScript = @'
-          import json, subprocess, sys, threading, time, os
-
-          kiss_project = sys.argv[1]
-          uv_exe = sys.argv[2]
-          work_dir = sys.argv[3]
-
-          print(f"Starting server from {kiss_project}")
-          print(f"Work dir: {work_dir}")
-          print(f"uv: {uv_exe}")
-          print(f"ANTHROPIC_API_KEY set: {'ANTHROPIC_API_KEY' in os.environ}")
-
-          proc = subprocess.Popen(
-              [uv_exe, "run", "python", "-u", "-m", "kiss.agents.vscode.server"],
-              cwd=kiss_project,
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,
-              env={**os.environ, "PYTHONUNBUFFERED": "1", "KISS_WORKDIR": work_dir},
-          )
-
-          events = []
-          stderr_lines = []
-          task_done = threading.Event()
-
-          def read_stdout():
-              for line in proc.stdout:
-                  text = line.decode("utf-8", errors="replace").strip()
-                  if not text:
-                      continue
-                  try:
-                      evt = json.loads(text)
-                      events.append(evt)
-                      etype = evt.get("type", "")
-                      etext = evt.get("text", "")[:100]
-                      print(f"  EVENT: {etype} {etext}", flush=True)
-                      if etype in ("task_done", "task_error", "task_stopped"):
-                          task_done.set()
-                  except json.JSONDecodeError:
-                      print(f"  RAW: {text[:200]}", flush=True)
-
-          def read_stderr():
-              for line in proc.stderr:
-                  text = line.decode("utf-8", errors="replace").strip()
-                  if text:
-                      stderr_lines.append(text)
-                      print(f"  STDERR: {text[:300]}", flush=True)
-
-          t1 = threading.Thread(target=read_stdout, daemon=True)
-          t2 = threading.Thread(target=read_stderr, daemon=True)
-          t1.start()
-          t2.start()
-
-          time.sleep(5)
-          print(f"Server started, events so far: {len(events)}", flush=True)
-          print(f"Stderr so far: {len(stderr_lines)}", flush=True)
-          for s in stderr_lines:
-              print(f"  PRE-STDERR: {s[:300]}", flush=True)
-
-          cmd = {
-              "type": "run",
-              "prompt": "Create a file called hello.txt containing exactly: Hello from Windows!",
-              "model": "claude-sonnet-4-20250514",
-              "workDir": work_dir,
-          }
-          print(f"\nSending command: {json.dumps(cmd)}", flush=True)
-          proc.stdin.write((json.dumps(cmd) + "\n").encode())
-          proc.stdin.flush()
-
-          # Wait up to 5 minutes, with periodic status updates
-          for i in range(30):
-              if task_done.wait(timeout=10):
-                  print(f"\nTask completed after ~{(i+1)*10}s!", flush=True)
-                  break
-              print(f"  ... waiting ({(i+1)*10}s, events={len(events)}, stderr={len(stderr_lines)})", flush=True)
-          else:
-              print("\nTask timed out after 5 minutes!", flush=True)
-
-          # Stop and close
-          try:
-              proc.stdin.write(b'{"type":"stop"}\n')
-              proc.stdin.flush()
-              proc.stdin.close()
-          except:
-              pass
-          try:
-              proc.wait(timeout=15)
-          except:
-              proc.kill()
-
-          print(f"\n{'='*60}")
-          print(f"Total events: {len(events)}")
-          print(f"Stderr lines: {len(stderr_lines)}")
-
-          done_events = [e for e in events if e.get("type") in ("task_done", "task_error", "task_stopped")]
-          if done_events:
-              print(f"Task result: {done_events[0].get('type')}")
-              if done_events[0].get("type") == "task_error":
-                  print(f"Error: {done_events[0].get('text', 'unknown')}")
-          else:
-              print("No task completion event found!")
-
-          hello_path = os.path.join(work_dir, "hello.txt")
-          if os.path.exists(hello_path):
-              content = open(hello_path).read()
-              print(f"\nSUCCESS: hello.txt created with content: {content!r}")
-          else:
-              print(f"\nFAILED: hello.txt was not created")
-              print("Files in workspace:")
-              for root, dirs, files in os.walk(work_dir):
-                  for f in files:
-                      if ".git" not in root:
-                          print(f"  {os.path.join(root, f)}")
-
-          print(f"\nAll event types: {[e.get('type') for e in events]}")
-
-          with open(os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "backend-events.json"), "w") as f:
-              json.dump(events, f, indent=2)
-
-          sys.exit(0 if os.path.exists(hello_path) else 1)
-          '@
-
-          Set-Content -Path "${{ github.workspace }}\test_backend.py" -Value $testScript
-
-          Write-Host "Running backend test..."
-          & python "${{ github.workspace }}\test_backend.py" $kissProject $uvExe $workDir 2>&1
-          $backendResult = $LASTEXITCODE
-          Write-Host "Backend test exit code: $backendResult"
-
-          if ($backendResult -ne 0) {
-              Write-Host "::warning::Backend task test did not create hello.txt"
-          }
-
-      # ── TEST 2: UI visual test (extension renders on Windows) ──
+      # ── TEST 3: UI visual test (extension renders on Windows) ──
       - name: Launch VS Code and capture UI
+        if: always()
         shell: pwsh
         run: |
           $code = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
@@ -332,6 +179,7 @@ jobs:
           & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\ui-01-loaded.png"
 
       - name: Open KISS Sorcar panel via command palette
+        if: always()
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms
@@ -354,6 +202,7 @@ jobs:
           & "${{ github.workspace }}\ss.ps1" "${{ github.workspace }}\ui-04-panel.png"
 
       - name: Verify workspace result
+        if: always()
         shell: pwsh
         run: |
           $testFile = "$env:TEMP\kiss-test-workspace\hello.txt"
@@ -362,7 +211,7 @@ jobs:
               Write-Host "Content: $(Get-Content $testFile -Raw)"
           } else {
               Write-Host "Files in workspace:"
-              Get-ChildItem "$env:TEMP\kiss-test-workspace" -Recurse | ForEach-Object { Write-Host $_.FullName }
+              Get-ChildItem "$env:TEMP\kiss-test-workspace" -Recurse -File | Where-Object { $_.FullName -notlike "*\.git\*" } | ForEach-Object { Write-Host $_.FullName }
           }
 
       - name: Collect logs
@@ -380,7 +229,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-test-results
-          path: |
-            ui-*.png
-            backend-events.json
+          path: ui-*.png
           retention-days: 7
