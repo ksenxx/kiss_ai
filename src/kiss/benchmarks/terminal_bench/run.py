@@ -14,10 +14,129 @@ SorcarHarborAgent without needing to modify the harbor source.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import subprocess
 import sys
+from pathlib import Path
 
 AGENT_IMPORT_PATH = "kiss.benchmarks.terminal_bench.agent:SorcarHarborAgent"
+
+
+def is_docker_hub_authenticated() -> bool:
+    """Check whether Docker Hub credentials are configured.
+
+    Reads ~/.docker/config.json to find the credential store, then
+    queries it via ``docker-credential-<store> list``.  Returns True
+    if any credential is stored for ``https://index.docker.io/``.
+    Falls back to checking the ``auths`` dict when no credential
+    store is configured.
+    """
+    config_path = Path.home() / ".docker" / "config.json"
+    if not config_path.exists():
+        return False
+
+    try:
+        config = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    creds_store = config.get("credsStore")
+    if creds_store:
+        try:
+            result = subprocess.run(
+                [f"docker-credential-{creds_store}", "list"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                creds = json.loads(result.stdout)
+                return any(
+                    "index.docker.io" in url for url in creds
+                )
+        except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            pass
+
+    auths = config.get("auths", {})
+    return any("index.docker.io" in url for url in auths)
+
+
+async def _resolve_docker_images(dataset: str) -> list[str]:
+    """Resolve unique Docker image names from a harbor dataset.
+
+    Uses harbor's ``DatasetConfig`` to download/cache task definitions,
+    then reads each task's ``task.toml`` to extract ``docker_image``.
+
+    Args:
+        dataset: Harbor dataset specifier (e.g. "terminal-bench@2.0").
+
+    Returns:
+        Sorted list of unique Docker image names.
+    """
+    try:
+        from harbor.models.job.config import DatasetConfig
+        from harbor.models.task.config import TaskConfig as TaskTomlConfig
+    except ImportError:
+        return []
+
+    parts = dataset.split("@", 1)
+    ds = DatasetConfig(
+        name=parts[0],
+        version=parts[1] if len(parts) > 1 else None,
+    )
+    task_configs = await ds.get_task_configs()
+
+    images: set[str] = set()
+    for tc in task_configs:
+        task_toml = tc.get_local_path() / "task.toml"
+        if task_toml.exists():
+            try:
+                cfg = TaskTomlConfig.model_validate_toml(task_toml.read_text())
+                if cfg.environment.docker_image:
+                    images.add(cfg.environment.docker_image)
+            except Exception:
+                continue
+    return sorted(images)
+
+
+def pre_pull_images(dataset: str) -> None:
+    """Pre-pull all Docker images needed by a harbor dataset.
+
+    Resolves the dataset's task definitions, extracts unique Docker
+    image names, and pulls each one sequentially.  Because Docker
+    caches pulled images locally, subsequent ``docker compose up``
+    calls by harbor will not trigger additional pulls, avoiding
+    Docker Hub rate limits.
+
+    Args:
+        dataset: Harbor dataset specifier (e.g. "terminal-bench@2.0").
+    """
+    images = asyncio.run(_resolve_docker_images(dataset))
+    if not images:
+        print("No Docker images to pre-pull.")
+        return
+
+    print(f"Pre-pulling {len(images)} Docker images...")
+    failed: list[str] = []
+    for i, image in enumerate(images, 1):
+        print(f"  [{i}/{len(images)}] {image}")
+        result = subprocess.run(
+            ["docker", "pull", image],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            failed.append(image)
+            print(f"    WARN: pull failed: {result.stdout.strip()}")
+
+    if failed:
+        print(
+            f"WARNING: Failed to pull {len(failed)}/{len(images)} images.",
+            file=sys.stderr,
+        )
+    else:
+        print(f"All {len(images)} images pulled successfully.")
 
 
 def run_terminal_bench(
@@ -25,15 +144,39 @@ def run_terminal_bench(
     dataset: str = "terminal-bench@2.0",
     n_concurrent: int = 8,
     trials: int = 1,
+    skip_pre_pull: bool = False,
 ) -> None:
     """Run Terminal-Bench 2.0 using the harbor CLI with the sorcar agent.
+
+    Before invoking harbor, checks that Docker Hub credentials are
+    configured (to avoid unauthenticated pull rate limits) and pre-pulls
+    all task Docker images so each unique image is fetched exactly once.
 
     Args:
         model: Model name in harbor format (provider/model).
         dataset: Harbor dataset specifier (e.g. "terminal-bench@2.0").
         n_concurrent: Number of concurrent task containers.
         trials: Number of attempts per task (-k flag). Use 5 for leaderboard.
+        skip_pre_pull: If True, skip the image pre-pull step.
     """
+    if not is_docker_hub_authenticated():
+        print(
+            "ERROR: Not authenticated to Docker Hub.\n"
+            "\n"
+            "  Terminal-Bench tasks use pre-built Docker images from Docker Hub.\n"
+            "  Without authentication, Docker Hub limits pulls to 100 per 6 hours,\n"
+            "  which is easily exceeded with concurrent benchmark runs.\n"
+            "\n"
+            "  Fix: run 'docker login' and enter your Docker Hub credentials.\n"
+            "  A free account provides 200 pulls per 6 hours.\n"
+            "  Create an account at https://hub.docker.com/signup\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not skip_pre_pull:
+        pre_pull_images(dataset)
+
     cmd = [
         "harbor",
         "run",
@@ -92,8 +235,19 @@ def main() -> None:
         default=1,
         help="Number of attempts per task (use 5 for leaderboard submission)",
     )
+    parser.add_argument(
+        "--skip-pre-pull",
+        action="store_true",
+        help="Skip pre-pulling Docker images (not recommended)",
+    )
     args = parser.parse_args()
-    run_terminal_bench(args.model, args.dataset, args.n_concurrent, args.trials)
+    run_terminal_bench(
+        args.model,
+        args.dataset,
+        args.n_concurrent,
+        args.trials,
+        args.skip_pre_pull,
+    )
 
 
 if __name__ == "__main__":

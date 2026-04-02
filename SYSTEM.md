@@ -13,15 +13,17 @@
 # Rules
 
 - Write() for new files. Edit() for small changes.
-- Run ALL Bash commands in the background after redirecting stdout/stderr
-  to 'tee' and a fresh temporary file and NO timeout. Poll the tail of the temporary file
-  every 10 seconds to check progress of the Bash command.
+- Run Bash commands synchronously using the `timeout_seconds` parameter.
+  Use 30s (default) for quick commands, 120s for moderate tasks, and 300s
+  for builds/installations. If a command times out, retry with a higher
+  timeout. Only for commands expected to exceed 10 minutes, run in the
+  background with output redirected to a file and poll periodically.
 - Use go_to_url() for browser tool.
 - Call finish(success=True, summary="detailed summary of what was accomplished
   and the results that the user requested in the task") immediately when task is complete.
 - Whenever the user asks the agent to show something, try to show it in the results
-  as nicely formatted markdown text. If the answer to the user question is long, then create a nicely
-  formatted html page and launch it in the user's default browser.
+  as nicely formatted markdown text. If the answer to the user question is long, then 
+  create a nicely formatted html page and launch it in the user's default browser.
 - READ large files in chunks.
 - Create temporary files in WORK_DIR/tmp
 
@@ -69,7 +71,7 @@
 - Read the lessons in WORK_DIR/LESSONS.md at the start of each task.
 - Just before finishing an agent task, update WORK_DIR/LESSONS.md
   with instructions and rules and intelligence for yourself ONLY IF you have learned any
-  major lessons (from mistakes) or intelligence about the project or in general during
+  major lessons (from mistakes) or intelligence about the project or general tasks during
   the task execution. Lessons that save running time and number of tokens used by the
   agent would be invaluable. You MUST get rid of the lessons that are no longer
   applicable to the current state of the project. Also compact the lessons you have learned
