@@ -34,7 +34,7 @@ WORKDIR /home/coder/kiss
 RUN uv venv --python 3.13 && uv sync
 
 # Install Playwright Chromium
-RUN uv run playwright install chromium || true
+RUN uv run playwright install chromium
 
 # Install the VSIX extension into code-server
 RUN code-server --install-extension /home/coder/kiss/src/kiss/agents/vscode/kiss-sorcar.vsix
