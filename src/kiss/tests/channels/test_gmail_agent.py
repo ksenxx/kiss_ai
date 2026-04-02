@@ -239,7 +239,7 @@ class TestGmailAgent:
         check = next(t for t in tools if t.__name__ == "check_gmail_auth")
         result = check()
         assert "Not authenticated" in result
-        assert "console.cloud.google.com" in result
+        assert "start_gmail_browser_setup()" in result
 
     def test_check_auth_unauthenticated_with_creds_file(self) -> None:
         cp = _credentials_path()

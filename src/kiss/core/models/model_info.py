@@ -840,6 +840,26 @@ def get_available_models() -> list[str]:
     return sorted(result)
 
 
+def get_default_model() -> str:
+    """Return the best default model based on which API keys are configured.
+
+    Priority order: Anthropic > OpenRouter > Gemini > OpenAI > Together AI.
+    Falls back to ``"claude-opus-4-6"`` if no keys are set.
+    """
+    keys = config_module.DEFAULT_CONFIG
+    if keys.ANTHROPIC_API_KEY:
+        return "claude-opus-4-6"
+    if keys.OPENROUTER_API_KEY:
+        return "openrouter/anthropic/claude-opus-4.6"
+    if keys.GEMINI_API_KEY:
+        return "gemini-3.1-pro-preview"
+    if keys.OPENAI_API_KEY:
+        return "gpt-5.4"
+    if keys.TOGETHER_API_KEY:
+        return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+    return "claude-opus-4-6"
+
+
 def get_most_expensive_model(fc_only: bool = True) -> str:
     best_name, best_price = "", -1.0
     for name in get_available_models():

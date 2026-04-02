@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentProcess, findKissProject } from './AgentProcess';
+import { getDefaultModel } from './DependencyInstaller';
 import { MergeManager } from './MergeManager';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
@@ -41,7 +42,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     this._extensionUri = extensionUri;
     this._agentProcess = new AgentProcess();
     this._mergeManager = mergeManager || new MergeManager();
-    this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || 'claude-opus-4-6';
+    this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
 
     // Track active editor changes to update run-prompt button
     this._activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
@@ -58,6 +59,9 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       }
       if (msg.type === 'commitMessage') {
         this._onCommitMessage.fire(msg as any);
+      }
+      if (msg.type === 'models' && (msg as any).selected) {
+        this._selectedModel = (msg as any).selected;
       }
       this.sendToWebview(msg);
       if (msg.type === 'status') {
@@ -452,7 +456,7 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
           <div id="model-picker">
             <button id="model-btn" data-tooltip="Select model">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
-              <span id="model-name">claude-opus-4-6</span>
+              <span id="model-name">${this._selectedModel}</span>
             </button>
             <button id="upload-btn" data-tooltip="Attach files">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>

@@ -55,7 +55,7 @@ from kiss.agents.vscode.helpers import (
 )
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import Attachment
-from kiss.core.models.model_info import MODEL_INFO, get_available_models
+from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class VSCodeServer:
         self._selected_model = (
             persisted
             or os.environ.get("KISS_MODEL", "")
-            or "claude-opus-4-6"
+            or get_default_model()
         )
         self._file_cache: list[str] = []
         self._last_active_file: str = ""

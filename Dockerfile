@@ -34,10 +34,10 @@ WORKDIR /home/coder/kiss
 RUN uv venv --python 3.13 && uv sync
 
 # Install Playwright Chromium
-RUN uv run playwright install chromium || true
+RUN uv run playwright install chromium
 
 # Install the VSIX extension into code-server
-RUN code-server --install-extension /home/coder/kiss/kiss-sorcar.vsix || true
+RUN code-server --install-extension /home/coder/kiss/src/kiss/agents/vscode/kiss-sorcar.vsix
 
 # Create a demo workspace
 RUN mkdir -p /home/coder/workspace
@@ -49,5 +49,7 @@ WORKDIR /home/coder/workspace
 
 EXPOSE 8080
 
-# Run code-server with no auth for local demo
-CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "--auth", "none", "/home/coder/workspace"]
+# Override base image ENTRYPOINT (which bakes in "--bind-addr 0.0.0.0:8080 .")
+# so our CMD controls all code-server arguments cleanly.
+ENTRYPOINT ["/usr/bin/entrypoint.sh"]
+CMD ["--bind-addr", "0.0.0.0:8080", "--auth", "none", "/home/coder/workspace"]
