@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import os
 import shlex
+from pathlib import Path
 
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+
+_TBENCH_MD = (Path(__file__).parent / "tbench.md").read_text()
 
 
 class SorcarHarborAgent(BaseAgent):
@@ -80,7 +83,7 @@ class SorcarHarborAgent(BaseAgent):
             environment: The harbor execution environment.
             context: Agent context for storing token/cost metadata.
         """
-        escaped = shlex.quote(instruction)
+        escaped = shlex.quote(instruction + "\n\n" + _TBENCH_MD)
         model_flag = f"-m {self.model_name}" if self.model_name else ""
         env = {
             k: v
