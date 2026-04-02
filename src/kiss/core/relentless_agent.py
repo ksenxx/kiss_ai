@@ -133,7 +133,7 @@ class RelentlessAgent(Base):
         Raises:
             KISSError: If the task fails after exhausting all sub-sessions.
         """
-        print(f"Executing task: {self.task_description}")
+        logger.info("Executing task: %s", self.task_description)
         all_tools: list[Callable[..., Any]] = [finish, *tools]
 
         progress_section = ""

@@ -10,7 +10,6 @@ from __future__ import annotations
 import inspect
 import logging
 import time
-import traceback
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -442,7 +441,9 @@ class KISSAgent(Base):
                 Base.global_budget_used += cost
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
-            print(f"Error updating tokens and budget from response: {e} {traceback.format_exc()}")
+            logger.error(
+                "Error updating tokens and budget from response: %s", e, exc_info=True
+            )
 
     def _get_usage_info_string(self) -> str:
         """Returns a compact single-line usage information string."""
