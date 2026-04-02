@@ -10,6 +10,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -98,13 +99,20 @@ class DockerManager:
         container_id = self.container.id[:12] if self.container.id else "unknown"
         print(f"Container {container_id} is now running")
 
-    def Bash(self, command: str, description: str) -> str:  # noqa: N802
+    def Bash(  # noqa: N802
+        self,
+        command: str,
+        description: str,
+        timeout_seconds: int = 30,
+    ) -> str:  # noqa: N802
         """
         Execute a bash command in the running Docker container.
 
         Args:
             command: The bash command to execute
             description: A short description of the command in natural language
+            timeout_seconds: Maximum time to wait before treating the command as hung.
+
         Returns:
             The output of the command, including stdout, stderr, and exit code
         """
@@ -116,14 +124,33 @@ class DockerManager:
         if self.stream_callback:
             return self._bash_streaming(command)
 
-        exec_result = self.container.exec_run(
-            f"/bin/bash -c {shlex.quote(command)}",
-            stdout=True,
-            stderr=True,
-            demux=True,
-            workdir=self.workdir,
-        )
+        result_holder: dict[str, Any] = {}
+        error_holder: dict[str, BaseException] = {}
 
+        container = self.container
+        assert container is not None
+
+        def run_exec() -> None:
+            try:
+                result_holder["result"] = container.exec_run(
+                    f"/bin/bash -c {shlex.quote(command)}",
+                    stdout=True,
+                    stderr=True,
+                    demux=True,
+                    workdir=self.workdir,
+                )
+            except BaseException as exc:
+                error_holder["error"] = exc
+
+        thread = threading.Thread(target=run_exec, daemon=True)
+        thread.start()
+        thread.join(timeout_seconds)
+        if thread.is_alive():
+            return f"Error: command timed out after {timeout_seconds}s"
+        if error_holder:
+            raise error_holder["error"]
+
+        exec_result = result_holder["result"]
         output_payload = exec_result.output
         if output_payload:
             stdout_bytes, stderr_bytes = output_payload
@@ -132,9 +159,11 @@ class DockerManager:
         stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
         stderr = stderr_bytes.decode("utf-8") if stderr_bytes else ""
         exit_code = exec_result.exit_code
-        output = stdout + "\n" + stderr
+        output_parts = [part for part in (stdout, stderr) if part]
+        output = "\n".join(output_parts)
         if exit_code != 0:
-            output += f"\n[exit code: {exit_code}]"
+            suffix = f"[exit code: {exit_code}]"
+            output = f"{output}\n{suffix}" if output else suffix
         return output
 
     def _bash_streaming(self, command: str) -> str:
@@ -166,9 +195,10 @@ class DockerManager:
                 self.stream_callback(text)
         inspect_result = self.client.api.exec_inspect(exec_id)
         exit_code = inspect_result.get("ExitCode", 0)
-        output = "".join(stdout_parts) + "\n" + "".join(stderr_parts)
+        output = "\n".join(part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part)
         if exit_code != 0:
-            output += f"\n[exit code: {exit_code}]"
+            suffix = f"[exit code: {exit_code}]"
+            output = f"{output}\n{suffix}" if output else suffix
         return output
 
     def get_host_port(self, container_port: int) -> int | None:

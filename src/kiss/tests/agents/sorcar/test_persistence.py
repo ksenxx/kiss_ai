@@ -84,7 +84,7 @@ class TestChatEvents:
         assert events == [{"a": 1}]
 
     def test_save_task_result_no_matching_task(self):
-        th._save_task_result("nonexistent", "result")
+        th._save_task_result(result="result", task="nonexistent")
         # Should not raise; just returns early
 
 

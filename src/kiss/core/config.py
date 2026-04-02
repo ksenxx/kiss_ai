@@ -8,26 +8,71 @@
 import os
 import random
 import time
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+_PROJECT_DIR = Path(__file__).resolve().parents[3]
+_ARTIFACTS_DIR_NAME = ".kiss.artifacts"
+_artifact_dir: str | None = None
 
-def _generate_artifact_dir() -> str:
-    """Generate a unique artifact subdirectory name based on timestamp and random number.
+
+def _artifact_root(base_dir: str | Path | None = None) -> Path:
+    """Return the root directory for generated KISS artifacts."""
+    root = Path(base_dir) if base_dir is not None else _PROJECT_DIR
+    return root.resolve() / _ARTIFACTS_DIR_NAME
+
+
+def set_artifact_base_dir(base_dir: str | Path | None) -> str:
+    """Set the base directory used to resolve ``artifact_dir``.
+
+    Args:
+        base_dir: Directory whose ``.kiss.artifacts`` child should contain
+            generated job artifacts. ``None`` resets to the project root.
 
     Returns:
-        str: The absolute path to the newly created artifact directory.
+        The resolved artifact job directory.
     """
-    from pathlib import Path
+    global _artifact_dir
+    _artifact_dir = _generate_artifact_dir(base_dir)
+    return _artifact_dir
 
-    artifact_subdir_name = f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
-    artifact_path = Path(".kiss.artifacts").resolve() / "jobs" / artifact_subdir_name
+
+def _generate_artifact_dir(base_dir: str | Path | None = None) -> str:
+    """Generate a unique artifact job directory under the configured base directory.
+
+    Args:
+        base_dir: Optional base directory for the ``.kiss.artifacts`` root.
+
+    Returns:
+        The absolute path to the newly created artifact directory.
+    """
+    artifact_subdir_name = (
+        f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
+    )
+    artifact_path = _artifact_root(base_dir) / "jobs" / artifact_subdir_name
     artifact_path.mkdir(parents=True, exist_ok=True)
     return str(artifact_path)
 
 
-artifact_dir = _generate_artifact_dir()
+def get_artifact_dir() -> str:
+    """Return the active artifact directory, creating it lazily if needed."""
+    global _artifact_dir
+    if _artifact_dir is None:
+        _artifact_dir = _generate_artifact_dir()
+    return _artifact_dir
+
+
+class _ArtifactDirProxy:
+    def __fspath__(self) -> str:
+        return get_artifact_dir()
+
+    def __str__(self) -> str:
+        return get_artifact_dir()
+
+
+artifact_dir = _ArtifactDirProxy()
 
 
 class Config(BaseModel):
@@ -54,10 +99,6 @@ class Config(BaseModel):
     MINIMAX_API_KEY: str = Field(
         default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""),
         description="MiniMax API key (can also be set via MINIMAX_API_KEY env var)",
-    )
-    NOVITA_API_KEY: str = Field(
-        default_factory=lambda: os.getenv("NOVITA_API_KEY", ""),
-        description="Novita API key (can also be set via NOVITA_API_KEY env var)",
     )
     FAST_MODEL: str = Field(
         default="claude-haiku-4-5",

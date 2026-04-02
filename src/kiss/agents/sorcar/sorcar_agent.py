@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -361,13 +360,8 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
             "ask_user_question_callback": cli_ask_user_question,
         }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        result = agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    result = agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print("FINAL RESULT:")
