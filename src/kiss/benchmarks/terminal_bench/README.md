@@ -10,25 +10,6 @@ Runs KISS Sorcar on [Terminal-Bench 2.0](https://www.tbench.ai/) using the
 uv pip install harbor
 ```
 
-## Quick Test
-
-## Quick Test (1 trial per task)
-
-```bash
-python -m kiss.benchmarks.terminal_bench.run \
-    --model claude-opus-4-6 --n-concurrent 4
-uv run python -m kiss.benchmarks.terminal_bench.run \
-    --model anthropic/claude-opus-4-6 --n-concurrent 4
-```
-
-## Full Run
-
-```bash
-python -m kiss.benchmarks.terminal_bench.run \
-uv run python -m kiss.benchmarks.terminal_bench.run \
-    --model anthropic/claude-opus-4-6 --n-concurrent 16
-```
-
 ## Leaderboard Dataset
 
 ## Leaderboard Submission (5 trials per task)
@@ -42,7 +23,7 @@ harbor run \
     --agent sorcar \
     --model claude-opus-4-6 \
 uv run python -m kiss.benchmarks.terminal_bench.run \
-    --model anthropic/claude-opus-4-6 --n-concurrent 8 -k 5
+    --model claude-opus-4-6 --n-concurrent 8 -k 5
 ```
 
 Or using the harbor CLI directly:
@@ -51,22 +32,8 @@ Or using the harbor CLI directly:
 uv run harbor run \
     --dataset terminal-bench@2.0 \
     --agent-import-path kiss.benchmarks.terminal_bench.agent:SorcarHarborAgent \
-    --model anthropic/claude-opus-4-6 \
+    --model claude-opus-4-6 \
     --n-concurrent 8
-```
-
-## Direct Harbor CLI Usage
-
-The `--agent-import-path` flag tells harbor to load our custom agent class
-directly, without needing to register it in harbor's built-in agent list:
-
-```bash
-harbor run --dataset terminal-bench@2.0 \
-    --agent-import-path kiss.benchmarks.terminal_bench.agent:SorcarHarborAgent \
-    --model anthropic/claude-opus-4-6 \
-    --n-concurrent 4
-    --n-concurrent 8 \
-    -k 5
 ```
 
 ## References
