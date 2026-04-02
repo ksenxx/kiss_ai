@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -99,8 +100,33 @@ def _load_service(sa_path: str = "") -> Any:
     return None
 
 
+def _is_headless_environment() -> bool:
+    """Return True when running in a headless/Docker/Linux environment.
+
+    Checks in order:
+    1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless)
+    2. Presence of /.dockerenv (running inside Docker)
+    3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set
+    """
+    env = os.environ.get("KISS_HEADLESS", "").lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    if Path("/.dockerenv").exists():
+        return True
+    if sys.platform.startswith("linux"):
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            return True
+    return False
+
+
 def _run_oauth_flow() -> Any:
     """Run OAuth2 flow for Google Chat.
+
+    In headless/Docker environments, falls back to ``run_console()`` which
+    prints a URL and reads the auth code from stdin instead of opening a
+    browser window.
 
     Returns:
         Google Chat API service resource, or None on failure.
@@ -115,7 +141,10 @@ def _run_oauth_flow() -> Any:
     if not creds_path.exists():
         return None
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
-    creds = cast(Credentials, flow.run_local_server(port=0))
+    if _is_headless_environment():
+        creds = cast(Credentials, flow.run_console())
+    else:
+        creds = cast(Credentials, flow.run_local_server(port=0))
     token_file = _token_path()
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(creds.to_json())

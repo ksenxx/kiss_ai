@@ -238,6 +238,14 @@ ignore_missing_imports = true
 module = "irc.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["harbor", "harbor.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["datasets", "datasets.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
