@@ -599,8 +599,8 @@ class TestStatefulSorcarAgentBranches:
         from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
         agent = StatefulSorcarAgent("test")
         # Add a task with empty result to the agent's chat
-        th._add_task("task with no result", chat_id=agent._chat_id)
-        th._save_task_result("task with no result", "")
+        task_id = th._add_task("task with no result", chat_id=agent._chat_id)
+        th._save_task_result("", task_id)
         prompt = agent.build_chat_prompt("new task")
         assert "### Task 1" in prompt
         assert "### Result 1" not in prompt

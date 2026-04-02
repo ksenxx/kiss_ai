@@ -267,9 +267,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
-    "novita/deepseek/deepseek-v3.2": _mi(163840, 0.25, 0.40),  # Default model
-    "novita/minimax/minimax-m2.5": _mi(196608, 0.27, 0.95),
-    "novita/zai-org/glm-5": _mi(202752, 0.80, 2.56),  # GLM-5 from ZAI
     "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.06, 0.25),  # NEW
     "o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
     "o1-2024-12-17": _mi(200000, 15.00, 60.00),  # NEW
@@ -792,19 +789,6 @@ def model(
             keys.MINIMAX_API_KEY,
             model_config,
             token_callback,
-        )
-    if model_name.startswith("novita/"):
-        from kiss.core.models import NovitaModel
-
-        if NovitaModel is None:
-            raise KISSError(
-                "OpenAI SDK not installed. Install 'openai' to use Novita models."
-            )
-        return NovitaModel(  # type: ignore[no-any-return]
-            model_name=model_name,
-            api_key=keys.NOVITA_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
         )
     raise KISSError(f"Unknown model name: {model_name}")
 

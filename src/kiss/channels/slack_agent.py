@@ -18,9 +18,10 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -32,6 +33,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._backend_utils import wait_for_matching_message
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +274,14 @@ class SlackChannelBackend:
             kwargs["thread_ts"] = thread_ts
         self._client.chat_postMessage(**kwargs)
 
-    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+        stop_event: threading.Event | None = None,
+    ) -> str | None:
         """Poll a Slack thread for a reply from a specific user.
 
         Args:
@@ -281,37 +290,50 @@ class SlackChannelBackend:
             user_id: User ID to wait for a reply from.
 
         Returns:
-            The text of the user's reply message.
+            The text of the user's reply message, or ``None`` on timeout.
         """
-        assert self._client is not None
+        client = self._client
+        assert client is not None
         seen_ts: set[str] = set()
-        # Mark all existing thread messages as seen
         try:
-            resp = self._client.conversations_replies(
+            resp = client.conversations_replies(
                 channel=channel_id, ts=thread_ts, limit=100
             )
-            existing: list[dict[str, Any]] = resp.get("messages", [])
-            for msg in existing:
+            for msg in cast(list[dict[str, Any]], resp.get("messages", [])):
                 seen_ts.add(str(msg["ts"]))
         except SlackApiError:
             pass
 
-        while True:
-            time.sleep(_REPLY_POLL_INTERVAL)
+        def poll() -> list[dict[str, Any]]:
             try:
-                resp = self._client.conversations_replies(
+                resp = client.conversations_replies(
                     channel=channel_id, ts=thread_ts, limit=100
                 )
-                replies: list[dict[str, Any]] = resp.get("messages", [])
-                for reply in replies:
-                    ts = str(reply["ts"])
-                    if ts in seen_ts:
-                        continue
-                    seen_ts.add(ts)
-                    if reply.get("user") == user_id:
-                        return str(reply.get("text", ""))
             except (SlackApiError, OSError):
                 logger.debug("Error polling thread replies", exc_info=True)
+                return []
+            replies: list[dict[str, Any]] = []
+            for reply in cast(list[dict[str, Any]], resp.get("messages", [])):
+                ts = str(reply["ts"])
+                if ts in seen_ts:
+                    continue
+                seen_ts.add(ts)
+                replies.append(reply)
+            return replies
+
+        return wait_for_matching_message(
+            poll=poll,
+            matches=lambda reply: reply.get("user") == user_id,
+            extract_text=lambda reply: str(reply.get("text", "")),
+            timeout_seconds=timeout_seconds,
+            stop_event=stop_event,
+            poll_interval=_REPLY_POLL_INTERVAL,
+        )
+
+    def disconnect(self) -> None:
+        """Release Slack backend state before stop or reconnect."""
+        self._client = None
+        self._bot_user_id = ""
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if a message was sent by the bot itself.
@@ -977,7 +999,6 @@ class SlackAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the SlackAgent from the command line with chat persistence."""
-    import os
     import sys
     import time as time_mod
 
@@ -1061,13 +1082,8 @@ def main() -> None:
         "ask_user_question_callback": cli_ask_user_question,
     }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(f"Time: {elapsed:.1f}s")

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels import ChannelBackend
+from kiss.core.base import Base
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,17 @@ _RECONNECT_BASE = 2.0
 _RECONNECT_MAX = 60.0
 _RECONNECT_ATTEMPTS = 5
 _STALE_THRESHOLD = 300.0
+_HANDLER_JOIN_TIMEOUT = 5.0
+_REPLY_WAIT_TIMEOUT = 300.0
+
+
+@dataclass
+class _SenderState:
+    """Mutable per-sender state protected by the daemon's sender-state lock."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    chat_id: str = ""
+    pending_messages: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
 
 
 class ChannelDaemon:
@@ -49,13 +63,16 @@ class ChannelDaemon:
         self._work_dir = work_dir or str(Path.home() / ".kiss" / "daemon_work")
         self._poll_interval = poll_interval
         self._allow_users = set(allow_users) if allow_users else None
-        self._sender_locks: dict[str, threading.Lock] = {}
-        self._sender_chat_ids: dict[str, str] = {}
+        self._sender_states: dict[str, _SenderState] = {}
+        self._sender_states_lock = threading.Lock()
+        self._handler_threads: set[threading.Thread] = set()
+        self._handler_threads_lock = threading.Lock()
         self._last_event_at: float = time.time()
         self._stop_event = threading.Event()
 
     def run(self) -> None:
         """Start the daemon loop. Blocks until stop() is called or fatal error."""
+        Base.reset_global_budget()
         reconnect_delay = _RECONNECT_BASE
         attempts = 0
         while not self._stop_event.is_set():
@@ -74,12 +91,15 @@ class ChannelDaemon:
                     e,
                     reconnect_delay,
                 )
-                time.sleep(reconnect_delay)
+                if self._stop_event.wait(reconnect_delay):
+                    break
                 reconnect_delay = min(reconnect_delay * 2, _RECONNECT_MAX)
 
     def stop(self) -> None:
-        """Signal the daemon to stop after the current poll cycle."""
+        """Signal the daemon to stop and wait briefly for handler cleanup."""
         self._stop_event.set()
+        self._disconnect_backend()
+        self._join_handler_threads()
 
     def _connect_and_poll(self) -> None:
         """Connect to channel and run the polling loop."""
@@ -87,102 +107,165 @@ class ChannelDaemon:
             raise RuntimeError(f"Failed to connect: {self._backend.connection_info}")
         logger.info("Connected: %s", self._backend.connection_info)
 
-        channel_id = ""
-        if self._channel_name:
-            channel_id = self._backend.find_channel(self._channel_name) or ""
-            if not channel_id:
-                raise RuntimeError(f"Channel not found: {self._channel_name!r}")
-            self._backend.join_channel(channel_id)
-            logger.info("Joined channel: %s (%s)", self._channel_name, channel_id)
+        try:
+            channel_id = ""
+            if self._channel_name:
+                channel_id = self._backend.find_channel(self._channel_name) or ""
+                if not channel_id:
+                    raise RuntimeError(f"Channel not found: {self._channel_name!r}")
+                self._backend.join_channel(channel_id)
+                logger.info("Joined channel: %s (%s)", self._channel_name, channel_id)
 
-        oldest = str(time.time())
-        self._last_event_at = time.time()
+            oldest = str(time.time())
+            self._last_event_at = time.time()
 
-        while not self._stop_event.is_set():
-            if time.time() - self._last_event_at > _STALE_THRESHOLD:
-                logger.warning("No events for %.0fs — reconnecting", _STALE_THRESHOLD)
-                raise RuntimeError("Stale connection detected")
+            while not self._stop_event.is_set():
+                if time.time() - self._last_event_at > _STALE_THRESHOLD:
+                    logger.warning("No events for %.0fs — reconnecting", _STALE_THRESHOLD)
+                    raise RuntimeError("Stale connection detected")
 
-            messages, oldest = self._backend.poll_messages(channel_id, oldest)
-            if messages:
-                self._last_event_at = time.time()
+                messages, oldest = self._backend.poll_messages(channel_id, oldest)
+                if messages:
+                    self._last_event_at = time.time()
 
-            for msg in messages:
-                if self._backend.is_from_bot(msg):
-                    continue
-                user_id = msg.get("user", "")
-                if self._allow_users and user_id not in self._allow_users:
-                    logger.debug("Ignoring message from non-allowed user: %s", user_id)
-                    continue
-                self._dispatch_message(channel_id, msg)
+                for msg in messages:
+                    if self._backend.is_from_bot(msg):
+                        continue
+                    user_id = msg.get("user", "")
+                    if self._allow_users and user_id not in self._allow_users:
+                        logger.debug("Ignoring message from non-allowed user: %s", user_id)
+                        continue
+                    self._dispatch_message(channel_id, msg)
 
-            time.sleep(self._poll_interval)
+                if self._stop_event.wait(self._poll_interval):
+                    break
+        finally:
+            self._disconnect_backend()
 
     def _dispatch_message(self, channel_id: str, msg: dict[str, Any]) -> None:
-        """Spawn a thread to handle one inbound message."""
+        """Queue an inbound message and ensure a handler thread is running."""
         user_id = msg.get("user", "unknown")
         session_key = f"{channel_id}:{user_id}"
+        state = self._get_sender_state(session_key)
+        state.pending_messages.put(msg)
+        self._start_sender_worker(session_key, channel_id, state)
 
-        if session_key not in self._sender_locks:
-            self._sender_locks[session_key] = threading.Lock()
-        lock = self._sender_locks[session_key]
+    def _get_sender_state(self, session_key: str) -> _SenderState:
+        """Return the per-sender state object for *session_key*."""
+        with self._sender_states_lock:
+            state = self._sender_states.get(session_key)
+            if state is None:
+                state = _SenderState()
+                self._sender_states[session_key] = state
+            return state
 
-        text = self._backend.strip_bot_mention(msg.get("text", ""))
-        thread_ts = msg.get("thread_ts", msg.get("ts", ""))
+    def _start_sender_worker(
+        self, session_key: str, channel_id: str, state: _SenderState
+    ) -> None:
+        """Start a managed worker for queued messages from one sender."""
+        if not state.lock.acquire(blocking=False):
+            return
 
         def handle() -> None:
-            if not lock.acquire(blocking=False):
-                logger.debug("Skipping message — agent already busy for %s", session_key)
-                return
             try:
-                agent = StatefulSorcarAgent(self._agent_name)
-                if session_key in self._sender_chat_ids:
-                    agent._chat_id = self._sender_chat_ids[session_key]
-                else:
-                    agent.new_chat()
-                    self._sender_chat_ids[session_key] = agent._chat_id
-
-                tools = list(self._extra_tools)
-
-                def reply(message: str) -> str:
-                    """Send a reply to the current conversation.
-
-                    Args:
-                        message: Text to send as the bot's reply.
-
-                    Returns:
-                        JSON string with ok status.
-                    """
-                    try:
-                        self._backend.send_message(channel_id, message, thread_ts)
-                        return json.dumps({"ok": True})
-                    except Exception as e:
-                        return json.dumps({"ok": False, "error": str(e)})
-
-                tools.append(reply)
-
-                Path(self._work_dir).mkdir(parents=True, exist_ok=True)
-                agent.run(
-                    prompt_template=text,
-                    model_name=self._model_name,
-                    max_budget=self._max_budget,
-                    work_dir=self._work_dir,
-                    tools=tools,
-                    headless=True,
-                    verbose=False,
-                )
-            except Exception as e:
-                logger.error("Agent error for %s: %s", session_key, e, exc_info=True)
-                try:
-                    self._backend.send_message(
-                        channel_id,
-                        f"Error processing your message: {e}",
-                        thread_ts,
-                    )
-                except Exception:
-                    pass
+                self._process_sender_queue(session_key, channel_id, state)
             finally:
-                lock.release()
+                state.lock.release()
+                with self._handler_threads_lock:
+                    self._handler_threads.discard(thread)
 
         thread = threading.Thread(target=handle, daemon=True)
+        with self._handler_threads_lock:
+            self._handler_threads.add(thread)
         thread.start()
+
+    def _process_sender_queue(
+        self, session_key: str, channel_id: str, state: _SenderState
+    ) -> None:
+        """Drain queued messages for one sender sequentially."""
+        while not self._stop_event.is_set():
+            try:
+                msg = state.pending_messages.get_nowait()
+            except queue.Empty:
+                return
+            self._handle_message(session_key, channel_id, msg, state)
+
+    def _handle_message(
+        self,
+        session_key: str,
+        channel_id: str,
+        msg: dict[str, Any],
+        state: _SenderState,
+    ) -> None:
+        """Run one agent task for a queued inbound message."""
+        text = self._backend.strip_bot_mention(msg.get("text", ""))
+        thread_ts = msg.get("thread_ts", msg.get("ts", ""))
+        agent = StatefulSorcarAgent(self._agent_name)
+        if state.chat_id:
+            agent.resume_chat_by_id(state.chat_id)
+        else:
+            agent.new_chat()
+            state.chat_id = agent.chat_id
+
+        tools = list(self._extra_tools)
+
+        def reply(message: str) -> str:
+            """Send a reply to the current conversation.
+
+            Args:
+                message: Text to send as the bot's reply.
+
+            Returns:
+                JSON string with ok status.
+            """
+            try:
+                self._backend.send_message(channel_id, message, thread_ts)
+                return json.dumps({"ok": True})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        tools.append(reply)
+
+        Path(self._work_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            agent.run(
+                prompt_template=text,
+                model_name=self._model_name,
+                max_budget=self._max_budget,
+                work_dir=self._work_dir,
+                tools=tools,
+                headless=True,
+                verbose=False,
+            )
+            state.chat_id = agent.chat_id
+        except Exception as e:
+            logger.error("Agent error for %s: %s", session_key, e, exc_info=True)
+            try:
+                self._backend.send_message(
+                    channel_id,
+                    f"Error processing your message: {e}",
+                    thread_ts,
+                )
+            except Exception:
+                pass
+
+    def _disconnect_backend(self) -> None:
+        """Best-effort backend cleanup hook for stop and reconnect paths."""
+        disconnect = getattr(self._backend, "disconnect", None)
+        if not callable(disconnect):
+            return
+        try:
+            disconnect()
+        except Exception:
+            logger.warning("Backend disconnect failed", exc_info=True)
+
+    def _join_handler_threads(self) -> None:
+        """Join in-flight handler threads with a bounded timeout."""
+        with self._handler_threads_lock:
+            threads = list(self._handler_threads)
+        deadline = time.monotonic() + _HANDLER_JOIN_TIMEOUT
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)

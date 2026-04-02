@@ -104,34 +104,37 @@ class WebUseTool:
 
     def _ensure_browser(self) -> None:
         """Ensure a Playwright browser page is ready, installing Chromium if needed."""
-        if self._page is not None:
+        if self._playwright is not None and self._page is not None:
             return
         from playwright.sync_api import sync_playwright
 
-        self._playwright = sync_playwright().start()
-        launcher = self._playwright.chromium
-        kwargs: dict[str, Any] = {
-            "headless": False,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-infobars",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        }
-
         try:
-            self._launch_browser(launcher, kwargs)
-        except Exception:  # pragma: no cover – Chromium always pre-installed in CI
-            # Chromium not installed yet — install it and retry
-            logger.info("Playwright Chromium not found, installing...")
-            subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                check=True,
-                capture_output=True,
-            )
-            self._launch_browser(launcher, kwargs)
+            self._playwright = sync_playwright().start()
+            launcher = self._playwright.chromium
+            kwargs: dict[str, Any] = {
+                "headless": False,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-infobars",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            }
+
+            try:
+                self._launch_browser(launcher, kwargs)
+            except Exception:  # pragma: no cover – Chromium always pre-installed in CI
+                logger.info("Playwright Chromium not found, installing...")
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    check=True,
+                    capture_output=True,
+                )
+                self._launch_browser(launcher, kwargs)
+        except Exception:
+            self.close()
+            raise
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self.user_data_dir:

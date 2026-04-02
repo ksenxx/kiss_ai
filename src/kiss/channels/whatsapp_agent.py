@@ -20,7 +20,7 @@ import logging
 import queue
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +33,15 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._backend_utils import (
+    ThreadedHTTPServer,
+    stop_http_server,
+    wait_for_matching_message,
+)
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_WEBHOOK_PORT = 18080
 
 _WHATSAPP_DIR = Path.home() / ".kiss" / "channels" / "whatsapp"
 _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
@@ -170,7 +177,8 @@ class WhatsAppChannelBackend:
         self._waba_id: str = ""
         self._connection_info: str = ""
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._webhook_server: HTTPServer | None = None
+        self._webhook_server: ThreadedHTTPServer | None = None
+        self._webhook_thread: threading.Thread | None = None
 
     def connect(self) -> bool:
         """Authenticate with WhatsApp using stored config and start webhook server.
@@ -198,14 +206,18 @@ class WhatsAppChannelBackend:
             f"Authenticated as {result.get('verified_name', '')} "
             f"({result.get('display_phone_number', '')})"
         )
-        self._start_webhook_server()
+        if not self._start_webhook_server():
+            return False
         return True
 
-    def _start_webhook_server(self, port: int = 8080) -> None:
+    def _start_webhook_server(self, port: int = _DEFAULT_WEBHOOK_PORT) -> bool:
         """Start the webhook HTTP server in a background thread.
 
         Args:
-            port: Port to listen on. Default: 8080.
+            port: Port to listen on. Default: 18080.
+
+        Returns:
+            True if the server started successfully, False otherwise.
         """
         backend = self
 
@@ -238,15 +250,21 @@ class WhatsAppChannelBackend:
             def log_message(self, *args: Any) -> None:  # type: ignore[override]
                 pass  # Suppress access log
 
+        self.disconnect()
         try:
-            self._webhook_server = HTTPServer(("0.0.0.0", port), Handler)
-            thread = threading.Thread(
+            self._webhook_server = ThreadedHTTPServer(("0.0.0.0", port), Handler)
+            self._webhook_thread = threading.Thread(
                 target=self._webhook_server.serve_forever, daemon=True
             )
-            thread.start()
+            self._webhook_thread.start()
             logger.info("WhatsApp webhook server started on port %d", port)
+            return True
         except OSError as e:
+            self._connection_info = f"WhatsApp webhook bind failed: {e}"
             logger.warning("Could not start webhook server: %s", e)
+            self._webhook_server = None
+            self._webhook_thread = None
+            return False
 
     @property
     def connection_info(self) -> str:
@@ -328,7 +346,14 @@ class WhatsAppChannelBackend:
             "text": {"body": text},
         })
 
-    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+        stop_event: threading.Event | None = None,
+    ) -> str | None:
         """Block until a message from a specific user is received.
 
         Args:
@@ -339,21 +364,33 @@ class WhatsAppChannelBackend:
         Returns:
             The text of the user's reply.
         """
-        import time
-        while True:
-            time.sleep(2.0)
-            temp: list[dict[str, Any]] = []
-            found = ""
+        def poll() -> list[dict[str, Any]]:
+            matches: list[dict[str, Any]] = []
+            others: list[dict[str, Any]] = []
             while not self._message_queue.empty():
                 raw = self._message_queue.get_nowait()
                 if raw.get("from") == user_id:
-                    found = raw.get("text", {}).get("body", "")
+                    matches.append(raw)
                 else:
-                    temp.append(raw)
-            for item in temp:
+                    others.append(raw)
+            for item in others:
                 self._message_queue.put(item)
-            if found:
-                return found
+            return matches
+
+        return wait_for_matching_message(
+            poll=poll,
+            matches=lambda raw: raw.get("from") == user_id,
+            extract_text=lambda raw: str(raw.get("text", {}).get("body", "")),
+            timeout_seconds=timeout_seconds,
+            stop_event=stop_event,
+            poll_interval=2.0,
+        )
+
+    def disconnect(self) -> None:
+        """Stop the embedded webhook server and release backend resources."""
+        self._webhook_server, self._webhook_thread = stop_http_server(
+            self._webhook_server, self._webhook_thread
+        )
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if a message was sent by the bot itself.
@@ -994,7 +1031,6 @@ class WhatsAppAgent(StatefulSorcarAgent):
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
     """Run the WhatsAppAgent from the command line with chat persistence."""
-    import os
     import sys
     import time as time_mod
 
@@ -1039,13 +1075,8 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         "ask_user_question_callback": cli_ask_user_question,
     }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(f"Time: {elapsed:.1f}s")

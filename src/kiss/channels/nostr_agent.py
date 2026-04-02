@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -130,9 +131,19 @@ class NostrChannelBackend:
         """Publish a Nostr note."""
         self.publish_note(text)
 
-    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
-        """Not fully implemented for Nostr."""
-        return ""
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+        stop_event: threading.Event | None = None,
+    ) -> str | None:
+        """Reply waiting is not currently supported for Nostr."""
+        return None
+
+    def disconnect(self) -> None:
+        """Release backend resources before stop or reconnect."""
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if event is from this key."""
@@ -442,7 +453,6 @@ class NostrAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the NostrAgent from the command line with chat persistence."""
-    import os
     import sys
     import time as time_mod
 
@@ -480,13 +490,8 @@ def main() -> None:
         "ask_user_question_callback": cli_ask_user_question,
     }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(f"Time: {elapsed:.1f}s")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -185,9 +184,9 @@ class RelentlessAgent(Base):
                 # For step/budget limit errors, try to summarize and continue
                 trajectory_path: Path | None = None
                 try:
-                    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="trajectory_")
-                    os.close(fd)
-                    trajectory_path = Path(tmp)
+                    tmp_dir = Path(self.work_dir) / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    trajectory_path = tmp_dir / f"trajectory_{session}.json"
                     trajectory_path.write_text(executor.get_trajectory())
                     shell_tools = UsefulTools()
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")

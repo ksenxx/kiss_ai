@@ -44,6 +44,16 @@ _db_conn: sqlite3.Connection | None = None
 _db_lock = threading.Lock()
 
 
+def _close_db() -> None:
+    """Close the singleton database connection and clear the cached handle."""
+    global _db_conn
+    with _db_lock:
+        if _db_conn is None:
+            return
+        _db_conn.close()
+        _db_conn = None
+
+
 _HISTORY_SELECT = (
     "SELECT id, timestamp, task, has_events, result, chat_id "
     "FROM task_history "
@@ -161,21 +171,30 @@ def _generate_chat_id() -> str:
                 return candidate
 
 
-def _add_task(task: str, chat_id: str = "") -> None:
-    """Append a task to the history. Thread-safe.
+def _add_task(task: str, chat_id: str = "") -> int:
+    """Append a task to the history and return its row id. Thread-safe.
 
-    Single-statement write — SQLite WAL + busy_timeout handles contention.
+    Single-statement write protected by ``_db_lock`` so callers can rely on
+    the returned row id for subsequent updates.
 
     Args:
         task: The task description string.
         chat_id: Chat session identifier to associate this task with.
+
+    Returns:
+        The inserted ``task_history.id`` value.
     """
     db = _get_db()
-    db.execute(
-        "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
-        (time.time(), task, chat_id, "Agent Failed Abrubptly"),
-    )
-    db.commit()
+    with _db_lock:
+        cursor = db.execute(
+            "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
+            (time.time(), task, chat_id, "Agent Failed Abruptly"),
+        )
+        db.commit()
+        row_id = cursor.lastrowid
+        if row_id is None:  # pragma: no cover
+            raise RuntimeError("sqlite did not return lastrowid")
+        return row_id
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
@@ -297,88 +316,87 @@ def _load_task_chat_events(
 
 
 def _save_task_result(
-    task: str,
     result: str,
+    task_id: int | None = None,
+    task: str | None = None,
 ) -> None:
     """Save just the result summary for a task (no event table changes).
 
-    Updates only the ``result`` column of the target task_history row.
-    Single-statement write — SQLite WAL + busy_timeout handles contention.
-
     Args:
-        task: The task description string to look up.
         result: The task result text to store in the history entry.
+        task_id: Stable row id to update when available.
+        task: Fallback task description string for legacy callers.
     """
     db = _get_db()
-    task_id = _most_recent_task_id(db, task)
-    if task_id is None:
-        return
-    db.execute(
-        "UPDATE task_history SET result = ? WHERE id = ?",
-        (result, task_id),
-    )
-    db.commit()
+    with _db_lock:
+        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
+        if resolved_task_id is None:
+            return
+        db.execute(
+            "UPDATE task_history SET result = ? WHERE id = ?",
+            (result, resolved_task_id),
+        )
+        db.commit()
 
 
 def _set_latest_chat_events(
     events: list[dict[str, object]],
+    task_id: int | None = None,
     task: str | None = None,
     result: str = "",
 ) -> None:
     """Save chat events for a task.
 
-    Updates the ``has_events`` and ``result`` columns of the target
-    task_history row and replaces all rows in the events table for
-    that task.
-
     Args:
         events: The chat events to store.
-        task: If given, find the history entry by task name.
-              Otherwise update the most recent entry.
+        task_id: Stable row id to update when available.
+        task: Fallback task description string for legacy callers.
         result: The task result text to store in the history entry.
     """
     db = _get_db()
-    task_id = _most_recent_task_id(db, task)
-    if task_id is None:
-        return
     has_ev = 1 if events else 0
     with _db_lock:
+        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
+        if resolved_task_id is None:
+            return
         db.execute(
             "UPDATE task_history SET has_events = ?, result = ? WHERE id = ?",
-            (has_ev, result, task_id),
+            (has_ev, result, resolved_task_id),
         )
-        db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
+        db.execute("DELETE FROM events WHERE task_id = ?", (resolved_task_id,))
         if has_ev:
             db.executemany(
                 "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-                [(task_id, i, json.dumps(ev)) for i, ev in enumerate(events)],
+                [(resolved_task_id, i, json.dumps(ev)) for i, ev in enumerate(events)],
             )
         db.commit()
 
 
-def _append_chat_event(task: str, event: dict[str, object]) -> None:
+def _append_chat_event(
+    event: dict[str, object],
+    task_id: int | None = None,
+    task: str | None = None,
+) -> None:
     """Append a single event to the saved chat events for a task.
 
-    Adds the event at the end (next sequence number) of the events
-    already stored for the most recent run of *task*.
-
     Args:
-        task: The task description string.
         event: The event dict to append.
+        task_id: Stable row id to update when available.
+        task: Fallback task description string for legacy callers.
     """
     db = _get_db()
-    task_id = _most_recent_task_id(db, task)
-    if task_id is None:
-        return
     with _db_lock:
+        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
+        if resolved_task_id is None:
+            return
         row = db.execute(
             "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM events WHERE task_id = ?",
-            (task_id,),
+            (resolved_task_id,),
         ).fetchone()
         next_seq = row["next_seq"] if row else 0
         db.execute(
             "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-            (task_id, next_seq, json.dumps(event)),
+            (resolved_task_id, next_seq, json.dumps(event)),
         )
         db.commit()
 
@@ -506,30 +524,23 @@ def _load_file_usage() -> dict[str, int]:
 
 
 def _record_file_usage(path: str) -> None:
-    """Increment the access count for a file path.
-
-    Updates the ``last_used`` timestamp for recency ordering and
-    evicts the least recently used entries when the table exceeds
-    ``_MAX_FILE_USAGE_ENTRIES`` rows.
-
-    Single atomic INSERT; eviction uses _db_lock for multi-statement safety.
-    """
+    """Increment the access count for a file path atomically."""
     db = _get_db()
     now = time.time()
-    db.execute(
-        "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
-        "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
-        (path, now, now),
-    )
-    row = db.execute("SELECT COUNT(*) FROM file_usage").fetchone()
-    if row[0] > _MAX_FILE_USAGE_ENTRIES:
-        with _db_lock:
+    with _db_lock:
+        db.execute(
+            "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
+            "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
+            (path, now, now),
+        )
+        row = db.execute("SELECT COUNT(*) FROM file_usage").fetchone()
+        if row[0] > _MAX_FILE_USAGE_ENTRIES:
             db.execute(
                 "DELETE FROM file_usage WHERE path NOT IN "
                 "(SELECT path FROM file_usage ORDER BY last_used DESC LIMIT ?)",
                 (_MAX_FILE_USAGE_ENTRIES,),
             )
-    db.commit()
+        db.commit()
 
 
 # ---------------------------------------------------------------------------

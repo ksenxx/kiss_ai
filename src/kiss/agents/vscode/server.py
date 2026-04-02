@@ -59,6 +59,11 @@ from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_de
 
 logger = logging.getLogger(__name__)
 
+ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
+    ctypes.c_ulong,
+    ctypes.py_object,
+]
+
 
 class VSCodePrinter(BaseBrowserPrinter):
     """Printer that outputs JSON events to stdout for VS Code extension.
@@ -113,6 +118,7 @@ class VSCodeServer:
         self._complete_seq = itertools.count()
         self._complete_seq_latest = -1
         self._complete_lock = threading.Lock()
+        self._task_history_id: int | None = None
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -288,6 +294,7 @@ class VSCodeServer:
         task_end_event: dict[str, Any] | None = None
         try:
             self.printer.start_recording(rec_id)
+            self._task_history_id = None
             try:
                 self.agent.run(
                     prompt_template=prompt,
@@ -313,7 +320,12 @@ class VSCodeServer:
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
                 chat_events = self.printer.stop_recording(rec_id)
-                _set_latest_chat_events(chat_events, task=prompt, result=result_summary)
+                _set_latest_chat_events(
+                    chat_events,
+                    task_id=self._task_history_id,
+                    task=prompt,
+                    result=result_summary,
+                )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
                 self._stop_event = None
@@ -335,7 +347,14 @@ class VSCodeServer:
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
                 if result_summary:
-                    self._generate_followup_async(prompt, result_summary, model, gen)
+                    self._generate_followup_async(
+                        prompt,
+                        result_summary,
+                        model,
+                        gen,
+                        self._task_history_id,
+                    )
+                self._task_history_id = None
             except BaseException:
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
@@ -561,7 +580,7 @@ class VSCodeServer:
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
     def _generate_followup_async(
-        self, task: str, result: str, model: str, gen: int
+        self, task: str, result: str, model: str, gen: int, task_id: int | None
     ) -> None:
         """Generate and broadcast a follow-up suggestion in a background thread.
 
@@ -575,6 +594,7 @@ class VSCodeServer:
             result: The task result summary.
             model: The model used for the task.
             gen: Task generation counter at time of launch.
+            task_id: Stable history row id for the completed task.
         """
         def _run() -> None:
             try:
@@ -583,18 +603,23 @@ class VSCodeServer:
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
                     # P12 fix: only broadcast if still same task generation
-                    if self._task_generation != gen:
+                    if not self._is_current_task_generation(gen):
                         return  # pragma: no cover
                     event: dict[str, object] = {
                         "type": "followup_suggestion",
                         "text": suggestion,
                     }
                     self.printer.broadcast(event)
-                    _append_chat_event(task, event)
+                    _append_chat_event(event, task_id=task_id, task=task)
             except Exception:  # pragma: no cover — LLM API error handler
                 logger.debug("Async followup generation failed", exc_info=True)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _is_current_task_generation(self, gen: int) -> bool:
+        """Return whether *gen* still matches the current task generation."""
+        with self._state_lock:
+            return self._task_generation == gen
 
     def _extract_result_summary(self) -> str:
         """Extract result summary from the last recorded events."""

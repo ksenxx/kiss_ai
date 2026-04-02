@@ -17,7 +17,7 @@ import logging
 import queue
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +28,15 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._backend_utils import (
+    ThreadedHTTPServer,
+    stop_http_server,
+    wait_for_matching_message,
+)
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_WEBHOOK_PORT = 18081
 
 _LINE_DIR = Path.home() / ".kiss" / "channels" / "line"
 
@@ -84,7 +91,8 @@ class LineChannelBackend:
     def __init__(self) -> None:
         self._api: Any = None
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._webhook_server: HTTPServer | None = None
+        self._webhook_server: ThreadedHTTPServer | None = None
+        self._webhook_thread: threading.Thread | None = None
         self._connection_info: str = ""
 
     def connect(self) -> bool:
@@ -99,13 +107,14 @@ class LineChannelBackend:
             configuration = Configuration(access_token=cfg["channel_access_token"])
             self._api = MessagingApi(ApiClient(configuration))
             self._connection_info = "Connected to LINE"
-            self._start_webhook_server()
+            if not self._start_webhook_server():
+                return False
             return True
         except Exception as e:
             self._connection_info = f"LINE connection failed: {e}"
             return False
 
-    def _start_webhook_server(self, port: int = 8080) -> None:
+    def _start_webhook_server(self, port: int = _DEFAULT_WEBHOOK_PORT) -> bool:
         """Start webhook HTTP server."""
         backend = self
 
@@ -136,15 +145,21 @@ class LineChannelBackend:
             def log_message(self, *args: Any) -> None:  # type: ignore[override]
                 pass
 
+        self.disconnect()
         try:
-            self._webhook_server = HTTPServer(("0.0.0.0", port), Handler)
-            thread = threading.Thread(
+            self._webhook_server = ThreadedHTTPServer(("0.0.0.0", port), Handler)
+            self._webhook_thread = threading.Thread(
                 target=self._webhook_server.serve_forever, daemon=True
             )
-            thread.start()
+            self._webhook_thread.start()
             logger.info("LINE webhook server started on port %d", port)
+            return True
         except OSError as e:
+            self._connection_info = f"LINE webhook bind failed: {e}"
             logger.warning("Could not start LINE webhook server: %s", e)
+            self._webhook_server = None
+            self._webhook_thread = None
+            return False
 
     @property
     def connection_info(self) -> str:
@@ -185,15 +200,29 @@ class LineChannelBackend:
         except Exception:
             pass
 
-    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+        stop_event: threading.Event | None = None,
+    ) -> str | None:
         """Poll for a reply from a specific user."""
-        import time
-        while True:
-            time.sleep(2.0)
-            msgs, _ = self.poll_messages(channel_id, "")
-            for msg in msgs:
-                if msg.get("user") == user_id:
-                    return str(msg.get("text", ""))
+        return wait_for_matching_message(
+            poll=lambda: self.poll_messages(channel_id, "")[0],
+            matches=lambda msg: msg.get("user") == user_id,
+            extract_text=lambda msg: str(msg.get("text", "")),
+            timeout_seconds=timeout_seconds,
+            stop_event=stop_event,
+            poll_interval=2.0,
+        )
+
+    def disconnect(self) -> None:
+        """Stop the embedded webhook server and release backend resources."""
+        self._webhook_server, self._webhook_thread = stop_http_server(
+            self._webhook_server, self._webhook_thread
+        )
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot."""
@@ -429,7 +458,6 @@ class LineAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the LineAgent from the command line with chat persistence."""
-    import os
     import sys
     import time as time_mod
 
@@ -500,13 +528,8 @@ def main() -> None:
         "ask_user_question_callback": cli_ask_user_question,
     }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(f"Time: {elapsed:.1f}s")

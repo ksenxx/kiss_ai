@@ -403,7 +403,7 @@ class KISSAgent(Base):
         """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if Base.global_budget_used > 200.0:
+        if Base.get_global_budget_used() > 200.0:
             raise KISSError("Global budget exceeded.")
         if self.step_count >= self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -454,12 +454,13 @@ class KISSAgent(Base):
             session_part = (
                 f"{self.session_info}, " if self.session_info else ""
             )
+            global_budget_used = Base.get_global_budget_used()
             return (
                 f"{session_part}"
                 f"Steps: {self.step_count}/{self.max_steps}, "
                 f"Tokens: {capped_tokens}/{max_tokens}, "
                 f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}, "
-                f"Global Budget: ${Base.global_budget_used:.4f}/${global_max:.2f}"
+                f"Global Budget: ${global_budget_used:.4f}/${global_max:.2f}"
             )
         except Exception:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)

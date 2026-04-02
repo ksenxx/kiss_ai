@@ -7,7 +7,6 @@ management — the same workflow that the VS Code extension performs in
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,6 +62,15 @@ class StatefulSorcarAgent(SorcarAgent):
         """
         chat_id = _load_task_chat_id(task)
         if chat_id:
+            self.resume_chat_by_id(chat_id)
+
+    def resume_chat_by_id(self, chat_id: str) -> None:
+        """Resume a chat session using a stable chat identifier.
+
+        Args:
+            chat_id: Persisted chat session identifier to resume.
+        """
+        if chat_id:
             self._chat_id = chat_id
 
     def build_chat_prompt(self, prompt: str) -> str:
@@ -110,7 +118,7 @@ class StatefulSorcarAgent(SorcarAgent):
             YAML string with 'success' and 'summary' keys.
         """
         agent_prompt = self.build_chat_prompt(prompt_template)
-        _add_task(prompt_template, chat_id=self._chat_id)
+        task_id = _add_task(prompt_template, chat_id=self._chat_id)
 
         result_summary = ""
         try:
@@ -122,7 +130,7 @@ class StatefulSorcarAgent(SorcarAgent):
             result_summary = "Task failed"
             raise
         finally:
-            _save_task_result(prompt_template, result_summary)
+            _save_task_result(task_id=task_id, result=result_summary)
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
@@ -165,13 +173,8 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         "ask_user_question_callback": cli_ask_user_question,
     }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(f"Time: {elapsed:.1f}s")
