@@ -8,6 +8,7 @@
   - [`kiss.core`](#kisscore)
     - [`kiss.core.kiss_agent`](#kisscorekiss_agent)
     - [`kiss.core.base`](#kisscorebase)
+    - [`kiss.core.config`](#kisscoreconfig)
     - [`kiss.core.config_builder`](#kisscoreconfig_builder)
     - [`kiss.core.models`](#kisscoremodels)
       - [`kiss.core.models.model_info`](#kisscoremodelsmodel_info)
@@ -94,7 +95,6 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.gemini_model`](#kissagentsvscodekiss_projectsrckisscoremodelsgemini_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.model`](#kissagentsvscodekiss_projectsrckisscoremodelsmodel)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.model_info`](#kissagentsvscodekiss_projectsrckisscoremodelsmodel_info)
-              - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.novita_model`](#kissagentsvscodekiss_projectsrckisscoremodelsnovita_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.openai_compatible_model`](#kissagentsvscodekiss_projectsrckisscoremodelsopenai_compatible_model)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.print_to_console`](#kissagentsvscodekiss_projectsrckisscoreprint_to_console)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.printer`](#kissagentsvscodekiss_projectsrckisscoreprinter)
@@ -114,6 +114,7 @@
       - [`kiss.benchmarks.terminal_bench.agent`](#kissbenchmarksterminal_benchagent)
       - [`kiss.benchmarks.terminal_bench.run`](#kissbenchmarksterminal_benchrun)
   - [`kiss.channels`](#kisschannels)
+    - [`kiss.channels._backend_utils`](#kisschannels_backend_utils)
     - [`kiss.channels.background_agent`](#kisschannelsbackground_agent)
     - [`kiss.channels.bluebubbles_agent`](#kisschannelsbluebubbles_agent)
     - [`kiss.channels.discord_agent`](#kisschannelsdiscord_agent)
@@ -138,7 +139,6 @@
     - [`kiss.channels.twitch_agent`](#kisschannelstwitch_agent)
     - [`kiss.channels.whatsapp_agent`](#kisschannelswhatsapp_agent)
     - [`kiss.channels.zalo_agent`](#kisschannelszalo_agent)
-      - [`kiss.core.models.novita_model`](#kisscoremodelsnovita_model)
     - [`kiss.docker.docker_tools`](#kissdockerdocker_tools)
 
 </details>
@@ -203,6 +203,10 @@ ______________________________________________________________________
 
 - `name`: The name identifier for the agent.
 
+- **get_global_budget_used** — Return the global budget total under the shared class lock.<br/>`get_global_budget_used() -> float`
+
+- **reset_global_budget** — Reset the shared process-wide budget counter to zero.<br/>`reset_global_budget() -> None`
+
 - **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled.<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
 
   - `printer`: An existing Printer instance to use directly. If provided, verbose is ignored.
@@ -211,6 +215,17 @@ ______________________________________________________________________
 - **get_trajectory** — Return the trajectory as JSON for visualization.<br/>`get_trajectory() -> str`
 
   - **Returns:** str: A JSON-formatted string of all messages in the agent's history.
+
+______________________________________________________________________
+
+#### `kiss.core.config` — *Configuration Pydantic models for KISS agent settings with CLI support.*
+
+**`set_artifact_base_dir`** — Set the base directory used to resolve `artifact_dir`.<br/>`def set_artifact_base_dir(base_dir: str | Path | None) -> str`
+
+- `base_dir`: Directory whose `.kiss.artifacts` child should contain generated job artifacts. `None` resets to the project root.
+- **Returns:** The resolved artifact job directory.
+
+**`get_artifact_dir`** — Return the active artifact directory, creating it lazily if needed.<br/>`def get_artifact_dir() -> str`
 
 ______________________________________________________________________
 
@@ -226,7 +241,7 @@ ______________________________________________________________________
 #### `kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel, NovitaModel
+from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
 ```
 
 ##### `class Attachment` — A file attachment (image or document) to include in a prompt.
@@ -1070,10 +1085,11 @@ ______________________________________________________________________
   - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
   - `tag`: The tag/version of the image (default: 'latest')
 
-- **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str) -> str`
+- **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str, timeout_seconds: int = 30) -> str`
 
   - `command`: The bash command to execute
   - `description`: A short description of the command in natural language
+  - `timeout_seconds`: Maximum time to wait before treating the command as hung.
   - **Returns:** The output of the command, including stdout, stderr, and exit code
 
 - **get_host_port** — Get the host port mapped to a container port.<br/>`get_host_port(container_port: int) -> int | None`
@@ -1098,6 +1114,10 @@ ______________________________________________________________________
 - **resume_chat** — Resume a previous chat session by looking up the task's chat_id. If the task has an associated `chat_id` in history, subsequent `run()` calls will continue that session.<br/>`resume_chat(task: str) -> None`
 
   - `task`: The task description string to look up.
+
+- **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
+
+  - `chat_id`: Persisted chat session identifier to resume.
 
 - **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
 
@@ -1567,6 +1587,10 @@ ______________________________________________________________________
 
   - `task`: The task description string to look up.
 
+- **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
+
+  - `chat_id`: Persisted chat session identifier to resume.
+
 - **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
 
   - `prompt`: The original task prompt.
@@ -1884,7 +1908,7 @@ ______________________________________________________________________
 **Constructor:** `ChannelDaemon(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', poll_interval: float = _POLL_INTERVAL, allow_users: list[str] | None = None) -> None`
 
 - **run** — Start the daemon loop. Blocks until stop() is called or fatal error.<br/>`run() -> None`
-- **stop** — Signal the daemon to stop after the current poll cycle.<br/>`stop() -> None`
+- **stop** — Signal the daemon to stop and wait briefly for handler cleanup.<br/>`stop() -> None`
 
 ______________________________________________________________________
 
@@ -1908,7 +1932,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a BlueBubbles message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -1976,7 +2002,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Discord message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release Discord backend state before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2086,7 +2114,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Feishu message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2182,12 +2212,14 @@ ______________________________________________________________________
   - `text`: Email body text.
   - `thread_ts`: Thread ID to reply to (optional).
 
-- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
   - `channel_id`: Label ID (unused for Gmail).
   - `thread_ts`: Thread ID to poll.
   - `user_id`: Email address of expected sender.
   - **Returns:** The text of the user's reply.
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2321,7 +2353,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Google Chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2410,7 +2444,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an iMessage.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Not implemented for iMessage via AppleScript.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Reply waiting is not supported for AppleScript-based iMessage.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2468,7 +2504,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an IRC PRIVMSG.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Close the IRC socket and join the reader thread.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2563,7 +2601,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a LINE push message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2630,7 +2670,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Matrix text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2721,7 +2763,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Mattermost post.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2817,7 +2861,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Teams channel message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2907,7 +2953,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Nextcloud Talk message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2989,7 +3037,9 @@ ______________________________________________________________________
 
 - **send_message** — Publish a Nostr note.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Not fully implemented for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Reply waiting is not currently supported for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if event is from this key.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3066,7 +3116,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the phone itself (sent).<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3150,7 +3202,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Signal message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3229,12 +3283,14 @@ ______________________________________________________________________
   - `text`: Message text (supports Slack mrkdwn formatting).
   - `thread_ts`: If non-empty, reply in this thread.
 
-- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
   - `channel_id`: Channel ID containing the thread.
   - `thread_ts`: Timestamp of the parent message (thread root).
   - `user_id`: User ID to wait for a reply from.
-  - **Returns:** The text of the user's reply message.
+  - **Returns:** The text of the user's reply message, or `None` on timeout.
+
+- **disconnect** — Release Slack backend state before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3380,7 +3436,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot's number.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3479,7 +3537,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Synology Chat message via incoming webhook.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3525,7 +3585,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Telegram message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3654,7 +3716,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Tlon/Urbit poke.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3728,7 +3792,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Twitch chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Not fully implemented for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Reply waiting is not currently supported for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3836,12 +3902,14 @@ ______________________________________________________________________
   - `text`: Message text.
   - `thread_ts`: Unused for WhatsApp.
 
-- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
   - `channel_id`: Unused for WhatsApp.
   - `thread_ts`: Unused for WhatsApp.
   - `user_id`: Phone number to wait for.
   - **Returns:** The text of the user's reply.
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -3977,7 +4045,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Zalo text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -4057,6 +4127,10 @@ ______________________________________________________________________
 
 - `name`: The name identifier for the agent.
 
+- **get_global_budget_used** — Return the global budget total under the shared class lock.<br/>`get_global_budget_used() -> float`
+
+- **reset_global_budget** — Reset the shared process-wide budget counter to zero.<br/>`reset_global_budget() -> None`
+
 - **set_printer** — Configure the output printer for this agent. If an explicit *printer* is provided, it is always used regardless of the verbose setting. Otherwise a `ConsolePrinter` is created when verbose output is enabled.<br/>`set_printer(printer: Printer | None = None, verbose: bool | None = None) -> None`
 
   - `printer`: An existing Printer instance to use directly. If provided, verbose is ignored.
@@ -4071,6 +4145,13 @@ ______________________________________________________________________
 #### `kiss.agents.vscode.kiss_project.src.kiss.core.config` — *Configuration Pydantic models for KISS agent settings with CLI support.*
 
 ##### `class Config(BaseModel)`
+
+**`set_artifact_base_dir`** — Set the base directory used to resolve `artifact_dir`.<br/>`def set_artifact_base_dir(base_dir: str | Path | None) -> str`
+
+- `base_dir`: Directory whose `.kiss.artifacts` child should contain generated job artifacts. `None` resets to the project root.
+- **Returns:** The resolved artifact job directory.
+
+**`get_artifact_dir`** — Return the active artifact directory, creating it lazily if needed.<br/>`def get_artifact_dir() -> str`
 
 ______________________________________________________________________
 
@@ -4122,7 +4203,7 @@ ______________________________________________________________________
 #### `kiss.agents.vscode.kiss_project.src.kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel, NovitaModel
+from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
 ```
 
 ##### `class Attachment` — A file attachment (image or document) to include in a prompt.
@@ -4384,19 +4465,6 @@ ______________________________________________________________________
 
 - `model_name`: Name of the model (with or without provider prefix).
 - **Returns:** int: Maximum context length in tokens.
-
-______________________________________________________________________
-
-#### `kiss.agents.vscode.kiss_project.src.kiss.core.models.novita_model` — *Novita model implementation using OpenAI-compatible API.*
-
-##### `class NovitaModel(OpenAICompatibleModel)` — A model that uses Novita's OpenAI-compatible API.
-
-**Constructor:** `NovitaModel(model_name: str, api_key: str, model_config: dict | None = None, token_callback: TokenCallback | None = None)`
-
-- `model_name`: The name of the Novita model to use.
-- `api_key`: The Novita API key for authentication.
-- `model_config`: Optional dictionary of model configuration parameters.
-- `token_callback`: Optional callback invoked with each streamed text token.
 
 ______________________________________________________________________
 
@@ -4666,10 +4734,11 @@ ______________________________________________________________________
   - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
   - `tag`: The tag/version of the image (default: 'latest')
 
-- **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str) -> str`
+- **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str, timeout_seconds: int = 30) -> str`
 
   - `command`: The bash command to execute
   - `description`: A short description of the command in natural language
+  - `timeout_seconds`: Maximum time to wait before treating the command as hung.
   - **Returns:** The output of the command, including stdout, stderr, and exit code
 
 - **get_host_port** — Get the host port mapped to a container port.<br/>`get_host_port(container_port: int) -> int | None`
@@ -4829,6 +4898,35 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+#### `kiss.channels._backend_utils` — *Shared helpers for channel backend polling and lifecycle management.*
+
+##### `class ThreadedHTTPServer(ThreadingMixIn, HTTPServer)` — HTTP server with per-request threads and address reuse enabled.
+
+**`wait_for_matching_message`** — Wait for a message matching a predicate with timeout and cancellation.<br/>`def wait_for_matching_message(*, poll: Callable[[], list[dict[str, Any]]], matches: Callable[[dict[str, Any]], bool], extract_text: Callable[[dict[str, Any]], str], timeout_seconds: float, stop_event: threading.Event | None, poll_interval: float) -> str | None`
+
+- `poll`: Callable returning newly observed messages.
+- `matches`: Predicate selecting the desired message.
+- `extract_text`: Callable extracting the reply text from a matching message.
+- `timeout_seconds`: Maximum time to wait.
+- `stop_event`: Optional cancellation event.
+- `poll_interval`: Delay between polls.
+- **Returns:** Extracted reply text, or `None` on timeout/cancellation.
+
+**`drain_queue_messages`** — Drain up to `limit` messages from a queue, optionally filtering.<br/>`def drain_queue_messages(message_queue: queue.Queue[dict[str, Any]], *, limit: int, keep: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]`
+
+- `message_queue`: Queue containing message dicts.
+- `limit`: Maximum number of kept messages to return.
+- `keep`: Optional predicate deciding whether a drained message should be kept.
+- **Returns:** The kept messages in dequeue order.
+
+**`stop_http_server`** — Shut down an embedded HTTP server and join its thread.<br/>`def stop_http_server(server: HTTPServer | None, server_thread: threading.Thread | None) -> tuple[None, None]`
+
+- `server`: HTTP server instance to stop.
+- `server_thread`: Background thread running `serve_forever()`.
+- **Returns:** `(None, None)` so callers can reset both attributes succinctly.
+
+______________________________________________________________________
+
 #### `kiss.channels.background_agent` — *Background channel daemon — polls ChannelBackend and triggers agents.*
 
 ##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
@@ -4836,7 +4934,7 @@ ______________________________________________________________________
 **Constructor:** `ChannelDaemon(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', poll_interval: float = _POLL_INTERVAL, allow_users: list[str] | None = None) -> None`
 
 - **run** — Start the daemon loop. Blocks until stop() is called or fatal error.<br/>`run() -> None`
-- **stop** — Signal the daemon to stop after the current poll cycle.<br/>`stop() -> None`
+- **stop** — Signal the daemon to stop and wait briefly for handler cleanup.<br/>`stop() -> None`
 
 ______________________________________________________________________
 
@@ -4860,7 +4958,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a BlueBubbles message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -4928,7 +5028,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Discord message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release Discord backend state before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5038,7 +5140,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Feishu message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5134,12 +5238,14 @@ ______________________________________________________________________
   - `text`: Email body text.
   - `thread_ts`: Thread ID to reply to (optional).
 
-- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
   - `channel_id`: Label ID (unused for Gmail).
   - `thread_ts`: Thread ID to poll.
   - `user_id`: Email address of expected sender.
   - **Returns:** The text of the user's reply.
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5273,7 +5379,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Google Chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5362,7 +5470,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an iMessage.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Not implemented for iMessage via AppleScript.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Reply waiting is not supported for AppleScript-based iMessage.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5420,7 +5530,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an IRC PRIVMSG.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Close the IRC socket and join the reader thread.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5515,7 +5627,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a LINE push message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5582,7 +5696,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Matrix text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5673,7 +5789,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Mattermost post.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5769,7 +5887,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Teams channel message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5859,7 +5979,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Nextcloud Talk message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -5941,7 +6063,9 @@ ______________________________________________________________________
 
 - **send_message** — Publish a Nostr note.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Not fully implemented for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Reply waiting is not currently supported for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if event is from this key.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6018,7 +6142,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the phone itself (sent).<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6102,7 +6228,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Signal message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6181,12 +6309,14 @@ ______________________________________________________________________
   - `text`: Message text (supports Slack mrkdwn formatting).
   - `thread_ts`: If non-empty, reply in this thread.
 
-- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
   - `channel_id`: Channel ID containing the thread.
   - `thread_ts`: Timestamp of the parent message (thread root).
   - `user_id`: User ID to wait for a reply from.
-  - **Returns:** The text of the user's reply message.
+  - **Returns:** The text of the user's reply message, or `None` on timeout.
+
+- **disconnect** — Release Slack backend state before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6332,7 +6462,9 @@ ______________________________________________________________________
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot's number.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6431,7 +6563,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Synology Chat message via incoming webhook.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6477,7 +6611,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Telegram message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6606,7 +6742,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Tlon/Urbit poke.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6680,7 +6818,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Twitch chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Not fully implemented for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Reply waiting is not currently supported for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6788,12 +6928,14 @@ ______________________________________________________________________
   - `text`: Message text.
   - `thread_ts`: Unused for WhatsApp.
 
-- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
   - `channel_id`: Unused for WhatsApp.
   - `thread_ts`: Unused for WhatsApp.
   - `user_id`: Phone number to wait for.
   - **Returns:** The text of the user's reply.
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6929,7 +7071,9 @@ ______________________________________________________________________
 
 - **send_message** — Send a Zalo text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str) -> str`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+
+- **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -6986,19 +7130,6 @@ ______________________________________________________________________
 ##### `class ZaloAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
 
 **Constructor:** `ZaloAgent() -> None`
-
-______________________________________________________________________
-
-#### `kiss.core.models.novita_model` — *Novita model implementation using OpenAI-compatible API.*
-
-##### `class NovitaModel(OpenAICompatibleModel)` — A model that uses Novita's OpenAI-compatible API.
-
-**Constructor:** `NovitaModel(model_name: str, api_key: str, model_config: dict | None = None, token_callback: TokenCallback | None = None)`
-
-- `model_name`: The name of the Novita model to use.
-- `api_key`: The Novita API key for authentication.
-- `model_config`: Optional dictionary of model configuration parameters.
-- `token_callback`: Optional callback invoked with each streamed text token.
 
 ______________________________________________________________________
 

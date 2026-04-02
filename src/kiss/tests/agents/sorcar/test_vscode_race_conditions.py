@@ -81,7 +81,11 @@ class TestRace2FollowupUsesFastModel(unittest.TestCase):
     def test_run_task_calls_followup_with_model(self) -> None:
         """Verify _run_task_inner passes the task model to _generate_followup_async."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_generate_followup_async(prompt, result_summary, model" in source
+        assert "_generate_followup_async(" in source
+        # The call passes prompt, result_summary, and model (may span lines)
+        assert "prompt," in source
+        assert "result_summary," in source
+        assert "model," in source
 
 
 class TestRace14StatusBroadcastOrder(unittest.TestCase):

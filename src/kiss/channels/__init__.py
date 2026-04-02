@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Protocol
 
 
@@ -81,17 +82,30 @@ class ChannelBackend(Protocol):
         """
         ...
 
-    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
-        """Block until a specific user replies in a thread.
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+        stop_event: threading.Event | None = None,
+    ) -> str | None:
+        """Wait for a specific user reply with timeout and cancellation support.
 
         Args:
             channel_id: Channel ID containing the thread.
             thread_ts: Timestamp of the parent message (thread root).
             user_id: User ID to wait for a reply from.
+            timeout_seconds: Maximum time to wait for a reply.
+            stop_event: Optional event used to cancel waiting early.
 
         Returns:
-            The text of the user's reply.
+            The text of the user's reply, or ``None`` on timeout/cancellation.
         """
+        ...
+
+    def disconnect(self) -> None:
+        """Release any backend-owned resources before stop or reconnect."""
         ...
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:

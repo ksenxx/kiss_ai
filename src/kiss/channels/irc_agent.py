@@ -28,6 +28,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._backend_utils import wait_for_matching_message
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +111,9 @@ class IRCChannelBackend:
                 import ssl
                 context = ssl.create_default_context()
                 sock = context.wrap_socket(sock, server_hostname=cfg["server"])
+            self.disconnect()
             self._sock = sock
-            self._sock.settimeout(None)
+            self._sock.settimeout(1.0)
             if cfg.get("password"):
                 self._send_raw(f"PASS {cfg['password']}")
             self._send_raw(f"NICK {cfg['nick']}")
@@ -135,7 +137,7 @@ class IRCChannelBackend:
     def _read_loop(self) -> None:
         """Background thread reading IRC data."""
         buf = ""
-        while self._sock:
+        while self._sock is not None:
             try:
                 data = self._sock.recv(4096)
                 if not data:
@@ -144,7 +146,9 @@ class IRCChannelBackend:
                 while "\r\n" in buf:
                     line, buf = buf.split("\r\n", 1)
                     self._handle_line(line)
-            except Exception:
+            except TimeoutError:
+                continue
+            except OSError:
                 break
 
     def _handle_line(self, line: str) -> None:
@@ -199,14 +203,37 @@ class IRCChannelBackend:
         """Send an IRC PRIVMSG."""
         self._send_raw(f"PRIVMSG {channel_id} :{text}")
 
-    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+        stop_event: threading.Event | None = None,
+    ) -> str | None:
         """Poll for a reply from a specific user."""
-        while True:
-            time.sleep(1.0)
-            msgs, _ = self.poll_messages(channel_id, "")
-            for msg in msgs:
-                if msg.get("user") == user_id:
-                    return str(msg.get("text", ""))
+        return wait_for_matching_message(
+            poll=lambda: self.poll_messages(channel_id, "")[0],
+            matches=lambda msg: msg.get("user") == user_id,
+            extract_text=lambda msg: str(msg.get("text", "")),
+            timeout_seconds=timeout_seconds,
+            stop_event=stop_event,
+            poll_interval=1.0,
+        )
+
+    def disconnect(self) -> None:
+        """Close the IRC socket and join the reader thread."""
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=5.0)
+            self._reader_thread = None
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot."""
@@ -494,7 +521,6 @@ class IRCAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the IRCAgent from the command line with chat persistence."""
-    import os
     import sys
     import time as time_mod
 
@@ -564,13 +590,8 @@ def main() -> None:
         "ask_user_question_callback": cli_ask_user_question,
     }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(f"Time: {elapsed:.1f}s")

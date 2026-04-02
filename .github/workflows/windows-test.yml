@@ -118,6 +118,7 @@ jobs:
           & $uvExe run --directory $kissProject python -c "import platform; print(f'Python {platform.python_version()} on {platform.system()} {platform.machine()}')" 2>&1
 
       - name: Test Anthropic API connectivity
+        if: env.ANTHROPIC_API_KEY != ''
         shell: pwsh
         timeout-minutes: 2
         run: |
@@ -134,6 +135,7 @@ jobs:
 
       # ── TEST 2: Direct agent test (the real functional test) ──
       - name: Run agent task on Windows
+        if: env.ANTHROPIC_API_KEY != ''
         shell: pwsh
         timeout-minutes: 5
         run: |

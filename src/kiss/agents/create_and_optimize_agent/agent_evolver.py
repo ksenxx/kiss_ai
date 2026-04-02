@@ -85,7 +85,6 @@ Algorithm EVOLVE():
     5. CLEANUP work_dir
 """
 
-import importlib.util
 import json
 import logging
 import os
@@ -455,26 +454,51 @@ class AgentEvolver:
             parent_ids=[],
         )
 
-    def _load_module_from_path(self, module_name: str, file_path: str) -> Any:
-        """Dynamically load a Python module from a file path.
-
-        Loads a Python file as a module, making its contents available for
-        execution. Used to load agent.py files from variant directories.
+    def _run_variant_subprocess(self, agent_dir: str) -> dict[str, Any]:
+        """Run a variant's agent in an isolated subprocess and return its result.
 
         Args:
-            module_name: The name to assign to the loaded module in sys.modules.
-            file_path: The absolute path to the Python file to load.
+            agent_dir: Directory containing the variant's ``agent.py`` file.
 
         Returns:
-            The loaded module object, or None if loading fails.
+            Parsed JSON result from ``agent_run()``, or failure metrics if the
+            subprocess fails or returns invalid output.
         """
-        spec = importlib.util.spec_from_file_location(module_name, file_path)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-        return module
+        import subprocess
+
+        script = (
+            "import importlib.util, json, pathlib, sys; "
+            "agent_dir = pathlib.Path(sys.argv[1]); "
+            "agent_file = agent_dir / 'agent.py'; "
+            "spec = importlib.util.spec_from_file_location('agent_variant', agent_file); "
+            "module = importlib.util.module_from_spec(spec) if spec and spec.loader else None; "
+            "assert spec and spec.loader and module is not None; "
+            "spec.loader.exec_module(module); "
+            f"result = module.agent_run({self.task_description!r}); "
+            "print(json.dumps(result))"
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, '-c', script, agent_dir],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except Exception:
+            logger.debug("Exception caught", exc_info=True)
+            return {
+                "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
+            }
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            logger.debug("Exception caught", exc_info=True)
+            return {
+                "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
+            }
+        return result if isinstance(result, dict) else {
+            "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
+        }
 
     def _evaluate_variant(
         self,
@@ -498,37 +522,8 @@ class AgentEvolver:
 
         temp_dir = self.work_dir / f"eval_variant_{variant.id}"
         temp_dir.mkdir(parents=True, exist_ok=True)
-        old_cwd = os.getcwd()
-        os.chdir(temp_dir)
-        module_name: str | None = None
-        try:
-            shutil.copytree(variant.folder_path, temp_dir / "agent_code", dirs_exist_ok=True)
-            agent_dir = str(temp_dir / "agent_code")
-            agent_file = temp_dir / "agent_code" / "agent.py"
-            module_name = f"agent_variant_{id(self)}_{random.randint(0, 10000)}"
-
-            try:
-                sys.path.insert(0, agent_dir)
-                agent_module = self._load_module_from_path(module_name, str(agent_file))
-                if agent_module is None:
-                    print(f"Failed to load module from {agent_file}")
-                    return {
-                        "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
-                    }
-                result: dict[str, Any] = agent_module.agent_run(self.task_description)
-                return result
-            except Exception:
-                logger.debug("Exception caught", exc_info=True)
-                return {
-                    "metrics": {"success": 1, "tokens_used": 0, "execution_time": 0.0},
-                }
-            finally:
-                if agent_dir in sys.path:
-                    sys.path.remove(agent_dir)
-                if module_name:
-                    sys.modules.pop(module_name, None)
-        finally:
-            os.chdir(old_cwd)
+        shutil.copytree(variant.folder_path, temp_dir / "agent_code", dirs_exist_ok=True)
+        return self._run_variant_subprocess(str(temp_dir / "agent_code"))
 
     def _update_pareto_frontier(self, new_variant: AgentVariant) -> bool:
         """Update the Pareto frontier with a new variant.
