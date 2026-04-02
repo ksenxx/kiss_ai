@@ -158,11 +158,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "gemini-2.5-flash-image": _mi(32768, 0.30, 2.50),  # NEW: needs pricing
     "gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),  # Poor tool use
-    "gemini-2.5-flash-lite-preview-09-2025": _mi(1048576, 0.10, 0.40, fc=False),
     "gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
     "gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
     "gemini-3-pro-preview": _mi(1048576, 2.00, 12.00),
     "gemini-3.1-flash-lite-preview": _mi(1048576, 0.25, 1.50),  # NEW: needs pricing
+    "gemini-3.1-flash-live-preview": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
     "gemini-3.1-pro-preview": _mi(1048576, 2.00, 12.00),  # 1M context, 64k output
     "gemini-embedding-001": _emb(2048, 0.15),  # Newest embedding model
     "gemini-embedding-2-preview": _emb(8192, 0.00),  # NEW: needs pricing
@@ -326,6 +326,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/arcee-ai/coder-large": _mi(32768, 0.50, 0.80, fc=False),
     "openrouter/arcee-ai/maestro-reasoning": _mi(131072, 0.90, 3.30, fc=False),
     "openrouter/arcee-ai/spotlight": _mi(131072, 0.18, 0.18, fc=False),
+    "openrouter/arcee-ai/trinity-large-thinking": _mi(262144, 0.22, 0.85),  # NEW
     "openrouter/arcee-ai/trinity-mini": _mi(131072, 0.045, 0.15, fc=False),
     "openrouter/arcee-ai/virtuoso-large": _mi(131072, 0.75, 1.20),  # NEW
     "openrouter/baidu/ernie-4.5-21b-a3b": _mi(120000, 0.07, 0.28, fc=False),
@@ -377,6 +378,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemma-3-27b-it": _mi(131072, 0.08, 0.16, fc=False),
     "openrouter/google/gemma-3-4b-it": _mi(131072, 0.04, 0.08, fc=False),
     "openrouter/google/gemma-3n-e4b-it": _mi(32768, 0.02, 0.04, fc=False),
+    "openrouter/google/lyria-3-clip-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
+    "openrouter/google/lyria-3-pro-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
     "openrouter/gryphe/mythomax-l2-13b": _mi(4096, 0.06, 0.06, fc=False),
     "openrouter/ibm-granite/granite-4.0-h-micro": _mi(131000, 0.02, 0.11, fc=False),
     "openrouter/inception/mercury": _mi(128000, 0.25, 0.75, fc=False, gen=False),  # Returns empty
@@ -384,7 +387,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/inception/mercury-coder": _mi(128000, 0.25, 0.75, fc=False, gen=False),
     "openrouter/inflection/inflection-3-pi": _mi(8000, 2.50, 10.00, fc=False),
     "openrouter/inflection/inflection-3-productivity": _mi(8000, 2.50, 10.00, fc=False),
-    "openrouter/kwaipilot/kat-coder-pro": _mi(256000, 0.207, 0.828),
     "openrouter/kwaipilot/kat-coder-pro-v2": _mi(256000, 0.30, 1.20),  # NEW
     "openrouter/liquid/lfm-2-24b-a2b": _mi(32768, 0.03, 0.12),  # NEW
     "openrouter/liquid/lfm-2.2-6b": _mi(32768, 0.01, 0.02, fc=False),
@@ -410,7 +412,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/minimax/minimax-m2": _mi(196608, 0.255, 1.00, fc=False),
     "openrouter/minimax/minimax-m2-her": _mi(65536, 0.30, 1.20, fc=False),  # Roleplay model
     "openrouter/minimax/minimax-m2.1": _mi(196608, 0.27, 0.95),
-    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.19, 1.15),
+    "openrouter/minimax/minimax-m2.5": _mi(196600, 0.118, 1.25),
     "openrouter/minimax/minimax-m2.7": _mi(204800, 0.30, 1.20),  # NEW
     "openrouter/mistralai/codestral-2508": _mi(256000, 0.30, 0.90, fc=False),
     "openrouter/mistralai/devstral-2512": _mi(262144, 0.40, 2.00, fc=False),
@@ -440,7 +442,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2": _mi(131072, 0.57, 2.30, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-0905": _mi(131072, 0.40, 2.00, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-thinking": _mi(131072, 0.47, 2.00, fc=False),  # SLOW
-    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.42, 2.20),  # Multimodal + agentic
+    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.383, 1.909),  # Multimodal + agentic
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
     "openrouter/nex-agi/deepseek-v3.1-nex-n1": _mi(131072, 0.135, 0.50, fc=False),
@@ -568,7 +570,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.065, 0.26),  # NEW
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),  # NEW
     "openrouter/qwen/qwq-32b": _mi(131072, 0.15, 0.58, fc=False),  # SLOW: reasoning model
-    "openrouter/reka/reka-edge": _mi(16384, 0.10, 0.10),  # NEW
+    "openrouter/rekaai/reka-edge": _mi(16384, 0.10, 0.10),  # NEW
+    "openrouter/rekaai/reka-flash-3": _mi(65536, 0.10, 0.20),  # NEW
     "openrouter/relace/relace-apply-3": _mi(256000, 0.85, 1.25, fc=False),
     "openrouter/relace/relace-search": _mi(256000, 1.00, 3.00, fc=False),  # Agentic search
     "openrouter/sao10k/l3-euryale-70b": _mi(8192, 1.48, 1.48),
@@ -594,8 +597,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/x-ai/grok-4": _mi(256000, 3.00, 15.00),
     "openrouter/x-ai/grok-4-fast": _mi(2000000, 0.20, 0.50),
     "openrouter/x-ai/grok-4.1-fast": _mi(2000000, 0.20, 0.50),
-    "openrouter/x-ai/grok-4.20-beta": _mi(2000000, 2.00, 6.00),  # NEW
-    "openrouter/x-ai/grok-4.20-multi-agent-beta": _mi(2000000, 2.00, 6.00),  # NEW
+    "openrouter/x-ai/grok-4.20": _mi(2000000, 2.00, 6.00),  # NEW
+    "openrouter/x-ai/grok-4.20-multi-agent": _mi(2000000, 2.00, 6.00),  # NEW
     "openrouter/x-ai/grok-code-fast-1": _mi(256000, 0.20, 1.50),
     "openrouter/xiaomi/mimo-v2-flash": _mi(262144, 0.09, 0.29, fc=False),
     "openrouter/xiaomi/mimo-v2-omni": _mi(262144, 0.40, 2.00),  # NEW
@@ -610,6 +613,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
     "openrouter/z-ai/glm-5": _mi(80000, 0.72, 2.30),  # 744B MoE - FC verified
     "openrouter/z-ai/glm-5-turbo": _mi(202752, 1.20, 4.00),  # NEW
+    "openrouter/z-ai/glm-5v-turbo": _mi(202752, 1.20, 4.00),  # NEW
     "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),  # NEW
     "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
