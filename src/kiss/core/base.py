@@ -51,7 +51,7 @@ if sys.platform == "win32":
             "`Get-Content` instead of `cat`.\n"
         )
 
-_sorcar_path = Path("SORCAR.md")
+_sorcar_path = _project_dir / "SORCAR.md"
 if _sorcar_path.exists():
     SYSTEM_PROMPT += "\n" + _sorcar_path.read_text()
 
@@ -62,6 +62,18 @@ class Base:
     agent_counter: ClassVar[int] = 1
     global_budget_used: ClassVar[float] = 0.0
     _class_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    @classmethod
+    def get_global_budget_used(cls) -> float:
+        """Return the global budget total under the shared class lock."""
+        with cls._class_lock:
+            return cls.global_budget_used
+
+    @classmethod
+    def reset_global_budget(cls) -> None:
+        """Reset the shared process-wide budget counter to zero."""
+        with cls._class_lock:
+            cls.global_budget_used = 0.0
 
     model_name: str
     messages: list[dict[str, Any]]
