@@ -208,6 +208,61 @@ class TestGetAvailableModels:
         result = get_most_expensive_model()
         assert isinstance(result, str)
 
+    def test_get_default_model_priority(self) -> None:
+        """Test that get_default_model picks the right model per API key priority."""
+        import os
+
+        from kiss.core import config as config_module
+        from kiss.core.models.model_info import get_default_model
+
+        env_keys = [
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENAI_API_KEY",
+            "TOGETHER_API_KEY",
+        ]
+        saved = {k: os.environ.get(k) for k in env_keys}
+        try:
+            # Clear all keys
+            for k in env_keys:
+                os.environ.pop(k, None)
+            config_module.DEFAULT_CONFIG = config_module.Config()
+            assert get_default_model() == "claude-opus-4-6"  # fallback
+
+            # Together only
+            os.environ["TOGETHER_API_KEY"] = "t"
+            config_module.DEFAULT_CONFIG = config_module.Config()
+            assert get_default_model() == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+
+            # OpenAI beats Together
+            os.environ["OPENAI_API_KEY"] = "t"
+            config_module.DEFAULT_CONFIG = config_module.Config()
+            assert get_default_model() == "gpt-5.4"
+
+            # Gemini beats OpenAI
+            os.environ["GEMINI_API_KEY"] = "t"
+            config_module.DEFAULT_CONFIG = config_module.Config()
+            assert get_default_model() == "gemini-3.1-pro-preview"
+
+            # OpenRouter beats Gemini
+            os.environ["OPENROUTER_API_KEY"] = "t"
+            config_module.DEFAULT_CONFIG = config_module.Config()
+            assert get_default_model() == "openrouter/anthropic/claude-opus-4.6"
+
+            # Anthropic beats all
+            os.environ["ANTHROPIC_API_KEY"] = "t"
+            config_module.DEFAULT_CONFIG = config_module.Config()
+            assert get_default_model() == "claude-opus-4-6"
+        finally:
+            for k in env_keys:
+                val = saved[k]
+                if val is not None:
+                    os.environ[k] = val
+                else:
+                    os.environ.pop(k, None)
+            config_module.DEFAULT_CONFIG = config_module.Config()
+
 
 class TestAttachment:
     def test_from_file_unsupported_mime(self, tmp_path: Path) -> None:

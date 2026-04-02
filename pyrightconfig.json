@@ -34,6 +34,26 @@
     {
       "root": "src/kiss/channels/telegram_agent.py",
       "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/benchmarks/swebench_pro/run.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/benchmarks/terminal_bench/agent.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/benchmarks/terminal_bench/run.py",
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "src/kiss/channels/gmail_agent.py",
+      "reportAttributeAccessIssue": "none"
+    },
+    {
+      "root": "src/kiss/channels/googlechat_agent.py",
+      "reportAttributeAccessIssue": "none"
     }
   ]
 }

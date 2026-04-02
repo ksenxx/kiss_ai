@@ -39,3 +39,8 @@ src/kiss/agents/vscode/README.md
 LESSONS.md
 kiss_project/
 tmp/
+src/kiss/benchmarks/results/
+!src/kiss/benchmarks/results/.gitkeep
+src/kiss/benchmarks/swebench_pro/vendor/
+src/kiss/benchmarks/dashboard.html
+jobs/
