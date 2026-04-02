@@ -176,7 +176,7 @@ The RelentlessAgent achieves comparable (and for very long tasks, superior) resu
 
 ### 5. No Subscription, No Proprietary Infrastructure
 
-Cursor requires a monthly subscription ($20/month Pro, $200/month Ultra) and runs on proprietary infrastructure. Claude Code requires an Anthropic API key with per-token billing through their infrastructure, or a $100-200/month Max plan. The RelentlessAgent runs on any LLM provider (Anthropic, OpenAI, Gemini, Together AI, OpenRouter, MiniMax, Novita), on your own machine, with no monthly fees beyond API usage. You can switch models between sessions if needed.
+Cursor requires a monthly subscription ($20/month Pro, $200/month Ultra) and runs on proprietary infrastructure. Claude Code requires an Anthropic API key with per-token billing through their infrastructure, or a $100-200/month Max plan. The RelentlessAgent runs on any LLM provider (Anthropic, OpenAI, Gemini, Together AI, OpenRouter, MiniMax), on your own machine, with no monthly fees beyond API usage. You can switch models between sessions if needed.
 
 ______________________________________________________________________
 

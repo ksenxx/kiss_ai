@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._backend_utils import wait_for_matching_message
 
 logger = logging.getLogger(__name__)
 
@@ -164,15 +166,33 @@ class PhoneControlChannelBackend:
             timeout=30,
         )
 
-    def wait_for_reply(self, channel_id: str, thread_ts: str, user_id: str) -> str:
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+        stop_event: threading.Event | None = None,
+    ) -> str | None:
         """Poll for a reply SMS from a specific number."""
         oldest = str(int(time.time() * 1000))
-        while True:
-            time.sleep(3.0)
+
+        def poll() -> list[dict[str, Any]]:
+            nonlocal oldest
             msgs, oldest = self.poll_messages(channel_id, oldest)
-            for msg in msgs:
-                if msg.get("user") == user_id:
-                    return str(msg.get("text", ""))
+            return msgs
+
+        return wait_for_matching_message(
+            poll=poll,
+            matches=lambda msg: msg.get("user") == user_id,
+            extract_text=lambda msg: str(msg.get("text", "")),
+            timeout_seconds=timeout_seconds,
+            stop_event=stop_event,
+            poll_interval=3.0,
+        )
+
+    def disconnect(self) -> None:
+        """Release backend resources before stop or reconnect."""
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the phone itself (sent)."""
@@ -466,7 +486,6 @@ class PhoneControlAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the PhoneControlAgent from the command line with chat persistence."""
-    import os
     import sys
     import time as time_mod
 
@@ -535,13 +554,8 @@ def main() -> None:
         "ask_user_question_callback": cli_ask_user_question,
     }
 
-    old_cwd = os.getcwd()
-    os.chdir(work_dir)
     start_time = time_mod.time()
-    try:
-        agent.run(**run_kwargs)
-    finally:
-        os.chdir(old_cwd)
+    agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(f"Time: {elapsed:.1f}s")
