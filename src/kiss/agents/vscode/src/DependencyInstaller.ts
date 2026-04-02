@@ -61,6 +61,20 @@ function findNodeDirWindows(baseDir: string): string {
 }
 
 /**
+ * Return the best default model name based on which LLM API keys are set
+ * in ``process.env``.  Priority: Anthropic > OpenRouter > Gemini > OpenAI > Together AI.
+ * Falls back to ``"claude-opus-4-6"`` when no keys are present.
+ */
+export function getDefaultModel(): string {
+  if (process.env.ANTHROPIC_API_KEY) return 'claude-opus-4-6';
+  if (process.env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.6';
+  if (process.env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
+  if (process.env.OPENAI_API_KEY) return 'gpt-5.4';
+  if (process.env.TOGETHER_API_KEY) return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
+  return 'claude-opus-4-6';
+}
+
+/**
  * Ensure all required dependencies are installed.
  * Shows a progress notification during first-time installation.
  * Safe to call multiple times — skips already-installed dependencies.
@@ -258,11 +272,10 @@ export async function ensureDependencies(): Promise<void> {
 
   log('=== Dependency check finished ===');
 
-  // Prompt for missing API keys (returns true when required keys are set)
+  // Prompt for missing API keys (returns true when at least one key is set)
   const apiKeysReady = await ensureApiKeys();
 
-  // Show restart notification only after all API keys have been collected
-  // and only when the required ANTHROPIC_API_KEY is available.
+  // Show restart notification only after API key prompting has completed.
   if (showRestartNotification) {
     if (apiKeysReady) {
       vscode.window.showInformationMessage(
@@ -275,8 +288,8 @@ export async function ensureDependencies(): Promise<void> {
       });
     } else {
       vscode.window.showWarningMessage(
-        'KISS Sorcar: Installation complete, but an Anthropic API key is required. ' +
-        'Set ANTHROPIC_API_KEY in your environment or restart VS Code to be prompted again.'
+        'KISS Sorcar: Installation complete, but at least one LLM API key is required. ' +
+        'Set an API key (Anthropic, OpenAI, Gemini, Together AI, or OpenRouter) in your environment or restart VS Code to be prompted again.'
       );
     }
   }
@@ -1018,59 +1031,67 @@ function loadApiKeysFromShellRc(): void {
 }
 
 /**
- * Ensure all LLM API keys are configured.
+ * Ensure at least one LLM API key is configured.
  * Loads existing keys from the shell rc file (needed on macOS Dock launch),
- * then prompts the user for each missing key.  Validates the Anthropic key.
+ * then skips prompting if any key is already set.  Otherwise prompts the
+ * user for each provider until at least one key is provided.
+ * Validates the Anthropic key if the user enters one.
  * Saves provided keys to the user's shell rc file and current process env.
  *
  * Uses a marker file (~/.kiss/.api-keys-prompted) to suppress re-prompting
- * for optional keys on subsequent VS Code restarts.  The required
- * ANTHROPIC_API_KEY is always prompted for if it is not set.
+ * for additional keys on subsequent VS Code restarts once at least one key
+ * has been collected.
  *
- * Returns true when ANTHROPIC_API_KEY is available.
+ * Returns true when at least one API key is available.
  */
 async function ensureApiKeys(): Promise<boolean> {
   // Load keys from shell rc into process.env so that keys saved in
   // ~/.zshrc are picked up even when VS Code wasn't launched from a shell.
   loadApiKeysFromShellRc();
 
-  const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
-  const alreadyPrompted = fs.existsSync(markerPath);
-
-  const rcPath = getShellRcPath();
-
   const keys = [
-    { envName: 'ANTHROPIC_API_KEY', displayName: 'Anthropic API Key', placeholder: 'sk-ant-...', validate: true, optional: false },
-    { envName: 'OPENAI_API_KEY', displayName: 'OpenAI API Key', placeholder: 'sk-...', validate: false, optional: true },
-    { envName: 'GEMINI_API_KEY', displayName: 'Gemini API Key', placeholder: 'AI...', validate: false, optional: true },
-    { envName: 'TOGETHER_API_KEY', displayName: 'Together API Key', placeholder: 'tok-...', validate: false, optional: true },
-    { envName: 'OPENROUTER_API_KEY', displayName: 'OpenRouter API Key', placeholder: 'sk-or-...', validate: false, optional: true },
+    { envName: 'ANTHROPIC_API_KEY', displayName: 'Anthropic API Key', placeholder: 'sk-ant-...', validate: validateAnthropicKey },
+    { envName: 'OPENAI_API_KEY', displayName: 'OpenAI API Key', placeholder: 'sk-...' },
+    { envName: 'GEMINI_API_KEY', displayName: 'Gemini API Key', placeholder: 'AI...' },
+    { envName: 'TOGETHER_API_KEY', displayName: 'Together API Key', placeholder: 'tok-...' },
+    { envName: 'OPENROUTER_API_KEY', displayName: 'OpenRouter API Key', placeholder: 'sk-or-...' },
   ];
 
-  for (const { envName, displayName, placeholder, validate, optional } of keys) {
-    if (process.env[envName]) {
-      continue; // Already set in environment (inherited or loaded from rc file)
-    }
-    // Skip optional keys if the user has already been prompted once before
-    if (alreadyPrompted && optional) {
-      continue;
+  const hasAnyKey = () => keys.some(k => !!process.env[k.envName]);
+
+  // If at least one key is already set, no prompting needed
+  if (hasAnyKey()) return true;
+
+  const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
+  const alreadyPrompted = fs.existsSync(markerPath);
+  const rcPath = getShellRcPath();
+
+  // Prompt for keys until at least one is provided
+  while (true) {
+    for (const { envName, displayName, placeholder, validate } of keys) {
+      if (process.env[envName]) continue;
+      // Once we have at least one key and were already prompted, skip remaining
+      if (hasAnyKey() && alreadyPrompted) break;
+
+      const key = await promptForApiKey(displayName, placeholder, validate, true);
+      if (key) {
+        process.env[envName] = key;
+        addToShellRc(rcPath, envName, key);
+        log(`${displayName} saved to ~/${path.basename(rcPath)}`);
+      }
     }
 
-    const key = await promptForApiKey(
-      displayName,
-      placeholder,
-      validate ? validateAnthropicKey : undefined,
-      optional
+    if (hasAnyKey()) break;
+
+    // No key provided — warn and offer retry
+    const choice = await vscode.window.showWarningMessage(
+      'KISS Sorcar requires at least one LLM API key (Anthropic, OpenAI, Gemini, Together AI, or OpenRouter).',
+      'Enter Key', 'Skip'
     );
-
-    if (key) {
-      process.env[envName] = key;
-      addToShellRc(rcPath, envName, key);
-      log(`${displayName} saved to ~/${path.basename(rcPath)}`);
-    }
+    if (choice !== 'Enter Key') break;
   }
 
-  // Write marker so optional keys aren't re-prompted on next restart
+  // Write marker so additional keys aren't re-prompted on next restart
   if (!alreadyPrompted) {
     try {
       fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -1079,5 +1100,5 @@ async function ensureApiKeys(): Promise<boolean> {
     } catch { /* ignore */ }
   }
 
-  return !!process.env.ANTHROPIC_API_KEY;
+  return hasAnyKey();
 }

@@ -22,7 +22,7 @@
 - Call finish(success=True, summary="detailed summary of what was accomplished
   and the results that the user requested in the task") immediately when task is complete.
 - Whenever the user asks the agent to show something, try to show it in the results
-  as nicely formatted markdown text. If the answer to the user question is long, then 
+  as nicely formatted markdown text. If the answer to the user question is long, then
   create a nicely formatted html page and launch it in the user's default browser.
 - READ large files in chunks.
 - Create temporary files in WORK_DIR/tmp

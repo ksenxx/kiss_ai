@@ -21,9 +21,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -38,7 +37,8 @@ def _load_json(path: str) -> list[dict] | dict | None:
         with open(p) as f:
             return [json.loads(line) for line in f if line.strip()]
     with open(p) as f:
-        return json.load(f)
+        result: list[dict] | dict = json.load(f)
+        return result
 
 
 def _compute_swebench_stats(data: dict | list[dict]) -> dict:
@@ -142,7 +142,7 @@ def generate_dashboard(
         tbench_results_path: Path to Terminal-Bench results JSONL.
         output_path: Path for the output HTML file.
     """
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
     swebench_section = ""
     tbench_section = ""
 

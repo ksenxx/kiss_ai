@@ -49,6 +49,15 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.browser_ui`](#kissagentsvscodekiss_projectsrckissagentsvscodebrowser_ui)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.helpers`](#kissagentsvscodekiss_projectsrckissagentsvscodehelpers)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.server`](#kissagentsvscodekiss_projectsrckissagentsvscodeserver)
+          - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks`](#kissagentsvscodekiss_projectsrckissbenchmarks)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.generate_dashboard`](#kissagentsvscodekiss_projectsrckissbenchmarksgenerate_dashboard)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro`](#kissagentsvscodekiss_projectsrckissbenchmarksswebench_pro)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro.adapter`](#kissagentsvscodekiss_projectsrckissbenchmarksswebench_proadapter)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro.eval`](#kissagentsvscodekiss_projectsrckissbenchmarksswebench_proeval)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro.run`](#kissagentsvscodekiss_projectsrckissbenchmarksswebench_prorun)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_bench)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchagent)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.run`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchrun)
           - [`kiss.agents.vscode.kiss_project.src.kiss.channels`](#kissagentsvscodekiss_projectsrckisschannels)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent`](#kissagentsvscodekiss_projectsrckisschannelsbackground_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.bluebubbles_agent`](#kissagentsvscodekiss_projectsrckisschannelsbluebubbles_agent)
@@ -95,6 +104,15 @@
             - [`kiss.agents.vscode.kiss_project.src.kiss.docker.docker_manager`](#kissagentsvscodekiss_projectsrckissdockerdocker_manager)
             - [`kiss.agents.vscode.kiss_project.src.kiss.docker.docker_tools`](#kissagentsvscodekiss_projectsrckissdockerdocker_tools)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
+  - [`kiss.benchmarks`](#kissbenchmarks)
+    - [`kiss.benchmarks.generate_dashboard`](#kissbenchmarksgenerate_dashboard)
+    - [`kiss.benchmarks.swebench_pro`](#kissbenchmarksswebench_pro)
+      - [`kiss.benchmarks.swebench_pro.adapter`](#kissbenchmarksswebench_proadapter)
+      - [`kiss.benchmarks.swebench_pro.eval`](#kissbenchmarksswebench_proeval)
+      - [`kiss.benchmarks.swebench_pro.run`](#kissbenchmarksswebench_prorun)
+    - [`kiss.benchmarks.terminal_bench`](#kissbenchmarksterminal_bench)
+      - [`kiss.benchmarks.terminal_bench.agent`](#kissbenchmarksterminal_benchagent)
+      - [`kiss.benchmarks.terminal_bench.run`](#kissbenchmarksterminal_benchrun)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels.background_agent`](#kisschannelsbackground_agent)
     - [`kiss.channels.bluebubbles_agent`](#kisschannelsbluebubbles_agent)
@@ -301,6 +319,8 @@ ______________________________________________________________________
 **`get_available_models`** — Return model names for which an API key is configured and generation is supported.<br/>`def get_available_models() -> list[str]`
 
 - **Returns:** list\[str\]: Sorted list of model name strings that have a configured API key and support text generation.
+
+**`get_default_model`** — Return the best default model based on which API keys are configured. Priority order: Anthropic > OpenRouter > Gemini > OpenAI > Together AI. Falls back to `"claude-opus-4-6"` if no keys are set.<br/>`def get_default_model() -> str`
 
 **`get_most_expensive_model`**<br/>`def get_most_expensive_model(fc_only: bool = True) -> str`
 
@@ -1753,6 +1773,106 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks` — *KISS Sorcar benchmark harnesses for SWE-bench Pro and Terminal-Bench 2.0.*
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.generate_dashboard` — *Generate a benchmark results dashboard as a self-contained HTML page.*
+
+**`generate_dashboard`** — Read benchmark results and produce an HTML dashboard.<br/>`def generate_dashboard(swebench_results_path: str | None = None, tbench_results_path: str | None = None, output_path: str = 'results/dashboard.html') -> None`
+
+- `swebench_results_path`: Path to SWE-bench Pro eval results JSON.
+- `tbench_results_path`: Path to Terminal-Bench results JSONL.
+- `output_path`: Path for the output HTML file.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro` — *SWE-bench Pro benchmark harness for KISS Sorcar.*
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro.adapter` — *Convert SWE-bench Pro instances into sorcar task prompts.*
+
+**`make_sorcar_task`** — Build a sorcar task prompt from a SWE-bench Pro instance. Returns a task string that tells sorcar: - The repo is already cloned at /app - The issue to fix (problem_statement) - To produce a git diff as the solution<br/>`def make_sorcar_task(instance: dict) -> str`
+
+- `instance`: A SWE-bench Pro dataset row with at least 'problem_statement' and 'repo' fields.
+- **Returns:** A formatted task prompt string for sorcar.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro.eval` — *Thin wrapper around the official SWE-bench Pro evaluation script.*
+
+**`run_eval`** — Run the official SWE-bench Pro evaluation script.<br/>`def run_eval(patch_path: str, num_workers: int = 8, use_local_docker: bool = True, block_network: bool = False, docker_platform: str | None = None, redo: bool = False) -> None`
+
+- `patch_path`: Path to the patches JSON file.
+- `num_workers`: Number of parallel Docker workers.
+- `use_local_docker`: Use local Docker instead of Modal.
+- `block_network`: Block network access inside eval containers.
+- `docker_platform`: Docker platform (e.g. "linux/amd64" for Apple Silicon).
+- `redo`: Re-evaluate even if output exists.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.swebench_pro.run` — *Run sorcar on SWE-bench Pro instances and collect patches.*
+
+**`run_instance`** — Run sorcar on a single SWE-bench Pro instance inside its Docker container. Steps: 1. docker run the instance's image (jefzda/sweap-images:\<dockerhub_tag>) 2. Inside the container, invoke sorcar with the task prompt 3. Capture the generated patch (git diff from /app) 4. Return {"instance_id": ..., "model_patch": ..., "prefix": model}<br/>`def run_instance(instance: dict, model: str, budget: float) -> dict`
+
+- `instance`: A SWE-bench Pro dataset row.
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+- `budget`: Max USD budget per instance.
+- **Returns:** A dict with instance_id, model_patch, and prefix fields.
+
+**`run_all`** — Iterate over all SWE-bench Pro public instances, generate patches.<br/>`def run_all(model: str, budget: float, max_instances: int | None = None, workers: int = 1) -> None`
+
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+- `budget`: Max USD budget per instance.
+- `max_instances`: Cap for quick testing (None = all 731).
+- `workers`: Number of parallel workers (currently sequential).
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench` — *Terminal-Bench 2.0 benchmark harness for KISS Sorcar.*
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.agent` — *Harbor agent adapter that delegates to KISS Sorcar.*
+
+##### `class SorcarHarborAgent(BaseAgent)` — Harbor-compatible agent that uses KISS Sorcar as the backend.
+
+- **name** — Return the agent's name.<br/>`name() -> str`
+
+- **version** — Return the agent version string.<br/>`version() -> str | None`
+
+- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and downloads SYSTEM.md to the path where the installed package expects it.<br/>`async setup(environment: BaseEnvironment) -> None`
+
+  - `environment`: The harbor execution environment.
+
+- **run** — Run sorcar with the task instruction inside the container. The agent executes sorcar which modifies the environment directly. Harbor evaluates the result by inspecting the environment state after this method returns.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+
+  - `instruction`: Natural language task description from harbor.
+  - `environment`: The harbor execution environment.
+  - `context`: Agent context for storing token/cost metadata.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.run` — *Run Terminal-Bench 2.0 with the sorcar harbor agent.*
+
+**`is_docker_hub_authenticated`** — Check whether Docker Hub credentials are configured. Reads ~/.docker/config.json to find the credential store, then queries it via `docker-credential-<store> list`. Returns True if any credential is stored for `https://index.docker.io/`. Falls back to checking the `auths` dict when no credential store is configured.<br/>`def is_docker_hub_authenticated() -> bool`
+
+**`pre_pull_images`** — Pre-pull all Docker images needed by a harbor dataset. Resolves the dataset's task definitions, extracts unique Docker image names, and pulls each one sequentially. Because Docker caches pulled images locally, subsequent `docker compose up` calls by harbor will not trigger additional pulls, avoiding Docker Hub rate limits.<br/>`def pre_pull_images(dataset: str) -> None`
+
+- `dataset`: Harbor dataset specifier (e.g. "terminal-bench@2.0").
+
+**`run_terminal_bench`** — Run Terminal-Bench 2.0 using the harbor CLI with the sorcar agent. Before invoking harbor, checks that Docker Hub credentials are configured (to avoid unauthenticated pull rate limits) and pre-pulls all task Docker images so each unique image is fetched exactly once.<br/>`def run_terminal_bench(model: str = 'anthropic/claude-opus-4-6', dataset: str = 'terminal-bench@2.0', n_concurrent: int = 8, trials: int = 1, skip_pre_pull: bool = False) -> None`
+
+- `model`: Model name in harbor format (provider/model).
+- `dataset`: Harbor dataset specifier (e.g. "terminal-bench@2.0").
+- `n_concurrent`: Number of concurrent task containers.
+- `trials`: Number of attempts per task (-k flag). Use 5 for leaderboard.
+- `skip_pre_pull`: If True, skip the image pre-pull step.
+
+______________________________________________________________________
+
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels` — *Channel integrations for KISS agents.*
 
 ______________________________________________________________________
@@ -1941,6 +2061,8 @@ ______________________________________________________________________
 ##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
 
 **Constructor:** `DiscordAgent() -> None`
+
+- **run** — Run with Discord-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
 
 ______________________________________________________________________
 
@@ -2174,6 +2296,8 @@ ______________________________________________________________________
 ##### `class GmailAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Gmail API tools.
 
 **Constructor:** `GmailAgent() -> None`
+
+- **run** — Run with Gmail-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
 
 ______________________________________________________________________
 
@@ -3232,6 +3356,8 @@ ______________________________________________________________________
 
 **Constructor:** `SlackAgent() -> None`
 
+- **run** — Run with Slack-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
+
 ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.sms_agent` — *SMS Agent — StatefulSorcarAgent extension with Twilio SMS tools.*
@@ -4241,6 +4367,8 @@ ______________________________________________________________________
 
 - **Returns:** list\[str\]: Sorted list of model name strings that have a configured API key and support text generation.
 
+**`get_default_model`** — Return the best default model based on which API keys are configured. Priority order: Anthropic > OpenRouter > Gemini > OpenAI > Together AI. Falls back to `"claude-opus-4-6"` if no keys are set.<br/>`def get_default_model() -> str`
+
 **`get_most_expensive_model`**<br/>`def get_most_expensive_model(fc_only: bool = True) -> str`
 
 **`calculate_cost`** — Calculates the cost in USD for the given token counts.<br/>`def calculate_cost(model_name: str, num_input_tokens: int, num_output_tokens: int, num_cache_read_tokens: int = 0, num_cache_write_tokens: int = 0) -> float`
@@ -4597,6 +4725,106 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+### `kiss.benchmarks` — *KISS Sorcar benchmark harnesses for SWE-bench Pro and Terminal-Bench 2.0.*
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.generate_dashboard` — *Generate a benchmark results dashboard as a self-contained HTML page.*
+
+**`generate_dashboard`** — Read benchmark results and produce an HTML dashboard.<br/>`def generate_dashboard(swebench_results_path: str | None = None, tbench_results_path: str | None = None, output_path: str = 'results/dashboard.html') -> None`
+
+- `swebench_results_path`: Path to SWE-bench Pro eval results JSON.
+- `tbench_results_path`: Path to Terminal-Bench results JSONL.
+- `output_path`: Path for the output HTML file.
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.swebench_pro` — *SWE-bench Pro benchmark harness for KISS Sorcar.*
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.swebench_pro.adapter` — *Convert SWE-bench Pro instances into sorcar task prompts.*
+
+**`make_sorcar_task`** — Build a sorcar task prompt from a SWE-bench Pro instance. Returns a task string that tells sorcar: - The repo is already cloned at /app - The issue to fix (problem_statement) - To produce a git diff as the solution<br/>`def make_sorcar_task(instance: dict) -> str`
+
+- `instance`: A SWE-bench Pro dataset row with at least 'problem_statement' and 'repo' fields.
+- **Returns:** A formatted task prompt string for sorcar.
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.swebench_pro.eval` — *Thin wrapper around the official SWE-bench Pro evaluation script.*
+
+**`run_eval`** — Run the official SWE-bench Pro evaluation script.<br/>`def run_eval(patch_path: str, num_workers: int = 8, use_local_docker: bool = True, block_network: bool = False, docker_platform: str | None = None, redo: bool = False) -> None`
+
+- `patch_path`: Path to the patches JSON file.
+- `num_workers`: Number of parallel Docker workers.
+- `use_local_docker`: Use local Docker instead of Modal.
+- `block_network`: Block network access inside eval containers.
+- `docker_platform`: Docker platform (e.g. "linux/amd64" for Apple Silicon).
+- `redo`: Re-evaluate even if output exists.
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.swebench_pro.run` — *Run sorcar on SWE-bench Pro instances and collect patches.*
+
+**`run_instance`** — Run sorcar on a single SWE-bench Pro instance inside its Docker container. Steps: 1. docker run the instance's image (jefzda/sweap-images:\<dockerhub_tag>) 2. Inside the container, invoke sorcar with the task prompt 3. Capture the generated patch (git diff from /app) 4. Return {"instance_id": ..., "model_patch": ..., "prefix": model}<br/>`def run_instance(instance: dict, model: str, budget: float) -> dict`
+
+- `instance`: A SWE-bench Pro dataset row.
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+- `budget`: Max USD budget per instance.
+- **Returns:** A dict with instance_id, model_patch, and prefix fields.
+
+**`run_all`** — Iterate over all SWE-bench Pro public instances, generate patches.<br/>`def run_all(model: str, budget: float, max_instances: int | None = None, workers: int = 1) -> None`
+
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+- `budget`: Max USD budget per instance.
+- `max_instances`: Cap for quick testing (None = all 731).
+- `workers`: Number of parallel workers (currently sequential).
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.terminal_bench` — *Terminal-Bench 2.0 benchmark harness for KISS Sorcar.*
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.terminal_bench.agent` — *Harbor agent adapter that delegates to KISS Sorcar.*
+
+##### `class SorcarHarborAgent(BaseAgent)` — Harbor-compatible agent that uses KISS Sorcar as the backend.
+
+- **name** — Return the agent's name.<br/>`name() -> str`
+
+- **version** — Return the agent version string.<br/>`version() -> str | None`
+
+- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and downloads SYSTEM.md to the path where the installed package expects it.<br/>`async setup(environment: BaseEnvironment) -> None`
+
+  - `environment`: The harbor execution environment.
+
+- **run** — Run sorcar with the task instruction inside the container. The agent executes sorcar which modifies the environment directly. Harbor evaluates the result by inspecting the environment state after this method returns.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+
+  - `instruction`: Natural language task description from harbor.
+  - `environment`: The harbor execution environment.
+  - `context`: Agent context for storing token/cost metadata.
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.terminal_bench.run` — *Run Terminal-Bench 2.0 with the sorcar harbor agent.*
+
+**`is_docker_hub_authenticated`** — Check whether Docker Hub credentials are configured. Reads ~/.docker/config.json to find the credential store, then queries it via `docker-credential-<store> list`. Returns True if any credential is stored for `https://index.docker.io/`. Falls back to checking the `auths` dict when no credential store is configured.<br/>`def is_docker_hub_authenticated() -> bool`
+
+**`pre_pull_images`** — Pre-pull all Docker images needed by a harbor dataset. Resolves the dataset's task definitions, extracts unique Docker image names, and pulls each one sequentially. Because Docker caches pulled images locally, subsequent `docker compose up` calls by harbor will not trigger additional pulls, avoiding Docker Hub rate limits.<br/>`def pre_pull_images(dataset: str) -> None`
+
+- `dataset`: Harbor dataset specifier (e.g. "terminal-bench@2.0").
+
+**`run_terminal_bench`** — Run Terminal-Bench 2.0 using the harbor CLI with the sorcar agent. Before invoking harbor, checks that Docker Hub credentials are configured (to avoid unauthenticated pull rate limits) and pre-pulls all task Docker images so each unique image is fetched exactly once.<br/>`def run_terminal_bench(model: str = 'anthropic/claude-opus-4-6', dataset: str = 'terminal-bench@2.0', n_concurrent: int = 8, trials: int = 1, skip_pre_pull: bool = False) -> None`
+
+- `model`: Model name in harbor format (provider/model).
+- `dataset`: Harbor dataset specifier (e.g. "terminal-bench@2.0").
+- `n_concurrent`: Number of concurrent task containers.
+- `trials`: Number of attempts per task (-k flag). Use 5 for leaderboard.
+- `skip_pre_pull`: If True, skip the image pre-pull step.
+
+______________________________________________________________________
+
 ### `kiss.channels` — *Channel integrations for KISS agents.*
 
 ______________________________________________________________________
@@ -4785,6 +5013,8 @@ ______________________________________________________________________
 ##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
 
 **Constructor:** `DiscordAgent() -> None`
+
+- **run** — Run with Discord-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
 
 ______________________________________________________________________
 
@@ -5018,6 +5248,8 @@ ______________________________________________________________________
 ##### `class GmailAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Gmail API tools.
 
 **Constructor:** `GmailAgent() -> None`
+
+- **run** — Run with Gmail-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
 
 ______________________________________________________________________
 
@@ -6075,6 +6307,8 @@ ______________________________________________________________________
 ##### `class SlackAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent() -> None`
+
+- **run** — Run with Slack-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
 
 ______________________________________________________________________
 
