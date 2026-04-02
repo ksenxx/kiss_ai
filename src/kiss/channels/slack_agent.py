@@ -851,6 +851,18 @@ class SlackAgent(StatefulSorcarAgent):
         if token:
             self._backend._client = WebClient(token=token, retry_handlers=[])
 
+    def run(self, **kwargs: Any) -> str:  # type: ignore[override]
+        """Run with Slack-specific system prompt encouraging browser-based auth."""
+        channel_prompt = (
+            "\n\n## Slack Authentication\n"
+            "If authentication is needed, call start_slack_browser_auth() to open "
+            "the Slack API portal, then use browser tools to create an app, configure "
+            "OAuth scopes, install it to a workspace, and copy the xoxb- bot token. "
+            "Complete these steps autonomously — do NOT instruct the user to do them manually."
+        )
+        kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
+        return super().run(**kwargs)
+
     def _get_tools(self) -> list:
         """Return SorcarAgent tools + Slack auth tools + Slack API tools."""
         tools = super()._get_tools()
@@ -867,10 +879,10 @@ class SlackAgent(StatefulSorcarAgent):
             """
             if agent._backend._client is None:
                 return (
-                    "Not authenticated with Slack. Use authenticate_slack(token=...) "
-                    "to set a bot token. The token should start with 'xoxb-'. "
-                    "Get it from https://api.slack.com/apps > your app > "
-                    "OAuth & Permissions > Bot User OAuth Token."
+                    "Not authenticated with Slack. Call start_slack_browser_auth() "
+                    "to open the Slack API portal in the browser and create an app "
+                    "autonomously, then call authenticate_slack(token=...) with the "
+                    "xoxb- bot token you retrieve."
                 )
             try:
                 resp = agent._backend._client.auth_test()
@@ -930,7 +942,32 @@ class SlackAgent(StatefulSorcarAgent):
             agent._backend._client = None
             return "Slack authentication cleared."
 
-        tools.extend([check_slack_auth, authenticate_slack, clear_slack_auth])
+        def start_slack_browser_auth() -> str:
+            """Begin automated Slack app creation and token retrieval via browser.
+
+            Navigates to the Slack API portal. Use your browser tools (go_to_url,
+            click, type_text) to complete the following steps autonomously:
+            1. Create a new app ("From scratch"), give it a name, select a workspace.
+            2. Go to "OAuth & Permissions", add bot scopes (channels:read, chat:write, etc.).
+            3. Click "Install to Workspace" and approve the installation.
+            4. Copy the "Bot User OAuth Token" (starts with xoxb-).
+            5. Call authenticate_slack(token=<the token>).
+            Use ask_user_browser_action() for any login or workspace-selection screens.
+
+            Returns:
+                Page content of the Slack API portal to begin navigation.
+            """
+            if agent.web_use_tool is None:
+                return (
+                    "Browser not available. Use authenticate_slack(token=...) "
+                    "with an xoxb- token from https://api.slack.com/apps."
+                )
+            return agent.web_use_tool.go_to_url("https://api.slack.com/apps")
+
+        tools.extend([
+            check_slack_auth, authenticate_slack, clear_slack_auth,
+            start_slack_browser_auth,
+        ])
 
         if agent._backend._client is not None:
             tools.extend(agent._backend.get_tool_methods())

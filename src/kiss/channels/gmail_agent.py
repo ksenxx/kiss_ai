@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import sys
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -112,11 +113,36 @@ def _clear_credentials() -> None:
         path.unlink()
 
 
+def _is_headless_environment() -> bool:
+    """Return True when running in a headless/Docker/Linux environment.
+
+    Checks in order:
+    1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless)
+    2. Presence of /.dockerenv (running inside Docker)
+    3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set
+    """
+    env = os.environ.get("KISS_HEADLESS", "").lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    if Path("/.dockerenv").exists():
+        return True
+    if sys.platform.startswith("linux"):
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            return True
+    return False
+
+
 def _run_oauth_flow() -> Credentials | None:
     """Run the OAuth2 installed-app flow to get new credentials.
 
     Requires ``~/.kiss/channels/gmail/credentials.json`` to exist
     (downloaded from Google Cloud Console).
+
+    In headless/Docker environments, falls back to ``run_console()`` which
+    prints a URL and reads the auth code from stdin instead of opening a
+    browser window.
 
     Returns:
         New Credentials object, or None if credentials.json not found.
@@ -125,7 +151,10 @@ def _run_oauth_flow() -> Credentials | None:
     if not creds_path.exists():
         return None
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
-    creds = cast(Credentials, flow.run_local_server(port=0))
+    if _is_headless_environment():
+        creds = cast(Credentials, flow.run_console())
+    else:
+        creds = cast(Credentials, flow.run_local_server(port=0))
     _save_credentials(creds)
     return creds
 
@@ -1024,6 +1053,19 @@ class GmailAgent(StatefulSorcarAgent):
         if creds:
             self._backend._service = _build_service(creds)
 
+    def run(self, **kwargs: Any) -> str:  # type: ignore[override]
+        """Run with Gmail-specific system prompt encouraging browser-based auth."""
+        channel_prompt = (
+            "\n\n## Gmail Authentication\n"
+            "If credentials.json is missing, call start_gmail_browser_setup() to open "
+            "Google Cloud Console, then use browser tools to create OAuth credentials "
+            "autonomously. If credentials.json exists, call authenticate_gmail() directly. "
+            "Use ask_user_browser_action() for any Google account login screens. "
+            "Do NOT instruct the user to do these steps manually."
+        )
+        kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
+        return super().run(**kwargs)
+
     def _get_tools(self) -> list:
         """Return SorcarAgent tools + Gmail auth tools + Gmail API tools."""
         tools = super()._get_tools()
@@ -1043,16 +1085,14 @@ class GmailAgent(StatefulSorcarAgent):
                 if creds_exist:
                     return (
                         "Not authenticated with Gmail. A credentials.json file exists. "
-                        "Use authenticate_gmail() to start the OAuth2 flow — this will "
-                        "open a browser window for you to authorize access."
+                        "Call authenticate_gmail() to start the OAuth2 flow. "
+                        "Use ask_user_browser_action() if a browser login is required."
                     )
                 return (
-                    "Not authenticated with Gmail. To set up:\n"
-                    "1. Go to https://console.cloud.google.com/apis/credentials\n"
-                    "2. Create an OAuth 2.0 Client ID (Desktop app type)\n"
-                    "3. Download the JSON and save it as:\n"
-                    f"   {_credentials_path()}\n"
-                    "4. Then call authenticate_gmail() to start the OAuth2 flow."
+                    "Not authenticated with Gmail. Call start_gmail_browser_setup() "
+                    "to open Google Cloud Console in the browser and create OAuth "
+                    "credentials autonomously, then call authenticate_gmail() to "
+                    "complete the OAuth2 flow."
                 )
             try:
                 profile = agent._backend._service.users().getProfile(userId="me").execute()
@@ -1107,7 +1147,37 @@ class GmailAgent(StatefulSorcarAgent):
             agent._backend._service = None
             return "Gmail authentication cleared."
 
-        tools.extend([check_gmail_auth, authenticate_gmail, clear_gmail_auth])
+        def start_gmail_browser_setup() -> str:
+            """Begin automated Gmail API credential setup via browser.
+
+            Navigates to Google Cloud Console. Use your browser tools
+            (go_to_url, click, type_text) to complete the following steps autonomously:
+            1. Create or select a project.
+            2. Enable the Gmail API (APIs & Services > Enable APIs > search "Gmail API").
+            3. Go to Credentials > Create Credentials > OAuth client ID.
+            4. Choose "Desktop app" as the application type, give it a name.
+            5. Download the JSON file and save it to:
+               ~/.kiss/channels/gmail/credentials.json
+            6. Call authenticate_gmail() to complete the OAuth consent flow.
+            Use ask_user_browser_action() for any Google account login screens.
+
+            Returns:
+                Page content of Google Cloud Console to begin navigation.
+            """
+            if agent.web_use_tool is None:
+                return (
+                    "Browser not available. Manually download credentials.json from "
+                    "https://console.cloud.google.com/apis/credentials and save it to "
+                    f"{_credentials_path()}, then call authenticate_gmail()."
+                )
+            return agent.web_use_tool.go_to_url(
+                "https://console.cloud.google.com/apis/credentials"
+            )
+
+        tools.extend([
+            check_gmail_auth, authenticate_gmail, clear_gmail_auth,
+            start_gmail_browser_setup,
+        ])
 
         if agent._backend._service is not None:
             tools.extend(agent._backend.get_tool_methods())

@@ -536,6 +536,18 @@ class DiscordAgent(StatefulSorcarAgent):
         if cfg:
             self._backend._bot_token = cfg["bot_token"]
 
+    def run(self, **kwargs: Any) -> str:  # type: ignore[override]
+        """Run with Discord-specific system prompt encouraging browser-based auth."""
+        channel_prompt = (
+            "\n\n## Discord Authentication\n"
+            "If authentication is needed, call start_discord_browser_auth() to open "
+            "the Discord Developer Portal, then use browser tools to create an app, "
+            "add a bot, and copy the bot token. Complete these steps autonomously — "
+            "do NOT instruct the user to do them manually."
+        )
+        kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
+        return super().run(**kwargs)
+
     def _get_tools(self) -> list:
         """Return SorcarAgent tools + Discord auth tools + Discord API tools."""
         tools = super()._get_tools()
@@ -549,8 +561,10 @@ class DiscordAgent(StatefulSorcarAgent):
             """
             if not agent._backend._bot_token:
                 return (
-                    "Not authenticated with Discord. Use authenticate_discord(bot_token=...) "
-                    "to configure. Get a token from https://discord.com/developers/applications."
+                    "Not authenticated with Discord. Call start_discord_browser_auth() "
+                    "to open the Discord Developer Portal in the browser and create a "
+                    "bot autonomously, then call authenticate_discord(bot_token=...) "
+                    "with the token you retrieve."
                 )
             try:
                 result = agent._backend._get("/users/@me")
@@ -609,7 +623,32 @@ class DiscordAgent(StatefulSorcarAgent):
             agent._backend._bot_token = ""
             return "Discord authentication cleared."
 
-        tools.extend([check_discord_auth, authenticate_discord, clear_discord_auth])
+        def start_discord_browser_auth() -> str:
+            """Begin automated Discord bot creation and token retrieval via browser.
+
+            Navigates to the Discord Developer Portal. Use your browser tools
+            (go_to_url, click, type_text) to complete the following steps autonomously:
+            1. Click "New Application", give it a name, and create it.
+            2. Go to the "Bot" section, click "Add Bot" (or "Reset Token").
+            3. Copy the bot token shown.
+            4. Enable any required Privileged Gateway Intents (Message Content, etc.).
+            5. Call authenticate_discord(bot_token=<the token>).
+            Use ask_user_browser_action() for any login screens.
+
+            Returns:
+                Page content of the Discord Developer Portal to begin navigation.
+            """
+            if agent.web_use_tool is None:
+                return (
+                    "Browser not available. Use authenticate_discord(bot_token=...) "
+                    "with a token from https://discord.com/developers/applications."
+                )
+            return agent.web_use_tool.go_to_url("https://discord.com/developers/applications")
+
+        tools.extend([
+            check_discord_auth, authenticate_discord, clear_discord_auth,
+            start_discord_browser_auth,
+        ])
 
         if agent._backend._bot_token:
             tools.extend(agent._backend.get_tool_methods())
