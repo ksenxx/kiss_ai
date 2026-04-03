@@ -30,6 +30,7 @@ class FakeEnvironment:
     """
 
     exec_calls: list[str] = field(default_factory=list)
+    uploaded_files: list[tuple[str, str]] = field(default_factory=list)
     fail_commands: set[str] = field(default_factory=set)
 
     async def exec(
@@ -45,6 +46,13 @@ class FakeEnvironment:
                     return_code=1,
                 )
         return FakeExecResult()
+
+    async def upload_file(
+        self,
+        source_path: object,
+        target_path: str,
+    ) -> None:
+        self.uploaded_files.append((str(source_path), target_path))
 
 
 @dataclass
@@ -154,7 +162,13 @@ class TestSetup:
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
         assert len(env.exec_calls) == 3
         assert "curl" in env.exec_calls[0]
+        # Step 2: installs from uploaded local wheel, not PyPI
         assert "uv tool install --python 3.13" in env.exec_calls[1]
+        assert "/tmp/kiss_agent_framework-" in env.exec_calls[1]
+        assert len(env.uploaded_files) == 1
+        src, dst = env.uploaded_files[0]
+        assert src.endswith(".whl")
+        assert dst.startswith("/tmp/kiss_agent_framework-")
         # Step 3 uses the tool's own Python to decode base64 and write
         # SYSTEM.md — avoids depending on shell `base64` command.
         assert "python3" in env.exec_calls[2]
@@ -167,6 +181,7 @@ class TestSetup:
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
         # Only the first step should have been attempted
         assert len(env.exec_calls) == 1
+        assert len(env.uploaded_files) == 0
 
     def test_setup_aborts_on_pip_failure(self) -> None:
         agent = _make_agent()
@@ -174,6 +189,8 @@ class TestSetup:
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
         # First step succeeds, second fails, third not attempted
         assert len(env.exec_calls) == 2
+        # Wheel was uploaded before the install command ran
+        assert len(env.uploaded_files) == 1
 
 
 class TestRunSorcarNotFound:

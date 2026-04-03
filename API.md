@@ -59,6 +59,7 @@
             - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_bench)
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchagent)
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.run`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchrun)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.test_agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchtest_agent)
           - [`kiss.agents.vscode.kiss_project.src.kiss.channels`](#kissagentsvscodekiss_projectsrckisschannels)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels._backend_utils`](#kissagentsvscodekiss_projectsrckisschannels_backend_utils)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent`](#kissagentsvscodekiss_projectsrckisschannelsbackground_agent)
@@ -1871,7 +1872,7 @@ ______________________________________________________________________
 
 - **version** — Return the agent version string.<br/>`version() -> str | None`
 
-- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and writes a tbench-specific SYSTEM.md that replaces the generic IDE system prompt with terminal-bench instructions.<br/>`async setup(environment: BaseEnvironment) -> None`
+- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and writes a tbench-specific SYSTEM.md that replaces the generic IDE system prompt with terminal-bench instructions. Each step is run separately so failures are logged clearly and do not silently abort the chain.<br/>`async setup(environment: BaseEnvironment) -> None`
 
   - `environment`: The harbor execution environment.
 
@@ -1898,6 +1899,47 @@ ______________________________________________________________________
 - `n_concurrent`: Number of concurrent task containers.
 - `trials`: Number of attempts per task (-k flag). Use 5 for leaderboard.
 - `skip_pre_pull`: If True, skip the image pre-pull step.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.test_agent` — *Tests for the terminal bench harbor agent.*
+
+##### `class FakeExecResult`
+
+##### `class FakeEnvironment` — Minimal stand-in for BaseEnvironment.
+
+- **exec**<br/>`async exec(command: str, **kwargs: object) -> FakeExecResult`
+
+##### `class FakeContext` — Minimal stand-in for AgentContext.
+
+- **is_empty**<br/>`is_empty() -> bool`
+
+##### `class TestSkipPhrases` — Verify \_SKIP_PHRASES is a non-empty tuple of strings.
+
+- **test_skip_phrases_non_empty**<br/>`test_skip_phrases_non_empty() -> None`
+- **test_skip_phrases_are_strings**<br/>`test_skip_phrases_are_strings() -> None`
+
+##### `class TestAgentIdentity` — Agent name and version.
+
+- **test_name**<br/>`test_name() -> None`
+- **test_version_matches_package**<br/>`test_version_matches_package() -> None`
+
+##### `class TestRunSkipsImpossibleTasks` — Verify that run() returns immediately for impossible tasks.
+
+- **test_skip_compcert**<br/>`test_skip_compcert() -> None`
+- **test_skip_windows_311**<br/>`test_skip_windows_311() -> None`
+- **test_skip_ocaml_gc**<br/>`test_skip_ocaml_gc() -> None`
+- **test_non_skip_task_runs_normally** — A normal task makes a which-check then runs sorcar.<br/>`test_non_skip_task_runs_normally() -> None`
+
+##### `class TestSetup` — Verify setup runs the expected installation steps.
+
+- **test_setup_three_steps**<br/>`test_setup_three_steps() -> None`
+- **test_setup_aborts_on_uv_failure**<br/>`test_setup_aborts_on_uv_failure() -> None`
+- **test_setup_aborts_on_pip_failure**<br/>`test_setup_aborts_on_pip_failure() -> None`
+
+##### `class TestRunSorcarNotFound` — When sorcar is not installed, run returns early with an error.
+
+- **test_sorcar_missing**<br/>`test_sorcar_missing() -> None`
 
 ______________________________________________________________________
 
@@ -4934,6 +4976,7 @@ ______________________________________________________________________
 ##### `class FakeEnvironment` — Minimal stand-in for BaseEnvironment.
 
 - **exec**<br/>`async exec(command: str, **kwargs: object) -> FakeExecResult`
+- **upload_file**<br/>`async upload_file(source_path: object, target_path: str) -> None`
 
 ##### `class FakeContext` — Minimal stand-in for AgentContext.
 
