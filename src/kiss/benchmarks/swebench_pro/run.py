@@ -118,9 +118,10 @@ def run_all(
     dataset = load_dataset("ScaleAI/SWE-bench_Pro", split="test")
     results = []
 
-    for i, instance in enumerate(dataset):
+    for i, row in enumerate(dataset):
         if max_instances is not None and i >= max_instances:
             break
+        instance: dict = dict(row)  # type: ignore[arg-type]
         print(f"[{i + 1}] Running {instance['instance_id']}...")
         result = run_instance(instance, model, budget)
         results.append(result)

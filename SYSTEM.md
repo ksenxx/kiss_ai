@@ -14,7 +14,7 @@
 
 - Write() for new files. Edit() for small changes.
 - Run Bash commands synchronously using the `timeout_seconds` parameter.
-  Use 30s (default) for quick commands, 120s for moderate tasks, and 300s
+  Use 300s (default) for quick commands, 120s for moderate tasks, and 300s
   for builds/installations. If a command times out, retry with a higher
   timeout. Only for commands expected to exceed 10 minutes, run in the
   background with output redirected to a file and poll periodically.

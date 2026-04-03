@@ -60,6 +60,7 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchagent)
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.run`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchrun)
           - [`kiss.agents.vscode.kiss_project.src.kiss.channels`](#kissagentsvscodekiss_projectsrckisschannels)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels._backend_utils`](#kissagentsvscodekiss_projectsrckisschannels_backend_utils)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent`](#kissagentsvscodekiss_projectsrckisschannelsbackground_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.bluebubbles_agent`](#kissagentsvscodekiss_projectsrckisschannelsbluebubbles_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.discord_agent`](#kissagentsvscodekiss_projectsrckisschannelsdiscord_agent)
@@ -113,6 +114,7 @@
     - [`kiss.benchmarks.terminal_bench`](#kissbenchmarksterminal_bench)
       - [`kiss.benchmarks.terminal_bench.agent`](#kissbenchmarksterminal_benchagent)
       - [`kiss.benchmarks.terminal_bench.run`](#kissbenchmarksterminal_benchrun)
+      - [`kiss.benchmarks.terminal_bench.test_agent`](#kissbenchmarksterminal_benchtest_agent)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels._backend_utils`](#kisschannels_backend_utils)
     - [`kiss.channels.background_agent`](#kisschannelsbackground_agent)
@@ -642,7 +644,7 @@ ______________________________________________________________________
   - `replace_all`: If True, replace all occurrences.
   - **Returns:** The output of the edit operation.
 
-- **Bash** — Runs a bash command and returns its output.<br/>`Bash(command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str`
+- **Bash** — Runs a bash command and returns its output.<br/>`Bash(command: str, description: str, timeout_seconds: float = 300, max_output_chars: int = 50000) -> str`
 
   - `command`: The bash command to run.
   - `description`: A brief description of the command.
@@ -863,7 +865,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -877,6 +879,7 @@ ______________________________________________________________________
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
   - `headless`: Deprecated, ignored. Browser always runs headless.
+  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for headless terminal-only environments.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1540,7 +1543,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -1554,6 +1557,7 @@ ______________________________________________________________________
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
   - `headless`: Deprecated, ignored. Browser always runs headless.
+  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for headless terminal-only environments.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1628,7 +1632,7 @@ ______________________________________________________________________
   - `replace_all`: If True, replace all occurrences.
   - **Returns:** The output of the edit operation.
 
-- **Bash** — Runs a bash command and returns its output.<br/>`Bash(command: str, description: str, timeout_seconds: float = 30, max_output_chars: int = 50000) -> str`
+- **Bash** — Runs a bash command and returns its output.<br/>`Bash(command: str, description: str, timeout_seconds: float = 300, max_output_chars: int = 50000) -> str`
 
   - `command`: The bash command to run.
   - `description`: A brief description of the command.
@@ -1867,7 +1871,7 @@ ______________________________________________________________________
 
 - **version** — Return the agent version string.<br/>`version() -> str | None`
 
-- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and downloads SYSTEM.md to the path where the installed package expects it.<br/>`async setup(environment: BaseEnvironment) -> None`
+- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and writes a tbench-specific SYSTEM.md that replaces the generic IDE system prompt with terminal-bench instructions.<br/>`async setup(environment: BaseEnvironment) -> None`
 
   - `environment`: The harbor execution environment.
 
@@ -1901,7 +1905,36 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent` — *Background channel daemon — polls ChannelBackend and triggers agents.*
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels._backend_utils` — *Shared helpers for channel backend polling and lifecycle management.*
+
+##### `class ThreadedHTTPServer(ThreadingMixIn, HTTPServer)` — HTTP server with per-request threads and address reuse enabled.
+
+**`wait_for_matching_message`** — Wait for a message matching a predicate with timeout and cancellation.<br/>`def wait_for_matching_message(*, poll: Callable[[], list[dict[str, Any]]], matches: Callable[[dict[str, Any]], bool], extract_text: Callable[[dict[str, Any]], str], timeout_seconds: float, stop_event: threading.Event | None, poll_interval: float) -> str | None`
+
+- `poll`: Callable returning newly observed messages.
+- `matches`: Predicate selecting the desired message.
+- `extract_text`: Callable extracting the reply text from a matching message.
+- `timeout_seconds`: Maximum time to wait.
+- `stop_event`: Optional cancellation event.
+- `poll_interval`: Delay between polls.
+- **Returns:** Extracted reply text, or `None` on timeout/cancellation.
+
+**`drain_queue_messages`** — Drain up to `limit` messages from a queue, optionally filtering.<br/>`def drain_queue_messages(message_queue: queue.Queue[dict[str, Any]], *, limit: int, keep: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]`
+
+- `message_queue`: Queue containing message dicts.
+- `limit`: Maximum number of kept messages to return.
+- `keep`: Optional predicate deciding whether a drained message should be kept.
+- **Returns:** The kept messages in dequeue order.
+
+**`stop_http_server`** — Shut down an embedded HTTP server and join its thread.<br/>`def stop_http_server(server: HTTPServer | None, server_thread: threading.Thread | None) -> tuple[None, None]`
+
+- `server`: HTTP server instance to stop.
+- `server_thread`: Background thread running `serve_forever()`.
+- **Returns:** `(None, None)` so callers can reset both attributes succinctly.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent` — *Background channel daemon — polls a ChannelBackend and runs agents.*
 
 ##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
 
@@ -4864,7 +4897,7 @@ ______________________________________________________________________
 
 - **version** — Return the agent version string.<br/>`version() -> str | None`
 
-- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and downloads SYSTEM.md to the path where the installed package expects it.<br/>`async setup(environment: BaseEnvironment) -> None`
+- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and writes a tbench-specific SYSTEM.md that replaces the generic IDE system prompt with terminal-bench instructions. Each step is run separately so failures are logged clearly and do not silently abort the chain.<br/>`async setup(environment: BaseEnvironment) -> None`
 
   - `environment`: The harbor execution environment.
 
@@ -4891,6 +4924,47 @@ ______________________________________________________________________
 - `n_concurrent`: Number of concurrent task containers.
 - `trials`: Number of attempts per task (-k flag). Use 5 for leaderboard.
 - `skip_pre_pull`: If True, skip the image pre-pull step.
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.terminal_bench.test_agent` — *Tests for the terminal bench harbor agent.*
+
+##### `class FakeExecResult`
+
+##### `class FakeEnvironment` — Minimal stand-in for BaseEnvironment.
+
+- **exec**<br/>`async exec(command: str, **kwargs: object) -> FakeExecResult`
+
+##### `class FakeContext` — Minimal stand-in for AgentContext.
+
+- **is_empty**<br/>`is_empty() -> bool`
+
+##### `class TestSkipPhrases` — Verify \_SKIP_PHRASES is a non-empty tuple of strings.
+
+- **test_skip_phrases_non_empty**<br/>`test_skip_phrases_non_empty() -> None`
+- **test_skip_phrases_are_strings**<br/>`test_skip_phrases_are_strings() -> None`
+
+##### `class TestAgentIdentity` — Agent name and version.
+
+- **test_name**<br/>`test_name() -> None`
+- **test_version_matches_package**<br/>`test_version_matches_package() -> None`
+
+##### `class TestRunSkipsImpossibleTasks` — Verify that run() returns immediately for impossible tasks.
+
+- **test_skip_compcert**<br/>`test_skip_compcert() -> None`
+- **test_skip_windows_311**<br/>`test_skip_windows_311() -> None`
+- **test_skip_ocaml_gc**<br/>`test_skip_ocaml_gc() -> None`
+- **test_non_skip_task_runs_normally** — A normal task makes a which-check then runs sorcar.<br/>`test_non_skip_task_runs_normally() -> None`
+
+##### `class TestSetup` — Verify setup runs the expected installation steps.
+
+- **test_setup_three_steps**<br/>`test_setup_three_steps() -> None`
+- **test_setup_aborts_on_uv_failure**<br/>`test_setup_aborts_on_uv_failure() -> None`
+- **test_setup_aborts_on_pip_failure**<br/>`test_setup_aborts_on_pip_failure() -> None`
+
+##### `class TestRunSorcarNotFound` — When sorcar is not installed, run returns early with an error.
+
+- **test_sorcar_missing**<br/>`test_sorcar_missing() -> None`
 
 ______________________________________________________________________
 
@@ -4927,7 +5001,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.background_agent` — *Background channel daemon — polls ChannelBackend and triggers agents.*
+#### `kiss.channels.background_agent` — *Background channel daemon — polls a ChannelBackend and runs agents.*
 
 ##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
 

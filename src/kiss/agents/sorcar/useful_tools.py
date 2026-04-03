@@ -2,8 +2,6 @@
 
 import logging
 import os
-import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -84,138 +82,6 @@ def _truncate_output(output: str, max_chars: int) -> str:
         return output[:head] + msg + output[-tail:]
     return output[:head] + msg
 
-
-DISALLOWED_BASH_COMMANDS = {
-    ".",
-    "env",
-    "eval",
-    "exec",
-    "source",
-}
-
-DISALLOWED_PS_COMMANDS = {
-    "Invoke-Expression",
-    "iex",
-}
-
-
-_SHELL_PREFIX_TOKENS = frozenset(("!", "{", "}", "(", ")", "&"))
-_REDIRECT_RE = re.compile(r"^[0-9]*[<>][<>&]*")
-
-
-def _extract_leading_command_name(part: str) -> str | None:
-    try:
-        tokens = shlex.split(part)
-    except ValueError:
-        _log_exc()
-        return None
-    if not tokens:
-        return None
-
-    i = 0
-    while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*", tokens[i]):
-        i += 1
-
-    while i < len(tokens):
-        token = tokens[i]
-        if token in _SHELL_PREFIX_TOKENS:
-            i += 1
-            continue
-        m = _REDIRECT_RE.match(token)
-        if m:
-            if m.end() < len(token):
-                i += 1
-            else:
-                i += 2
-            continue
-        break
-
-    if i >= len(tokens):
-        return None
-    name = tokens[i].lstrip("({")
-    if not name:
-        return None
-    return name.split("/")[-1]
-
-
-def _split_respecting_quotes(command: str, pattern: re.Pattern[str]) -> list[str]:
-    """Split *command* on *pattern* while skipping quoted and escaped regions."""
-    segments: list[str] = []
-    current: list[str] = []
-    i = 0
-    while i < len(command):
-        ch = command[i]
-        if ch == "\\":
-            current.append(command[i : i + 2])
-            i += 2
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            j = i + 1
-            while j < len(command):
-                if command[j] == "\\" and quote == '"':
-                    j += 2
-                    continue
-                if command[j] == quote:
-                    j += 1
-                    break
-                j += 1
-            current.append(command[i:j])
-            i = j
-            continue
-        m = pattern.match(command, i)
-        if m:
-            segments.append("".join(current))
-            current = []
-            i = m.end()
-            continue
-        current.append(ch)
-        i += 1
-    segments.append("".join(current))
-    return segments
-
-
-_CONTROL_RE = re.compile(r"&&|\|\||;|\n|(?<![<>|&])&(?![&>])")
-_PIPE_RE = re.compile(r"(?<!>)\|(?!\|)")
-
-
-def _extract_command_names(command: str) -> list[str]:
-    """Extract command names from a shell command string.
-
-    On Windows without bash (PowerShell fallback), uses a simple regex
-    since ``shlex.split()`` only handles POSIX quoting.
-
-    Args:
-        command: The command string to parse.
-
-    Returns:
-        List of command name strings found in the command.
-    """
-    if sys.platform == "win32" and _WINDOWS_BASH is None:
-        return re.findall(r"\b([A-Za-z_][\w.-]*)\b", command)
-    names: list[str] = []
-    stripped_command = _strip_heredocs(command)
-    segments = _split_respecting_quotes(stripped_command, _CONTROL_RE)
-    for segment in segments:
-        for part in _split_respecting_quotes(segment, _PIPE_RE):
-            name = _extract_leading_command_name(part.strip())
-            if name:
-                names.append(name)
-    return names
-
-
-def _strip_heredocs(command: str) -> str:
-    """Strip heredoc content from a bash command.
-
-    Removes everything between << DELIM and DELIM (or <<- DELIM and DELIM),
-    so that heredoc body text is not parsed as command arguments.
-    """
-    return re.sub(
-        r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n(?:.*?\n)*?[ \t]*\1[ \t]*(?=\n|$)",
-        "",
-        command,
-        flags=re.DOTALL,
-    )
 
 
 def _clean_env() -> dict[str, str]:
@@ -390,7 +256,7 @@ class UsefulTools:
         self,
         command: str,
         description: str,
-        timeout_seconds: float = 30,
+        timeout_seconds: float = 300,
         max_output_chars: int = 50000,
     ) -> str:
         """Runs a bash command and returns its output.
@@ -405,13 +271,6 @@ class UsefulTools:
             The output of the command.
         """
         del description
-
-        disallowed = DISALLOWED_BASH_COMMANDS
-        if sys.platform == "win32" and _WINDOWS_BASH is None:
-            disallowed = disallowed | DISALLOWED_PS_COMMANDS
-        for command_name in _extract_command_names(command):
-            if command_name in disallowed:
-                return f"Error: Command '{command_name}' is not allowed in Bash tool"
 
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
