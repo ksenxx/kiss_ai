@@ -1,4 +1,30 @@
-"""Background channel daemon — polls ChannelBackend and triggers agents."""
+"""Background channel daemon — polls a ChannelBackend and runs agents.
+
+Pseudocode
+----------
+
+run():  (blocking main loop)
+    Connect to backend with exponential-backoff retry.
+    Join the named channel.
+    Poll for new messages in a loop.
+    Reconnect on staleness (no events for a while) or errors.
+
+On each inbound message:
+    Skip bot's own messages and non-allowed users.
+    Route to a per-sender session (keyed by channel+user).
+    Each session has a FIFO queue and a mutex ensuring only one
+    worker thread processes that sender's messages at a time.
+    Messages within a session share a persistent agent chat_id
+    so the conversation is multi-turn.
+
+Worker thread (one per active sender):
+    Drain the session queue sequentially.
+    For each message, create/resume a StatefulSorcarAgent and run it,
+    passing a reply() tool the agent can call to post back to the channel.
+
+stop():
+    Signal all loops to exit, disconnect the backend, join worker threads.
+"""
 
 from __future__ import annotations
 

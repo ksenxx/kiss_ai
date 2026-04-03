@@ -54,7 +54,11 @@ def find_markdown_files() -> list[str]:
     )
     if result.returncode != 0 or not result.stdout.strip():
         return []
-    return sorted(str(project_root / f) for f in result.stdout.strip().split("\n") if f)
+    return sorted(
+        str(p)
+        for f in result.stdout.strip().split("\n")
+        if f and (p := project_root / f).is_file()
+    )
 
 
 def _should_skip_path(path: Path) -> bool:

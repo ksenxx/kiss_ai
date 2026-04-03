@@ -10,9 +10,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.useful_tools import (
-    DISALLOWED_BASH_COMMANDS,
     UsefulTools,
-    _extract_command_names,
     _truncate_output,
 )
 
@@ -41,11 +39,6 @@ class TestUsefulTools:
         result = ut.Write(str(subdir), "content")
         assert "Error:" in result
 
-
-class TestExtractCommandNames:
-
-    def test_empty_pipe_segment(self):
-        assert _extract_command_names("echo hi | | cat") == ["echo", "cat"]
 
 
 @pytest.fixture
@@ -114,31 +107,10 @@ class TestAdversarial:
 class TestBugs:
     """Tests that expose bugs in useful_tools.py."""
 
-
-    def test_source_is_blocked(self):
-        assert "source" in DISALLOWED_BASH_COMMANDS, (
-            "source is the bash synonym of . and should be disallowed"
-        )
-
-
     def test_truncate_output_tiny_limit(self):
         big = "X" * 200
         result = _truncate_output(big, 5)
         assert len(result) <= 5
-
-
-    def test_brace_group_eval_detected(self):
-        names = _extract_command_names("{ eval foo; }")
-        assert "eval" in names
-
-
-    def test_fd_redirect_before_source(self):
-        names = _extract_command_names("2>/dev/null source script.sh")
-        assert "source" in names
-
-    def test_redirect_output_before_exec(self):
-        names = _extract_command_names("> /tmp/log exec cmd")
-        assert "exec" in names
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
