@@ -659,7 +659,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -1647,7 +1647,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -1909,6 +1909,7 @@ ______________________________________________________________________
 ##### `class FakeEnvironment` — Minimal stand-in for BaseEnvironment.
 
 - **exec**<br/>`async exec(command: str, **kwargs: object) -> FakeExecResult`
+- **upload_file**<br/>`async upload_file(source_path: object, target_path: str) -> None`
 
 ##### `class FakeContext` — Minimal stand-in for AgentContext.
 
@@ -4943,7 +4944,7 @@ ______________________________________________________________________
 
   - `environment`: The harbor execution environment.
 
-- **run** — Run sorcar with the task instruction inside the container. The agent executes sorcar which modifies the environment directly. Harbor evaluates the result by inspecting the environment state after this method returns.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+- **run** — Run sorcar with the task instruction inside the container. Pre-reads the verifier test script and injects it into the instruction so the agent sees exact assertions. After the first sorcar run, automatically runs the tests and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
 
   - `instruction`: Natural language task description from harbor.
   - `environment`: The harbor execution environment.

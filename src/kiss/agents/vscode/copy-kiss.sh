@@ -30,10 +30,17 @@ cp "$PROJECT_ROOT/uv.lock" "$DEST/"
 cp "$PROJECT_ROOT/README.md" "$DEST/"
 cp "$PROJECT_ROOT/SYSTEM.md" "$DEST/"
 
-# Copy all git-tracked src/kiss/ files
+# Copy all git-tracked src/kiss/ files, excluding VS Code extension build
+# artifacts (tsconfig, TS sources, node configs) that would confuse the
+# TypeScript language server when nested inside kiss_project/.
 cd "$PROJECT_ROOT"
 git ls-files src/kiss/ | while IFS= read -r f; do
     [ -f "$f" ] || continue
+    case "$f" in
+        src/kiss/agents/vscode/tsconfig.json) continue ;;
+        src/kiss/agents/vscode/src/*.ts)      continue ;;
+        src/kiss/agents/vscode/package-lock.json) continue ;;
+    esac
     mkdir -p "$DEST/$(dirname "$f")"
     cp "$f" "$DEST/$f"
 done
