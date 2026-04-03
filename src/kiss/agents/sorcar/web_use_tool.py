@@ -75,10 +75,12 @@ class WebUseTool:
     OS browser when user interaction is needed (ask_user_browser_action).
     """
 
+    _DEFAULT_USER_DATA_DIR = str(Path.home() / ".kiss" / "browser_profile")
+
     def __init__(
         self,
         viewport: tuple[int, int] = (1280, 900),
-        user_data_dir: str | None = None,
+        user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
         wait_for_user_callback: Callable[[str, str], None] | None = None,
         **_kwargs: Any,
     ) -> None:

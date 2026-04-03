@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels import ChannelBackend
 from kiss.core.base import Base
@@ -252,9 +254,26 @@ class ChannelDaemon:
 
         tools.append(reply)
 
+        replied = threading.Event()
+        original_reply = reply
+
+        def reply_with_tracking(message: str) -> str:
+            """Send a reply to the current conversation.
+
+            Args:
+                message: Text to send as the bot's reply.
+
+            Returns:
+                JSON string with ok status.
+            """
+            replied.set()
+            return original_reply(message)
+
+        tools[-1] = reply_with_tracking
+
         Path(self._work_dir).mkdir(parents=True, exist_ok=True)
         try:
-            agent.run(
+            result = agent.run(
                 prompt_template=text,
                 model_name=self._model_name,
                 max_budget=self._max_budget,
@@ -264,6 +283,10 @@ class ChannelDaemon:
                 verbose=False,
             )
             state.chat_id = agent.chat_id
+            if not replied.is_set():
+                result_yaml = yaml.safe_load(result)
+                summary = (result_yaml.get("summary", "") if result_yaml else "") or result
+                self._backend.send_message(channel_id, summary, thread_ts)
         except Exception as e:
             logger.error("Agent error for %s: %s", session_key, e, exc_info=True)
             try:
