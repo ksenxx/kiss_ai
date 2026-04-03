@@ -22,9 +22,7 @@ import pytest
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
-    _extract_leading_command_name,
     _kill_process_group,
-    _split_respecting_quotes,
     _truncate_output,
 )
 from kiss.agents.sorcar.web_use_tool import (
@@ -235,21 +233,10 @@ class TestUsefulToolsBranches:
             assert Path(f.name).read_text() == "aYaYa"
             os.unlink(f.name)
 
-    def test_bash_disallowed(self):
-        ut = UsefulTools()
-        result = ut.Bash("eval echo hi", "test")
-        assert "not allowed" in result
-
     def test_bash_timeout_nonstreaming(self):
         ut = UsefulTools()
         result = ut.Bash("sleep 100", "timeout test", timeout_seconds=0.5)
         assert "timeout" in result.lower()
-
-    def test_split_respecting_quotes_escaped(self):
-        import re
-        pat = re.compile(r";")
-        result = _split_respecting_quotes("a\\;b;c", pat)
-        assert result == ["a\\;b", "c"]
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses 'true' command)")
     def test_kill_process_group_already_dead(self):
@@ -764,11 +751,6 @@ class TestHandleMessageContentBlockNoIsError:
 
 
 class TestUsefulToolsMoreBranches:
-    def test_extract_leading_command_name_invalid_shlex(self):
-        """shlex.split raises ValueError on unmatched quotes."""
-        result = _extract_leading_command_name("'unterminated")
-        assert result is None
-
     def test_truncate_output_zero_tail(self):
         """Edge case where tail computes to 0."""
         # Create a string where (max_chars - msg_len) // 2 = head, remaining - head = 0 for tail

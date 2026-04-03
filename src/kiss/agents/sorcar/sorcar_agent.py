@@ -27,6 +27,7 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
         self._wait_for_user_callback: Callable[[str, str], None] | None = None
+        self._use_web_tools: bool = True
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -68,7 +69,7 @@ class SorcarAgent(RelentlessAgent):
             ]
         else:
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
-        if self.web_use_tool is None:
+        if self._use_web_tools and self.web_use_tool is None:
             self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
             tools.extend(self.web_use_tool.get_tools())
         tools.append(ask_user_question)
@@ -130,6 +131,7 @@ class SorcarAgent(RelentlessAgent):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         headless: bool | None = None,
+        web_tools: bool = True,
         verbose: bool | None = None,
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
@@ -151,6 +153,8 @@ class SorcarAgent(RelentlessAgent):
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
             headless: Deprecated, ignored. Browser always runs headless.
+            web_tools: Whether to include browser/web tools. Defaults to True.
+                Set to False for headless terminal-only environments.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
@@ -164,6 +168,7 @@ class SorcarAgent(RelentlessAgent):
         """
         self._wait_for_user_callback = wait_for_user_callback
         self._ask_user_question_callback = ask_user_question_callback
+        self._use_web_tools = web_tools
         # Lazy-initialized when web tools are first accessed via _get_tools()
         self.web_use_tool = None
         # Extract the per-thread stop event from the printer so UsefulTools
@@ -253,6 +258,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Print output to console",
     )
     parser.add_argument(
+        "--no-web",
+        action="store_true",
+        default=False,
+        help="Disable browser/web tools (terminal-only mode)",
+    )
+    parser.add_argument(
         "-t", "--task", type=str, default=None, help="Prompt template/task description"
     )
     parser.add_argument(
@@ -316,7 +327,6 @@ def cli_ask_user_question(question: str) -> str:
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run a demo of the SorcarAgent with a sample Gmail task."""
     import time as time_mod
 
 
@@ -355,6 +365,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
             "model_config": model_config,
             "work_dir": work_dir,
             "headless": args.headless,
+            "web_tools": not args.no_web,
             "verbose": args.verbose,
             "wait_for_user_callback": cli_wait_for_user,
             "ask_user_question_callback": cli_ask_user_question,

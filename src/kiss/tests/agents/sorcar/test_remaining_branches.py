@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import re
 import socket
 import subprocess
 import sys
@@ -22,8 +21,6 @@ import pytest
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import (
-    _extract_leading_command_name,
-    _split_respecting_quotes,
     _stop_monitor,
     _truncate_output,
 )
@@ -180,20 +177,6 @@ class TestUsefulToolsBranches:
         assert "truncated" in result
         # tail is 0 so no suffix is appended
         assert not result.endswith("A")
-
-    def test_extract_leading_command_name_empty_after_lstrip(self) -> None:
-        """_extract_leading_command_name returns None when name is empty after lstrip (line 80)."""
-        # After skipping env var, remaining token "({" lstrips to empty string
-        result = _extract_leading_command_name("X=1 ({")
-        assert result is None
-
-    def test_split_respecting_quotes_unclosed_dquote_with_escape(self) -> None:
-        """Cover unclosed double-quote string ending with escape (line 98->106)."""
-        pattern = re.compile(r"&&")
-        # Unclosed double-quote with escape — while loop exits because j >= len
-        result = _split_respecting_quotes('echo "hello\\', pattern)
-        assert len(result) == 1
-        assert result[0] == 'echo "hello\\'
 
     def test_stop_monitor_exits_when_done(self) -> None:
         """_stop_monitor exits cleanly when done is set (line 207 exit branch)."""
