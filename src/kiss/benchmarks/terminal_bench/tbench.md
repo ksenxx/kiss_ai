@@ -27,10 +27,18 @@ cat README* INSTRUCTIONS* 2>/dev/null
 find . -maxdepth 3 -type f | head -50
 ```
 
-Read the ENTIRE eval script carefully — every assertion, every import,
-every expected value. Understand what assertions it makes, what files it
-checks, and what commands it runs. Everything you do must serve passing
-that eval. Do NOT skip any part of the test file.
+**CRITICAL: Read the FULL test/verifier script — not just the first
+screen.** If it was truncated, re-read specific sections with
+`sed -n 'START,ENDp' FILE`. Extract a mental checklist:
+
+- Every assertion and its exact expected value
+- Every file path that is checked (e.g. `/app/sqlite/`, `/app/result.txt`)
+- Every command the verifier runs (e.g. `subprocess.run(["sqlite3", ...])`)
+- Every service/port it connects to (e.g. `curl localhost:8080`)
+- The exact output format expected (trailing newlines, column order, etc.)
+
+Everything you do must serve passing that eval. Do NOT skip any part of
+the test file.
 
 ## Phase 2: Plan
 
@@ -63,11 +71,44 @@ just as hard as a wrong one.
 - If a command fails, read the error carefully. Do NOT retry the same
   command unchanged — analyze the error and try an alternative approach.
 - Use short timeouts for exploratory commands. Fail fast, iterate fast.
-- For tasks that need a running service (server, daemon), start it in the
-  background: `nohup <cmd> &` or `<cmd> &`. Verify it is running before
-  moving on.
 - Prefer simple, direct commands over complex pipelines. Each additional
   pipe is another failure point.
+
+### Python packages
+
+When installing Python packages, ALWAYS use the system pip:
+
+```bash
+pip install <pkg>
+# or
+python3 -m pip install <pkg>
+```
+
+The verifier runs tests with the **system Python**, not any virtual
+environment you create. If the verifier script imports a module, that
+module must be installed in the system Python.
+
+### Background services
+
+For tasks that require a running service at verification time:
+
+1. Use `systemctl enable --now <service>` if systemd is available.
+1. Otherwise: `nohup /path/to/cmd >/var/log/svc.log 2>&1 &`
+1. Immediately verify the service responds: `curl localhost:<port>` or
+   `ss -tlnp | grep <port>`.
+1. **At the END of your work**, re-verify the service is still running.
+   The verifier runs AFTER the agent exits — if the service dies with
+   your shell session, the test fails.
+
+### Build tasks
+
+When the test script checks for source directories, file hashes, or
+specific file paths, ensure you:
+
+- Keep source directories where the test expects them (e.g. `/app/pmars-*`)
+- Do NOT delete or move source dirs during cleanup
+- Build artifacts (.o files, binaries) should only be removed from
+  directories where the test explicitly does NOT expect them
 
 ## Phase 4: Verify (MANDATORY)
 
@@ -98,7 +139,7 @@ After tests pass, do a final sanity check:
 - You are root inside an Ubuntu-based Docker container.
 - Working directory is `/app` containing the task files.
 - `apt-get install -y <pkg>` for system packages.
-- `pip install <pkg>` for Python packages.
+- `pip install <pkg>` for Python packages (system pip — see above).
 - Network access is available.
 - **Do not modify the test/evaluation scripts themselves.**
 
@@ -130,6 +171,7 @@ newlines.
 Read the build error carefully. Check for missing dependencies (`apt-get`),
 wrong versions, or syntax errors. Fix one error at a time and rebuild.
 For kernel/large builds, ensure you have enough disk space and memory.
+**Keep source directories in place** — verifiers often check them.
 
 **ML / training** (keywords: train, model, accuracy, loss, dataset):
 Read the data format and evaluation criteria first. Check if there are
@@ -153,3 +195,17 @@ Read service logs for clues.
    If the tests fail, fix and retry. Never finish with failing tests.
 1. **Stay minimal.** Change only what the task requires. Leave everything
    else untouched.
+1. **Check exact paths.** The verifier checks specific directories and
+   file locations. If it looks for `/app/sqlite/*.gcda`, your gcda files
+   MUST be there, not in `/usr/local/`. Always match the test's paths.
+
+# MOST Important Instructions to be followed at any cost
+
+- Before calling finish(), remove compiled binaries and .o files ONLY from
+  directories where the test does not expect them. Keep source directories
+  and build outputs that the verifier checks.
+- For tasks requiring running services, ensure services run as background
+  daemons that survive after sorcar exits. Use nohup or systemd. Verify
+  the service is still running AND responding at the END of your work.
+- When the test imports a Python module, that module must be installed in
+  the SYSTEM Python (pip install), not in any isolated environment.

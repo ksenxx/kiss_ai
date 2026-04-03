@@ -205,13 +205,30 @@ export function activate(context: vscode.ExtensionContext): void {
     );
   }
 
+  // Track panel visibility in globalState so we don't override user preference
+  // on subsequent launches.  undefined (first install) → auto-open; false → don't.
+  const PANEL_WAS_OPEN_KEY = 'kissSorcar.panelWasOpen';
+  for (const provider of [primaryProvider, secondaryProvider]) {
+    if (provider) {
+      context.subscriptions.push(
+        provider.onDidChangeVisibility((visible) => {
+          context.globalState.update(PANEL_WAS_OPEN_KEY, visible);
+        })
+      );
+    }
+  }
+
   // Set context for conditional view visibility, then auto-open on startup
+  // only if the user hasn't explicitly closed the panel in a previous session.
+  const panelWasOpen = context.globalState.get<boolean>(PANEL_WAS_OPEN_KEY);
   vscode.commands.executeCommand(
     'setContext',
     'kissSorcar:doesNotSupportSecondarySidebar',
     !supportsSecondarySidebar
   ).then(() => {
-    vscode.commands.executeCommand('kissSorcar.openPanel');
+    if (panelWasOpen !== false) {
+      vscode.commands.executeCommand('kissSorcar.openPanel');
+    }
   });
 
   // Auto-install dependencies (uv, Python, Playwright Chromium) in background

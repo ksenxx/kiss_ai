@@ -161,18 +161,11 @@ def run_terminal_bench(
     """
     if not is_docker_hub_authenticated():
         print(
-            "ERROR: Not authenticated to Docker Hub.\n"
-            "\n"
-            "  Terminal-Bench tasks use pre-built Docker images from Docker Hub.\n"
-            "  Without authentication, Docker Hub limits pulls to 100 per 6 hours,\n"
-            "  which is easily exceeded with concurrent benchmark runs.\n"
-            "\n"
-            "  Fix: run 'docker login' and enter your Docker Hub credentials.\n"
-            "  A free account provides 200 pulls per 6 hours.\n"
-            "  Create an account at https://hub.docker.com/signup\n",
+            "WARNING: Not authenticated to Docker Hub.\n"
+            "  Without authentication, Docker Hub limits pulls to 100 per 6 hours.\n"
+            "  Run 'docker login' to avoid rate limits.\n",
             file=sys.stderr,
         )
-        sys.exit(1)
 
     if not skip_pre_pull:
         pre_pull_images(dataset)

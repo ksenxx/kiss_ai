@@ -33,6 +33,9 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
   private _mergeManager: MergeManager;
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
+  private _onDidChangeVisibility = new vscode.EventEmitter<boolean>();
+  /** Fires with `true` when the view becomes visible, `false` when hidden. */
+  public readonly onDidChangeVisibility = this._onDidChangeVisibility.event;
   private _activeEditorDisposable?: vscode.Disposable;
   private _commitPending: boolean = false;
   private _pendingNewChat: boolean = false;
@@ -115,6 +118,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       undefined,
       []
     );
+
+    // Track visibility changes (user opening/closing the panel)
+    webviewView.onDidChangeVisibility(() => {
+      this._onDidChangeVisibility.fire(webviewView.visible);
+    });
 
     // Start the agent process
     const workDir = this._getWorkDir();
