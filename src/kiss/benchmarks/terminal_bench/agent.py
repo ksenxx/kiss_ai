@@ -18,6 +18,9 @@ import base64
 import logging
 import os
 import shlex
+import subprocess
+import threading
+from pathlib import Path
 
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
@@ -53,6 +56,35 @@ _SKIP_PHRASES: tuple[str, ...] = (
 )
 
 logger = logging.getLogger(__name__)
+
+_wheel_lock = threading.Lock()
+_wheel_path: Path | None = None
+
+
+def _get_wheel() -> Path:
+    """Build a wheel from local source, cached for the process lifetime.
+
+    Returns:
+        Path to the built .whl file.
+    """
+    global _wheel_path
+    with _wheel_lock:
+        if _wheel_path is not None and _wheel_path.exists():
+            return _wheel_path
+        import kiss
+
+        project_root = Path(kiss.__file__).resolve().parent.parent.parent
+        dist = project_root / "dist"
+        subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", str(dist)],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+        )
+        wheels = sorted(dist.glob("kiss_agent_framework-*.whl"))
+        _wheel_path = wheels[-1]
+        return _wheel_path
+
 
 # API key environment variables to forward into the container.
 _API_KEY_VARS = (
@@ -128,13 +160,18 @@ class SorcarHarborAgent(BaseAgent):
         ):
             return
 
-        # Step 2: Install kiss-agent-framework.  Pin to Python 3.13 because
-        # transitive deps (e.g. pyiceberg) lack pre-built wheels for 3.14,
-        # and minimal Docker images don't have a C compiler for source builds.
+        # Step 2: Build a wheel from local source (avoids stale PyPI package),
+        # upload it to the container, and install it.  Pin to Python 3.13
+        # because transitive deps (e.g. pyiceberg) lack pre-built wheels for
+        # 3.14, and minimal Docker images don't have a C compiler for source
+        # builds.
+        wheel = _get_wheel()
+        container_wheel = f"/tmp/{wheel.name}"
+        await environment.upload_file(wheel, container_wheel)
         if not await self._exec_check(
             environment,
             'export PATH="/root/.local/bin:$PATH"'
-            " && uv tool install --python 3.13 kiss-agent-framework",
+            f" && uv tool install --python 3.13 {container_wheel}",
             "install kiss-agent-framework",
         ):
             return
