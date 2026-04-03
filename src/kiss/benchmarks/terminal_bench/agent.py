@@ -128,11 +128,13 @@ class SorcarHarborAgent(BaseAgent):
         ):
             return
 
-        # Step 2: Install kiss-agent-framework
+        # Step 2: Install kiss-agent-framework.  Pin to Python 3.13 because
+        # transitive deps (e.g. pyiceberg) lack pre-built wheels for 3.14,
+        # and minimal Docker images don't have a C compiler for source builds.
         if not await self._exec_check(
             environment,
             'export PATH="/root/.local/bin:$PATH"'
-            " && uv tool install kiss-agent-framework",
+            " && uv tool install --python 3.13 kiss-agent-framework",
             "install kiss-agent-framework",
         ):
             return

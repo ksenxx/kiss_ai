@@ -154,7 +154,7 @@ class TestSetup:
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
         assert len(env.exec_calls) == 3
         assert "curl" in env.exec_calls[0]
-        assert "uv tool install" in env.exec_calls[1]
+        assert "uv tool install --python 3.13" in env.exec_calls[1]
         # Step 3 uses the tool's own Python to decode base64 and write
         # SYSTEM.md — avoids depending on shell `base64` command.
         assert "python3" in env.exec_calls[2]
