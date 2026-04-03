@@ -52,6 +52,7 @@ dependencies = [
     "google-auth-httplib2>=0.2.0",
     "filelock>=3.25.2",
     "requests>=2.28.0",
+    "harbor>=0.3.0",
 ]
 
 [build-system]

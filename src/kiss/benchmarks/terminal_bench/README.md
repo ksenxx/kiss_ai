@@ -13,7 +13,7 @@ uv pip install harbor
 ## Quick Run
 
 ```bash
-python -m kiss.benchmarks.terminal_bench.run \
+uv run python -m kiss.benchmarks.terminal_bench.run \
     --model claude-opus-4-6 --n-concurrent 8
 ```
 
@@ -23,7 +23,7 @@ The leaderboard requires `-k 5` (5 attempts per task) to compute confidence
 intervals:
 
 ```bash
-python -m kiss.benchmarks.terminal_bench.run \
+uv run python -m kiss.benchmarks.terminal_bench.run \
     --model claude-opus-4-6 --n-concurrent 8 -k 5
 ```
 
