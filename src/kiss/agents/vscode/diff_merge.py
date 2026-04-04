@@ -69,7 +69,7 @@ def _scan_files(work_dir: str) -> list[str]:
             )
             for name in sorted(files):
                 paths.append(str(rel_root / name).replace(os.sep, "/"))
-                if len(paths) >= 2000:
+                if len(paths) >= 5000:
                     return paths
             for d in dirs:
                 paths.append(str(rel_root / d).replace(os.sep, "/") + "/")
