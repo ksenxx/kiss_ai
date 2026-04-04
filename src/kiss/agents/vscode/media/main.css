@@ -593,10 +593,17 @@ header {
 
 /* ── Sidebar ────────────────────────────────────────── */
 #sidebar {
-  position: fixed; right: 0; top: 0; bottom: 0; width: 420px;
-  background: var(--bg2); border-left: 1px solid var(--border);
-  transform: translateX(100%); transition: transform 0.25s ease;
-  z-index: 200; padding: 16px;
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(420px, 75vw);
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  transform: translateX(100%);
+  transition: transform 0.25s ease;
+  z-index: 200;
+  padding: 16px;
   overflow: hidden;
   display: flex;
   flex-direction: column;

@@ -769,13 +769,13 @@ class TestUsefulToolsMoreBranches:
 
 class TestCodeServerMoreBranches:
     def test_scan_files_max_limit(self):
-        """Scan should stop at 2000 files."""
+        """Scan should stop at 5000 files."""
         with tempfile.TemporaryDirectory() as d:
             # Create many files
-            for i in range(2100):
+            for i in range(5100):
                 (Path(d) / f"file_{i:04d}.txt").write_text("x")
             result = _scan_files(d)
-            assert len(result) <= 2000
+            assert len(result) <= 5000
 
     def test_prepare_merge_view_new_files_only(self):
         """When only new untracked files are added after a task."""
