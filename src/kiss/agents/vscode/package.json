@@ -99,22 +99,25 @@
         {
           "id": "kissSorcar",
           "title": "KISS Sorcar",
-          "icon": "media/spark.svg",
-          "when": "kissSorcar:doesNotSupportSecondarySidebar"
+          "icon": "media/kiss-icon.svg"
         }
       ],
       "secondarySidebar": [
         {
           "id": "kissSorcarSecondary",
           "title": "KISS Sorcar",
-          "icon": "media/spark.svg",
-          "when": "!kissSorcar:doesNotSupportSecondarySidebar",
+          "icon": "media/kiss-icon.svg",
           "order": -100
         }
       ]
     },
     "views": {
       "kissSorcar": [
+        {
+          "id": "kissSorcar.launcherView",
+          "name": "KISS Sorcar",
+          "when": "!kissSorcar:doesNotSupportSecondarySidebar"
+        },
         {
           "type": "webview",
           "id": "kissSorcar.chatView",
@@ -126,11 +129,16 @@
         {
           "type": "webview",
           "id": "kissSorcar.chatViewSecondary",
-          "name": "Chat",
-          "when": "!kissSorcar:doesNotSupportSecondarySidebar"
+          "name": "Chat"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "kissSorcar.launcherView",
+        "contents": "Open KISS Sorcar Chat in the secondary sidebar.\n[Open Chat](command:kissSorcar.openPanel)"
+      }
+    ],
     "keybindings": [
       {
         "command": "kissSorcar.newConversation",
