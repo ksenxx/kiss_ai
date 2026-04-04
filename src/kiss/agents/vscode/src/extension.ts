@@ -3,6 +3,8 @@
  */
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { TabManager } from './SorcarTab';
 import { ensureDependencies, ensureLocalBinInPath } from './DependencyInstaller';
 
@@ -145,6 +147,18 @@ export function activate(context: vscode.ExtensionContext): void {
       // Already registered by another extension — ignored
     }
   }
+
+  // Auto-reload when this extension's files are replaced (e.g. VSIX reinstall).
+  // fs.watchFile uses stat-polling so it works even when the file is deleted
+  // and recreated, which is what happens during VSIX installation.
+  const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
+  fs.watchFile(extJsPath, { interval: 2000 }, (curr, prev) => {
+    if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino) {
+      fs.unwatchFile(extJsPath);
+      vscode.commands.executeCommand('workbench.action.reloadWindow');
+    }
+  });
+  context.subscriptions.push({ dispose: () => fs.unwatchFile(extJsPath) });
 
   // Auto-open a chat tab on activation, restoring the last session
   tabManager.createTab(true);
