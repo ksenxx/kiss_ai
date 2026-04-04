@@ -257,7 +257,7 @@ def _get_tools(self) -> list:
         ]
     else:
         tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
-    if self.web_use_tool is None:
+    if self._use_web_tools and self.web_use_tool is None:
         self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
         tools.extend(self.web_use_tool.get_tools())
     tools.append(ask_user_question)
