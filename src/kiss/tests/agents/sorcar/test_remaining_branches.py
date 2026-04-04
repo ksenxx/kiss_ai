@@ -420,6 +420,48 @@ class TestVSCodeServerBranches:
         assert len(hist_events) == 1
         assert "tasks" in hist_events[0]
 
+    def test_get_input_history_loads_beyond_first_100_rows(self) -> None:
+        """Arrow-key input history should cover the full history.db, not just 100 rows."""
+        server = VSCodeServer()
+        events: list[dict] = []
+
+        def cap(ev: dict) -> None:
+            events.append(ev)
+
+        server.printer.broadcast = cap  # type: ignore[assignment]
+        for i in range(105):
+            th._add_task(f"task-{i:03d}")
+
+        server._get_input_history()
+
+        hist_event = next(e for e in events if e.get("type") == "inputHistory")
+        tasks = hist_event["tasks"]
+        assert len(tasks) >= 105
+        assert "task-000" in tasks
+        assert tasks[0] == "task-104"
+
+    def test_get_input_history_deduplicates_across_full_history(self) -> None:
+        """Deduplication should keep the newest copy even when duplicates span >100 rows."""
+        server = VSCodeServer()
+        events: list[dict] = []
+
+        def cap(ev: dict) -> None:
+            events.append(ev)
+
+        server.printer.broadcast = cap  # type: ignore[assignment]
+        th._add_task("repeated-task")
+        for i in range(100):
+            th._add_task(f"middle-task-{i:03d}")
+        th._add_task("repeated-task")
+
+        server._get_input_history()
+
+        hist_event = next(e for e in events if e.get("type") == "inputHistory")
+        tasks = hist_event["tasks"]
+        assert tasks.count("repeated-task") == 1
+        assert tasks[0] == "repeated-task"
+        assert "middle-task-000" in tasks
+
 # ---------------------------------------------------------------------------
 # diff_merge.py — uncovered branches
 # ---------------------------------------------------------------------------

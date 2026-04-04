@@ -541,8 +541,13 @@ class VSCodeServer:
         })
 
     def _get_input_history(self) -> None:
-        """Send deduplicated recent task texts for arrow-key cycling."""
-        entries = _load_history(limit=100)
+        """Send deduplicated task texts for arrow-key cycling.
+
+        Loads the full persisted history so ArrowUp can traverse every
+        distinct task stored in ``history.db``, not just an arbitrary
+        recent subset.
+        """
+        entries = _load_history()
         seen: set[str] = set()
         tasks: list[str] = []
         for e in entries:
