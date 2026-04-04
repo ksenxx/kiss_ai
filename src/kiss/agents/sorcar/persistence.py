@@ -258,9 +258,10 @@ def _search_history(
     if not query:
         return _load_history(limit=limit, offset=offset)
     db = _get_db()
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = db.execute(
-        _HISTORY_SELECT + "WHERE task LIKE ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-        (f"%{query}%", limit, offset),
+        _HISTORY_SELECT + "WHERE task LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        (f"%{escaped}%", limit, offset),
     ).fetchall()
     return [dict(r) for r in rows]
 

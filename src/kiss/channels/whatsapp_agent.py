@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import queue
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -37,6 +36,12 @@ from kiss.channels._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
     wait_for_matching_message,
+)
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,24 +72,7 @@ def _load_config() -> dict[str, str] | None:
     Returns:
         Dict with ``access_token`` and ``phone_number_id``, or None.
     """
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if (
-            isinstance(data, dict)
-            and data.get("access_token")
-            and data.get("phone_number_id")
-        ):
-            return {
-                "access_token": data["access_token"],
-                "phone_number_id": data["phone_number_id"],
-                "waba_id": data.get("waba_id", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("access_token", "phone_number_id"))
 
 
 def _save_config(access_token: str, phone_number_id: str, waba_id: str = "") -> None:
@@ -95,22 +83,19 @@ def _save_config(access_token: str, phone_number_id: str, waba_id: str = "") -> 
         phone_number_id: WhatsApp Business phone number ID.
         waba_id: WhatsApp Business Account ID (optional).
     """
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "access_token": access_token.strip(),
-        "phone_number_id": phone_number_id.strip(),
-        "waba_id": waba_id.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(
+        _config_path(),
+        {
+            "access_token": access_token.strip(),
+            "phone_number_id": phone_number_id.strip(),
+            "waba_id": waba_id.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
     """Delete the stored WhatsApp config."""
-    path = _config_path()
-    if path.exists():
-        path.unlink()
+    clear_json_config(_config_path())
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +144,7 @@ def _api_request(
 # ---------------------------------------------------------------------------
 
 
-class WhatsAppChannelBackend:
+class WhatsAppChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for WhatsApp Business Cloud API.
 
     Provides channel monitoring via webhook queue, message sending,
@@ -869,27 +854,6 @@ class WhatsAppChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent.
-
-        Automatically discovers all public methods of this class,
-        excluding ChannelBackend protocol/infrastructure methods.
-
-        Returns:
-            List of callable tool methods for WhatsApp API operations.
-        """
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 # ---------------------------------------------------------------------------

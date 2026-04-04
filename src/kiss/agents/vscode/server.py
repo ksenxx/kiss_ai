@@ -118,6 +118,11 @@ class VSCodeServer:
         self._complete_seq = itertools.count()
         self._complete_seq_latest = -1
         self._complete_lock = threading.Lock()
+        self._complete_queue: queue.Queue[tuple[str, int, str, str]] = queue.Queue()
+        self._complete_worker = threading.Thread(
+            target=self._complete_worker_loop, daemon=True
+        )
+        self._complete_worker.start()
         self._task_history_id: int | None = None
 
     def run(self) -> None:
@@ -139,12 +144,15 @@ class VSCodeServer:
         cmd_type = cmd.get("type")
 
         if cmd_type == "run":
-            if self._task_thread and self._task_thread.is_alive():
-                self.printer.broadcast({"type": "error", "text": "Task already running"})
-                self.printer.broadcast({"type": "status", "running": False})
-                return
-            self._task_thread = threading.Thread(target=self._run_task, args=(cmd,), daemon=True)
-            self._task_thread.start()
+            with self._state_lock:
+                if self._task_thread and self._task_thread.is_alive():
+                    self.printer.broadcast({"type": "error", "text": "Task already running"})
+                    self.printer.broadcast({"type": "status", "running": False})
+                    return
+                self._task_thread = threading.Thread(
+                    target=self._run_task, args=(cmd,), daemon=True
+                )
+                self._task_thread.start()
         elif cmd_type == "stop":
             self._stop_task()
         elif cmd_type == "getModels":
@@ -199,11 +207,7 @@ class VSCodeServer:
             with self._complete_lock:
                 self._complete_seq_latest = seq
             if query:
-                threading.Thread(
-                    target=self._complete,
-                    args=(query, seq, snapshot_file, snapshot_content),
-                    daemon=True,
-                ).start()
+                self._complete_queue.put((query, seq, snapshot_file, snapshot_content))
         elif cmd_type == "getInputHistory":
             self._get_input_history()
         elif cmd_type == "generateCommitMessage":
@@ -306,17 +310,20 @@ class VSCodeServer:
                     wait_for_user_callback=self._wait_for_user,
                     ask_user_question_callback=self._ask_user_question,
                 )
-                _record_model_usage(model)
+                self._task_history_id = self.agent._last_task_id
                 result_summary = self._extract_result_summary() or "No summary available"
                 task_end_event = {"type": "task_done"}
             except KeyboardInterrupt:
+                self._task_history_id = self.agent._last_task_id
                 task_end_event = {"type": "task_stopped"}
             except Exception as e:  # pragma: no cover
+                self._task_history_id = self.agent._last_task_id
                 task_end_event = {"type": "task_error", "text": str(e)}
         except BaseException:  # pragma: no cover — async interrupt before inner try
             # P14: interrupt before inner try — ensure stop_recording runs
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
+            _record_model_usage(model)
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
                 chat_events = self.printer.stop_recording(rec_id)
@@ -686,6 +693,19 @@ class VSCodeServer:
                     best = suffix
         return best
 
+    def _complete_worker_loop(self) -> None:
+        """Persistent worker that drains the complete queue."""
+        while True:
+            item = self._complete_queue.get()
+            # Drain to latest request (skip stale ones)
+            while not self._complete_queue.empty():
+                try:
+                    item = self._complete_queue.get_nowait()
+                except queue.Empty:  # pragma: no cover — race guard
+                    break
+            query, seq, snapshot_file, snapshot_content = item
+            self._complete(query, seq, snapshot_file, snapshot_content)
+
     def _complete(
         self,
         query: str,
@@ -737,10 +757,12 @@ class VSCodeServer:
     def _get_files(self, prefix: str) -> None:
         """Send file list for autocomplete with usage-based sorting."""
         with self._state_lock:
-            if not self._file_cache:
-                from kiss.agents.vscode.diff_merge import _scan_files
-                self._file_cache = _scan_files(self.work_dir)
             cache = self._file_cache
+        if not cache:
+            from kiss.agents.vscode.diff_merge import _scan_files
+            cache = _scan_files(self.work_dir)
+            with self._state_lock:
+                self._file_cache = cache
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 import threading
 import time
 from pathlib import Path
@@ -30,6 +29,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,42 +54,26 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, str] | None:
     """Load stored Discord bot token from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and data.get("bot_token"):  # pragma: no branch
-            return {
-                "bot_token": data["bot_token"],
-                "application_id": data.get("application_id", ""),
-                "guild_ids": data.get("guild_ids", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("bot_token",))
 
 
 def _save_config(
     bot_token: str, application_id: str = "", guild_ids: str = ""
 ) -> None:
     """Save Discord config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "bot_token": bot_token.strip(),
-        "application_id": application_id.strip(),
-        "guild_ids": guild_ids.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(
+        _config_path(),
+        {
+            "bot_token": bot_token.strip(),
+            "application_id": application_id.strip(),
+            "guild_ids": guild_ids.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
     """Delete the stored Discord config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    clear_json_config(_config_path())
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +81,7 @@ def _clear_config() -> None:
 # ---------------------------------------------------------------------------
 
 
-class DiscordChannelBackend:
+class DiscordChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Discord REST API v10."""
 
     def __init__(self) -> None:
@@ -153,8 +142,36 @@ class DiscordChannelBackend:
         return self._connection_info
 
     def find_channel(self, name: str) -> str | None:
-        """Return channel name as channel ID."""
-        return name if name else None
+        """Find a channel by name or numeric ID.
+
+        If *name* is already a numeric snowflake ID, returns it as-is.
+        Otherwise queries all guilds for a channel matching the name.
+
+        Args:
+            name: Channel name or numeric ID.
+
+        Returns:
+            The channel snowflake ID string, or None if not found.
+        """
+        if not name:
+            return None
+        # If already a numeric ID, return as-is
+        if name.isdigit():
+            return name
+        try:
+            guilds = self._get("/users/@me/guilds", params={"limit": 100})
+            if not isinstance(guilds, list):
+                return None
+            for guild in guilds:
+                channels = self._get(f"/guilds/{guild['id']}/channels")
+                if not isinstance(channels, list):
+                    continue
+                for ch in channels:
+                    if ch.get("name") == name:
+                        return str(ch["id"])
+        except Exception:
+            pass
+        return None
 
     def find_user(self, username: str) -> str | None:
         """Return username as user ID."""
@@ -175,7 +192,7 @@ class DiscordChannelBackend:
                 params["after"] = oldest
             else:
                 # Snowflake for "1 second ago"
-                params["after"] = str((int(time.time() - 1) * 1000 - 1420070400000) << 22)
+                params["after"] = str((int((time.time() - 1) * 1000) - 1420070400000) << 22)
             result = self._get(f"/channels/{channel_id}/messages", params=params)
             if not isinstance(result, list):  # pragma: no branch
                 return [], oldest
@@ -520,20 +537,6 @@ class DiscordChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 # ---------------------------------------------------------------------------

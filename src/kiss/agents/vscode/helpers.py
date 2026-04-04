@@ -76,7 +76,7 @@ def generate_followup_text(task: str, result: str, model: str) -> str:
 
     Args:
         task: The completed task description.
-        result: The task result summary (truncated to 500 chars internally).
+        result: The task result summary.
         model: The model to use for generation.
 
     Returns:

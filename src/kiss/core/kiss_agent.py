@@ -400,7 +400,7 @@ class KISSAgent(Base):
             raise KISSError(f"Agent {self.name} budget exceeded.")
         if Base.get_global_budget_used() > 200.0:
             raise KISSError("Global budget exceeded.")
-        if self.step_count >= self.max_steps:  # pragma: no branch
+        if self.step_count > self.max_steps:  # pragma: no branch
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:

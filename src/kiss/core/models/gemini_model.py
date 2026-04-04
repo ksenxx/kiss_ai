@@ -40,6 +40,11 @@ class GeminiModel(Model):
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
 
+    def reset_conversation(self) -> None:
+        """Reset conversation state including thought signatures."""
+        super().reset_conversation()
+        self._thought_signatures = {}
+
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
 
@@ -109,7 +114,7 @@ class GeminiModel(Model):
                 tool_call_id = msg.get("tool_call_id")
                 func_name = "unknown"
                 for prev_msg in reversed(self.conversation):
-                    if prev_msg == msg:
+                    if prev_msg is msg:
                         continue  # Skip current
                     if prev_msg["role"] == "assistant" and prev_msg.get("tool_calls"):
                         for tc in prev_msg["tool_calls"]:

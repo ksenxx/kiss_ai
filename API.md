@@ -62,6 +62,7 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.test_agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchtest_agent)
           - [`kiss.agents.vscode.kiss_project.src.kiss.channels`](#kissagentsvscodekiss_projectsrckisschannels)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels._backend_utils`](#kissagentsvscodekiss_projectsrckisschannels_backend_utils)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels._channel_agent_utils`](#kissagentsvscodekiss_projectsrckisschannels_channel_agent_utils)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent`](#kissagentsvscodekiss_projectsrckisschannelsbackground_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.bluebubbles_agent`](#kissagentsvscodekiss_projectsrckisschannelsbluebubbles_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.discord_agent`](#kissagentsvscodekiss_projectsrckisschannelsdiscord_agent)
@@ -118,6 +119,7 @@
       - [`kiss.benchmarks.terminal_bench.test_agent`](#kissbenchmarksterminal_benchtest_agent)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels._backend_utils`](#kisschannels_backend_utils)
+    - [`kiss.channels._channel_agent_utils`](#kisschannels_channel_agent_utils)
     - [`kiss.channels.background_agent`](#kisschannelsbackground_agent)
     - [`kiss.channels.bluebubbles_agent`](#kisschannelsbluebubbles_agent)
     - [`kiss.channels.discord_agent`](#kisschannelsdiscord_agent)
@@ -458,6 +460,8 @@ ______________________________________________________________________
 - `model_config`: Optional dictionary of model configuration parameters.
 
 - `token_callback`: Optional callback invoked with each streamed text token.
+
+- **reset_conversation** — Reset conversation state including thought signatures.<br/>`reset_conversation() -> None`
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -1080,9 +1084,6 @@ ______________________________________________________________________
 
 - **open** — Pull and load a Docker image, then create and start a container.<br/>`open() -> None`
 
-  - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
-  - `tag`: The tag/version of the image (default: 'latest')
-
 - **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str, timeout_seconds: int = 30) -> str`
 
   - `command`: The bash command to execute
@@ -1153,7 +1154,7 @@ ______________________________________________________________________
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.
-- `result`: The task result summary (truncated to 500 chars internally).
+- `result`: The task result summary.
 - `model`: The model to use for generation.
 - **Returns:** Suggestion text, or empty string on failure.
 
@@ -1764,7 +1765,7 @@ ______________________________________________________________________
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.
-- `result`: The task result summary (truncated to 500 chars internally).
+- `result`: The task result summary.
 - `model`: The model to use for generation.
 - **Returns:** Suggestion text, or empty string on failure.
 
@@ -1972,6 +1973,30 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels._channel_agent_utils` — *Shared helpers for channel agent backends and local config persistence.*
+
+##### `class ToolMethodBackend` — Mixin that exposes public backend methods as agent tools.
+
+- **get_tool_methods** — Return the backend's public tool methods.<br/>`get_tool_methods() -> list`
+  - **Returns:** List of bound callable methods intended for LLM tool use.
+
+**`load_json_config`** — Load a JSON config file containing string values.<br/>`def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, str] | None`
+
+- `path`: Config file path.
+- `required_keys`: Keys that must be present and non-empty.
+- **Returns:** Loaded string dictionary, or `None` if the file is missing, malformed, not a dict, or lacks a required key.
+
+**`save_json_config`** — Save a JSON config file with restricted permissions.<br/>`def save_json_config(path: Path, data: dict[str, str]) -> None`
+
+- `path`: Config file path.
+- `data`: String dictionary to persist.
+
+**`clear_json_config`** — Delete a JSON config file if it exists.<br/>`def clear_json_config(path: Path) -> None`
+
+- `path`: Config file path.
+
+______________________________________________________________________
+
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent` — *Background channel daemon — polls a ChannelBackend and runs agents.*
 
 ##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
@@ -2055,7 +2080,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
 
-##### `class DiscordChannelBackend` — ChannelBackend implementation for Discord REST API v10.
+##### `class DiscordChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Discord REST API v10.
 
 **Constructor:** `DiscordChannelBackend() -> None`
 
@@ -2063,7 +2088,10 @@ ______________________________________________________________________
 
 - **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
 
-- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+- **find_channel** — Find a channel by name or numeric ID. If *name* is already a numeric snowflake ID, returns it as-is. Otherwise queries all guilds for a channel matching the name.<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name or numeric ID.
+  - **Returns:** The channel snowflake ID string, or None if not found.
 
 - **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
 
@@ -2154,8 +2182,6 @@ ______________________________________________________________________
   - `max_age`: Invite expiry in seconds (0 = never). Default: 86400 (1 day).
   - `max_uses`: Maximum uses (0 = unlimited). Default: 0.
   - **Returns:** JSON string with invite code and URL.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
 
@@ -3638,7 +3664,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
 
-##### `class TelegramChannelBackend` — ChannelBackend implementation for Telegram Bot API.
+##### `class TelegramChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Telegram Bot API.
 
 **Constructor:** `TelegramChannelBackend() -> None`
 
@@ -3758,8 +3784,6 @@ ______________________________________________________________________
   - `from_chat_id`: Source chat ID.
   - `message_id`: ID of the message to forward.
   - **Returns:** JSON string with ok status and message_id.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class TelegramAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Telegram Bot API tools.
 
@@ -3936,7 +3960,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
 
-##### `class WhatsAppChannelBackend` — ChannelBackend implementation for WhatsApp Business Cloud API.
+##### `class WhatsAppChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for WhatsApp Business Cloud API.
 
 **Constructor:** `WhatsAppChannelBackend() -> None`
 
@@ -4085,10 +4109,6 @@ ______________________________________________________________________
   - `limit`: Maximum number of templates to return. Default: 20.
   - `status`: Filter by status ("APPROVED", "PENDING", "REJECTED"). If empty, returns all statuses.
   - **Returns:** JSON string with template list (name, status, category, language).
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for WhatsApp API operations.
 
 ##### `class WhatsAppAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 
@@ -4398,6 +4418,8 @@ ______________________________________________________________________
 - `model_config`: Optional dictionary of model configuration parameters.
 
 - `token_callback`: Optional callback invoked with each streamed text token.
+
+- **reset_conversation** — Reset conversation state including thought signatures.<br/>`reset_conversation() -> None`
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -4797,9 +4819,6 @@ ______________________________________________________________________
 
 - **open** — Pull and load a Docker image, then create and start a container.<br/>`open() -> None`
 
-  - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
-  - `tag`: The tag/version of the image (default: 'latest')
-
 - **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str, timeout_seconds: int = 30) -> str`
 
   - `command`: The bash command to execute
@@ -5037,6 +5056,30 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+#### `kiss.channels._channel_agent_utils` — *Shared helpers for channel agent backends and local config persistence.*
+
+##### `class ToolMethodBackend` — Mixin that exposes public backend methods as agent tools.
+
+- **get_tool_methods** — Return the backend's public tool methods.<br/>`get_tool_methods() -> list`
+  - **Returns:** List of bound callable methods intended for LLM tool use.
+
+**`load_json_config`** — Load a JSON config file containing string values.<br/>`def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, str] | None`
+
+- `path`: Config file path.
+- `required_keys`: Keys that must be present and non-empty.
+- **Returns:** Loaded string dictionary, or `None` if the file is missing, malformed, not a dict, or lacks a required key.
+
+**`save_json_config`** — Save a JSON config file with restricted permissions.<br/>`def save_json_config(path: Path, data: dict[str, str]) -> None`
+
+- `path`: Config file path.
+- `data`: String dictionary to persist.
+
+**`clear_json_config`** — Delete a JSON config file if it exists.<br/>`def clear_json_config(path: Path) -> None`
+
+- `path`: Config file path.
+
+______________________________________________________________________
+
 #### `kiss.channels.background_agent` — *Background channel daemon — polls a ChannelBackend and runs agents.*
 
 ##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
@@ -5120,7 +5163,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
 
-##### `class DiscordChannelBackend` — ChannelBackend implementation for Discord REST API v10.
+##### `class DiscordChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Discord REST API v10.
 
 **Constructor:** `DiscordChannelBackend() -> None`
 
@@ -5128,7 +5171,10 @@ ______________________________________________________________________
 
 - **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
 
-- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+- **find_channel** — Find a channel by name or numeric ID. If *name* is already a numeric snowflake ID, returns it as-is. Otherwise queries all guilds for a channel matching the name.<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name or numeric ID.
+  - **Returns:** The channel snowflake ID string, or None if not found.
 
 - **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
 
@@ -5219,8 +5265,6 @@ ______________________________________________________________________
   - `max_age`: Invite expiry in seconds (0 = never). Default: 86400 (1 day).
   - `max_uses`: Maximum uses (0 = unlimited). Default: 0.
   - **Returns:** JSON string with invite code and URL.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
 
@@ -6703,7 +6747,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
 
-##### `class TelegramChannelBackend` — ChannelBackend implementation for Telegram Bot API.
+##### `class TelegramChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Telegram Bot API.
 
 **Constructor:** `TelegramChannelBackend() -> None`
 
@@ -6823,8 +6867,6 @@ ______________________________________________________________________
   - `from_chat_id`: Source chat ID.
   - `message_id`: ID of the message to forward.
   - **Returns:** JSON string with ok status and message_id.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class TelegramAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Telegram Bot API tools.
 
@@ -7001,7 +7043,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
 
-##### `class WhatsAppChannelBackend` — ChannelBackend implementation for WhatsApp Business Cloud API.
+##### `class WhatsAppChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for WhatsApp Business Cloud API.
 
 **Constructor:** `WhatsAppChannelBackend() -> None`
 
@@ -7150,10 +7192,6 @@ ______________________________________________________________________
   - `limit`: Maximum number of templates to return. Default: 20.
   - `status`: Filter by status ("APPROVED", "PENDING", "REJECTED"). If empty, returns all statuses.
   - **Returns:** JSON string with template list (name, status, category, language).
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for WhatsApp API operations.
 
 ##### `class WhatsAppAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 

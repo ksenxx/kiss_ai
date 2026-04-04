@@ -198,7 +198,6 @@ class ChannelDaemon:
             try:
                 self._process_sender_queue(session_key, channel_id, state)
             finally:
-                state.lock.release()
                 with self._handler_threads_lock:
                     self._handler_threads.discard(thread)
 
@@ -210,13 +209,26 @@ class ChannelDaemon:
     def _process_sender_queue(
         self, session_key: str, channel_id: str, state: _SenderState
     ) -> None:
-        """Drain queued messages for one sender sequentially."""
-        while not self._stop_event.is_set():  # pragma: no branch
-            try:
-                msg = state.pending_messages.get_nowait()
-            except queue.Empty:
-                return
-            self._handle_message(session_key, channel_id, msg, state)
+        """Drain queued messages for one sender sequentially.
+
+        Re-checks the queue under the lock before releasing to prevent
+        message orphaning when a producer enqueues while the worker is
+        about to exit.
+        """
+        try:
+            while not self._stop_event.is_set():  # pragma: no branch
+                try:
+                    msg = state.pending_messages.get_nowait()
+                except queue.Empty:
+                    return
+                self._handle_message(session_key, channel_id, msg, state)
+        finally:
+            # Re-check under the lock: if new messages arrived between the
+            # get_nowait() Empty and here, release and re-start a worker.
+            has_more = not state.pending_messages.empty()
+            state.lock.release()
+            if has_more and not self._stop_event.is_set():
+                self._start_sender_worker(session_key, channel_id, state)
 
     def _handle_message(
         self,
@@ -299,11 +311,8 @@ class ChannelDaemon:
 
     def _disconnect_backend(self) -> None:
         """Best-effort backend cleanup hook for stop and reconnect paths."""
-        disconnect = getattr(self._backend, "disconnect", None)
-        if not callable(disconnect):  # pragma: no branch
-            return
         try:
-            disconnect()
+            self._backend.disconnect()
         except Exception:
             logger.warning("Backend disconnect failed", exc_info=True)
 
