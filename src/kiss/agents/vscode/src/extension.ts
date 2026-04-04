@@ -50,6 +50,23 @@ export function activate(context: vscode.ExtensionContext): void {
     )
   );
 
+  // Register the Activity Bar launcher tree view that redirects to secondary sidebar
+  const launcherTreeProvider: vscode.TreeDataProvider<string> = {
+    getTreeItem: () => new vscode.TreeItem(''),
+    getChildren: () => [],
+  };
+  const launcherView = vscode.window.createTreeView('kissSorcar.launcherView', {
+    treeDataProvider: launcherTreeProvider,
+  });
+  context.subscriptions.push(launcherView);
+  context.subscriptions.push(
+    launcherView.onDidChangeVisibility((e) => {
+      if (e.visible) {
+        vscode.commands.executeCommand('kissSorcar.chatViewSecondary.focus');
+      }
+    })
+  );
+
   // Create and register the secondary sidebar webview provider
   secondaryProvider = new SorcarViewProvider(context.extensionUri, mergeManager);
   secondaryProvider.mergeOwnerCallback = setMergeOwner;
