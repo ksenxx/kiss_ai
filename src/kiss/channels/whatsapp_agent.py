@@ -914,7 +914,6 @@ class WhatsAppAgent(StatefulSorcarAgent):
         agent = WhatsAppAgent()
         result = agent.run(
             prompt_template="Send 'Hello!' to +14155238886",
-            headless=False,
         )
     """
 
@@ -1069,7 +1068,6 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         "max_budget": args.max_budget,
         "model_config": model_config,
         "work_dir": work_dir,
-        "headless": args.headless,
         "verbose": args.verbose,
         "wait_for_user_callback": cli_wait_for_user,
         "ask_user_question_callback": cli_ask_user_question,

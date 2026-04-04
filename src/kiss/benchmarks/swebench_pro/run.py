@@ -51,7 +51,7 @@ def run_instance(instance: dict, model: str, budget: float) -> dict:
     # Build sorcar command to run inside the container
     escaped_task = task.replace('"', '\\"')
     sorcar_cmd = (
-        f'sorcar -t "{escaped_task}" -w /app --headless true -n '
+        f'sorcar -t "{escaped_task}" -w /app -n '
         f"--model {model} --budget {budget}"
     )
 

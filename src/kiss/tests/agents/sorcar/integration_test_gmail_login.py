@@ -18,7 +18,6 @@ def find_id(tree: str, pattern: str) -> int:
 def main() -> None:
     web = WebUseTool(
         browser_type="chromium",
-        headless=False,
         user_data_dir=KISS_PROFILE_DIR,
     )
 

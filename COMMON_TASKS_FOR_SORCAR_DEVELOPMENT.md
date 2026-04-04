@@ -8,8 +8,7 @@ can you write integration tests with no mocks or test doubles or fakes to achiev
 
 ## code review
 
-find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and fix them. Make sure that you test every change by writing and running integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not change any functionality or UI. Make sure that existing tests pass. Tests must be run
-with a timeout of 900 seconds.
+find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and plan to fix them in plan.md. Make sure that you write tests for every change by writing integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not modify code yet.
 
 ## documentation update
 

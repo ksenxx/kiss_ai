@@ -167,7 +167,6 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         "max_budget": args.max_budget,
         "model_config": model_config,
         "work_dir": work_dir,
-        "headless": args.headless,
         "web_tools": not args.no_web,
         "verbose": args.verbose,
         "wait_for_user_callback": cli_wait_for_user,

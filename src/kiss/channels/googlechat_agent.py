@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import threading
 from pathlib import Path
@@ -26,7 +25,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._backend_utils import is_headless_environment, wait_for_matching_message
 
 logger = logging.getLogger(__name__)
 
@@ -102,28 +101,6 @@ def _load_service(sa_path: str = "") -> Any:
     return None
 
 
-def _is_headless_environment() -> bool:
-    """Return True when running in a headless/Docker/Linux environment.
-
-    Checks in order:
-    1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless)
-    2. Presence of /.dockerenv (running inside Docker)
-    3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set
-    """
-    env = os.environ.get("KISS_HEADLESS", "").lower()
-    if env in ("1", "true", "yes"):  # pragma: no branch
-        return True
-    if env in ("0", "false", "no"):  # pragma: no branch
-        return False
-    if Path("/.dockerenv").exists():  # pragma: no branch
-        return True
-    if sys.platform.startswith("linux"):  # pragma: no branch
-        if (  # pragma: no branch
-            not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
-        ):
-            return True
-    return False
-
 
 def _run_oauth_flow() -> Any:
     """Run OAuth2 flow for Google Chat.
@@ -145,7 +122,7 @@ def _run_oauth_flow() -> Any:
     if not creds_path.exists():  # pragma: no branch
         return None
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
-    if _is_headless_environment():  # pragma: no branch
+    if is_headless_environment():  # pragma: no branch
         creds = cast(Credentials, flow.run_console())
     else:
         creds = cast(Credentials, flow.run_local_server(port=0))
@@ -707,7 +684,6 @@ def main() -> None:
         "max_budget": args.max_budget,
         "model_config": model_config,
         "work_dir": work_dir,
-        "headless": args.headless,
         "verbose": args.verbose,
         "wait_for_user_callback": cli_wait_for_user,
         "ask_user_question_callback": cli_ask_user_question,

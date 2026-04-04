@@ -279,7 +279,6 @@ class ChannelDaemon:
                 max_budget=self._max_budget,
                 work_dir=self._work_dir,
                 tools=tools,
-                headless=True,
                 verbose=False,
             )
             state.chat_id = agent.chat_id

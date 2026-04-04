@@ -747,11 +747,6 @@ ______________________________________________________________________
 
 - **Returns:** dict\[Any, Any\]: A dictionary representation of the default config.
 
-**`fc`** — Reads a file and returns the content.<br/>`def fc(file_path: str) -> str`
-
-- `file_path`: The path to the file to read.
-- **Returns:** str: The content of the file.
-
 **`finish`** — The agent must call this function with the final status, analysis, and result when it has solved the given task. Status **MUST** be 'success' or 'failure'.<br/>`def finish(status: str = 'success', analysis: str = '', result: str = '') -> str`
 
 - `status`: The status of the agent's task ('success' or 'failure'). Defaults to 'success'.
@@ -866,7 +861,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -879,8 +874,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `headless`: Deprecated, ignored. Browser always runs headless.
-  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for headless terminal-only environments.
+  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for terminal-only environments.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1544,7 +1538,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -1557,8 +1551,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `headless`: Deprecated, ignored. Browser always runs headless.
-  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for headless terminal-only environments.
+  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for terminal-only environments.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1974,6 +1967,8 @@ ______________________________________________________________________
 - `server`: HTTP server instance to stop.
 - `server_thread`: Background thread running `serve_forever()`.
 - **Returns:** `(None, None)` so callers can reset both attributes succinctly.
+
+**`is_headless_environment`** — Return True when running in a headless/Docker/Linux environment. Checks in order: 1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless) 2. Presence of /.dockerenv (running inside Docker) 3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set<br/>`def is_headless_environment() -> bool`
 
 ______________________________________________________________________
 
@@ -4745,11 +4740,6 @@ ______________________________________________________________________
 
 - **Returns:** dict\[Any, Any\]: A dictionary representation of the default config.
 
-**`fc`** — Reads a file and returns the content.<br/>`def fc(file_path: str) -> str`
-
-- `file_path`: The path to the file to read.
-- **Returns:** str: The content of the file.
-
 **`finish`** — The agent must call this function with the final status, analysis, and result when it has solved the given task. Status **MUST** be 'success' or 'failure'.<br/>`def finish(status: str = 'success', analysis: str = '', result: str = '') -> str`
 
 - `status`: The status of the agent's task ('success' or 'failure'). Defaults to 'success'.
@@ -5042,6 +5032,8 @@ ______________________________________________________________________
 - `server`: HTTP server instance to stop.
 - `server_thread`: Background thread running `serve_forever()`.
 - **Returns:** `(None, None)` so callers can reset both attributes succinctly.
+
+**`is_headless_environment`** — Return True when running in a headless/Docker/Linux environment. Checks in order: 1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless) 2. Presence of /.dockerenv (running inside Docker) 3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set<br/>`def is_headless_environment() -> bool`
 
 ______________________________________________________________________
 
