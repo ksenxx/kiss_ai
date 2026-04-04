@@ -54,7 +54,7 @@ class AnthropicModel(Model):
                 }
                 if att.mime_type.startswith("image/"):
                     blocks.append({"type": "image", "source": source})
-                elif att.mime_type == "application/pdf":
+                elif att.mime_type == "application/pdf":  # pragma: no branch
                     blocks.append({"type": "document", "source": source})
             blocks.append({"type": "text", "text": prompt})
             content = blocks

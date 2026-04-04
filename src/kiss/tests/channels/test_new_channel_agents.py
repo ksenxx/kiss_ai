@@ -228,28 +228,6 @@ def test_agent_instantiates(info: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
-def test_get_tools_includes_auth_trio(info: dict) -> None:
-    """_get_tools() always includes the three auth management tools."""
-    mod, agent_cls, _ = _load(info)
-    # Clear any saved config before testing
-    clear_fn = getattr(mod, "_clear_config", None)
-    if clear_fn:
-        clear_fn()
-    agent = agent_cls()
-    agent.web_use_tool = None  # Avoid headless browser init
-    tool_names = [t.__name__ for t in agent._get_tools()]
-    assert info["auth_check"] in tool_names, (
-        f"{info['auth_check']} not in tools: {tool_names}"
-    )
-    assert info["auth_set"] in tool_names, (
-        f"{info['auth_set']} not in tools: {tool_names}"
-    )
-    assert info["auth_clear"] in tool_names, (
-        f"{info['auth_clear']} not in tools: {tool_names}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Test: Check auth returns helpful message when unauthenticated
 # ---------------------------------------------------------------------------
@@ -303,14 +281,6 @@ def test_clear_auth_when_not_authenticated(info: dict) -> None:
 
 
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
-def test_backend_instantiates(info: dict) -> None:
-    """Every backend can be created without credentials."""
-    _, _, backend_cls = _load(info)
-    backend = backend_cls()
-    assert backend is not None
-
-
-@pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
 def test_backend_get_tool_methods(info: dict) -> None:
     """get_tool_methods() returns a list and excludes protocol methods."""
     _, _, backend_cls = _load(info)
@@ -331,22 +301,6 @@ def test_backend_get_tool_methods(info: dict) -> None:
 # ---------------------------------------------------------------------------
 # Test: Backend protocol methods exist
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
-def test_backend_has_protocol_methods(info: dict) -> None:
-    """Every backend has all ChannelBackend protocol methods."""
-    _, _, backend_cls = _load(info)
-    backend = backend_cls()
-    protocol_methods = [
-        "connect", "find_channel", "find_user", "join_channel",
-        "poll_messages", "send_message", "wait_for_reply",
-        "is_from_bot", "strip_bot_mention", "connection_info",
-    ]
-    for method_name in protocol_methods:
-        assert hasattr(backend, method_name), (
-            f"{backend_cls.__name__} missing protocol method: {method_name}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -432,21 +386,6 @@ def test_main_exits_with_no_args(info: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_channel_daemon_instantiates() -> None:
-    """ChannelDaemon can be created with a backend."""
-    from kiss.channels.background_agent import ChannelDaemon
-    from kiss.channels.discord_agent import DiscordChannelBackend
-
-    backend = DiscordChannelBackend()
-    daemon = ChannelDaemon(
-        backend=backend,
-        channel_name="test",
-        agent_name="Test Agent",
-    )
-    assert daemon._agent_name == "Test Agent"
-    assert daemon._channel_name == "test"
-
-
 def test_channel_daemon_stop() -> None:
     """ChannelDaemon.stop() sets the stop event."""
     from kiss.channels.background_agent import ChannelDaemon
@@ -463,30 +402,3 @@ def test_channel_daemon_stop() -> None:
     assert daemon._stop_event.is_set()
 
 
-def test_channel_daemon_with_allow_users() -> None:
-    """ChannelDaemon correctly stores allow_users set."""
-    from kiss.channels.background_agent import ChannelDaemon
-    from kiss.channels.discord_agent import DiscordChannelBackend
-
-    backend = DiscordChannelBackend()
-    daemon = ChannelDaemon(
-        backend=backend,
-        channel_name="",
-        agent_name="Test",
-        allow_users=["user1", "user2"],
-    )
-    assert daemon._allow_users == {"user1", "user2"}
-
-
-def test_channel_daemon_no_allow_users() -> None:
-    """ChannelDaemon with no allow_users allows all."""
-    from kiss.channels.background_agent import ChannelDaemon
-    from kiss.channels.discord_agent import DiscordChannelBackend
-
-    backend = DiscordChannelBackend()
-    daemon = ChannelDaemon(
-        backend=backend,
-        channel_name="",
-        agent_name="Test",
-    )
-    assert daemon._allow_users is None

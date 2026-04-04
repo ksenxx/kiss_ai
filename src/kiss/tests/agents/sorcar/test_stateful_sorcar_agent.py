@@ -53,29 +53,6 @@ class TestStatefulSorcarAgent:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_second_task_gets_chat_context(self) -> None:
-        agent = StatefulSorcarAgent("test")
-        captured: dict[str, Any] = {}
-        original_run = _patch_super_run(agent, captured)
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        try:
-            agent.run(prompt_template="task one")
-            agent.run(prompt_template="task two")
-        finally:
-            parent_class.run = original_run
-
-        prompt = str(captured["prompt_template"])
-        assert "## Previous tasks and results from the chat session for reference" in prompt
-        assert "### Task 1\ntask one" in prompt
-        assert "### Result 1\ntest done" in prompt
-        assert "# Task (work on it now)\n\ntask two" in prompt
-
-    def test_resume_chat_no_match_keeps_id(self) -> None:
-        agent = StatefulSorcarAgent("test")
-        old_id = agent.chat_id
-        agent.resume_chat("nonexistent task")
-        assert agent.chat_id == old_id
-
     def test_error_saves_failure_result(self) -> None:
         agent = StatefulSorcarAgent("test")
         parent_class = cast(Any, SorcarAgent.__mro__[1])

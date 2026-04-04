@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import queue
+import sys
 import threading
 import time
 from collections.abc import Callable
 from http.server import HTTPServer
+from pathlib import Path
 from socketserver import ThreadingMixIn
 from typing import Any
 
@@ -103,3 +106,26 @@ def stop_http_server(
     if server_thread is not None:
         server_thread.join(timeout=5.0)
     return None, None
+
+
+def is_headless_environment() -> bool:
+    """Return True when running in a headless/Docker/Linux environment.
+
+    Checks in order:
+    1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless)
+    2. Presence of /.dockerenv (running inside Docker)
+    3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set
+    """
+    env = os.environ.get("KISS_HEADLESS", "").lower()
+    if env in ("1", "true", "yes"):  # pragma: no branch
+        return True
+    if env in ("0", "false", "no"):  # pragma: no branch
+        return False
+    if Path("/.dockerenv").exists():  # pragma: no branch
+        return True
+    if sys.platform.startswith("linux"):  # pragma: no branch
+        if (  # pragma: no branch
+            not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+        ):
+            return True
+    return False

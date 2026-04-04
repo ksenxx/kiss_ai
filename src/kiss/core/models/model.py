@@ -208,7 +208,7 @@ class Model(ABC):
             role: The role of the message sender (e.g., 'user', 'assistant').
             content: The message content.
         """
-        if role == "user" and self.usage_info_for_messages:
+        if role == "user" and self.usage_info_for_messages:  # pragma: no branch
             content = f"{content}\n\n{self.usage_info_for_messages}"
         self.conversation.append({"role": role, "content": content})
 

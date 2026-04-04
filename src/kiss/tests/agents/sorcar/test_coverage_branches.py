@@ -22,7 +22,6 @@ import pytest
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
-    _kill_process_group,
     _truncate_output,
 )
 from kiss.agents.sorcar.web_use_tool import (
@@ -238,15 +237,6 @@ class TestUsefulToolsBranches:
         result = ut.Bash("sleep 100", "timeout test", timeout_seconds=0.5)
         assert "timeout" in result.lower()
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses 'true' command)")
-    def test_kill_process_group_already_dead(self):
-        """kill_process_group handles already-dead process."""
-        p = subprocess.Popen(["true"], start_new_session=True)
-        p.wait()
-        # Should not raise
-        _kill_process_group(p)
-
-
 # ---------------------------------------------------------------------------
 # web_use_tool.py coverage
 # ---------------------------------------------------------------------------
@@ -355,11 +345,6 @@ class TestVSCodeServerBranches:
         # No crash, no action
         # No crash
 
-    def test_handle_command_user_answer(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "userAnswer", "answer": "42"})
-        assert server._user_answer_queue.get_nowait() == "42"
-
     def test_handle_command_resume_session(self):
         server, events = self._make_server()
         server._handle_command({"type": "resumeSession", "sessionId": ""})
@@ -378,14 +363,6 @@ class TestVSCodeServerBranches:
         server._handle_command({"type": "mergeAction", "action": "all-done"})
         assert server._merging is False
         assert any(e.get("type") == "merge_ended" for e in events)
-
-    def test_await_user_response_with_answer(self):
-        server, events = self._make_server()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
-        server._user_answer_queue.put("hello")
-        result = server._await_user_response()
-        assert result == "hello"
 
     def test_wait_for_user(self):
         server, events = self._make_server()
@@ -792,13 +769,13 @@ class TestUsefulToolsMoreBranches:
 
 class TestCodeServerMoreBranches:
     def test_scan_files_max_limit(self):
-        """Scan should stop at 2000 files."""
+        """Scan should stop at 5000 files."""
         with tempfile.TemporaryDirectory() as d:
             # Create many files
-            for i in range(2100):
+            for i in range(5100):
                 (Path(d) / f"file_{i:04d}.txt").write_text("x")
             result = _scan_files(d)
-            assert len(result) <= 2000
+            assert len(result) <= 5000
 
     def test_prepare_merge_view_new_files_only(self):
         """When only new untracked files are added after a task."""

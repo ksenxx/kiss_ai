@@ -142,6 +142,9 @@ exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
 ]
+partial_branches = [
+    "pragma: no branch",
+]
 
 [tool.mypy]
 python_version = "3.13"

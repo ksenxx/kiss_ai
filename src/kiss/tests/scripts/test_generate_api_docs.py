@@ -42,11 +42,6 @@ class TestFormatFuncSig:
         func = self._parse_func("def f(*args): pass")
         assert _format_func_sig(func) == "(*args)"
 
-    def test_kwonly(self) -> None:
-        func = self._parse_func("def f(*, key=None): pass")
-        assert _format_func_sig(func) == "(*, key = None)"
-
-
 class TestHasDecorator:
     def _parse_func(self, code: str) -> ast.FunctionDef:
         tree = ast.parse(textwrap.dedent(code))

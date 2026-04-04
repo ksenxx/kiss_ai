@@ -136,17 +136,6 @@ def config_to_dict() -> dict[Any, Any]:
     return cast(dict[Any, Any], convert_to_json(config_module.DEFAULT_CONFIG))
 
 
-def fc(file_path: str) -> str:
-    """Reads a file and returns the content.
-
-    Args:
-        file_path (str): The path to the file to read.
-
-    Returns:
-        str: The content of the file.
-    """
-    return Path(file_path).read_text()
-
 
 def finish(
     status: str = "success",

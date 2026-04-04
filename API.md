@@ -59,8 +59,10 @@
             - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_bench)
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchagent)
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.run`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchrun)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.test_agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchtest_agent)
           - [`kiss.agents.vscode.kiss_project.src.kiss.channels`](#kissagentsvscodekiss_projectsrckisschannels)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels._backend_utils`](#kissagentsvscodekiss_projectsrckisschannels_backend_utils)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.channels._channel_agent_utils`](#kissagentsvscodekiss_projectsrckisschannels_channel_agent_utils)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.background_agent`](#kissagentsvscodekiss_projectsrckisschannelsbackground_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.bluebubbles_agent`](#kissagentsvscodekiss_projectsrckisschannelsbluebubbles_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels.discord_agent`](#kissagentsvscodekiss_projectsrckisschannelsdiscord_agent)
@@ -117,6 +119,7 @@
       - [`kiss.benchmarks.terminal_bench.test_agent`](#kissbenchmarksterminal_benchtest_agent)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels._backend_utils`](#kisschannels_backend_utils)
+    - [`kiss.channels._channel_agent_utils`](#kisschannels_channel_agent_utils)
     - [`kiss.channels.background_agent`](#kisschannelsbackground_agent)
     - [`kiss.channels.bluebubbles_agent`](#kisschannelsbluebubbles_agent)
     - [`kiss.channels.discord_agent`](#kisschannelsdiscord_agent)
@@ -458,6 +461,8 @@ ______________________________________________________________________
 
 - `token_callback`: Optional callback invoked with each streamed text token.
 
+- **reset_conversation** — Reset conversation state including thought signatures.<br/>`reset_conversation() -> None`
+
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
@@ -658,7 +663,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -745,11 +750,6 @@ ______________________________________________________________________
 **`config_to_dict`** — Convert the config to a dictionary.<br/>`def config_to_dict() -> dict[Any, Any]`
 
 - **Returns:** dict\[Any, Any\]: A dictionary representation of the default config.
-
-**`fc`** — Reads a file and returns the content.<br/>`def fc(file_path: str) -> str`
-
-- `file_path`: The path to the file to read.
-- **Returns:** str: The content of the file.
 
 **`finish`** — The agent must call this function with the final status, analysis, and result when it has solved the given task. Status **MUST** be 'success' or 'failure'.<br/>`def finish(status: str = 'success', analysis: str = '', result: str = '') -> str`
 
@@ -865,7 +865,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -878,8 +878,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `headless`: Deprecated, ignored. Browser always runs headless.
-  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for headless terminal-only environments.
+  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for terminal-only environments.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1085,9 +1084,6 @@ ______________________________________________________________________
 
 - **open** — Pull and load a Docker image, then create and start a container.<br/>`open() -> None`
 
-  - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
-  - `tag`: The tag/version of the image (default: 'latest')
-
 - **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str, timeout_seconds: int = 30) -> str`
 
   - `command`: The bash command to execute
@@ -1158,7 +1154,7 @@ ______________________________________________________________________
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.
-- `result`: The task result summary (truncated to 500 chars internally).
+- `result`: The task result summary.
 - `model`: The model to use for generation.
 - **Returns:** Suggestion text, or empty string on failure.
 
@@ -1543,7 +1539,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, headless: bool | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -1556,8 +1552,7 @@ ______________________________________________________________________
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
-  - `headless`: Deprecated, ignored. Browser always runs headless.
-  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for headless terminal-only environments.
+  - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for terminal-only environments.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
@@ -1646,7 +1641,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -1770,7 +1765,7 @@ ______________________________________________________________________
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.
-- `result`: The task result summary (truncated to 500 chars internally).
+- `result`: The task result summary.
 - `model`: The model to use for generation.
 - **Returns:** Suggestion text, or empty string on failure.
 
@@ -1871,11 +1866,11 @@ ______________________________________________________________________
 
 - **version** — Return the agent version string.<br/>`version() -> str | None`
 
-- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and writes a tbench-specific SYSTEM.md that replaces the generic IDE system prompt with terminal-bench instructions.<br/>`async setup(environment: BaseEnvironment) -> None`
+- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and writes a tbench-specific SYSTEM.md that replaces the generic IDE system prompt with terminal-bench instructions. Each step is run separately so failures are logged clearly and do not silently abort the chain.<br/>`async setup(environment: BaseEnvironment) -> None`
 
   - `environment`: The harbor execution environment.
 
-- **run** — Run sorcar with the task instruction inside the container. The agent executes sorcar which modifies the environment directly. Harbor evaluates the result by inspecting the environment state after this method returns.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+- **run** — Run sorcar with the task instruction inside the container. Pre-reads the verifier test script and injects it into the instruction so the agent sees exact assertions. After the first sorcar run, automatically runs the tests and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
 
   - `instruction`: Natural language task description from harbor.
   - `environment`: The harbor execution environment.
@@ -1898,6 +1893,48 @@ ______________________________________________________________________
 - `n_concurrent`: Number of concurrent task containers.
 - `trials`: Number of attempts per task (-k flag). Use 5 for leaderboard.
 - `skip_pre_pull`: If True, skip the image pre-pull step.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.test_agent` — *Tests for the terminal bench harbor agent.*
+
+##### `class FakeExecResult`
+
+##### `class FakeEnvironment` — Minimal stand-in for BaseEnvironment.
+
+- **exec**<br/>`async exec(command: str, **kwargs: object) -> FakeExecResult`
+- **upload_file**<br/>`async upload_file(source_path: object, target_path: str) -> None`
+
+##### `class FakeContext` — Minimal stand-in for AgentContext.
+
+- **is_empty**<br/>`is_empty() -> bool`
+
+##### `class TestSkipPhrases` — Verify \_SKIP_PHRASES is a non-empty tuple of strings.
+
+- **test_skip_phrases_non_empty**<br/>`test_skip_phrases_non_empty() -> None`
+- **test_skip_phrases_are_strings**<br/>`test_skip_phrases_are_strings() -> None`
+
+##### `class TestAgentIdentity` — Agent name and version.
+
+- **test_name**<br/>`test_name() -> None`
+- **test_version_matches_package**<br/>`test_version_matches_package() -> None`
+
+##### `class TestRunSkipsImpossibleTasks` — Verify that run() returns immediately for impossible tasks.
+
+- **test_skip_compcert**<br/>`test_skip_compcert() -> None`
+- **test_skip_windows_311**<br/>`test_skip_windows_311() -> None`
+- **test_skip_ocaml_gc**<br/>`test_skip_ocaml_gc() -> None`
+- **test_non_skip_task_runs_normally** — A normal task makes a which-check then runs sorcar.<br/>`test_non_skip_task_runs_normally() -> None`
+
+##### `class TestSetup` — Verify setup runs the expected installation steps.
+
+- **test_setup_three_steps**<br/>`test_setup_three_steps() -> None`
+- **test_setup_aborts_on_uv_failure**<br/>`test_setup_aborts_on_uv_failure() -> None`
+- **test_setup_aborts_on_pip_failure**<br/>`test_setup_aborts_on_pip_failure() -> None`
+
+##### `class TestRunSorcarNotFound` — When sorcar is not installed, run returns early with an error.
+
+- **test_sorcar_missing**<br/>`test_sorcar_missing() -> None`
 
 ______________________________________________________________________
 
@@ -1931,6 +1968,32 @@ ______________________________________________________________________
 - `server`: HTTP server instance to stop.
 - `server_thread`: Background thread running `serve_forever()`.
 - **Returns:** `(None, None)` so callers can reset both attributes succinctly.
+
+**`is_headless_environment`** — Return True when running in a headless/Docker/Linux environment. Checks in order: 1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless) 2. Presence of /.dockerenv (running inside Docker) 3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set<br/>`def is_headless_environment() -> bool`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.channels._channel_agent_utils` — *Shared helpers for channel agent backends and local config persistence.*
+
+##### `class ToolMethodBackend` — Mixin that exposes public backend methods as agent tools.
+
+- **get_tool_methods** — Return the backend's public tool methods.<br/>`get_tool_methods() -> list`
+  - **Returns:** List of bound callable methods intended for LLM tool use.
+
+**`load_json_config`** — Load a JSON config file containing string values.<br/>`def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, str] | None`
+
+- `path`: Config file path.
+- `required_keys`: Keys that must be present and non-empty.
+- **Returns:** Loaded string dictionary, or `None` if the file is missing, malformed, not a dict, or lacks a required key.
+
+**`save_json_config`** — Save a JSON config file with restricted permissions.<br/>`def save_json_config(path: Path, data: dict[str, str]) -> None`
+
+- `path`: Config file path.
+- `data`: String dictionary to persist.
+
+**`clear_json_config`** — Delete a JSON config file if it exists.<br/>`def clear_json_config(path: Path) -> None`
+
+- `path`: Config file path.
 
 ______________________________________________________________________
 
@@ -2017,7 +2080,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
 
-##### `class DiscordChannelBackend` — ChannelBackend implementation for Discord REST API v10.
+##### `class DiscordChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Discord REST API v10.
 
 **Constructor:** `DiscordChannelBackend() -> None`
 
@@ -2025,7 +2088,10 @@ ______________________________________________________________________
 
 - **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
 
-- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+- **find_channel** — Find a channel by name or numeric ID. If *name* is already a numeric snowflake ID, returns it as-is. Otherwise queries all guilds for a channel matching the name.<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name or numeric ID.
+  - **Returns:** The channel snowflake ID string, or None if not found.
 
 - **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
 
@@ -2116,8 +2182,6 @@ ______________________________________________________________________
   - `max_age`: Invite expiry in seconds (0 = never). Default: 86400 (1 day).
   - `max_uses`: Maximum uses (0 = unlimited). Default: 0.
   - **Returns:** JSON string with invite code and URL.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
 
@@ -3600,7 +3664,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
 
-##### `class TelegramChannelBackend` — ChannelBackend implementation for Telegram Bot API.
+##### `class TelegramChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Telegram Bot API.
 
 **Constructor:** `TelegramChannelBackend() -> None`
 
@@ -3720,8 +3784,6 @@ ______________________________________________________________________
   - `from_chat_id`: Source chat ID.
   - `message_id`: ID of the message to forward.
   - **Returns:** JSON string with ok status and message_id.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class TelegramAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Telegram Bot API tools.
 
@@ -3898,7 +3960,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
 
-##### `class WhatsAppChannelBackend` — ChannelBackend implementation for WhatsApp Business Cloud API.
+##### `class WhatsAppChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for WhatsApp Business Cloud API.
 
 **Constructor:** `WhatsAppChannelBackend() -> None`
 
@@ -4047,10 +4109,6 @@ ______________________________________________________________________
   - `limit`: Maximum number of templates to return. Default: 20.
   - `status`: Filter by status ("APPROVED", "PENDING", "REJECTED"). If empty, returns all statuses.
   - **Returns:** JSON string with template list (name, status, category, language).
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for WhatsApp API operations.
 
 ##### `class WhatsAppAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 
@@ -4360,6 +4418,8 @@ ______________________________________________________________________
 - `model_config`: Optional dictionary of model configuration parameters.
 
 - `token_callback`: Optional callback invoked with each streamed text token.
+
+- **reset_conversation** — Reset conversation state including thought signatures.<br/>`reset_conversation() -> None`
 
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
@@ -4702,11 +4762,6 @@ ______________________________________________________________________
 
 - **Returns:** dict\[Any, Any\]: A dictionary representation of the default config.
 
-**`fc`** — Reads a file and returns the content.<br/>`def fc(file_path: str) -> str`
-
-- `file_path`: The path to the file to read.
-- **Returns:** str: The content of the file.
-
 **`finish`** — The agent must call this function with the final status, analysis, and result when it has solved the given task. Status **MUST** be 'success' or 'failure'.<br/>`def finish(status: str = 'success', analysis: str = '', result: str = '') -> str`
 
 - `status`: The status of the agent's task ('success' or 'failure'). Defaults to 'success'.
@@ -4763,9 +4818,6 @@ ______________________________________________________________________
 - `ports`: Port mapping from container port to host port. Example: {8080: 8080} maps container port 8080 to host port 8080. Example: {80: 8000, 443: 8443} maps multiple ports.
 
 - **open** — Pull and load a Docker image, then create and start a container.<br/>`open() -> None`
-
-  - `image_name`: The name of the Docker image (e.g., 'ubuntu', 'python')
-  - `tag`: The tag/version of the image (default: 'latest')
 
 - **Bash** — Execute a bash command in the running Docker container.<br/>`Bash(command: str, description: str, timeout_seconds: int = 30) -> str`
 
@@ -4901,7 +4953,7 @@ ______________________________________________________________________
 
   - `environment`: The harbor execution environment.
 
-- **run** — Run sorcar with the task instruction inside the container. The agent executes sorcar which modifies the environment directly. Harbor evaluates the result by inspecting the environment state after this method returns.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+- **run** — Run sorcar with the task instruction inside the container. Pre-reads the verifier test script and injects it into the instruction so the agent sees exact assertions. After the first sorcar run, automatically runs the tests and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
 
   - `instruction`: Natural language task description from harbor.
   - `environment`: The harbor execution environment.
@@ -4934,6 +4986,7 @@ ______________________________________________________________________
 ##### `class FakeEnvironment` — Minimal stand-in for BaseEnvironment.
 
 - **exec**<br/>`async exec(command: str, **kwargs: object) -> FakeExecResult`
+- **upload_file**<br/>`async upload_file(source_path: object, target_path: str) -> None`
 
 ##### `class FakeContext` — Minimal stand-in for AgentContext.
 
@@ -4998,6 +5051,32 @@ ______________________________________________________________________
 - `server`: HTTP server instance to stop.
 - `server_thread`: Background thread running `serve_forever()`.
 - **Returns:** `(None, None)` so callers can reset both attributes succinctly.
+
+**`is_headless_environment`** — Return True when running in a headless/Docker/Linux environment. Checks in order: 1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless) 2. Presence of /.dockerenv (running inside Docker) 3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set<br/>`def is_headless_environment() -> bool`
+
+______________________________________________________________________
+
+#### `kiss.channels._channel_agent_utils` — *Shared helpers for channel agent backends and local config persistence.*
+
+##### `class ToolMethodBackend` — Mixin that exposes public backend methods as agent tools.
+
+- **get_tool_methods** — Return the backend's public tool methods.<br/>`get_tool_methods() -> list`
+  - **Returns:** List of bound callable methods intended for LLM tool use.
+
+**`load_json_config`** — Load a JSON config file containing string values.<br/>`def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, str] | None`
+
+- `path`: Config file path.
+- `required_keys`: Keys that must be present and non-empty.
+- **Returns:** Loaded string dictionary, or `None` if the file is missing, malformed, not a dict, or lacks a required key.
+
+**`save_json_config`** — Save a JSON config file with restricted permissions.<br/>`def save_json_config(path: Path, data: dict[str, str]) -> None`
+
+- `path`: Config file path.
+- `data`: String dictionary to persist.
+
+**`clear_json_config`** — Delete a JSON config file if it exists.<br/>`def clear_json_config(path: Path) -> None`
+
+- `path`: Config file path.
 
 ______________________________________________________________________
 
@@ -5084,7 +5163,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
 
-##### `class DiscordChannelBackend` — ChannelBackend implementation for Discord REST API v10.
+##### `class DiscordChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Discord REST API v10.
 
 **Constructor:** `DiscordChannelBackend() -> None`
 
@@ -5092,7 +5171,10 @@ ______________________________________________________________________
 
 - **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
 
-- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
+- **find_channel** — Find a channel by name or numeric ID. If *name* is already a numeric snowflake ID, returns it as-is. Otherwise queries all guilds for a channel matching the name.<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name or numeric ID.
+  - **Returns:** The channel snowflake ID string, or None if not found.
 
 - **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
 
@@ -5183,8 +5265,6 @@ ______________________________________________________________________
   - `max_age`: Invite expiry in seconds (0 = never). Default: 86400 (1 day).
   - `max_uses`: Maximum uses (0 = unlimited). Default: 0.
   - **Returns:** JSON string with invite code and URL.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class DiscordAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
 
@@ -6667,7 +6747,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
 
-##### `class TelegramChannelBackend` — ChannelBackend implementation for Telegram Bot API.
+##### `class TelegramChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Telegram Bot API.
 
 **Constructor:** `TelegramChannelBackend() -> None`
 
@@ -6787,8 +6867,6 @@ ______________________________________________________________________
   - `from_chat_id`: Source chat ID.
   - `message_id`: ID of the message to forward.
   - **Returns:** JSON string with ok status and message_id.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class TelegramAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Telegram Bot API tools.
 
@@ -6965,7 +7043,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
 
-##### `class WhatsAppChannelBackend` — ChannelBackend implementation for WhatsApp Business Cloud API.
+##### `class WhatsAppChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for WhatsApp Business Cloud API.
 
 **Constructor:** `WhatsAppChannelBackend() -> None`
 
@@ -7114,10 +7192,6 @@ ______________________________________________________________________
   - `limit`: Maximum number of templates to return. Default: 20.
   - `status`: Filter by status ("APPROVED", "PENDING", "REJECTED"). If empty, returns all statuses.
   - **Returns:** JSON string with template list (name, status, category, language).
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for WhatsApp API operations.
 
 ##### `class WhatsAppAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 
