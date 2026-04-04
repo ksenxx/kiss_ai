@@ -384,7 +384,6 @@ class ImproverAgent:
                     "kiss_folder": str(PROJECT_ROOT),
                 },
                 work_dir=work_dir,
-                headless=True,
             )
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)

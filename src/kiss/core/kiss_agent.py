@@ -55,11 +55,6 @@ if TYPE_CHECKING:  # pragma: no cover
 class KISSAgent(Base):
     """A KISS agent using native function calling."""
 
-    # Instance attributes initialized in _reset
-    budget_used: float
-    step_count: int
-    total_tokens_used: int
-
     def __init__(self, name: str) -> None:
         super().__init__(name)
 

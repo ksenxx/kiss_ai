@@ -14,9 +14,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _log_exc() -> None:
-    logger.debug("Exception caught", exc_info=True)
-
 
 def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
     """Find bash.exe on Windows (Git for Windows, WSL, etc.)."""
@@ -186,7 +183,7 @@ class UsefulTools:
                 )
             return text
         except Exception as e:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Write(  # noqa: N802
@@ -206,7 +203,7 @@ class UsefulTools:
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Edit(  # noqa: N802
@@ -250,7 +247,7 @@ class UsefulTools:
             replaced = count if replace_all else 1
             return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
         except Exception as e:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Bash(  # noqa: N802
@@ -315,7 +312,7 @@ class UsefulTools:
                 done.set()
             return _format_bash_result(process.returncode, stdout, max_output_chars)
         except Exception as e:  # pragma: no cover
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:

@@ -715,7 +715,6 @@ def main() -> None:
         "max_budget": args.max_budget,
         "model_config": model_config,
         "work_dir": work_dir,
-        "headless": args.headless,
         "verbose": args.verbose,
         "wait_for_user_callback": cli_wait_for_user,
         "ask_user_question_callback": cli_ask_user_question,

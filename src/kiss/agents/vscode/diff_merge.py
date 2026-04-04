@@ -18,9 +18,6 @@ from kiss.core import config as config_module
 logger = logging.getLogger(__name__)
 
 
-def _log_exc() -> None:
-    logger.debug("Exception caught", exc_info=True)
-
 
 def _load_gitignore_dirs(work_dir: str) -> set[str]:
     """Load directory names and paths to skip from .gitignore.
@@ -49,7 +46,7 @@ def _load_gitignore_dirs(work_dir: str) -> set[str]:
                 continue
             skip.add(name)
     except OSError:
-        _log_exc()
+        logger.debug("Exception caught", exc_info=True)
     return skip
 
 
@@ -77,7 +74,7 @@ def _scan_files(work_dir: str) -> list[str]:
             for d in dirs:
                 paths.append(str(rel_root / d).replace(os.sep, "/") + "/")
     except OSError:  # pragma: no cover — Path.walk swallows OSErrors internally
-        _log_exc()
+        logger.debug("Exception caught", exc_info=True)
     return paths
 
 
@@ -150,7 +147,7 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
         try:
             result[fname] = hashlib.md5(fpath.read_bytes()).hexdigest()
         except OSError:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
     return result
 
 
@@ -203,7 +200,7 @@ def _save_untracked_base(
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(fpath, dest)
         except OSError:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
 
 
 def _cleanup_merge_data(data_dir: str) -> None:
@@ -299,7 +296,7 @@ def _file_as_new_hunks(fpath: Path) -> list[dict[str, int]]:
         line_count = len(fpath.read_text().splitlines())
         return [{"bs": 0, "bc": 0, "cs": 0, "cc": line_count}] if line_count else []
     except (OSError, UnicodeDecodeError):
-        _log_exc()
+        logger.debug("Exception caught", exc_info=True)
         return []
 
 
@@ -360,7 +357,7 @@ def _prepare_merge_view(
         try:
             cur = hashlib.md5((Path(work_dir) / fname).read_bytes()).hexdigest()
         except OSError:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return False
         return cur != pre_file_hashes[fname]
 

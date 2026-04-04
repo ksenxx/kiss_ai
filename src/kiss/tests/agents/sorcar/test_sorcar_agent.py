@@ -239,14 +239,12 @@ class TestBuildArgParser:
             "--model_name", "gpt-4",
             "--max_budget", "1.5",
             "--work_dir", "/tmp/test",
-            "--headless", "true",
             "--verbose", "false",
             "--task", "hello world",
         ])
         assert args.model_name == "gpt-4"
         assert args.max_budget == 1.5
         assert args.work_dir == "/tmp/test"
-        assert args.headless is True
         assert args.verbose is False
         assert args.task == "hello world"
 

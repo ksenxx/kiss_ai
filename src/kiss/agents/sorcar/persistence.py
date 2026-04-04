@@ -20,9 +20,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _log_exc() -> None:
-    logger.debug("Exception caught", exc_info=True)
-
 _KISS_DIR = Path.home() / ".kiss"
 _DB_PATH = _KISS_DIR / "history.db"
 
@@ -311,7 +308,7 @@ def _load_task_chat_events(
         try:
             result.append(json.loads(r["event_json"]))
         except (json.JSONDecodeError, TypeError):
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
     return result
 
 
@@ -569,7 +566,7 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
             try:
                 p.unlink()
             except OSError:  # pragma: no cover — OS-level unlink failure
-                _log_exc()
+                logger.debug("Exception caught", exc_info=True)
     for d in sorted(_KISS_DIR.glob("cs-*")):
         if not d.is_dir() or d.name == "cs-extensions":
             continue
@@ -592,5 +589,5 @@ def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
         shutil.rmtree(d, ignore_errors=True)
         removed += 1
     except OSError:  # pragma: no cover
-        _log_exc()
+        logger.debug("Exception caught", exc_info=True)
     return removed
