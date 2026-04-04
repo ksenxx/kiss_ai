@@ -29,6 +29,7 @@ cp "$PROJECT_ROOT/pyproject.toml" "$DEST/"
 cp "$PROJECT_ROOT/uv.lock" "$DEST/"
 cp "$PROJECT_ROOT/README.md" "$DEST/"
 cp "$PROJECT_ROOT/SYSTEM.md" "$DEST/"
+cp "$PROJECT_ROOT/SORCAR.md" "$DEST/"
 
 # Copy all git-tracked src/kiss/ files, excluding VS Code extension build
 # artifacts (tsconfig, TS sources, node configs) that would confuse the
@@ -37,9 +38,8 @@ cd "$PROJECT_ROOT"
 git ls-files src/kiss/ | while IFS= read -r f; do
     [ -f "$f" ] || continue
     case "$f" in
-        src/kiss/agents/vscode/tsconfig.json) continue ;;
-        src/kiss/agents/vscode/src/*.ts)      continue ;;
-        src/kiss/agents/vscode/package-lock.json) continue ;;
+        src/kiss/agents/vscode/*.py) ;;  # keep Python files
+        src/kiss/agents/vscode/*)  continue ;;  # skip everything else
     esac
     mkdir -p "$DEST/$(dirname "$f")"
     cp "$f" "$DEST/$f"
