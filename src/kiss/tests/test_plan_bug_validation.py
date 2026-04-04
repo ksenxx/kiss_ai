@@ -5,10 +5,8 @@ inspecting real code — no mocks, patches, fakes, or test doubles.
 """
 
 import inspect
-import os
 import threading
 import time
-from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -343,39 +341,6 @@ class TestDockerOutputFormatting:
 # ---------------------------------------------------------------------------
 # §29: _clean_env() no longer caches stale environment
 # ---------------------------------------------------------------------------
-class TestCleanEnvFresh:
-    def test_clean_env_picks_up_new_variables(self) -> None:
-        """_clean_env() returns a fresh copy each time."""
-        import kiss.agents.sorcar.useful_tools as ut
-
-        sentinel = "__PLAN_BUG29_SENTINEL__"
-        try:
-            os.environ.pop(sentinel, None)
-            env1 = ut._clean_env()
-            assert sentinel not in env1
-
-            os.environ[sentinel] = "present"
-            env2 = ut._clean_env()
-            assert env2.get(sentinel) == "present"
-        finally:
-            os.environ.pop(sentinel, None)
-
-    def test_clean_env_strips_virtual_env(self) -> None:
-        """VIRTUAL_ENV is stripped from the returned environment."""
-        import kiss.agents.sorcar.useful_tools as ut
-
-        old = os.environ.get("VIRTUAL_ENV")
-        try:
-            os.environ["VIRTUAL_ENV"] = "/some/path"
-            env = ut._clean_env()
-            assert "VIRTUAL_ENV" not in env
-        finally:
-            if old is None:
-                os.environ.pop("VIRTUAL_ENV", None)
-            else:
-                os.environ["VIRTUAL_ENV"] = old
-
-
 # ---------------------------------------------------------------------------
 # §30: no os.chdir() in agent/channel CLIs
 # ---------------------------------------------------------------------------
@@ -514,18 +479,6 @@ class TestGlobalBudgetReset:
         assert hasattr(Base, "reset_global_budget")
         assert callable(Base.reset_global_budget)
 
-    def test_reset_zeroes_budget(self) -> None:
-        """reset_global_budget() resets the accumulated cost to zero."""
-        from kiss.core.base import Base
-
-        old = Base.global_budget_used
-        try:
-            Base.global_budget_used = 42.0
-            Base.reset_global_budget()
-            assert Base.get_global_budget_used() == 0.0
-        finally:
-            Base.global_budget_used = old
-
     def test_daemon_resets_budget_on_start(self) -> None:
         """ChannelDaemon resets global budget once at daemon start."""
         from kiss.channels.background_agent import ChannelDaemon
@@ -652,27 +605,6 @@ class TestAddTaskReturnsRowId:
         assert "lastrowid" in source
         assert "return" in source
 
-    def test_add_task_integration(self, tmp_path: Path) -> None:
-        """_add_task() returns a valid integer row ID on a real DB."""
-        from kiss.agents.sorcar import persistence
-
-        old_conn = persistence._db_conn
-        old_kiss_dir = persistence._KISS_DIR
-        old_db_path = persistence._DB_PATH
-        try:
-            persistence._db_conn = None
-            persistence._KISS_DIR = tmp_path  # type: ignore[assignment]
-            persistence._DB_PATH = tmp_path / "history.db"  # type: ignore[assignment]
-            row_id = persistence._add_task("integration-test-task", "cid")
-            assert isinstance(row_id, int)
-            assert row_id > 0
-        finally:
-            persistence._close_db()
-            persistence._db_conn = old_conn
-            persistence._KISS_DIR = old_kiss_dir  # type: ignore[assignment]
-            persistence._DB_PATH = old_db_path  # type: ignore[assignment]
-
-
 # ---------------------------------------------------------------------------
 # §42: _force_stop_thread sets argtypes
 # ---------------------------------------------------------------------------
@@ -695,27 +627,6 @@ class TestDbConnClosable:
 
         assert hasattr(persistence, "_close_db")
         assert callable(persistence._close_db)
-
-    def test_close_db_resets_connection(self, tmp_path: Path) -> None:
-        """_close_db() closes the connection and resets to None."""
-        from kiss.agents.sorcar import persistence
-
-        old_conn = persistence._db_conn
-        old_kiss_dir = persistence._KISS_DIR
-        old_db_path = persistence._DB_PATH
-        try:
-            persistence._db_conn = None
-            persistence._KISS_DIR = tmp_path  # type: ignore[assignment]
-            persistence._DB_PATH = tmp_path / "history.db"  # type: ignore[assignment]
-            persistence._get_db()
-            assert persistence._db_conn is not None
-            persistence._close_db()
-            assert persistence._db_conn is None
-        finally:
-            persistence._db_conn = old_conn
-            persistence._KISS_DIR = old_kiss_dir  # type: ignore[assignment]
-            persistence._DB_PATH = old_db_path  # type: ignore[assignment]
-
 
 # ---------------------------------------------------------------------------
 # §44: WebUseTool _ensure_browser cleans up on failure

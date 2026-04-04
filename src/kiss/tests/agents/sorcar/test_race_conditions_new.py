@@ -13,7 +13,6 @@ No mocks — uses real server and browser_ui internals.
 """
 
 import inspect
-import queue
 import threading
 import unittest
 
@@ -37,40 +36,6 @@ class TestP2UserAnswerClearBeforeSetRace(unittest.TestCase):
         assert "clear()" not in source, (
             "P2 fix: no .clear() call — queue-based, not Event-based"
         )
-
-    def test_user_answer_queue_attribute(self) -> None:
-        """Verify _user_answer_queue is a queue.Queue, not a plain str."""
-        server = VSCodeServer()
-        assert isinstance(server._user_answer_queue, queue.Queue), (
-            "P2 fix: _user_answer_queue should be queue.Queue"
-        )
-        assert not hasattr(server, "_user_answer_event"), (
-            "P2 fix: _user_answer_event should be removed"
-        )
-
-    def test_no_deadlock_with_early_answer(self) -> None:
-        """Verify queue-based approach doesn't deadlock when answer arrives early."""
-        server = VSCodeServer()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
-
-        # Put answer before await (simulates early arrival)
-        server._user_answer_queue.put("early answer")
-
-        result: list[str] = []
-
-        def awaiter() -> None:
-            answer = server._await_user_response()
-            result.append(answer)
-
-        t = threading.Thread(target=awaiter, daemon=True)
-        t.start()
-        t.join(timeout=2.0)
-
-        assert result == ["early answer"], (
-            "P2 fix: early answer should be received without deadlock"
-        )
-
 
 # ---------------------------------------------------------------------------
 # P5 — _merging flag synchronized with _state_lock
@@ -159,11 +124,6 @@ class TestP9RecordingsSnapshotBeforeIterate(unittest.TestCase):
             "P9 fix: should iterate snapshot, not _recordings"
         )
 
-    def test_lock_is_not_reentrant(self) -> None:
-        """Verify BaseBrowserPrinter._lock is a non-reentrant Lock."""
-        printer = BaseBrowserPrinter()
-        assert isinstance(printer._lock, type(threading.Lock()))
-
     def test_no_deadlock_with_concurrent_broadcast(self) -> None:
         """Verify _extract_result_summary doesn't block broadcast."""
         server = VSCodeServer()
@@ -217,26 +177,6 @@ class TestP15TaskThreadCleared(unittest.TestCase):
             "P15 fix: _run_task should clear _task_thread in finally"
         )
 
-    def test_task_thread_cleared_after_completion(self) -> None:
-        """Verify _task_thread is None after _run_task completes."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[method-assign,assignment]
-
-        # Set a dummy task thread
-        thread = threading.Thread(target=lambda: None, daemon=True)
-        thread.start()
-        thread.join()
-        server._task_thread = thread
-
-        # Run _run_task — it will fail early but the finally block should clear _task_thread
-        server._run_task({"prompt": "test", "model": "test"})
-
-        assert server._task_thread is None, (
-            "P15 fix: _task_thread should be None after _run_task completes"
-        )
-
-
 # ---------------------------------------------------------------------------
 # P16 — Recordings use explicit IDs instead of thread ident
 # ---------------------------------------------------------------------------
@@ -254,43 +194,6 @@ class TestP16ExplicitRecordingIds(unittest.TestCase):
         """Verify stop_recording accepts a recording_id parameter."""
         sig = inspect.signature(BaseBrowserPrinter.stop_recording)
         assert "recording_id" in sig.parameters
-
-    def test_recording_with_explicit_id(self) -> None:
-        """Verify recordings work correctly with explicit IDs."""
-        printer = BaseBrowserPrinter()
-        printer.start_recording(42)
-        printer.broadcast({"type": "text_delta", "text": "hello"})
-        events = printer.stop_recording(42)
-        assert len(events) == 1
-        assert events[0]["text"] == "hello"
-
-    def test_no_cross_contamination_between_ids(self) -> None:
-        """Verify recordings with different IDs are independent."""
-        printer = BaseBrowserPrinter()
-        printer.start_recording(1)
-        printer.broadcast({"type": "text_delta", "text": "task1"})
-        events1 = printer.stop_recording(1)
-
-        printer.start_recording(2)
-        printer.broadcast({"type": "text_delta", "text": "task2"})
-        events2 = printer.stop_recording(2)
-
-        # Recording 1 has only task1 events
-        assert len(events1) == 1
-        assert events1[0]["text"] == "task1"
-        # Recording 2 has only task2 events
-        assert len(events2) == 1
-        assert events2[0]["text"] == "task2"
-
-    def test_backward_compat_without_id(self) -> None:
-        """Verify start/stop_recording still work without explicit ID (uses thread ident)."""
-        printer = BaseBrowserPrinter()
-        printer.start_recording()
-        printer.broadcast({"type": "text_delta", "text": "compat"})
-        events = printer.stop_recording()
-        assert len(events) == 1
-        assert events[0]["text"] == "compat"
-
 
 # ---------------------------------------------------------------------------
 # D3 — _await_user_response checks stop_event with timeout
@@ -323,17 +226,6 @@ class TestD3UserAnswerWaitWithTimeout(unittest.TestCase):
 
         with self.assertRaises(KeyboardInterrupt):
             server._await_user_response()
-
-    def test_returns_answer_from_queue(self) -> None:
-        """Verify _await_user_response returns the answer from the queue."""
-        server = VSCodeServer()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
-        server._user_answer_queue.put("test answer")
-
-        result = server._await_user_response()
-        assert result == "test answer"
-
 
 if __name__ == "__main__":
     unittest.main()

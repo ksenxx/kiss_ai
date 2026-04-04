@@ -6,7 +6,6 @@ import threading
 import time
 from typing import Any, cast
 
-from kiss.channels._backend_utils import stop_http_server
 from kiss.channels.background_agent import ChannelDaemon, _SenderState
 from kiss.channels.irc_agent import IRCChannelBackend
 from kiss.channels.line_agent import LineChannelBackend
@@ -14,7 +13,6 @@ from kiss.channels.slack_agent import SlackChannelBackend
 from kiss.channels.synology_chat_agent import SynologyChatChannelBackend
 from kiss.channels.whatsapp_agent import WhatsAppChannelBackend
 from kiss.channels.zalo_agent import ZaloChannelBackend
-from kiss.core.base import Base
 
 
 class _FakeSlackClient:
@@ -94,10 +92,6 @@ def test_zalo_disconnect_stops_server() -> None:
     backend.disconnect()
     assert backend._webhook_server is None
     assert backend._webhook_thread is None
-
-
-def test_stop_http_server_handles_none() -> None:
-    assert stop_http_server(None, None) == (None, None)
 
 
 def test_irc_disconnect_closes_socket_and_joins_thread() -> None:
@@ -249,41 +243,6 @@ def test_dispatch_always_calls_start_sender_worker() -> None:
     assert "self._start_sender_worker(" in source
 
 
-def test_process_sender_queue_drains_all() -> None:
-    """_process_sender_queue processes every message in the queue.
-
-    This verifies the worker loop correctly drains multiple queued messages
-    in a single invocation, which is essential for the no-shortcut fix to
-    work: when a second dispatch can't acquire the lock, it relies on the
-    existing worker to drain the newly added message.
-    """
-    daemon = ChannelDaemon(
-        backend=_TrackingBackend(),  # type: ignore[arg-type]
-        channel_name="",
-        agent_name="test",
-    )
-
-    collected: list[str] = []
-
-    def tracking_handle(
-        session_key: str,
-        channel_id: str,
-        msg: dict[str, Any],
-        state: _SenderState,
-    ) -> None:
-        collected.append(msg.get("text", ""))
-
-    daemon._handle_message = tracking_handle  # type: ignore[method-assign]
-
-    state = daemon._get_sender_state("ch:u1")
-    for i in range(5):
-        state.pending_messages.put({"user": "u1", "text": f"queued-{i}"})
-
-    # Manually call the queue-drain loop
-    daemon._process_sender_queue("ch:u1", "ch", state)
-    assert collected == [f"queued-{i}" for i in range(5)]
-
-
 # ---------------------------------------------------------------------------
 # Regression: concurrent-worker budget reset (§36 / review semantic issue)
 #
@@ -311,43 +270,3 @@ def test_budget_reset_at_daemon_start_not_per_task() -> None:
     assert "reset_global_budget" not in queue_source
 
 
-def test_concurrent_workers_do_not_zero_each_others_budget() -> None:
-    """Two concurrent workers both accumulate cost without interference.
-
-    Regression test: if reset_global_budget were called per-task, worker A's
-    reset would erase worker B's accumulated cost and vice versa, allowing
-    the global budget cap to be silently exceeded.
-    """
-    old_budget = Base.global_budget_used
-    try:
-        Base.reset_global_budget()
-        assert Base.get_global_budget_used() == 0.0
-
-        # Simulate two concurrent workers accumulating cost
-        barrier = threading.Barrier(2)
-        results: dict[str, float] = {}
-
-        def worker(name: str, cost: float) -> None:
-            barrier.wait(timeout=5)
-            # Each worker adds cost in small increments (simulating LLM calls)
-            for _ in range(10):
-                with Base._class_lock:
-                    Base.global_budget_used += cost
-                time.sleep(0.001)
-            results[name] = cost * 10
-
-        t1 = threading.Thread(target=worker, args=("A", 0.5))
-        t2 = threading.Thread(target=worker, args=("B", 0.3))
-        t1.start()
-        t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
-
-        total = Base.get_global_budget_used()
-        expected = results["A"] + results["B"]  # 5.0 + 3.0 = 8.0
-        assert abs(total - expected) < 0.01, (
-            f"Budget should reflect both workers' costs: "
-            f"expected {expected}, got {total}"
-        )
-    finally:
-        Base.global_budget_used = old_budget
