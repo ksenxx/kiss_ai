@@ -49,8 +49,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage('No text selected');
         return;
       }
-      let tab = tabManager!.getActiveTab();
-      if (!tab) tab = tabManager!.createTab();
+      const tab = tabManager!.createTab();
       tab.submitTask(sel.trim());
     })
   );

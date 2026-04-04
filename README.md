@@ -102,13 +102,13 @@ print(result)  # 127.05
 ```
 
 That's a fully functional AI agent that uses tools. No annotations. No boilerplate. No ceremony. Just intent, directly expressed.
-Well, you might ask "**Why not use LangChain, DSpy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well-established agent frameworks?**" Here is my response:
+Well, you might ask "**Why not use LangChain, DSPy, OpenHands, MiniSweAgent, CrewAI, Google ADK, Claude Agent SDK, or some well-established agent frameworks?**" Here is my response:
 
 - KISS comes with KISS Sorcar, a powerful local code IDE that is free and open-source.
 - It has the GEPA prompt optimizer built-in with a simple API.
 - It has a [`RelentlessAgent`](src/kiss/core/relentless_agent.py), which is pretty straightforward in terms of implementation, but it can work for very long tasks. It was self-evolved over time to reduce cost and running time.
 - No bloat and simple codebase.
-- New techniques will be incorporated to the framework as we research them.
+- New techniques will be incorporated into the framework as we research them.
 
 ## 🤝 Multi-Agent Orchestration is Function Composition
 
@@ -161,7 +161,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 - **RelentlessAgent for Long-Running Tasks**: Extends `Base` and uses `KISSAgent` for each sub-session, with auto-continuation across multiple sub-sessions (up to 10,000 by default). When a session runs out of steps, it **summarizes progress as a chronologically-ordered list of things the agent did with explanation and relevant code snippets**, and continues in a new sub-session with the logged context, enabling agents to run for hours to days.
 - **SorcarAgent with Coding and Browser Tools**: Provides `Read`, `Write`, `Edit`, and `Bash` (with streaming output) for coding tasks, `ask_user_question` for human-in-the-loop interaction, plus full browser automation and desktop app automation.
 - **StatefulSorcarAgent with Chat-Session Persistence**: Extends `SorcarAgent` with multi-turn chat-session state management — maintains a `chat_id`, loads prior chat context from `history.db`, persists tasks and results, and augments prompts with previous session history. Supports `new_chat()` to start fresh sessions and `resume_chat(task)` to continue previous ones. This is the same stateful workflow the VS Code extension uses, exposed as a standalone reusable agent and CLI (`sorcar` command with `-n` flag for new sessions).
-- **KISS Sorcar Extension for VS Code**: A full-featured VS Code extension that embeds the Sorcar agent as an interactive chat panel in the secondary sidebar. The TypeScript frontend (`SorcarPanel`) communicates with a Python backend (`server.py`) over JSON-line stdio, streaming thinking, text, tool calls, and results in real time. Includes a `MergeManager` for reviewing agent file changes with inline diff decorations and per-hunk accept/reject, auto-dependency installation (uv, Python venv, Playwright Chromium) on first launch via `DependencyInstaller`, model selection with usage-ranked suggestions, session history browsing and resumption, `@file` mentions with autocomplete, git commit message generation, and keyboard shortcuts (`Cmd+T` new chat, `Cmd+D` toggle focus, `Cmd+L` run selection). The extension bundles the full KISS Python project for standalone distribution as a `.vsix`.
+- **KISS Sorcar Extension for VS Code**: A full-featured VS Code extension that embeds the Sorcar agent as interactive chat tabs in the editor area. Each tab has its own Python backend process for full isolation, and multiple tabs can run concurrently. The TypeScript frontend (`SorcarTab`) communicates with a Python backend (`server.py`) over JSON-line stdio, streaming thinking, text, tool calls, and results in real time. The agent edits files directly in the workspace — users review changes via VS Code's built-in Source Control panel. Includes auto-dependency installation (uv, Python venv, Playwright Chromium) on first launch via `DependencyInstaller`, model selection with usage-ranked suggestions, session history browsing and resumption, `@file` mentions with autocomplete, git commit message generation, and keyboard shortcuts (`Cmd+T` new chat, `Cmd+D` toggle focus, `Cmd+L` run selection). The extension bundles the full KISS Python project for standalone distribution as a `.vsix`.
 - **GEPA Prompt Optimizer**: A Genetic-Pareto prompt optimization framework that evolves prompts through natural language reflection, instance-level Pareto frontiers, and structural merge — based on the paper "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning."
 - **KISSEvolve for Algorithm Discovery**: An evolutionary framework using LLM-guided mutation, crossover, island-based evolution, novelty rejection sampling, and power-law parent sampling to discover novel algorithms.
 - **Trajectory Visualization**: A web-based UI for viewing complete agent execution histories including message flows, tool calls, token usage, and budget stats — with markdown rendering and syntax-highlighted code blocks.
@@ -188,7 +188,7 @@ KISS has a fresh implementation of GEPA with some key improvements. GEPA (Geneti
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
 
-This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolver` was expensive to run. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
+This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolve` was expensive to run. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
 For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
 
