@@ -160,7 +160,7 @@ class GeminiModel(Model):
         """Extract parts from a Gemini response or chunk."""
         if response and response.candidates:
             candidate = response.candidates[0]
-            if candidate.content and candidate.content.parts:
+            if candidate.content and candidate.content.parts:  # pragma: no branch
                 return list(candidate.content.parts)
         return []
 

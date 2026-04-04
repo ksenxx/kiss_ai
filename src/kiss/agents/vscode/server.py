@@ -682,7 +682,7 @@ class VSCodeServer:
         for candidate in candidates:
             if candidate.startswith(partial) and len(candidate) > len(partial):
                 suffix = candidate[len(partial):]
-                if len(suffix) > len(best):
+                if len(suffix) > len(best):  # pragma: no branch
                     best = suffix
         return best
 

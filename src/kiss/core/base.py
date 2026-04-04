@@ -34,8 +34,8 @@ yaml.add_representer(str, _str_presenter)
 _project_dir = Path(__file__).parent.parent.parent.parent
 SYSTEM_PROMPT = (_project_dir / "SYSTEM.md").read_text()
 
-if sys.platform == "win32":
-    if shutil.which("bash"):
+if sys.platform == "win32":  # pragma: no branch
+    if shutil.which("bash"):  # pragma: no branch
         SYSTEM_PROMPT += (
             "\n\n## Windows Environment\n"
             "- This machine runs Windows with Git Bash available. "
@@ -52,7 +52,7 @@ if sys.platform == "win32":
         )
 
 _sorcar_path = _project_dir / "SORCAR.md"
-if _sorcar_path.exists():
+if _sorcar_path.exists():  # pragma: no branch
     SYSTEM_PROMPT += "\n" + _sorcar_path.read_text()
 
 

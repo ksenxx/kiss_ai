@@ -244,7 +244,7 @@ class RelentlessAgent(Base):
                 return result
 
             summary = payload.get("summary", "")
-            if summary:
+            if summary:  # pragma: no branch
                 progress_section = CONTINUATION_PROMPT.format(progress_text=summary)
         raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
 

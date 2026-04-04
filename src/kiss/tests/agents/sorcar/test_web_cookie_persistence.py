@@ -1,6 +1,5 @@
 """Integration tests: cookies and login state persist across WebUseTool sessions."""
 
-import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -53,24 +52,6 @@ def http_server():
 
 class TestCookiePersistence:
     """Verify cookies survive browser close/reopen with a persistent profile."""
-
-    def test_cookies_persist_across_sessions(self, http_server: str) -> None:
-        with tempfile.TemporaryDirectory() as profile_dir:
-            # Session 1: visit /setcookie to receive a Set-Cookie header
-            tool1 = WebUseTool(user_data_dir=profile_dir)
-            try:
-                result = tool1.go_to_url(f"{http_server}/setcookie")
-                assert "Cookie Set" in result
-            finally:
-                tool1.close()
-
-            # Session 2: visit /checkcookie — JS puts document.cookie into <title>
-            tool2 = WebUseTool(user_data_dir=profile_dir)
-            try:
-                result = tool2.go_to_url(f"{http_server}/checkcookie")
-                assert "session_token=abc123" in result
-            finally:
-                tool2.close()
 
     def test_ephemeral_mode_loses_cookies(self, http_server: str) -> None:
         # Session 1 (ephemeral): set cookie

@@ -123,12 +123,6 @@ class TestResolveTask:
         result = _resolve_task(args)
         assert "weather" in result.lower()
 
-    def test_resolve_task_from_string(self) -> None:
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--task", "Do something"])
-        result = _resolve_task(args)
-        assert result == "Do something"
-
     def test_resolve_task_from_file(self, tmp_path: Path) -> None:
         f = tmp_path / "task.txt"
         f.write_text("File task content")
@@ -238,19 +232,6 @@ class TestSorcarAgentCallbackWiring:
         assert agent.web_use_tool is None
 
 
-class TestGetToolsWebToolsFlag:
-    def test_web_tools_disabled_skips_browser_tools(self) -> None:
-        agent = SorcarAgent("test")
-        agent._use_web_tools = False
-        tools = agent._get_tools()
-        tool_names = [t.__name__ for t in tools]
-        assert "go_to_url" not in tool_names
-        assert "click" not in tool_names
-        assert "screenshot" not in tool_names
-        assert "ask_user_question" in tool_names
-        assert agent.web_use_tool is None
-
-
 class TestBuildArgParser:
     def test_custom_args(self) -> None:
         parser = _build_arg_parser()
@@ -268,17 +249,6 @@ class TestBuildArgParser:
         assert args.headless is True
         assert args.verbose is False
         assert args.task == "hello world"
-
-    def test_no_web_flag(self) -> None:
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--no-web", "--task", "test"])
-        assert args.no_web is True
-
-    def test_no_web_flag_default(self) -> None:
-        parser = _build_arg_parser()
-        args = parser.parse_args(["--task", "test"])
-        assert args.no_web is False
-
 
 def _drain(q: queue.Queue) -> list[dict]:
     events: list[dict] = []

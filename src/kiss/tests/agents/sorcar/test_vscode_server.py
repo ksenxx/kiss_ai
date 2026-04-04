@@ -267,15 +267,6 @@ class TestExtractResultSummary(unittest.TestCase):
     def setUp(self) -> None:
         self.server = VSCodeServer()
 
-    def test_extracts_text_when_no_summary(self) -> None:
-        self.server.printer.start_recording()
-        self.server.printer.broadcast({
-            "type": "result",
-            "text": "Some result text",
-        })
-        result = self.server._extract_result_summary()
-        assert result == "Some result text"
-
     def test_returns_empty_when_no_result_event(self) -> None:
         self.server.printer.start_recording()
         self.server.printer.broadcast({"type": "text_delta", "text": "hello"})

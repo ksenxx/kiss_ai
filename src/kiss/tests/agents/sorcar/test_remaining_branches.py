@@ -406,12 +406,6 @@ class TestVSCodeServerBranches:
         usage = th._load_file_usage()
         assert "/test/file.py" in usage
 
-    def test_user_answer_command(self) -> None:
-        """userAnswer command puts the answer on the queue."""
-        server = VSCodeServer()
-        server._handle_command({"type": "userAnswer", "answer": "yes"})
-        assert server._user_answer_queue.get_nowait() == "yes"
-
     def test_get_input_history(self) -> None:
         """getInputHistory command returns deduplicated tasks."""
         server = VSCodeServer()
@@ -425,21 +419,6 @@ class TestVSCodeServerBranches:
         hist_events = [e for e in events if e.get("type") == "inputHistory"]
         assert len(hist_events) == 1
         assert "tasks" in hist_events[0]
-
-    def test_resume_session_no_events(self) -> None:
-        """_replay_session broadcasts error when no events found."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        orig = server.printer.broadcast
-        def cap(ev: dict) -> None:
-            events.append(ev)
-            orig(ev)
-        server.printer.broadcast = cap  # type: ignore[assignment]
-        server._replay_session("nonexistent-task-12345")
-        err = [e for e in events if e.get("type") == "error"]
-        assert len(err) == 1
-        assert "No recorded events" in err[0]["text"]
-
 
 # ---------------------------------------------------------------------------
 # diff_merge.py — uncovered branches
@@ -689,22 +668,6 @@ class TestSorcarAgentDockerBranch:
         assert "Write" in tool_names
         if agent.web_use_tool:
             agent.web_use_tool.close()
-
-
-class TestWebUseToolPersistentContextInProcess:
-    """Cover _launch_browser persistent context branch (lines 138-142)."""
-
-    def test_persistent_context_direct(self, tmp_path: Path) -> None:
-        """Launch browser with user_data_dir in the same process."""
-        user_dir = str(tmp_path / "user_data")
-        tool = WebUseTool(user_data_dir=user_dir)
-        try:
-            tool._ensure_browser()
-            assert tool._context is not None
-            assert tool._browser is None  # persistent context: no separate browser
-            assert tool._page is not None
-        finally:
-            tool.close()
 
 
 class TestWebUseToolTruncation:

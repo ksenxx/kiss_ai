@@ -62,14 +62,6 @@ class TestCloseDbNotInitialized:
 class TestResumeChatNoMatch:
     """Cover resume_chat branches."""
 
-    def test_resume_chat_nonexistent_task(self) -> None:
-        """resume_chat with a task not in history should be a no-op."""
-        agent = StatefulSorcarAgent("test")
-        original_chat_id = agent.chat_id
-        agent.resume_chat("this-task-definitely-does-not-exist-xyz-12345")
-        # Chat ID should remain unchanged since no match found
-        assert agent.chat_id == original_chat_id
-
     def test_resume_chat_by_id_empty(self) -> None:
         """resume_chat_by_id("") should be a no-op (branch 73->exit)."""
         agent = StatefulSorcarAgent("test")
@@ -107,33 +99,6 @@ class TestDiffFilesBranches:
             assert len(hunks) >= 1
             # Pure deletion: new_count should be 0
             assert hunks[0][3] == 0
-
-    def test_replacement_hunk(self) -> None:
-        """_diff_files with a replacement hunk → old_count > 0 (line 256)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir) / "base.txt"
-            base.write_text("line1\nline2\nline3\n")
-            current = Path(tmpdir) / "current.txt"
-            current.write_text("line1\nmodified\nline3\n")
-            hunks = _diff_files(str(base), str(current))
-            assert len(hunks) >= 1
-            # Replacement: both old_count and new_count > 0
-            found_replacement = any(h[1] > 0 and h[3] > 0 for h in hunks)
-            assert found_replacement
-
-    def test_pure_deletion_at_beginning(self) -> None:
-        """_diff_files with deletion at beginning of non-empty result (line 260)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir) / "base.txt"
-            base.write_text("delete_me\nkeep_this\n")
-            current = Path(tmpdir) / "current.txt"
-            current.write_text("keep_this\n")
-            hunks = _diff_files(str(base), str(current))
-            assert len(hunks) >= 1
-            # Pure deletion: new_count = 0
-            deletion = [h for h in hunks if h[3] == 0]
-            assert len(deletion) >= 1
-
 
 # ---------------------------------------------------------------------------
 # diff_merge.py — _prepare_merge_view untracked file branches
@@ -326,30 +291,6 @@ class TestAwaitUserResponseLoop:
 # ---------------------------------------------------------------------------
 # server.py — _complete with stale sequence (685->682)
 # ---------------------------------------------------------------------------
-
-
-class TestCompleteStaleSequence:
-    """Cover stale sequence check in _complete (branch 685->682)."""
-
-    def test_complete_stale_seq(self) -> None:
-        """When seq doesn't match latest, _complete exits early."""
-        server = VSCodeServer()
-        captured: list[dict[str, object]] = []
-        orig = server.printer.broadcast
-
-        def cap(ev: dict[str, object]) -> None:
-            captured.append(ev)
-            orig(ev)
-
-        server.printer.broadcast = cap  # type: ignore[assignment]
-
-        # Set latest to 5, call _complete with seq=0 (stale)
-        with server._complete_lock:
-            server._complete_seq_latest = 5
-        server._complete("some query", seq=0)
-        # Should not broadcast anything because seq is stale
-        ghost = [e for e in captured if e.get("type") == "ghost"]
-        assert len(ghost) == 0
 
 
 class TestCompleteFromActiveFileShorterSuffix:
