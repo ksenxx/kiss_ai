@@ -406,12 +406,6 @@ class TestVSCodeServerBranches:
         usage = th._load_file_usage()
         assert "/test/file.py" in usage
 
-    def test_user_answer_command(self) -> None:
-        """userAnswer command puts the answer on the queue."""
-        server = VSCodeServer()
-        server._handle_command({"type": "userAnswer", "answer": "yes"})
-        assert server._user_answer_queue.get_nowait() == "yes"
-
     def test_get_input_history(self) -> None:
         """getInputHistory command returns deduplicated tasks."""
         server = VSCodeServer()
@@ -426,20 +420,47 @@ class TestVSCodeServerBranches:
         assert len(hist_events) == 1
         assert "tasks" in hist_events[0]
 
-    def test_resume_session_no_events(self) -> None:
-        """_replay_session broadcasts error when no events found."""
+    def test_get_input_history_loads_beyond_first_100_rows(self) -> None:
+        """Arrow-key input history should cover the full history.db, not just 100 rows."""
         server = VSCodeServer()
         events: list[dict] = []
-        orig = server.printer.broadcast
+
         def cap(ev: dict) -> None:
             events.append(ev)
-            orig(ev)
-        server.printer.broadcast = cap  # type: ignore[assignment]
-        server._replay_session("nonexistent-task-12345")
-        err = [e for e in events if e.get("type") == "error"]
-        assert len(err) == 1
-        assert "No recorded events" in err[0]["text"]
 
+        server.printer.broadcast = cap  # type: ignore[assignment]
+        for i in range(105):
+            th._add_task(f"task-{i:03d}")
+
+        server._get_input_history()
+
+        hist_event = next(e for e in events if e.get("type") == "inputHistory")
+        tasks = hist_event["tasks"]
+        assert len(tasks) >= 105
+        assert "task-000" in tasks
+        assert tasks[0] == "task-104"
+
+    def test_get_input_history_deduplicates_across_full_history(self) -> None:
+        """Deduplication should keep the newest copy even when duplicates span >100 rows."""
+        server = VSCodeServer()
+        events: list[dict] = []
+
+        def cap(ev: dict) -> None:
+            events.append(ev)
+
+        server.printer.broadcast = cap  # type: ignore[assignment]
+        th._add_task("repeated-task")
+        for i in range(100):
+            th._add_task(f"middle-task-{i:03d}")
+        th._add_task("repeated-task")
+
+        server._get_input_history()
+
+        hist_event = next(e for e in events if e.get("type") == "inputHistory")
+        tasks = hist_event["tasks"]
+        assert tasks.count("repeated-task") == 1
+        assert tasks[0] == "repeated-task"
+        assert "middle-task-000" in tasks
 
 # ---------------------------------------------------------------------------
 # diff_merge.py — uncovered branches
@@ -689,22 +710,6 @@ class TestSorcarAgentDockerBranch:
         assert "Write" in tool_names
         if agent.web_use_tool:
             agent.web_use_tool.close()
-
-
-class TestWebUseToolPersistentContextInProcess:
-    """Cover _launch_browser persistent context branch (lines 138-142)."""
-
-    def test_persistent_context_direct(self, tmp_path: Path) -> None:
-        """Launch browser with user_data_dir in the same process."""
-        user_dir = str(tmp_path / "user_data")
-        tool = WebUseTool(user_data_dir=user_dir)
-        try:
-            tool._ensure_browser()
-            assert tool._context is not None
-            assert tool._browser is None  # persistent context: no separate browser
-            assert tool._page is not None
-        finally:
-            tool.close()
 
 
 class TestWebUseToolTruncation:

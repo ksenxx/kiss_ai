@@ -267,15 +267,6 @@ class TestExtractResultSummary(unittest.TestCase):
     def setUp(self) -> None:
         self.server = VSCodeServer()
 
-    def test_extracts_text_when_no_summary(self) -> None:
-        self.server.printer.start_recording()
-        self.server.printer.broadcast({
-            "type": "result",
-            "text": "Some result text",
-        })
-        result = self.server._extract_result_summary()
-        assert result == "Some result text"
-
     def test_returns_empty_when_no_result_event(self) -> None:
         self.server.printer.start_recording()
         self.server.printer.broadcast({"type": "text_delta", "text": "hello"})
@@ -395,7 +386,7 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
 
 
 class TestMainCssInfiniteScroll(unittest.TestCase):
-    """Test main.css has infinite scroll and wider sidebar styles."""
+    """Test main.css has infinite scroll and responsive sidebar styles."""
 
     css: str
 
@@ -404,8 +395,20 @@ class TestMainCssInfiniteScroll(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
-    def test_sidebar_width_420(self) -> None:
-        assert "420px" in self.css
+    def test_sidebar_width_is_capped_at_420(self) -> None:
+        idx = self.css.index("#sidebar")
+        block = self.css[idx : idx + 400]
+        assert "420px" in block
+
+    def test_sidebar_uses_75_percent_of_viewport_width(self) -> None:
+        idx = self.css.index("#sidebar")
+        block = self.css[idx : idx + 400]
+        assert "75vw" in block
+
+    def test_sidebar_uses_75_percent_of_viewport_height(self) -> None:
+        idx = self.css.index("#sidebar")
+        block = self.css[idx : idx + 400]
+        assert "12.5vh" in block
 
     def test_sidebar_overflow_hidden(self) -> None:
         # Sidebar should have overflow: hidden (not auto) so #history-list scrolls

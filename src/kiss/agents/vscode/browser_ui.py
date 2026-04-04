@@ -69,6 +69,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self._bash_buffer: list[str] = []
         self._bash_last_flush = 0.0
         self._bash_flush_timer: threading.Timer | None = None
+        self._bash_generation = 0
         self._bash_streamed = False
         self.stop_event = threading.Event()
         self._thread_local = threading.local()
@@ -79,6 +80,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self.reset_stream_state()
         self._bash_streamed = False
         with self._bash_lock:
+            self._bash_generation += 1
             self._bash_buffer.clear()
             if self._bash_flush_timer is not None:
                 self._bash_flush_timer.cancel()
@@ -86,6 +88,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
 
     def _flush_bash(self) -> None:
         with self._bash_lock:
+            gen = self._bash_generation
             if self._bash_flush_timer is not None:
                 self._bash_flush_timer.cancel()
                 self._bash_flush_timer = None
@@ -95,7 +98,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                 self._bash_last_flush = time.monotonic()
             else:
                 text = ""
-        if text:
+        if text and gen == self._bash_generation:
             self.broadcast({"type": "system_output", "text": text})
 
     def start_recording(self, recording_id: int | None = None) -> None:

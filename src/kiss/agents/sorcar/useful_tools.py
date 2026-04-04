@@ -14,11 +14,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _log_exc() -> None:
-    logger.debug("Exception caught", exc_info=True)
 
-
-def _find_windows_bash() -> str | None:
+def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
     """Find bash.exe on Windows (Git for Windows, WSL, etc.)."""
     found = shutil.which("bash")
     if found:
@@ -55,16 +52,17 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
             "shell": True,
             "start_new_session": True,
         }
-    if _WINDOWS_BASH:
+    else:  # pragma: no cover — Windows only
+        if _WINDOWS_BASH:
+            return {
+                "args": [_WINDOWS_BASH, "-c", command],
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+            }
+        ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
         return {
-            "args": [_WINDOWS_BASH, "-c", command],
+            "args": [ps, "-NoProfile", "-Command", command],
             "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
         }
-    ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-    return {
-        "args": [ps, "-NoProfile", "-Command", command],
-        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-    }
 
 
 def _truncate_output(output: str, max_chars: int) -> str:
@@ -117,7 +115,7 @@ def _kill_process_group(process: subprocess.Popen) -> None:
     Args:
         process: The subprocess to terminate.
     """
-    if sys.platform == "win32":
+    if sys.platform == "win32":  # pragma: no cover — Windows only
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(process.pid)],
             capture_output=True,
@@ -185,7 +183,7 @@ class UsefulTools:
                 )
             return text
         except Exception as e:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Write(  # noqa: N802
@@ -205,7 +203,7 @@ class UsefulTools:
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Edit(  # noqa: N802
@@ -249,7 +247,7 @@ class UsefulTools:
             replaced = count if replace_all else 1
             return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
         except Exception as e:
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def Bash(  # noqa: N802
@@ -314,7 +312,7 @@ class UsefulTools:
                 done.set()
             return _format_bash_result(process.returncode, stdout, max_output_chars)
         except Exception as e:  # pragma: no cover
-            _log_exc()
+            logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:

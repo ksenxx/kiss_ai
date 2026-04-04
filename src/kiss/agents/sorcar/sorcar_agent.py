@@ -107,9 +107,9 @@ class SorcarAgent(RelentlessAgent):
         _save_last_model(resolved_model)
         super()._reset(
             model_name=resolved_model,
-            max_sub_sessions=max_sub_sessions if max_sub_sessions is not None else 10000,
-            max_steps=max_steps if max_steps is not None else 100,
-            max_budget=max_budget if max_budget is not None else 200.0,
+            max_sub_sessions=max_sub_sessions,
+            max_steps=max_steps,
+            max_budget=max_budget,
             work_dir=work_dir or ".",
             docker_image=docker_image,
             printer=printer,
@@ -130,7 +130,6 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
-        headless: bool | None = None,
         web_tools: bool = True,
         verbose: bool | None = None,
         current_editor_file: str | None = None,
@@ -152,9 +151,8 @@ class SorcarAgent(RelentlessAgent):
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
-            headless: Deprecated, ignored. Browser always runs headless.
             web_tools: Whether to include browser/web tools. Defaults to True.
-                Set to False for headless terminal-only environments.
+                Set to False for terminal-only environments.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
@@ -246,12 +244,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-w", "--work_dir", type=str, default=None, help="Working directory")
     parser.add_argument(
-        "--headless",
-        type=lambda x: str(x).lower() == "true",
-        default=False,
-        help="Run browser headless (true/false)",
-    )
-    parser.add_argument(
         "-v", "--verbose",
         type=lambda x: str(x).lower() == "true",
         default=True,
@@ -332,7 +324,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
     if len(sys.argv) <= 1:
         print("Usage: sorcar_agent.py [-m MODEL_NAME] [-e ENDPOINT] [-b MAX_BUDGET] "
-              "[-w WORK_DIR] [--headless true/false] [-v true/false] "
+              "[-w WORK_DIR] [-v true/false] "
               "[-t TASK_DESCRIPTION] [-f TASK_FILE]")
         sys.exit(1)
     parser = _build_arg_parser()
@@ -364,7 +356,6 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
             "max_budget": args.max_budget,
             "model_config": model_config,
             "work_dir": work_dir,
-            "headless": args.headless,
             "web_tools": not args.no_web,
             "verbose": args.verbose,
             "wait_for_user_callback": cli_wait_for_user,

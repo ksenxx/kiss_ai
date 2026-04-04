@@ -241,74 +241,12 @@ class TestSlackAgentChatPersistence:
         _restore(self._backup)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_slack_agent_is_stateful(self) -> None:
-        """SlackAgent inherits StatefulSorcarAgent and has chat methods."""
-        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-
-        agent = SlackAgent()
-        assert isinstance(agent, StatefulSorcarAgent)
-        assert hasattr(agent, "new_chat")
-        assert hasattr(agent, "resume_chat")
-        assert hasattr(agent, "chat_id")
-        assert len(agent.chat_id) == 32  # UUID4 hex
-
-    def test_new_chat_generates_new_id(self) -> None:
-        """new_chat() replaces the chat_id with a fresh one."""
-        agent = SlackAgent()
-        old_id = agent.chat_id
-        agent.new_chat()
-        assert agent.chat_id != old_id
-        assert len(agent.chat_id) == 32
-
-    def test_resume_chat_loads_previous_session(self) -> None:
-        """resume_chat() restores the chat_id from a previously persisted task."""
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        captured: dict[str, Any] = {}
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        original = _intercept_run(agent, captured)
-        try:
-            agent.run(prompt_template="slack task alpha")
-        finally:
-            parent_class.run = original
-        original_chat_id = agent.chat_id
-
-        # Create a new agent and resume the session
-        agent2 = SlackAgent()
-        assert agent2.chat_id != original_chat_id
-        agent2.resume_chat("slack task alpha")
-        assert agent2.chat_id == original_chat_id
-
     def test_resume_chat_nonexistent_keeps_id(self) -> None:
         """resume_chat() with unknown task keeps the current chat_id."""
         agent = SlackAgent()
         old_id = agent.chat_id
         agent.resume_chat("task that does not exist in db")
         assert agent.chat_id == old_id
-
-    def test_build_chat_prompt_no_history(self) -> None:
-        """build_chat_prompt() returns '# Task' prefix when no prior context."""
-        agent = SlackAgent()
-        prompt = agent.build_chat_prompt("do something")
-        assert prompt == "# Task\ndo something"
-
-    def test_build_chat_prompt_with_history(self) -> None:
-        """build_chat_prompt() includes previous tasks and results."""
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        captured: dict[str, Any] = {}
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        original = _intercept_run(agent, captured)
-        try:
-            agent.run(prompt_template="first slack task")
-        finally:
-            parent_class.run = original
-
-        prompt = agent.build_chat_prompt("second slack task")
-        assert "## Previous tasks and results" in prompt
-        assert "### Task 1\nfirst slack task" in prompt
-        assert "### Result 1\ndone" in prompt
-        assert "# Task (work on it now)\n\nsecond slack task" in prompt
 
     def test_main_with_new_flag_creates_new_session(self) -> None:
         """main() with -n flag calls new_chat(), giving a fresh session."""

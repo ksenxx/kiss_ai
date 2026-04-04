@@ -624,9 +624,6 @@ class OpenAICompatibleModel(Model):
             usage = response.usage
             prompt_tokens = getattr(usage, "prompt_tokens", None) or 0
             completion_tokens = getattr(usage, "completion_tokens", None) or 0
-            completion_details = getattr(usage, "completion_tokens_details", None)
-            if completion_details is not None:
-                completion_tokens += getattr(completion_details, "reasoning_tokens", 0) or 0
             cached_tokens = 0
             cache_write_tokens = 0
             details = getattr(usage, "prompt_tokens_details", None)

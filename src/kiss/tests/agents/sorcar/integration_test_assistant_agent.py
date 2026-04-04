@@ -42,7 +42,6 @@ AND coding tools (Bash, Write) to complete this task.
             max_steps=15,
             max_budget=2.0,
             work_dir=work_dir,
-            headless=True,
             verbose=True,
         )
     finally:

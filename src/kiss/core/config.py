@@ -71,6 +71,16 @@ class _ArtifactDirProxy:
     def __str__(self) -> str:
         return get_artifact_dir()
 
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _ArtifactDirProxy):
+            return get_artifact_dir() == other.__fspath__()
+        if isinstance(other, str):
+            return get_artifact_dir() == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(get_artifact_dir())
+
 
 artifact_dir = _ArtifactDirProxy()
 

@@ -8,8 +8,7 @@ can you write integration tests with no mocks or test doubles or fakes to achiev
 
 ## code review
 
-find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and fix them. Make sure that you test every change by writing and running integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not change any functionality or UI. Make sure that existing tests pass. Tests must be run
-with a timeout of 900 seconds.
+find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and plan to fix them in plan.md. Make sure that you write tests for every change by writing integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not modify code yet.
 
 ## documentation update
 
@@ -52,7 +51,7 @@ To validate that the code server creates a data directory for an instance of sor
 
 When I click a recent item in the welcome window of the sorcar (run with 'uv run sorcar'), you MUST not open the list of task history in the UI.
 
-When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorcar, then whatever is printed in the chat window of the sorcar gets copiedvv to the chat window of the newly launched sorcar. Can you validate this bugs by launching sorcar and fix it without breaking any other functionality or feature.
+When I launch KISS sorcar (using 'uv run sorcar') from inside a task run by sorcar, then whatever is printed in the chat window of the sorcar gets copied to the chat window of the newly launched sorcar. Can you validate this bugs by launching sorcar and fix it without breaking any other functionality or feature.
 
 You have implemented a restart logic for code-server in case the code-server shuts down, but I want you to investigate the root cause of why the code-server is shutting down intermittently in the first place. See if you can fix the intermittent shutdown of the code server without changing any functionality in the project except for the fix.
 

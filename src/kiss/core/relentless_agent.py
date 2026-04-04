@@ -188,7 +188,8 @@ class RelentlessAgent(Base):
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     trajectory_path = tmp_dir / f"trajectory_{session}.json"
                     trajectory_path.write_text(executor.get_trajectory())
-                    shell_tools = UsefulTools()
+                    _stop_ev = getattr(self.printer, "stop_event", None) if self.printer else None
+                    shell_tools = UsefulTools(stop_event=_stop_ev)
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")
                     summarizer_result = summarizer_agent.run(
                         model_name=self.model_name,
@@ -244,7 +245,7 @@ class RelentlessAgent(Base):
                 return result
 
             summary = payload.get("summary", "")
-            if summary:
+            if summary:  # pragma: no branch
                 progress_section = CONTINUATION_PROMPT.format(progress_text=summary)
         raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
 

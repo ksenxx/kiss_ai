@@ -18,9 +18,12 @@ import base64
 import logging
 import os
 import shlex
+import subprocess
+import threading
+from pathlib import Path
 
 from harbor.agents.base import BaseAgent
-from harbor.environments.base import BaseEnvironment
+from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 
 from kiss._version import __version__
@@ -53,6 +56,35 @@ _SKIP_PHRASES: tuple[str, ...] = (
 )
 
 logger = logging.getLogger(__name__)
+
+_wheel_lock = threading.Lock()
+_wheel_path: Path | None = None
+
+
+def _get_wheel() -> Path:
+    """Build a wheel from local source, cached for the process lifetime.
+
+    Returns:
+        Path to the built .whl file.
+    """
+    global _wheel_path
+    with _wheel_lock:
+        if _wheel_path is not None and _wheel_path.exists():
+            return _wheel_path
+        import kiss
+
+        project_root = Path(kiss.__file__).resolve().parent.parent.parent
+        dist = project_root / "dist"
+        subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", str(dist)],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+        )
+        wheels = sorted(dist.glob("kiss_agent_framework-*.whl"))
+        _wheel_path = wheels[-1]
+        return _wheel_path
+
 
 # API key environment variables to forward into the container.
 _API_KEY_VARS = (
@@ -128,11 +160,18 @@ class SorcarHarborAgent(BaseAgent):
         ):
             return
 
-        # Step 2: Install kiss-agent-framework
+        # Step 2: Build a wheel from local source (avoids stale PyPI package),
+        # upload it to the container, and install it.  Pin to Python 3.13
+        # because transitive deps (e.g. pyiceberg) lack pre-built wheels for
+        # 3.14, and minimal Docker images don't have a C compiler for source
+        # builds.
+        wheel = _get_wheel()
+        container_wheel = f"/tmp/{wheel.name}"
+        await environment.upload_file(wheel, container_wheel)
         if not await self._exec_check(
             environment,
             'export PATH="/root/.local/bin:$PATH"'
-            " && uv tool install kiss-agent-framework",
+            f" && uv tool install --python 3.13 {container_wheel}",
             "install kiss-agent-framework",
         ):
             return
@@ -152,6 +191,32 @@ class SorcarHarborAgent(BaseAgent):
             "write SYSTEM.md",
         )
 
+    async def _run_sorcar(
+        self,
+        environment: BaseEnvironment,
+        task: str,
+        env: dict[str, str],
+        model_flag: str,
+    ) -> ExecResult:
+        """Run a single sorcar invocation inside the container.
+
+        Args:
+            environment: The harbor execution environment.
+            task: Task instruction text.
+            env: API key environment variables.
+            model_flag: Model flag string for sorcar CLI.
+
+        Returns:
+            The exec result object.
+        """
+        escaped = shlex.quote(task)
+        return await environment.exec(
+            f'export PATH="/root/.local/bin:$PATH"'
+            f" && sorcar -t {escaped} -w /app --no-web -n {model_flag}",
+            user="root",
+            env=env,
+        )
+
     async def run(
         self,
         instruction: str,
@@ -160,9 +225,10 @@ class SorcarHarborAgent(BaseAgent):
     ) -> None:
         """Run sorcar with the task instruction inside the container.
 
-        The agent executes sorcar which modifies the environment directly.
-        Harbor evaluates the result by inspecting the environment state
-        after this method returns.
+        Pre-reads the verifier test script and injects it into the
+        instruction so the agent sees exact assertions.  After the
+        first sorcar run, automatically runs the tests and retries
+        once with failure output if tests don't pass.
 
         Args:
             instruction: Natural language task description from harbor.
@@ -185,15 +251,47 @@ class SorcarHarborAgent(BaseAgent):
             context.metadata = {"error": "sorcar not installed"}
             return
 
-        escaped = shlex.quote(instruction)
         model_flag = f"-m {self.model_name}" if self.model_name else ""
         env = {k: v for k in _API_KEY_VARS if (v := os.environ.get(k, ""))}
-        result = await environment.exec(
-            f'export PATH="/root/.local/bin:$PATH"'
-            f" && sorcar -t {escaped} -w /app --no-web -n {model_flag}",
+
+        # Pre-read the verifier test script so the agent sees every
+        # assertion, expected path, and expected value up front.
+        test_read = await environment.exec(
+            "cat /tests/test_outputs.py /tests/verify.sh"
+            " /app/test.sh 2>/dev/null | head -300",
             user="root",
-            env=env,
         )
+        augmented = instruction
+        if test_read.stdout and test_read.stdout.strip():
+            augmented += (
+                "\n\n## VERIFIER TEST SCRIPT (your solution MUST pass ALL"
+                " these tests — read every assertion):\n```\n"
+                + test_read.stdout.strip()
+                + "\n```"
+            )
+
+        # First sorcar run.
+        result = await self._run_sorcar(environment, augmented, env, model_flag)
+
+        # Auto-verify: run the test suite and retry once on failure.
+        test_result = await environment.exec(
+            "cd /app && bash test.sh 2>&1 | tail -80",
+            user="root",
+            timeout_sec=180,
+        )
+        test_out = test_result.stdout or ""
+        if test_result.return_code != 0 or "FAILED" in test_out:
+            logger.info("Tests failed after first run — retrying with failure context")
+            retry_task = (
+                "The verifier tests FAILED after your previous attempt."
+                " Fix the root cause and make ALL tests pass.\n\n"
+                f"Test output:\n{test_out}\n\n"
+                f"Original task: {instruction}"
+            )
+            result = await self._run_sorcar(
+                environment, retry_task, env, model_flag
+            )
+
         context.metadata = {
             "stdout": result.stdout,
             "stderr": result.stderr,

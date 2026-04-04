@@ -55,11 +55,6 @@ if TYPE_CHECKING:  # pragma: no cover
 class KISSAgent(Base):
     """A KISS agent using native function calling."""
 
-    # Instance attributes initialized in _reset
-    budget_used: float
-    step_count: int
-    total_tokens_used: int
-
     def __init__(self, name: str) -> None:
         super().__init__(name)
 
@@ -81,7 +76,7 @@ class KISSAgent(Base):
 
         # Reuse existing model client if model name and config haven't changed
         existing = getattr(self, "model", None)
-        if (
+        if (  # pragma: no branch
             existing is not None
             and existing.model_name == self.model_name
             and existing.model_config == (model_config or {})
@@ -405,7 +400,7 @@ class KISSAgent(Base):
             raise KISSError(f"Agent {self.name} budget exceeded.")
         if Base.get_global_budget_used() > 200.0:
             raise KISSError("Global budget exceeded.")
-        if self.step_count >= self.max_steps:
+        if self.step_count > self.max_steps:  # pragma: no branch
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:

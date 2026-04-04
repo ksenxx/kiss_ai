@@ -6,13 +6,13 @@ Merged from: test_internal, test_core_branch_coverage.
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import pytest
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.utils import (
     add_prefix_to_each_line,
-    fc,
     read_project_file,
     read_project_file_from_package,
 )
@@ -31,7 +31,9 @@ class TestUtilsFunctions(unittest.TestCase):
             f.write("Test content for fc function")
             temp_path = f.name
         try:
-            self.assertEqual(fc(temp_path), "Test content for fc function")
+            self.assertEqual(
+                Path(temp_path).read_text(), "Test content for fc function"
+            )
         finally:
             os.unlink(temp_path)
 
