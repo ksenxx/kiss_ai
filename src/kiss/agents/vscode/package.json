@@ -36,38 +36,6 @@
         "title": "KISS: Stop Current Task"
       },
       {
-        "command": "kissSorcar.acceptChange",
-        "title": "KISS: Accept Change"
-      },
-      {
-        "command": "kissSorcar.rejectChange",
-        "title": "KISS: Reject Change"
-      },
-      {
-        "command": "kissSorcar.prevChange",
-        "title": "KISS: Previous Change"
-      },
-      {
-        "command": "kissSorcar.nextChange",
-        "title": "KISS: Next Change"
-      },
-      {
-        "command": "kissSorcar.acceptAll",
-        "title": "KISS: Accept All Changes"
-      },
-      {
-        "command": "kissSorcar.rejectAll",
-        "title": "KISS: Reject All Changes"
-      },
-      {
-        "command": "kissSorcar.acceptFile",
-        "title": "KISS: Accept File Changes"
-      },
-      {
-        "command": "kissSorcar.rejectFile",
-        "title": "KISS: Reject File Changes"
-      },
-      {
         "command": "kissSorcar.generateCommitMessage",
         "title": "KISS: Generate Commit Message",
         "icon": "$(sparkle)"
@@ -94,51 +62,6 @@
         }
       ]
     },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "kissSorcar",
-          "title": "KISS Sorcar",
-          "icon": "media/kiss-icon.svg"
-        }
-      ],
-      "secondarySidebar": [
-        {
-          "id": "kissSorcarSecondary",
-          "title": "KISS Sorcar",
-          "icon": "media/kiss-icon.svg",
-          "order": -100
-        }
-      ]
-    },
-    "views": {
-      "kissSorcar": [
-        {
-          "id": "kissSorcar.launcherView",
-          "name": "KISS Sorcar",
-          "when": "!kissSorcar:doesNotSupportSecondarySidebar"
-        },
-        {
-          "type": "webview",
-          "id": "kissSorcar.chatView",
-          "name": "Chat",
-          "when": "kissSorcar:doesNotSupportSecondarySidebar"
-        }
-      ],
-      "kissSorcarSecondary": [
-        {
-          "type": "webview",
-          "id": "kissSorcar.chatViewSecondary",
-          "name": "Chat"
-        }
-      ]
-    },
-    "viewsWelcome": [
-      {
-        "view": "kissSorcar.launcherView",
-        "contents": "Open KISS Sorcar Chat in the secondary sidebar.\n[Open Chat](command:kissSorcar.openPanel)"
-      }
-    ],
     "keybindings": [
       {
         "command": "kissSorcar.newConversation",

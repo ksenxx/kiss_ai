@@ -91,11 +91,11 @@ class TestRace2FollowupUsesFastModel(unittest.TestCase):
 class TestRace14StatusBroadcastOrder(unittest.TestCase):
     """Race 14 fix: status "running: False" broadcast at end of finally block."""
 
-    def test_status_broadcast_after_merge_and_cache(self) -> None:
+    def test_status_broadcast_after_cache(self) -> None:
         """Verify _run_task wraps _run_task_inner with try/finally status broadcast.
 
         The outer _run_task guarantees status:running:false is always sent.
-        The inner method does merge/cache cleanup before returning, so the
+        The inner method does cache cleanup before returning, so the
         outer finally's status broadcast comes after all cleanup.
         """
         # Outer wrapper has the guaranteed status broadcast
@@ -103,11 +103,9 @@ class TestRace14StatusBroadcastOrder(unittest.TestCase):
         assert '"running": False' in outer_source
         assert "_run_task_inner" in outer_source
 
-        # Inner method has merge/cache cleanup
+        # Inner method has cache cleanup
         inner_source = inspect.getsource(VSCodeServer._run_task_inner)
-        merge_pos = inner_source.find("_prepare_merge_view")
         cache_pos = inner_source.find("_refresh_file_cache")
-        assert merge_pos > 0, "_prepare_merge_view not found"
         assert cache_pos > 0, "_refresh_file_cache not found"
 
 
@@ -173,39 +171,6 @@ class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
         )
 
 
-class TestRace17AllDoneHandlerInExtension(unittest.TestCase):
-    """Race 17 fix: allDone handler registered once in extension.ts, not in SorcarPanel."""
-
-    def test_no_alldone_handler_in_sorcar_panel(self) -> None:
-        """Verify SorcarPanel.ts no longer registers allDone handler."""
-        panel_path = "src/kiss/agents/vscode/src/SorcarPanel.ts"
-        with open(panel_path) as f:
-            source = f.read()
-        assert "this._mergeManager.on('allDone'" not in source
-
-    def test_alldone_handler_in_extension(self) -> None:
-        """Verify extension.ts registers a single allDone handler."""
-        ext_path = "src/kiss/agents/vscode/src/extension.ts"
-        with open(ext_path) as f:
-            source = f.read()
-        assert "mergeManager.on('allDone'" in source
-
-    def test_send_merge_all_done_method_exists(self) -> None:
-        """Verify SorcarPanel.ts has sendMergeAllDone method."""
-        panel_path = "src/kiss/agents/vscode/src/SorcarPanel.ts"
-        with open(panel_path) as f:
-            source = f.read()
-        assert "sendMergeAllDone" in source
-
-    def test_shared_merge_manager_in_extension(self) -> None:
-        """Verify extension.ts creates one MergeManager shared by both providers."""
-        ext_path = "src/kiss/agents/vscode/src/extension.ts"
-        with open(ext_path) as f:
-            source = f.read()
-        assert source.count("new MergeManager()") == 1
-        assert "new SorcarViewProvider(context.extensionUri, mergeManager)" in source
-
-
 class TestCompleteFunctionSignatures(unittest.TestCase):
     """Verify _complete and helpers accept snapshot parameters."""
 
@@ -223,90 +188,6 @@ class TestCompleteFunctionSignatures(unittest.TestCase):
 class TestTypescriptRaceFixesCodeInspection(unittest.TestCase):
     """Verify TypeScript race fixes via code inspection."""
 
-    def test_race3_submit_sets_is_running_before_await(self) -> None:
-        """Race 3: submit sets _isRunning = true before any await."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        # Find the submit case
-        idx = source.find("case 'submit':")
-        assert idx >= 0
-        block = source[idx:idx + 800]
-        # _isRunning = true should appear before the first await
-        running_pos = block.find("this._isRunning = true")
-        await_pos = block.find("await ")
-        assert running_pos > 0 and running_pos < await_pos
-
-    def test_race4_submit_task_sets_is_running(self) -> None:
-        """Race 4: submitTask sets _isRunning before _startTask."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        idx = source.find("public submitTask(")
-        assert idx >= 0
-        block = source[idx:idx + 400]
-        running_pos = block.find("this._isRunning = true")
-        start_pos = block.find("this._startTask")
-        assert running_pos > 0 and running_pos < start_pos
-
-    def test_race5_commit_pending_guard(self) -> None:
-        """Race 5: generateCommitMessage has _commitPending guard."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        assert "_commitPending" in source
-        idx = source.find("public generateCommitMessage")
-        block = source[idx:idx + 600]
-        assert "if (this._commitPending)" in block
-
-    def test_race6_merge_in_progress_guard(self) -> None:
-        """Race 6: openMerge has _mergeInProgress guard."""
-        with open("src/kiss/agents/vscode/src/MergeManager.ts") as f:
-            source = f.read()
-        assert "_mergeInProgress" in source
-        assert "_pendingMerge" in source
-        assert "_doOpenMerge" in source
-
-    def test_race7_8_hunk_op_guard(self) -> None:
-        """Race 7/8: acceptChange/rejectChange/acceptAll/rejectAll have _hunkOpInProgress."""
-        with open("src/kiss/agents/vscode/src/MergeManager.ts") as f:
-            source = f.read()
-        assert "_hunkOpInProgress" in source
-        # Guard is in _withHunkGuard; all four methods use it
-        idx = source.find("_withHunkGuard")
-        assert idx >= 0, "_withHunkGuard not found"
-        block = source[idx:idx + 300]
-        assert "this._hunkOpInProgress" in block, "_withHunkGuard missing guard"
-        # acceptChange/rejectChange delegate to _resolveHunk which calls _withHunkGuard;
-        # acceptAll/rejectAll call _withHunkGuard directly.
-        for method in ["acceptChange", "rejectChange", "acceptAll", "rejectAll"]:
-            idx = source.find(f"async {method}")
-            assert idx >= 0, f"{method} not found"
-            block = source[idx:idx + 300]
-            assert "_withHunkGuard" in block or "_resolveHunk" in block, (
-                f"{method} missing guard"
-            )
-        assert "_resolveHunk" in source
-        ridx = source.find("_resolveHunk")
-        rblock = source[ridx:ridx + 500]
-        assert "_withHunkGuard" in rblock, "_resolveHunk missing _withHunkGuard call"
-
-    def test_race9_nav_seq_guard(self) -> None:
-        """Race 9: _navigateHunk uses _navSeq for stale navigation detection."""
-        with open("src/kiss/agents/vscode/src/MergeManager.ts") as f:
-            source = f.read()
-        assert "_navSeq" in source
-        # Find the method body (private async _navigateHunk)
-        idx = source.find("private async _navigateHunk")
-        assert idx >= 0
-        block = source[idx:idx + 1500]
-        assert "this._navSeq !== seq" in block
-
-    def test_race10_await_open_panel(self) -> None:
-        """Race 10: newConversation command awaits openPanel."""
-        with open("src/kiss/agents/vscode/src/extension.ts") as f:
-            source = f.read()
-        idx = source.find("kissSorcar.newConversation")
-        block = source[idx:idx + 300]
-        assert "await vscode.commands.executeCommand('kissSorcar.openPanel')" in block
-
     def test_race11_focus_toggling_guard(self) -> None:
         """Race 11: toggleFocus has _focusToggling guard."""
         with open("src/kiss/agents/vscode/src/extension.ts") as f:
@@ -318,15 +199,6 @@ class TestTypescriptRaceFixesCodeInspection(unittest.TestCase):
         with open("src/kiss/agents/vscode/src/AgentProcess.ts") as f:
             source = f.read()
         assert "stdin?.writable" in source
-
-    def test_race15_stop_before_new_conversation(self) -> None:
-        """Race 15: newConversation stops task before resetting."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
-            source = f.read()
-        idx = source.find("public newConversation")
-        block = source[idx:idx + 300]
-        assert "this._agentProcess.stop()" in block
-        assert "if (this._isRunning)" in block
 
 
 class TestNewChatHistoryButtonsDisabledWhileRunning(unittest.TestCase):
@@ -416,9 +288,9 @@ class TestExistingBehavior(unittest.TestCase):
 class TestStatusAlwaysSentOnExit(unittest.TestCase):
     """Verify status:running:false is always sent when _run_task exits.
 
-    Previously, early returns (e.g. _merging guard) and exceptions before
-    the inner try/finally left _isRunning stuck on the TypeScript side,
-    silently dropping all subsequent task submissions.
+    Previously, early returns and exceptions before the inner try/finally
+    left _isRunning stuck on the TypeScript side, silently dropping all
+    subsequent task submissions.
     """
 
     def _capture_server(self) -> tuple[VSCodeServer, list[dict]]:

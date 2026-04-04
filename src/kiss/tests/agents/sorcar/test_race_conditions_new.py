@@ -2,7 +2,6 @@
 
 Tests verify fixes for:
 - P2 / X2: _user_answer uses queue.Queue instead of threading.Event (deadlock-proof)
-- P5:      _merging flag protected with _state_lock
 - P6:      _file_cache lazy-init protected with _state_lock
 - P9:      _extract_result_summary snapshots _recordings before iterating
 - P15:     _task_thread cleared after task completes
@@ -38,44 +37,6 @@ class TestP2UserAnswerClearBeforeSetRace(unittest.TestCase):
         )
 
 # ---------------------------------------------------------------------------
-# P5 — _merging flag synchronized with _state_lock
-# ---------------------------------------------------------------------------
-
-
-class TestP5MergingFlagSynchronized(unittest.TestCase):
-    """P5 fix: _merging is read and written under _state_lock."""
-
-    def test_merging_read_in_run_task_inner_with_lock(self) -> None:
-        """Verify _run_task_inner reads self._merging inside _state_lock."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "with self._state_lock" in source
-        # Find the _merging guard and verify it's inside _state_lock
-        lock_idx = source.find("with self._state_lock")
-        second_lock = source.find("with self._state_lock", lock_idx + 1)
-        merging_idx = source.find("if self._merging:")
-        assert merging_idx > 0
-        # _merging check should be between second lock start and its block
-        assert second_lock < merging_idx, (
-            "P5 fix: self._merging read should be inside _state_lock"
-        )
-
-    def test_merging_written_in_finish_merge_with_lock(self) -> None:
-        """Verify _finish_merge sets _merging = False under _state_lock."""
-        source = inspect.getsource(VSCodeServer._finish_merge)
-        assert "with self._state_lock" in source, (
-            "P5 fix: _finish_merge should use _state_lock"
-        )
-        assert "self._merging = False" in source
-
-    def test_merging_written_in_start_merge_with_lock(self) -> None:
-        """Verify _start_merge_session sets _merging = True under _state_lock."""
-        source = inspect.getsource(VSCodeServer._start_merge_session)
-        assert "with self._state_lock" in source, (
-            "P5 fix: _start_merge_session should use _state_lock"
-        )
-        assert "self._merging = True" in source
-
-
 # ---------------------------------------------------------------------------
 # P6 — _file_cache protected with _state_lock
 # ---------------------------------------------------------------------------

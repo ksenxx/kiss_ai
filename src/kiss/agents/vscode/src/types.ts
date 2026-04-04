@@ -35,7 +35,6 @@ export type FromWebviewMessage =
   | { type: 'resumeSession'; id: string }
   | { type: 'getWelcomeSuggestions' }
   | { type: 'complete'; query: string }
-  | { type: 'mergeAction'; action: string }
   | { type: 'newChat' }
   | { type: 'generateCommitMessage' }
   | { type: 'runPrompt' }
@@ -76,16 +75,13 @@ export type ToWebviewMessage =
   | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
   | { type: 'task_events'; events: any[]; task?: string }
   | { type: 'ghost'; suggestion: string; query: string }
-  | { type: 'merge_data'; data: any; hunk_count: number }
-  | { type: 'merge_started' }
-  | { type: 'merge_ended' }
   | { type: 'commitMessage'; message: string; error?: string }
   | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string }
   | { type: 'inputHistory'; tasks: string[] };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -98,6 +94,5 @@ export interface AgentCommand {
   answer?: string;
   path?: string;
   sessionId?: string;
-  action?: string;
   activeFileContent?: string;
 }
