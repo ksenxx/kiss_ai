@@ -134,7 +134,7 @@ class WebUseTool:
                     capture_output=True,
                 )
                 self._launch_browser(launcher, kwargs)
-        except Exception:
+        except Exception:  # pragma: no cover — Playwright init failure
             self.close()
             raise
 

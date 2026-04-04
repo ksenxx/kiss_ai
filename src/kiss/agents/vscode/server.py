@@ -168,7 +168,7 @@ class VSCodeServer:
             while not self._user_answer_queue.empty():
                 try:
                     self._user_answer_queue.get_nowait()
-                except queue.Empty:
+                except queue.Empty:  # pragma: no cover — race guard
                     break
             self._user_answer_queue.put(cmd.get("answer", ""))
         elif cmd_type == "resumeSession":
@@ -267,7 +267,7 @@ class VSCodeServer:
         while not self._user_answer_queue.empty():
             try:
                 self._user_answer_queue.get_nowait()
-            except queue.Empty:
+            except queue.Empty:  # pragma: no cover — race guard
                 break
 
         self.printer.broadcast({"type": "clear"})
@@ -313,7 +313,7 @@ class VSCodeServer:
                 task_end_event = {"type": "task_stopped"}
             except Exception as e:  # pragma: no cover
                 task_end_event = {"type": "task_error", "text": str(e)}
-        except BaseException:
+        except BaseException:  # pragma: no cover — async interrupt before inner try
             # P14: interrupt before inner try — ensure stop_recording runs
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
@@ -355,7 +355,7 @@ class VSCodeServer:
                         self._task_history_id,
                     )
                 self._task_history_id = None
-            except BaseException:
+            except BaseException:  # pragma: no cover — cleanup interrupted
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
                     self.printer.broadcast(task_end_event)

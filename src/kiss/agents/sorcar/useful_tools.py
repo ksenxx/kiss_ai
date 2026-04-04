@@ -18,7 +18,7 @@ def _log_exc() -> None:
     logger.debug("Exception caught", exc_info=True)
 
 
-def _find_windows_bash() -> str | None:
+def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
     """Find bash.exe on Windows (Git for Windows, WSL, etc.)."""
     found = shutil.which("bash")
     if found:
@@ -55,16 +55,17 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
             "shell": True,
             "start_new_session": True,
         }
-    if _WINDOWS_BASH:
+    else:  # pragma: no cover — Windows only
+        if _WINDOWS_BASH:
+            return {
+                "args": [_WINDOWS_BASH, "-c", command],
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+            }
+        ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
         return {
-            "args": [_WINDOWS_BASH, "-c", command],
+            "args": [ps, "-NoProfile", "-Command", command],
             "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
         }
-    ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-    return {
-        "args": [ps, "-NoProfile", "-Command", command],
-        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-    }
 
 
 def _truncate_output(output: str, max_chars: int) -> str:
@@ -117,7 +118,7 @@ def _kill_process_group(process: subprocess.Popen) -> None:
     Args:
         process: The subprocess to terminate.
     """
-    if sys.platform == "win32":
+    if sys.platform == "win32":  # pragma: no cover — Windows only
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(process.pid)],
             capture_output=True,
