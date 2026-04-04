@@ -31,15 +31,7 @@ from kiss.agents.vscode.browser_ui import (
     BaseBrowserPrinter,
     _coalesce_events,
 )
-from kiss.agents.vscode.diff_merge import (
-    _agent_file_hunks,
-    _capture_untracked,
-    _file_as_new_hunks,
-    _parse_diff_hunks,
-    _prepare_merge_view,
-    _scan_files,
-    _snapshot_files,
-)
+from kiss.agents.vscode.diff_merge import _scan_files
 from kiss.agents.vscode.server import VSCodeServer
 
 # ---------------------------------------------------------------------------
@@ -128,40 +120,6 @@ class TestCoalesceEventsBranches:
         ]
         result = _coalesce_events(events)
         assert len(result) == 2
-
-
-# ---------------------------------------------------------------------------
-# diff_merge.py coverage
-# ---------------------------------------------------------------------------
-
-
-class TestCodeServerBranches:
-
-    def test_file_as_new_hunks_nonexistent(self):
-        result = _file_as_new_hunks(Path("/nonexistent_file_xyz"))
-        assert result == []
-
-    def test_file_as_new_hunks_binary_file(self):
-        """UnicodeDecodeError should be caught."""
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "binary.bin"
-            f.write_bytes(b"\x80\x81\x82" * 100)
-            result = _file_as_new_hunks(f)
-            assert result == []
-
-    def test_agent_file_hunks_post_file_hunks_filter(self):
-        """Without saved base but with post_file_hunks, filters against pre_hunks."""
-        with tempfile.TemporaryDirectory() as d:
-            work = Path(d) / "work"
-            work.mkdir()
-            ub = Path(d) / "ub"
-            ub.mkdir()
-            (work / "f.txt").write_text("changed\n")
-            pre_hunks = {"f.txt": [(1, 1, 1, 1)]}
-            post = [(1, 1, 1, 1), (5, 0, 5, 2)]  # first matches pre
-            result = _agent_file_hunks(str(work), "f.txt", ub, pre_hunks, post)
-            # Only the second hunk should pass (first matches pre)
-            assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -349,20 +307,6 @@ class TestVSCodeServerBranches:
         server, events = self._make_server()
         server._handle_command({"type": "resumeSession", "sessionId": ""})
         # Empty sessionId - no action
-
-    def test_handle_merge_action_reject_ignored(self):
-        """Individual accept/reject actions are tracked on the TS side only."""
-        server, events = self._make_server()
-        server._merging = True
-        server._handle_command({"type": "mergeAction", "action": "reject"})
-        assert server._merging is True  # no change
-
-    def test_handle_merge_action_all_done(self):
-        server, events = self._make_server()
-        server._merging = True
-        server._handle_command({"type": "mergeAction", "action": "all-done"})
-        assert server._merging is False
-        assert any(e.get("type") == "merge_ended" for e in events)
 
     def test_wait_for_user(self):
         server, events = self._make_server()
@@ -777,33 +721,6 @@ class TestCodeServerMoreBranches:
             result = _scan_files(d)
             assert len(result) <= 5000
 
-    def test_prepare_merge_view_new_files_only(self):
-        """When only new untracked files are added after a task."""
-        with tempfile.TemporaryDirectory() as d:
-            repo = os.path.join(d, "repo")
-            os.makedirs(repo)
-            subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=repo, capture_output=True,
-            )
-            subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
-            Path(repo, "f.txt").write_text("content\n")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
-
-            pre_hunks = _parse_diff_hunks(repo)
-            pre_untracked = _capture_untracked(repo)
-            pre_hashes = _snapshot_files(repo, set())
-
-            # Agent creates a new file
-            Path(repo, "new_file.txt").write_text("new content\nline 2\n")
-
-            data_dir = os.path.join(d, "merge_data")
-            os.makedirs(data_dir)
-            result = _prepare_merge_view(repo, data_dir, pre_hunks, pre_untracked, pre_hashes)
-            assert result.get("status") == "opened"
-
 
 # ---------------------------------------------------------------------------
 # Additional vscode/server.py branches
@@ -843,9 +760,6 @@ class TestVSCodeServerMoreBranches:
         pdf_data = base64.b64encode(b"%PDF-1.4 fake").decode()
 
         # The actual run will fail (no API), but we can test attachment parsing
-        # by checking that the merging guard doesn't trigger
-        server._merging = False
-        # Use a work_dir that's a git repo so merge view doesn't crash
         with tempfile.TemporaryDirectory() as d:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)

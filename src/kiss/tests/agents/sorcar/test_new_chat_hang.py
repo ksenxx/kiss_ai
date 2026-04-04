@@ -155,11 +155,11 @@ class TestTaskEndEventOrdering(unittest.TestCase):
 
 
 class TestTypescriptIsRunningFix(unittest.TestCase):
-    """Verify SorcarPanel.ts sets _isRunning=false on task end events."""
+    """Verify SorcarTab.ts sets _isRunning=false on task end events."""
 
     def test_is_running_updated_by_status_event(self) -> None:
         """_isRunning is reset by the status event handler (sent after task_done/stopped/error)."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
+        with open("src/kiss/agents/vscode/src/SorcarTab.ts") as f:
             source = f.read()
         # The status handler manages _isRunning
         idx = source.find("msg.type === 'status'")

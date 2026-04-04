@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import tempfile
 import threading
 import time
 from collections.abc import Generator
@@ -17,12 +16,6 @@ import pytest
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.agents.vscode.diff_merge import (
-    _diff_files,
-    _prepare_merge_view,
-    _save_untracked_base,
-    _snapshot_files,
-)
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -68,99 +61,6 @@ class TestResumeChatNoMatch:
         original_chat_id = agent.chat_id
         agent.resume_chat_by_id("")
         assert agent.chat_id == original_chat_id
-
-
-# ---------------------------------------------------------------------------
-# diff_merge.py — _diff_files uncovered branches
-# ---------------------------------------------------------------------------
-
-
-class TestDiffFilesBranches:
-    """Cover all branches in _diff_files."""
-
-    def test_nonexistent_base_file(self) -> None:
-        """_diff_files with missing base file → base_lines=[] (line 238)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            current = Path(tmpdir) / "current.txt"
-            current.write_text("line1\nline2\n")
-            hunks = _diff_files("/nonexistent/base.txt", str(current))
-            # Should produce an insertion hunk
-            assert len(hunks) >= 1
-            # Pure insertion: old_count should be 0
-            assert hunks[0][1] == 0
-
-    def test_nonexistent_current_file(self) -> None:
-        """_diff_files with missing current file → current_lines=[] (lines 241-242)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir) / "base.txt"
-            base.write_text("line1\nline2\n")
-            hunks = _diff_files(str(base), "/nonexistent/current.txt")
-            # Should produce a deletion hunk
-            assert len(hunks) >= 1
-            # Pure deletion: new_count should be 0
-            assert hunks[0][3] == 0
-
-# ---------------------------------------------------------------------------
-# diff_merge.py — _prepare_merge_view untracked file branches
-# ---------------------------------------------------------------------------
-
-
-class TestPrepareMergeViewUntrackedBranches:
-    """Cover untracked file handling in _prepare_merge_view."""
-
-    def test_untracked_file_not_changed(self) -> None:
-        """Pre-existing untracked file that wasn't changed → continue (line 384)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "t@t.com")
-            _git(tmpdir, "config", "user.name", "T")
-            # Create a tracked file and commit
-            Path(tmpdir, "tracked.txt").write_text("tracked")
-            _git(tmpdir, "add", "tracked.txt")
-            _git(tmpdir, "commit", "-m", "init")
-            # Create an untracked file
-            Path(tmpdir, "untracked.txt").write_text("untracked content")
-
-            data_dir = os.path.join(tmpdir, ".kiss.artifacts", "merge_dir")
-            pre_untracked = {"untracked.txt"}
-            pre_hashes = _snapshot_files(tmpdir, pre_untracked)
-
-            # File not changed → _file_changed returns False → continue (line 384)
-            result = _prepare_merge_view(
-                tmpdir, data_dir, {}, pre_untracked, pre_hashes
-            )
-            # No changes because untracked file wasn't modified
-            assert result.get("error") == "No changes"
-
-    def test_untracked_file_changed_empty_diff(self) -> None:
-        """Pre-existing untracked file changed but diff produces no hunks → 386->380."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "t@t.com")
-            _git(tmpdir, "config", "user.name", "T")
-            Path(tmpdir, "tracked.txt").write_text("tracked")
-            _git(tmpdir, "add", "tracked.txt")
-            _git(tmpdir, "commit", "-m", "init")
-            # Create untracked file with content
-            Path(tmpdir, "untracked.txt").write_text("content")
-
-            # Save base before task
-            _save_untracked_base(tmpdir, {"untracked.txt"})
-            pre_untracked = {"untracked.txt"}
-            pre_hashes = _snapshot_files(tmpdir, pre_untracked)
-
-            # Now change the hash to pretend it changed, but the actual content
-            # is the same as the saved base → diff produces 0 hunks
-            # Force a different hash to trigger _file_changed=True
-            pre_hashes["untracked.txt"] = "0000000000000000"
-
-            data_dir = os.path.join(tmpdir, ".kiss.artifacts", "merge_dir")
-            result = _prepare_merge_view(
-                tmpdir, data_dir, {}, pre_untracked, pre_hashes
-            )
-            # The file is "changed" (hash mismatch) but diff against saved base
-            # produces 0 hunks since content is identical. Result: no changes
-            assert result.get("error") == "No changes"
 
 
 # ---------------------------------------------------------------------------

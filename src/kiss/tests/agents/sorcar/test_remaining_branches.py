@@ -16,8 +16,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import (
@@ -26,11 +24,6 @@ from kiss.agents.sorcar.useful_tools import (
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-from kiss.agents.vscode.diff_merge import (
-    _prepare_merge_view,
-    _save_untracked_base,
-    _snapshot_files,
-)
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     fast_model_for,
@@ -235,7 +228,6 @@ class TestVSCodeServerBranches:
     def test_run_loop_empty_lines_and_invalid_json(self) -> None:
         """server.run() skips empty lines, handles invalid JSON (line 119)."""
         import io
-        import sys
 
         server = VSCodeServer()
         events: list[dict] = []
@@ -335,70 +327,6 @@ class TestVSCodeServerBranches:
         assert len(ghost) == 1
         assert "s together" in ghost[0]["suggestion"]
 
-    def test_start_merge_session_empty_files(self) -> None:
-        """_start_merge_session returns False when files list is empty."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"files": []}, f)
-            path = f.name
-        try:
-            server = VSCodeServer()
-            result = server._start_merge_session(path)
-            assert result is False
-        finally:
-            os.unlink(path)
-
-    def test_start_merge_session_zero_hunks(self) -> None:
-        """_start_merge_session returns False when total hunks is 0."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"files": [{"name": "a.py", "hunks": []}]}, f)
-            path = f.name
-        try:
-            server = VSCodeServer()
-            result = server._start_merge_session(path)
-            assert result is False
-        finally:
-            os.unlink(path)
-
-    def test_start_merge_session_success(self) -> None:
-        """_start_merge_session returns True for valid merge data."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({
-                "files": [{"name": "a.py", "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}]}]
-            }, f)
-            path = f.name
-        server = VSCodeServer()
-        try:
-            events: list[dict] = []
-            orig = server.printer.broadcast
-            def cap(ev: dict) -> None:
-                events.append(ev)
-                orig(ev)
-            server.printer.broadcast = cap  # type: ignore[assignment]
-            result = server._start_merge_session(path)
-            assert result is True
-            assert server._merging
-            assert any(e.get("type") == "merge_data" for e in events)
-            assert any(e.get("type") == "merge_started" for e in events)
-        finally:
-            server._merging = False
-            os.unlink(path)
-
-    def test_run_task_merging_guard(self) -> None:
-        """_run_task_inner broadcasts error when _merging is True (lines 300-303)."""
-        server = VSCodeServer()
-        server._merging = True
-        events: list[dict] = []
-        orig = server.printer.broadcast
-        def cap(ev: dict) -> None:
-            events.append(ev)
-            orig(ev)
-        server.printer.broadcast = cap  # type: ignore[assignment]
-        server._run_task({"prompt": "test", "model": "test"})
-        assert any("merge review" in str(e.get("text", "")) for e in events)
-        # Must always broadcast status running=False
-        assert any(e.get("type") == "status" and e.get("running") is False for e in events)
-        server._merging = False
-
     def test_record_file_usage_command(self) -> None:
         """recordFileUsage command records the path."""
         server = VSCodeServer()
@@ -461,111 +389,6 @@ class TestVSCodeServerBranches:
         assert tasks.count("repeated-task") == 1
         assert tasks[0] == "repeated-task"
         assert "middle-task-000" in tasks
-
-# ---------------------------------------------------------------------------
-# diff_merge.py — uncovered branches
-# ---------------------------------------------------------------------------
-
-
-class TestDiffMergeBranches:
-    """Cover remaining branches in diff_merge.py."""
-
-    def test_file_changed_returns_false_on_oserror(self) -> None:
-        """_prepare_merge_view._file_changed returns False on OSError (lines 331-333)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Initialize a git repo
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "test@test.com")
-            _git(tmpdir, "config", "user.name", "Test")
-            Path(tmpdir, "a.txt").write_text("initial")
-            _git(tmpdir, "add", "a.txt")
-            _git(tmpdir, "commit", "-m", "init")
-            # Delete the file to trigger OSError in _file_changed
-            Path(tmpdir, "a.txt").unlink()
-            # Pre-hash includes a.txt
-            pre_hashes = {"a.txt": "abc123"}
-            result = _prepare_merge_view(
-                tmpdir, str(Path(tmpdir) / "merge"),
-                {}, set(), pre_hashes
-            )
-            # Should return "No changes" since file can't be read
-            assert result.get("error") == "No changes"
-
-    def test_prepare_merge_view_pre_untracked_modified(self) -> None:
-        """_prepare_merge_view detects modified pre-existing untracked files."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "test@test.com")
-            _git(tmpdir, "config", "user.name", "Test")
-            # Create and commit a file
-            Path(tmpdir, "committed.txt").write_text("committed")
-            _git(tmpdir, "add", ".")
-            _git(tmpdir, "commit", "-m", "init")
-
-            # Create an untracked file, snapshot it, then modify it
-            untracked = Path(tmpdir, "untracked.txt")
-            untracked.write_text("original content")
-            pre_untracked = {"untracked.txt"}
-            pre_hashes = _snapshot_files(tmpdir, pre_untracked)
-
-            # Now modify the untracked file (simulating agent changes)
-            untracked.write_text("modified content by agent")
-
-            merge_dir = str(Path(tmpdir) / "merge")
-            result = _prepare_merge_view(
-                tmpdir, merge_dir, {}, pre_untracked, pre_hashes
-            )
-            # Should detect the modification
-            assert result.get("status") == "opened" or "error" not in result
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses chmod)")
-    def test_save_untracked_base_oserror(self) -> None:
-        """_save_untracked_base handles OSError on copy (lines 203-204)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a file that we'll make unreadable
-            bad_file = Path(tmpdir) / "bad.txt"
-            bad_file.write_text("content")
-            os.chmod(str(bad_file), 0o000)
-            try:
-                _save_untracked_base(tmpdir, {"bad.txt"})
-            finally:
-                os.chmod(str(bad_file), 0o644)
-
-    def test_prepare_merge_view_empty_new_file(self) -> None:
-        """_prepare_merge_view skips empty new untracked files (line 345->343)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "t@t.com")
-            _git(tmpdir, "config", "user.name", "T")
-            Path(tmpdir, "x.txt").write_text("x")
-            _git(tmpdir, "add", ".")
-            _git(tmpdir, "commit", "-m", "init")
-            pre_untracked: set[str] = set()
-            # Create an empty new untracked file after task
-            Path(tmpdir, "empty.txt").write_text("")
-            merge_dir = str(Path(tmpdir) / "merge")
-            result = _prepare_merge_view(tmpdir, merge_dir, {}, pre_untracked, {})
-            # Empty file produces no hunks, so result may be "No changes"
-            # if there are no other changes
-            assert "error" in result or "status" in result
-
-    def test_prepare_merge_view_untracked_not_in_hashes(self) -> None:
-        """_prepare_merge_view skips untracked files not in pre_file_hashes (line 351)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "t@t.com")
-            _git(tmpdir, "config", "user.name", "T")
-            Path(tmpdir, "x.txt").write_text("x")
-            _git(tmpdir, "add", ".")
-            _git(tmpdir, "commit", "-m", "init")
-            # Pre-untracked set includes a file that's NOT in pre_file_hashes
-            # This hits the `fname not in pre_file_hashes` branch -> continue (line 351)
-            pre_untracked = {"phantom.txt"}
-            pre_hashes: dict[str, str] = {"other.txt": "abc"}  # phantom.txt NOT here
-            merge_dir = str(Path(tmpdir) / "merge")
-            result = _prepare_merge_view(tmpdir, merge_dir, {}, pre_untracked, pre_hashes)
-            assert result.get("error") == "No changes"
-
 
 # ---------------------------------------------------------------------------
 # sorcar_agent.py — uncovered branches

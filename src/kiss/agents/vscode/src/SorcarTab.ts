@@ -1,5 +1,7 @@
 /**
- * Webview panel manager for Sorcar chat interface.
+ * Editor-tab-based chat windows for Sorcar.
+ * Each SorcarTab wraps a WebviewPanel + AgentProcess in the editor area.
+ * TabManager tracks open tabs and routes commands to the active one.
  */
 
 import * as vscode from 'vscode';
@@ -7,7 +9,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { AgentProcess, findKissProject } from './AgentProcess';
 import { getDefaultModel } from './DependencyInstaller';
-import { MergeManager } from './MergeManager';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
@@ -24,42 +25,77 @@ function getVersion(): string {
   return '';
 }
 
-export class SorcarViewProvider implements vscode.WebviewViewProvider {
-  private _view?: vscode.WebviewView;
+/**
+ * A single chat tab in the editor area.
+ * Wraps a WebviewPanel and its own AgentProcess (Python subprocess).
+ */
+export class SorcarTab {
+  private _panel: vscode.WebviewPanel;
   private _agentProcess: AgentProcess;
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _isRunning: boolean = false;
-  private _mergeManager: MergeManager;
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
-  private _onDidChangeVisibility = new vscode.EventEmitter<boolean>();
-  /** Fires with `true` when the view becomes visible, `false` when hidden. */
-  public readonly onDidChangeVisibility = this._onDidChangeVisibility.event;
   private _activeEditorDisposable?: vscode.Disposable;
   private _commitPending: boolean = false;
   private _pendingNewChat: boolean = false;
-  private _mergeOwnerCallback?: (provider: SorcarViewProvider) => void;
+  private _disposed: boolean = false;
+  private _loadLastSession: boolean;
 
-  constructor(extensionUri: vscode.Uri, mergeManager?: MergeManager) {
+  /** The underlying WebviewPanel (for reveal/focus tracking). */
+  get panel(): vscode.WebviewPanel { return this._panel; }
+
+  /**
+   * @param extensionUri - Extension root URI for resolving media assets.
+   * @param loadLastSession - If true, restore the last chat session on ready.
+   *   If false, start a fresh conversation with welcome suggestions.
+   * @param _onDispose - Callback invoked when the tab is disposed.
+   */
+  constructor(extensionUri: vscode.Uri, loadLastSession: boolean, private _onDispose: (tab: SorcarTab) => void) {
     this._extensionUri = extensionUri;
+    this._loadLastSession = loadLastSession;
     this._agentProcess = new AgentProcess();
-    this._mergeManager = mergeManager || new MergeManager();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
 
-    // Track active editor changes to update run-prompt button
+    // Create editor-area WebviewPanel
+    this._panel = vscode.window.createWebviewPanel(
+      'kissSorcar.chat',
+      '\u2731 KISS Sorcar',
+      vscode.ViewColumn.Active,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [
+          vscode.Uri.joinPath(this._extensionUri, 'media'),
+          vscode.Uri.joinPath(this._extensionUri, 'out'),
+        ],
+      }
+    );
+
+    this._panel.iconPath = vscode.Uri.joinPath(this._extensionUri, 'media', 'kiss-icon.svg');
+    this._panel.webview.html = this._getHtmlContent(this._panel.webview);
+
+    // Track active editor changes
     this._activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
       this._sendActiveFileInfo();
     });
 
+    // Handle messages from webview
+    this._panel.webview.onDidReceiveMessage(
+      (message: FromWebviewMessage) => this._handleMessage(message),
+      undefined,
+      []
+    );
+
+    // Handle panel disposal
+    this._panel.onDidDispose(() => {
+      this.dispose();
+      this._onDispose(this);
+    });
+
     // Listen for agent events
     this._agentProcess.on('message', (msg: ToWebviewMessage) => {
-      if (msg.type === 'merge_data') {
-        this._mergeOwnerCallback?.(this);
-        this._mergeManager.openMerge((msg as any).data).catch((err) => {
-          console.error('[SorcarPanel] merge open failed:', err);
-        });
-      }
       if (msg.type === 'commitMessage') {
         this._onCommitMessage.fire(msg as any);
       }
@@ -71,60 +107,19 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._isRunning = msg.running;
         if (!msg.running) {
           this._sendActiveFileInfo();
-          // T9 fix: send deferred newChat when stop completes
           if (this._pendingNewChat) {
             this._pendingNewChat = false;
             this._agentProcess.sendCommand({ type: 'newChat' });
             this.sendToWebview({ type: 'clearChat' });
           }
-          // T10 fix: reset _commitPending on process death/stop
           if (this._commitPending) {
             this._onCommitMessage.fire({ message: '', error: 'Process stopped' });
           }
         }
       }
     });
-  }
 
-  get mergeManager(): MergeManager {
-    return this._mergeManager;
-  }
-
-  /** Register a callback invoked when this provider starts a merge session (X4 fix). */
-  set mergeOwnerCallback(cb: ((provider: SorcarViewProvider) => void) | undefined) {
-    this._mergeOwnerCallback = cb;
-  }
-
-  public resolveWebviewView(
-    webviewView: vscode.WebviewView,
-    _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
-  ): void {
-    this._view = webviewView;
-
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this._extensionUri, 'media'),
-        vscode.Uri.joinPath(this._extensionUri, 'out'),
-      ],
-    };
-
-    webviewView.webview.html = this._getHtmlContent(webviewView.webview);
-
-    // Handle messages from webview
-    webviewView.webview.onDidReceiveMessage(
-      (message: FromWebviewMessage) => this._handleMessage(message),
-      undefined,
-      []
-    );
-
-    // Track visibility changes (user opening/closing the panel)
-    webviewView.onDidChangeVisibility(() => {
-      this._onDidChangeVisibility.fire(webviewView.visible);
-    });
-
-    // Start the agent process
+    // Start agent process
     const workDir = this._getWorkDir();
     this._agentProcess.start(workDir);
   }
@@ -185,20 +180,21 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
-        this._agentProcess.sendCommand({ type: 'getLastSession' });
+        if (this._loadLastSession) {
+          this._agentProcess.sendCommand({ type: 'getLastSession' });
+        }
         this._sendActiveFileInfo();
         break;
 
       case 'submit': {
         if (this._isRunning) return;
-        this._isRunning = true;  // Claim immediately before any awaits (Race 3 fix)
+        this._isRunning = true;
 
-        // If the prompt is just a file path that exists, open it in the editor
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
           const resolved = path.resolve(this._getWorkDir(), trimmed);
           if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-            this._isRunning = false;  // Reset on early exit
+            this._isRunning = false;
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(doc);
@@ -303,28 +299,13 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       case 'focusEditor':
         vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
         break;
-
-      case 'mergeAction': {
-        const mergeActions: Record<string, () => void | Promise<void>> = {
-          'accept': () => this._mergeManager.acceptChange(),
-          'reject': () => this._mergeManager.rejectChange(),
-          'accept-all': () => this._mergeManager.acceptAll(),
-          'reject-all': () => this._mergeManager.rejectAll(),
-          'next': () => this._mergeManager.nextChange(),
-          'prev': () => this._mergeManager.prevChange(),
-          'accept-file': () => this._mergeManager.acceptFile(),
-          'reject-file': () => this._mergeManager.rejectFile(),
-        };
-        const handler = mergeActions[message.action];
-        if (handler) await handler();
-        break;
-      }
     }
   }
 
+  /** Submit a task programmatically (e.g. from runSelection command). */
   public submitTask(prompt: string): void {
     if (this._isRunning || !prompt.trim()) return;
-    this._isRunning = true;  // Claim immediately (Race 4 fix)
+    this._isRunning = true;
     this._startTask(
       prompt.trim(),
       this._selectedModel,
@@ -332,22 +313,21 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
+  /** Stop the currently running task. */
+  public stopTask(): void {
+    this._agentProcess.stop();
+  }
+
+  /** Reveal and focus the chat input. */
   public async focusChatInput(): Promise<void> {
-    if (!this._view) return;
-    this._view.show(false);
+    this._panel.reveal();
     await new Promise(r => setTimeout(r, 150));
-    this._view?.webview.postMessage({ type: 'focusInput' });
+    this._panel.webview.postMessage({ type: 'focusInput' });
   }
 
-  public sendToWebview(message: ToWebviewMessage): void {
-    if (this._view) {
-      this._view.webview.postMessage(message);
-    }
-  }
-
+  /** Start a new conversation, stopping any running task first. */
   public newConversation(): void {
     if (this._isRunning) {
-      // T9 fix: queue newChat to be sent once running=false arrives
       this._pendingNewChat = true;
       this._agentProcess.stop();
     } else {
@@ -356,13 +336,11 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public stopTask(): void {
-    this._agentProcess.stop();
-  }
-
-  /** Notify the Python backend that all merge hunks have been resolved. */
-  public sendMergeAllDone(): void {
-    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+  /** Send a message to the webview. */
+  public sendToWebview(message: ToWebviewMessage): void {
+    if (!this._disposed) {
+      this._panel.webview.postMessage(message);
+    }
   }
 
   /**
@@ -392,7 +370,10 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /** Cleanup: kill agent process and dispose listeners. */
   public dispose(): void {
+    if (this._disposed) return;
+    this._disposed = true;
     this._activeEditorDisposable?.dispose();
     this._agentProcess.dispose();
     this._onCommitMessage.dispose();
@@ -536,5 +517,65 @@ export class SorcarViewProvider implements vscode.WebviewViewProvider {
       text += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return text;
+  }
+}
+
+/**
+ * Manages multiple chat tabs. Tracks the active tab and routes commands.
+ */
+export class TabManager {
+  private _tabs: SorcarTab[] = [];
+  private _activeTab: SorcarTab | undefined;
+  private _extensionUri: vscode.Uri;
+  private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
+  /** Aggregated commit message events from all tabs. */
+  public readonly onCommitMessage = this._onCommitMessage.event;
+
+  constructor(extensionUri: vscode.Uri) {
+    this._extensionUri = extensionUri;
+  }
+
+  /**
+   * Create a new chat tab, set it as active, and return it.
+   * @param loadLastSession - If true, restore the last session on ready.
+   *   Pass true for the auto-open tab at activation, false for Cmd+T new chats.
+   */
+  createTab(loadLastSession: boolean = false): SorcarTab {
+    const tab = new SorcarTab(this._extensionUri, loadLastSession, (disposed) => {
+      this._tabs = this._tabs.filter(t => t !== disposed);
+      if (this._activeTab === disposed) {
+        this._activeTab = this._tabs.length > 0 ? this._tabs[this._tabs.length - 1] : undefined;
+      }
+    });
+
+    this._tabs.push(tab);
+    this._activeTab = tab;
+
+    // Track active tab via panel focus
+    tab.panel.onDidChangeViewState(() => {
+      if (tab.panel.active) {
+        this._activeTab = tab;
+      }
+    });
+
+    // Forward commit messages
+    tab.onCommitMessage((ev) => this._onCommitMessage.fire(ev));
+
+    return tab;
+  }
+
+  /** Get the currently active (last focused) tab, or undefined. */
+  getActiveTab(): SorcarTab | undefined {
+    return this._activeTab;
+  }
+
+  /** Dispose all tabs and clean up. */
+  dispose(): void {
+    for (const tab of [...this._tabs]) {
+      tab.panel.dispose();
+    }
+    this._tabs = [];
+    this._activeTab = undefined;
+    this._onCommitMessage.dispose();
   }
 }

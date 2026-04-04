@@ -5,7 +5,6 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -179,16 +178,6 @@ class TestMultiPrinter(TestCase):
         mp.reset()
         assert len(p1._bash_buffer) == 0
 
-
-class TestCodeServerHelpers(TestCase):
-    def test_snapshot_files(self) -> None:
-        from kiss.agents.vscode.diff_merge import _snapshot_files
-        with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir, "a.txt").write_text("hello")
-            result = _snapshot_files(tmpdir, {"a.txt", "missing.txt"})
-            assert "a.txt" in result
-            assert "missing.txt" not in result
-            assert result["a.txt"] == hashlib.md5(b"hello").hexdigest()
 
 
 def _noop_callback(token: str) -> None:

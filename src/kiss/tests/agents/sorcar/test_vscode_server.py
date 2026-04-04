@@ -405,10 +405,11 @@ class TestMainCssInfiniteScroll(unittest.TestCase):
         block = self.css[idx : idx + 400]
         assert "75vw" in block
 
-    def test_sidebar_uses_75_percent_of_viewport_height(self) -> None:
+    def test_sidebar_uses_full_viewport_height(self) -> None:
         idx = self.css.index("#sidebar")
         block = self.css[idx : idx + 400]
-        assert "12.5vh" in block
+        assert "top: 0" in block
+        assert "bottom: 0" in block
 
     def test_sidebar_overflow_hidden(self) -> None:
         # Sidebar should have overflow: hidden (not auto) so #history-list scrolls
