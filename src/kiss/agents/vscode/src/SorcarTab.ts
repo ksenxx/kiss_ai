@@ -11,6 +11,21 @@ import { AgentProcess, findKissProject } from './AgentProcess';
 import { getDefaultModel } from './DependencyInstaller';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
+/**
+ * Return the ViewColumn for the rightmost editor split.
+ * If the editor is not yet split, returns ``ViewColumn.Two`` which
+ * creates a vertical split automatically.
+ */
+function rightmostColumn(): vscode.ViewColumn {
+  const groups = vscode.window.tabGroups.all;
+  if (groups.length <= 1) return vscode.ViewColumn.Two;
+  let max = vscode.ViewColumn.One;
+  for (const g of groups) {
+    if (g.viewColumn > max) max = g.viewColumn;
+  }
+  return max;
+}
+
 /** Read the KISS project version from ``_version.py`` on disk. */
 function getVersion(): string {
   try {
@@ -42,6 +57,7 @@ export class SorcarTab {
   private _pendingNewChat: boolean = false;
   private _disposed: boolean = false;
   private _loadLastSession: boolean;
+  private _lastTask: string = '';
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
   get panel(): vscode.WebviewPanel { return this._panel; }
@@ -61,8 +77,8 @@ export class SorcarTab {
     // Create editor-area WebviewPanel
     this._panel = vscode.window.createWebviewPanel(
       'kissSorcar.chat',
-      '\u2731 KISS Sorcar',
-      vscode.ViewColumn.Active,
+      'KS: new chat',
+      rightmostColumn(),
       {
         enableScripts: true,
         retainContextWhenHidden: true,
@@ -102,6 +118,9 @@ export class SorcarTab {
       if (msg.type === 'models' && (msg as any).selected) {
         this._selectedModel = (msg as any).selected;
       }
+      if (msg.type === 'task_events' && (msg as any).task) {
+        this._updateTabTitle((msg as any).task);
+      }
       this.sendToWebview(msg);
       if (msg.type === 'status') {
         this._isRunning = msg.running;
@@ -111,6 +130,7 @@ export class SorcarTab {
             this._pendingNewChat = false;
             this._agentProcess.sendCommand({ type: 'newChat' });
             this.sendToWebview({ type: 'clearChat' });
+            this._updateTabTitle('');
           }
           if (this._commitPending) {
             this._onCommitMessage.fire({ message: '', error: 'Process stopped' });
@@ -154,6 +174,21 @@ export class SorcarTab {
     } as ToWebviewMessage);
   }
 
+  /**
+   * Update the tab title and tooltip to reflect the current task.
+   * The full first line is used as the title so the tooltip is never truncated.
+   * VS Code's tab bar handles display truncation via CSS text-overflow.
+   */
+  private _updateTabTitle(task: string): void {
+    this._lastTask = task;
+    if (!task.trim()) {
+      this._panel.title = 'KS: new chat';
+      return;
+    }
+    const firstLine = task.split('\n')[0].trim();
+    this._panel.title = 'KS: ' + firstLine;
+  }
+
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
     const workDir = this._getWorkDir();
     const started = this._agentProcess.start(workDir);
@@ -162,6 +197,7 @@ export class SorcarTab {
       this.sendToWebview({ type: 'status', running: false });
       return;
     }
+    this._updateTabTitle(prompt);
     this.sendToWebview({ type: 'status', running: true });
     this._agentProcess.sendCommand({
       type: 'run',
@@ -333,6 +369,7 @@ export class SorcarTab {
     } else {
       this._agentProcess.sendCommand({ type: 'newChat' });
       this.sendToWebview({ type: 'clearChat' });
+      this._updateTabTitle('');
     }
   }
 
