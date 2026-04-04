@@ -61,13 +61,7 @@ class DockerManager:
             self.tag = tag
 
     def open(self) -> None:
-        """
-        Pull and load a Docker image, then create and start a container.
-
-        Args:
-            image_name: The name of the Docker image (e.g., 'ubuntu', 'python')
-            tag: The tag/version of the image (default: 'latest')
-        """
+        """Pull and load a Docker image, then create and start a container."""
         image = self.image
         tag = self.tag
         full_image_name = f"{image}:{tag}"

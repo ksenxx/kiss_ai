@@ -815,7 +815,7 @@ class SlackChannelBackend:
         non_tool = frozenset({
             "connect", "find_channel", "find_user", "join_channel",
             "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "get_tool_methods",
+            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
         })
         return [
             getattr(self, name)

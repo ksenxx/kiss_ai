@@ -41,6 +41,7 @@ class StatefulSorcarAgent(SorcarAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self._chat_id = _generate_chat_id()
+        self._last_task_id: int | None = None
 
     @property
     def chat_id(self) -> str:
@@ -119,6 +120,7 @@ class StatefulSorcarAgent(SorcarAgent):
         """
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id = _add_task(prompt_template, chat_id=self._chat_id)
+        self._last_task_id = task_id
 
         result_summary = ""
         try:
