@@ -58,6 +58,7 @@ export class SorcarTab {
   private _disposed: boolean = false;
   private _loadLastSession: boolean;
   private _lastTask: string = '';
+  private _lastEditorFile: string = '';
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
   get panel(): vscode.WebviewPanel { return this._panel; }
@@ -73,6 +74,9 @@ export class SorcarTab {
     this._loadLastSession = loadLastSession;
     this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
+
+    // Capture active editor file before panel creation (panel steals focus)
+    this._lastEditorFile = vscode.window.activeTextEditor?.document.uri.fsPath || '';
 
     // Create editor-area WebviewPanel
     this._panel = vscode.window.createWebviewPanel(
@@ -164,7 +168,10 @@ export class SorcarTab {
 
   private _sendActiveFileInfo(): void {
     const editor = vscode.window.activeTextEditor;
-    const fpath = editor?.document.uri.fsPath || '';
+    if (editor) {
+      this._lastEditorFile = editor.document.uri.fsPath;
+    }
+    const fpath = this._lastEditorFile;
     const isPrompt = !!fpath && fpath.toLowerCase().endsWith('.md');
     this.sendToWebview({
       type: 'activeFileInfo',
@@ -247,7 +254,7 @@ export class SorcarTab {
         this._startTask(
           message.prompt,
           message.model,
-          vscode.window.activeTextEditor?.document.uri.fsPath,
+          this._lastEditorFile || undefined,
           message.attachments,
         );
         break;
@@ -314,14 +321,18 @@ export class SorcarTab {
         this._sendWelcomeSuggestions();
         break;
 
-      case 'complete':
+      case 'complete': {
+        const completeDoc = this._lastEditorFile
+          ? vscode.workspace.textDocuments.find(d => d.uri.fsPath === this._lastEditorFile)
+          : undefined;
         this._agentProcess.sendCommand({
           type: 'complete',
           query: message.query,
-          activeFile: vscode.window.activeTextEditor?.document.uri.fsPath,
-          activeFileContent: vscode.window.activeTextEditor?.document.getText(),
+          activeFile: this._lastEditorFile || undefined,
+          activeFileContent: completeDoc?.getText(),
         });
         break;
+      }
 
       case 'generateCommitMessage':
         this.generateCommitMessage();
@@ -329,12 +340,14 @@ export class SorcarTab {
 
       case 'runPrompt': {
         if (this._isRunning) return;
-        const editor = vscode.window.activeTextEditor;
-        if (!editor || !editor.document.uri.fsPath.toLowerCase().endsWith('.md')) return;
-        const content = editor.document.getText();
+        const promptPath = this._lastEditorFile;
+        if (!promptPath || !promptPath.toLowerCase().endsWith('.md')) return;
+        const promptDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === promptPath);
+        if (!promptDoc) return;
+        const content = promptDoc.getText();
         if (!content.trim()) return;
         this._isRunning = true;
-        this._startTask(content, this._selectedModel, editor.document.uri.fsPath);
+        this._startTask(content, this._selectedModel, promptPath);
         break;
       }
 
@@ -351,7 +364,7 @@ export class SorcarTab {
     this._startTask(
       prompt.trim(),
       this._selectedModel,
-      vscode.window.activeTextEditor?.document.uri.fsPath,
+      this._lastEditorFile || undefined,
     );
   }
 
