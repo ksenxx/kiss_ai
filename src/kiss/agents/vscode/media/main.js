@@ -154,12 +154,6 @@
   }
 
   // --- File path detection (matches web Sorcar) ---
-  function looksLikeFilePath(s) {
-    if (s.startsWith('/') || s.startsWith('./') || s.startsWith('../') || s.startsWith('~/')) return true;
-    if (!/\s/.test(s) && (s.indexOf('/') >= 0 || /\.\w{1,10}$/.test(s))) return true;
-    return false;
-  }
-
   // --- Shared rendering (ported from browser EVENT_HANDLER_JS) ---
 
   function esc(t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
@@ -920,13 +914,6 @@
   function sendMessage() {
     var prompt = inp.value.trim();
     if (!prompt || isRunning) return;
-
-    // File path detection: @path shortcut or bare file path
-    if (/^WORK_DIR[/\\]/.test(prompt) || looksLikeFilePath(prompt)) {
-      vscode.postMessage({ type: 'openFile', path: prompt.replace(/^WORK_DIR[/\\]/, '') });
-      inp.value = ''; syncClearBtn();
-      return;
-    }
 
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);

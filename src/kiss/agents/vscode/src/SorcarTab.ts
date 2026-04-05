@@ -233,7 +233,8 @@ export class SorcarTab {
 
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
-          const resolved = path.resolve(this._getWorkDir(), trimmed);
+          const bare = trimmed.replace(/^WORK_DIR[/\\]/, '');
+          const resolved = path.resolve(this._getWorkDir(), bare);
           if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
             this._isRunning = false;
             const uri = vscode.Uri.file(resolved);
