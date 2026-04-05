@@ -8,15 +8,12 @@
 import base64
 import dataclasses
 import inspect
-import logging
 import mimetypes
 import types as types_module
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
-
-logger = logging.getLogger(__name__)
 
 # Type alias for the synchronous token streaming callback.
 TokenCallback = Callable[[str], None]

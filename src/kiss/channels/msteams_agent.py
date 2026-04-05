@@ -12,7 +12,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import logging
 import sys
 import threading
 import time
@@ -29,8 +28,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
-
-logger = logging.getLogger(__name__)
 
 _MSTEAMS_DIR = Path.home() / ".kiss" / "channels" / "msteams"
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"

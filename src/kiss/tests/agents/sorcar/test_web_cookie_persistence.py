@@ -55,14 +55,14 @@ class TestCookiePersistence:
 
     def test_ephemeral_mode_loses_cookies(self, http_server: str) -> None:
         # Session 1 (ephemeral): set cookie
-        tool1 = WebUseTool(user_data_dir=None)
+        tool1 = WebUseTool(user_data_dir=None, headless=True)
         try:
             tool1.go_to_url(f"{http_server}/setcookie")
         finally:
             tool1.close()
 
         # Session 2 (ephemeral): cookie should be gone
-        tool2 = WebUseTool(user_data_dir=None)
+        tool2 = WebUseTool(user_data_dir=None, headless=True)
         try:
             result = tool2.go_to_url(f"{http_server}/checkcookie")
             assert "session_token" not in result

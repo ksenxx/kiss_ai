@@ -1,15 +1,27 @@
 """Pytest configuration and shared test utilities for KISS tests."""
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar import persistence as _th
 from kiss.core.kiss_error import KISSError
 
 _subprocess_rc = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".coveragerc.subprocess")
 if os.path.isfile(_subprocess_rc):
     os.environ.setdefault("COVERAGE_PROCESS_START", os.path.abspath(_subprocess_rc))
+
+# Redirect ALL tests to a temporary KISS_HOME so they never touch ~/.kiss/history.db.
+# Session-scoped: one temp dir shared across the entire test run.
+# The env var is also inherited by subprocesses (e.g. test_vscode_stop.py).
+_test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
+os.environ["KISS_HOME"] = _test_kiss_home
+_th._db_conn = None
+_th._KISS_DIR = Path(_test_kiss_home)
+_th._DB_PATH = _th._KISS_DIR / "history.db"
 
 DEFAULT_MODEL = "claude-opus-4-6"
 

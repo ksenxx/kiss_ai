@@ -95,6 +95,7 @@
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.kiss_error`](#kissagentsvscodekiss_projectsrckisscorekiss_error)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.models`](#kissagentsvscodekiss_projectsrckisscoremodels)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_model`](#kissagentsvscodekiss_projectsrckisscoremodelsanthropic_model)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.claude_code_model`](#kissagentsvscodekiss_projectsrckisscoremodelsclaude_code_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.gemini_model`](#kissagentsvscodekiss_projectsrckisscoremodelsgemini_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.model`](#kissagentsvscodekiss_projectsrckisscoremodelsmodel)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.model_info`](#kissagentsvscodekiss_projectsrckisscoremodelsmodel_info)
@@ -144,6 +145,7 @@
     - [`kiss.channels.twitch_agent`](#kisschannelstwitch_agent)
     - [`kiss.channels.whatsapp_agent`](#kisschannelswhatsapp_agent)
     - [`kiss.channels.zalo_agent`](#kisschannelszalo_agent)
+      - [`kiss.core.models.claude_code_model`](#kisscoremodelsclaude_code_model)
     - [`kiss.docker.docker_tools`](#kissdockerdocker_tools)
 
 </details>
@@ -246,7 +248,7 @@ ______________________________________________________________________
 #### `kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
+from kiss.core.models import Attachment, Model, AnthropicModel, ClaudeCodeModel, OpenAICompatibleModel, GeminiModel
 ```
 
 ##### `class Attachment` — A file attachment (image or document) to include in a prompt.
@@ -598,6 +600,11 @@ ______________________________________________________________________
   - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
+- **peek_recording** — Return a snapshot of the current recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording(recording_id: int) -> list[dict[str, Any]]`
+
+  - `recording_id`: The recording ID passed to start_recording.
+  - **Returns:** List of display-relevant events with consecutive deltas merged.
+
 - **broadcast** — Send an SSE event dict to the connected client. The event is also appended to every active per-thread recording.<br/>`broadcast(event: dict[str, Any]) -> None`
 
   - `event`: The event dictionary to broadcast.
@@ -663,7 +670,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, headless: bool = False, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -1641,7 +1648,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, headless: bool = False, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -1715,6 +1722,11 @@ ______________________________________________________________________
   - `recording_id`: Unique identifier for this recording session.
 
 - **stop_recording** — Stop recording and return its display events.<br/>`stop_recording(recording_id: int | None = None) -> list[dict[str, Any]]`
+
+  - `recording_id`: The recording ID passed to start_recording.
+  - **Returns:** List of display-relevant events with consecutive deltas merged.
+
+- **peek_recording** — Return a snapshot of the current recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording(recording_id: int) -> list[dict[str, Any]]`
 
   - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
@@ -4294,7 +4306,7 @@ ______________________________________________________________________
 #### `kiss.agents.vscode.kiss_project.src.kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Model, AnthropicModel, OpenAICompatibleModel, GeminiModel
+from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Model, AnthropicModel, ClaudeCodeModel, OpenAICompatibleModel, GeminiModel
 ```
 
 ##### `class Attachment` — A file attachment (image or document) to include in a prompt.
@@ -4402,6 +4414,42 @@ ______________________________________________________________________
 
   - `text`: The text to generate an embedding for.
   - `embedding_model`: Optional model name (not used by Anthropic).
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.core.models.claude_code_model` — *Claude Code model implementation — uses the `claude` CLI as an LLM backend.*
+
+##### `class ClaudeCodeModel(Model)` — A model that delegates to the Claude Code CLI for LLM completions.
+
+**Constructor:** `ClaudeCodeModel(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
+
+- `model_name`: Full model name including `cc/` prefix (e.g. `cc/opus`).
+
+- `model_config`: Optional configuration. Recognised keys: - `system_instruction` (str): System prompt for the session. - `timeout` (int): Subprocess timeout in seconds (default 300).
+
+- `token_callback`: Optional callback invoked with each streamed text token.
+
+- **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
+
+  - `prompt`: The initial user prompt.
+  - `attachments`: Not supported — ignored with a warning if provided.
+
+- **generate** — Generate a response using the Claude Code CLI.<br/>`generate() -> tuple[str, Any]`
+
+  - **Returns:** tuple\[str, Any\]: (generated_text, parsed_json_response).
+
+- **generate_and_process_with_tools** — Run Claude Code CLI as a full agent with its built-in tools. The CLI executes the entire agentic loop internally (Bash, Edit, Read, Write) and returns the final result. A synthetic `finish` tool call is returned so the framework's loop terminates cleanly.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
+
+  - `function_map`: Ignored — the CLI uses its own built-in tools.
+  - `tools_schema`: Ignored — the CLI uses its own tool definitions.
+  - **Returns:** Tuple of `([finish_call], "", response_json)`.
+
+- **extract_input_output_token_counts_from_response** — Extract token counts from the Claude Code CLI JSON response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
+
+  - `response`: The parsed JSON response from the CLI.
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
+
+- **get_embedding** — Not supported — Claude Code CLI does not provide embeddings.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
 ______________________________________________________________________
 
@@ -7278,6 +7326,42 @@ ______________________________________________________________________
 ##### `class ZaloAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
 
 **Constructor:** `ZaloAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.core.models.claude_code_model` — *Claude Code model implementation — uses the `claude` CLI as an LLM backend.*
+
+##### `class ClaudeCodeModel(Model)` — A model that delegates to the Claude Code CLI for LLM completions.
+
+**Constructor:** `ClaudeCodeModel(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
+
+- `model_name`: Full model name including `cc/` prefix (e.g. `cc/opus`).
+
+- `model_config`: Optional configuration. Recognised keys: - `system_instruction` (str): System prompt for the session. - `timeout` (int): Subprocess timeout in seconds (default 300).
+
+- `token_callback`: Optional callback invoked with each streamed text token.
+
+- **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
+
+  - `prompt`: The initial user prompt.
+  - `attachments`: Not supported — ignored with a warning if provided.
+
+- **generate** — Generate a response using the Claude Code CLI.<br/>`generate() -> tuple[str, Any]`
+
+  - **Returns:** tuple\[str, Any\]: (generated_text, parsed_json_response).
+
+- **generate_and_process_with_tools** — Run Claude Code CLI as a full agent with its built-in tools. The CLI executes the entire agentic loop internally (Bash, Edit, Read, Write) and returns the final result. A synthetic `finish` tool call is returned so the framework's loop terminates cleanly.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
+
+  - `function_map`: Ignored — the CLI uses its own built-in tools.
+  - `tools_schema`: Ignored — the CLI uses its own tool definitions.
+  - **Returns:** Tuple of `([finish_call], "", response_json)`.
+
+- **extract_input_output_token_counts_from_response** — Extract token counts from the Claude Code CLI JSON response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
+
+  - `response`: The parsed JSON response from the CLI.
+  - **Returns:** (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
+
+- **get_embedding** — Not supported — Claude Code CLI does not provide embeddings.<br/>`get_embedding(text: str, embedding_model: str | None = None) -> list[float]`
 
 ______________________________________________________________________
 

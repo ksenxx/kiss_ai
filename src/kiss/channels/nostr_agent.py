@@ -12,7 +12,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import logging
 import sys
 import threading
 import time
@@ -26,8 +25,6 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-
-logger = logging.getLogger(__name__)
 
 _NOSTR_DIR = Path.home() / ".kiss" / "channels" / "nostr"
 

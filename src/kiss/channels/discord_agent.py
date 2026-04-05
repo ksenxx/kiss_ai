@@ -13,7 +13,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import logging
 import threading
 import time
 from pathlib import Path
@@ -35,8 +34,6 @@ from kiss.channels._channel_agent_utils import (
     load_json_config,
     save_json_config,
 )
-
-logger = logging.getLogger(__name__)
 
 _DISCORD_DIR = Path.home() / ".kiss" / "channels" / "discord"
 _API_BASE = "https://discord.com/api/v10"

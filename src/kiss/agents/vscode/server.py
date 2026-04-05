@@ -114,6 +114,7 @@ class VSCodeServer:
         )
         self._complete_worker.start()
         self._task_history_id: int | None = None
+        self._flush_interval = 5  # seconds between crash-recovery flushes
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -220,6 +221,26 @@ class VSCodeServer:
                 self._task_thread = None
             self.printer.broadcast({"type": "status", "running": False})
 
+    def _periodic_event_flush(self, rec_id: int, stop: threading.Event) -> None:
+        """Periodically flush recorded events to DB for crash recovery.
+
+        Runs in a background daemon thread.  Every ``_flush_interval``
+        seconds it snapshots the in-memory recording and writes it to the
+        database.  If the agent process is killed before the task's
+        ``finally`` block runs, the most recent flush ensures partial
+        events survive in the DB and can be replayed later.
+
+        Args:
+            rec_id: Recording ID to peek at.
+            stop: Event signaled when the task completes normally.
+        """
+        while not stop.wait(self._flush_interval):
+            task_id = self.agent._last_task_id
+            if task_id is not None:
+                events = self.printer.peek_recording(rec_id)
+                if events:
+                    _set_latest_chat_events(events, task_id=task_id, result=None)
+
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
@@ -262,8 +283,16 @@ class VSCodeServer:
         # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = ""
         task_end_event: dict[str, Any] | None = None
+        flush_stop = threading.Event()
+        flush_thread: threading.Thread | None = None
         try:
             self.printer.start_recording(rec_id)
+            flush_thread = threading.Thread(
+                target=self._periodic_event_flush,
+                args=(rec_id, flush_stop),
+                daemon=True,
+            )
+            flush_thread.start()
             self._task_history_id = None
             try:
                 self.agent.run(
@@ -281,18 +310,25 @@ class VSCodeServer:
                 task_end_event = {"type": "task_done"}
             except KeyboardInterrupt:
                 self._task_history_id = self.agent._last_task_id
+                result_summary = "Task stopped by user"
                 task_end_event = {"type": "task_stopped"}
             except Exception as e:  # pragma: no cover
                 self._task_history_id = self.agent._last_task_id
+                result_summary = f"Task failed: {e}"
                 task_end_event = {"type": "task_error", "text": str(e)}
         except BaseException:  # pragma: no cover — async interrupt before inner try
             # P14: interrupt before inner try — ensure stop_recording runs
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
+            flush_stop.set()
+            if flush_thread is not None:
+                flush_thread.join(timeout=2)
             _record_model_usage(model)
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
                 chat_events = self.printer.stop_recording(rec_id)
+                if task_end_event:  # pragma: no branch — always set
+                    chat_events.append(task_end_event)
                 _set_latest_chat_events(
                     chat_events,
                     task_id=self._task_history_id,
@@ -468,7 +504,7 @@ class VSCodeServer:
             self.printer.broadcast({"type": "error", "text": "No recorded events for this session"})
             return
         self.agent.resume_chat(task)
-        self.printer.broadcast({"type": "task_events", "events": events})
+        self.printer.broadcast({"type": "task_events", "events": events, "task": task})
 
     def _get_last_session(self) -> None:
         """Load the most recent task from history and replay its events."""
@@ -669,7 +705,8 @@ class VSCodeServer:
             if not diff_text:  # pragma: no branch — LLM API required for else
                 self.printer.broadcast({
                     "type": "commitMessage",
-                    "message": "Error: No staged files.",
+                    "message": "",
+                    "error": "No staged changes found. Stage files with 'git add' first.",
                 })
                 return
             self._generate_commit_message_llm(diff_text)  # pragma: no cover

@@ -160,6 +160,26 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push({ dispose: () => fs.unwatchFile(extJsPath) });
 
+  // Register tree view so the activity-bar icon creates a new chat tab on click.
+  // After creating the tab we close the sidebar, so the next click re-opens it
+  // (visibility flips true again) and the cycle repeats.
+  const treeView = vscode.window.createTreeView('kissSorcar.chatView', {
+    treeDataProvider: {
+      getTreeItem: (el: string) => new vscode.TreeItem(el),
+      getChildren: () => [],
+    },
+  });
+  context.subscriptions.push(treeView);
+
+  let lastTabCreatedAt = Date.now(); // guards against double-creation on activation
+  treeView.onDidChangeVisibility(e => {
+    if (e.visible && Date.now() - lastTabCreatedAt > 1000) {
+      lastTabCreatedAt = Date.now();
+      tabManager!.createTab();
+      vscode.commands.executeCommand('workbench.action.closeSidebar');
+    }
+  });
+
   // Auto-open a chat tab on activation, restoring the last session
   tabManager.createTab(true);
 

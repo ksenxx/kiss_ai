@@ -111,7 +111,7 @@ def http_server():
 
 @pytest.fixture(scope="module")
 def web_tool():
-    tool = WebUseTool(user_data_dir=None)
+    tool = WebUseTool(user_data_dir=None, headless=True)
     yield tool
     tool.close()
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import sys
 import threading
 from email.mime.multipart import MIMEMultipart
@@ -37,8 +36,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import is_headless_environment, wait_for_matching_message
-
-logger = logging.getLogger(__name__)
 
 _GMAIL_DIR = Path.home() / ".kiss" / "channels" / "gmail"
 _SCOPES = [

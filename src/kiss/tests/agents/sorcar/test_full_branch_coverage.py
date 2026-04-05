@@ -289,7 +289,7 @@ class TestValidTabSwitch:
         from kiss.agents.sorcar.web_use_tool import WebUseTool
 
         profile = str(tmp_path / "browser_profile")
-        tool = WebUseTool(user_data_dir=profile)
+        tool = WebUseTool(user_data_dir=profile, headless=True)
         try:
             tool.go_to_url(http_server)
             # Tab 0 exists (the current page)

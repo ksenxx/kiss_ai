@@ -12,7 +12,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import logging
 import subprocess
 import sys
 import threading
@@ -26,8 +25,6 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-
-logger = logging.getLogger(__name__)
 
 _IMESSAGE_DIR = Path.home() / ".kiss" / "channels" / "imessage"
 
@@ -90,7 +87,7 @@ class IMessageChannelBackend:
             self._connection_info = "iMessage requires macOS."
             return False
         try:
-            stdout, _ = _run_osascript('tell application "Messages" to get name')
+            _run_osascript('tell application "Messages" to get name')
             self._enabled = True
             self._connection_info = "iMessage available via Messages.app"
             return True

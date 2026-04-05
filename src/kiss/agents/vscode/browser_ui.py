@@ -1,6 +1,5 @@
 """Shared browser UI components for KISS agent viewers."""
 
-import logging
 import queue
 import threading
 import time
@@ -14,11 +13,6 @@ from kiss.core.printer import (
     parse_result_yaml,
     truncate_result,
 )
-
-logger = logging.getLogger(__name__)
-
-
-
 
 _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
@@ -128,6 +122,23 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         assert key is not None
         with self._lock:
             raw = self._recordings.pop(key, [])
+        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
+        return _coalesce_events(filtered)
+
+    def peek_recording(self, recording_id: int) -> list[dict[str, Any]]:
+        """Return a snapshot of the current recording without stopping it.
+
+        Used for periodic crash-recovery flushes: the caller can persist
+        a snapshot of events to the database while recording continues.
+
+        Args:
+            recording_id: The recording ID passed to start_recording.
+
+        Returns:
+            List of display-relevant events with consecutive deltas merged.
+        """
+        with self._lock:
+            raw = list(self._recordings.get(recording_id, []))
         filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
         return _coalesce_events(filtered)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import socket
 import sqlite3
@@ -20,7 +21,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-_KISS_DIR = Path.home() / ".kiss"
+def _default_kiss_dir() -> Path:
+    """Return the KISS data directory, respecting ``KISS_HOME`` env var."""
+    env = os.environ.get("KISS_HOME")
+    return Path(env) if env else Path.home() / ".kiss"
+
+
+_KISS_DIR = _default_kiss_dir()
 _DB_PATH = _KISS_DIR / "history.db"
 
 _MAX_FILE_USAGE_ENTRIES = 1000
@@ -341,7 +348,7 @@ def _set_latest_chat_events(
     events: list[dict[str, object]],
     task_id: int | None = None,
     task: str | None = None,
-    result: str = "",
+    result: str | None = "",
 ) -> None:
     """Save chat events for a task.
 
@@ -350,6 +357,8 @@ def _set_latest_chat_events(
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
         result: The task result text to store in the history entry.
+            Pass ``None`` to update only events without touching the
+            result column (used for incremental crash-recovery flushes).
     """
     db = _get_db()
     has_ev = 1 if events else 0
@@ -357,10 +366,16 @@ def _set_latest_chat_events(
         resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
         if resolved_task_id is None:
             return
-        db.execute(
-            "UPDATE task_history SET has_events = ?, result = ? WHERE id = ?",
-            (has_ev, result, resolved_task_id),
-        )
+        if result is not None:
+            db.execute(
+                "UPDATE task_history SET has_events = ?, result = ? WHERE id = ?",
+                (has_ev, result, resolved_task_id),
+            )
+        else:
+            db.execute(
+                "UPDATE task_history SET has_events = ? WHERE id = ?",
+                (has_ev, resolved_task_id),
+            )
         db.execute("DELETE FROM events WHERE task_id = ?", (resolved_task_id,))
         if has_ev:
             db.executemany(

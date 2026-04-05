@@ -13,7 +13,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import logging
 import sys
 import threading
 from pathlib import Path
@@ -28,8 +27,6 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-
-logger = logging.getLogger(__name__)
 
 _TWITCH_DIR = Path.home() / ".kiss" / "channels" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"

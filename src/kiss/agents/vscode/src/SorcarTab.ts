@@ -175,9 +175,9 @@ export class SorcarTab {
   }
 
   /**
-   * Update the tab title and tooltip to reflect the current task.
-   * The full first line is used as the title so the tooltip is never truncated.
-   * VS Code's tab bar handles display truncation via CSS text-overflow.
+   * Update the tab title to reflect the current task.
+   * The title is truncated to keep the tab compact while the tooltip
+   * (set via ``WebviewPanel.description``) retains the full text.
    */
   private _updateTabTitle(task: string): void {
     this._lastTask = task;
@@ -186,7 +186,11 @@ export class SorcarTab {
       return;
     }
     const firstLine = task.split('\n')[0].trim();
-    this._panel.title = 'KS: ' + firstLine;
+    const maxLen = 30;
+    const truncated = firstLine.length > maxLen
+      ? firstLine.slice(0, maxLen) + '…'
+      : firstLine;
+    this._panel.title = 'KS: ' + truncated;
   }
 
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {

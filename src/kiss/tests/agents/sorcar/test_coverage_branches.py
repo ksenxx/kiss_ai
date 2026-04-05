@@ -431,7 +431,8 @@ class TestVSCodeServerBranches:
             time.sleep(1)
             commit_events = [e for e in events if e["type"] == "commitMessage"]
             assert len(commit_events) == 1
-            assert commit_events[0]["message"] == "Error: No staged files."
+            assert commit_events[0]["message"] == ""
+            assert "No staged changes" in commit_events[0]["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +493,7 @@ def http_server():
 
 @pytest.fixture(scope="module")
 def browser_tool():
-    tool = WebUseTool(user_data_dir=None)
+    tool = WebUseTool(user_data_dir=None, headless=True)
     yield tool
     tool.close()
 
@@ -576,7 +577,7 @@ import sys, os
 sys.path.insert(0, os.path.abspath("src"))
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 udd = os.path.join("{d}", "user_data")
-tool = WebUseTool(user_data_dir=udd)
+tool = WebUseTool(user_data_dir=udd, headless=True)
 try:
     result = tool.go_to_url("{http_server}/")
     assert tool._page is not None

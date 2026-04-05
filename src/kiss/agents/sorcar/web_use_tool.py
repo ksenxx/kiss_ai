@@ -79,11 +79,13 @@ class WebUseTool:
         viewport: tuple[int, int] = (1280, 900),
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
         wait_for_user_callback: Callable[[str, str], None] | None = None,
+        headless: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.viewport = viewport
         self.user_data_dir = user_data_dir
         self._wait_for_user_callback = wait_for_user_callback
+        self._headless = headless
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
@@ -111,7 +113,7 @@ class WebUseTool:
             self._playwright = sync_playwright().start()
             launcher = self._playwright.chromium
             kwargs: dict[str, Any] = {
-                "headless": False,
+                "headless": self._headless,
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",

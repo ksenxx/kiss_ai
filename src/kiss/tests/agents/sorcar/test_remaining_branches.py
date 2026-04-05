@@ -43,6 +43,22 @@ def _git(tmpdir: str, *args: str) -> None:
 class TestPersistenceBranches:
     """Cover remaining branches in persistence.py."""
 
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "history.db"
+        th._db_conn = None
+
+    def teardown_method(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
     def test_load_task_chat_events_bad_json(self) -> None:
         """_load_task_chat_events handles corrupt event_json gracefully (lines 294-295)."""
         db = th._get_db()
@@ -224,6 +240,22 @@ class TestHelpersBranches:
 
 class TestVSCodeServerBranches:
     """Cover remaining branches in server.py."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "history.db"
+        th._db_conn = None
+
+    def teardown_method(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_run_loop_empty_lines_and_invalid_json(self) -> None:
         """server.run() skips empty lines, handles invalid JSON (line 119)."""
@@ -421,6 +453,22 @@ class TestSorcarAgentBranches:
 class TestStatefulSorcarAgentBranches:
     """Cover remaining branches in stateful_sorcar_agent.py."""
 
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "history.db"
+        th._db_conn = None
+
+    def teardown_method(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
     def test_build_chat_prompt_entry_without_result(self) -> None:
         """build_chat_prompt skips result when entry has no result (line 84->82)."""
         from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
@@ -495,7 +543,7 @@ class TestWebUseToolBranches:
 
     def test_check_for_new_tab_no_context(self) -> None:
         """_check_for_new_tab returns immediately when no context."""
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         tool._context = None
         tool._check_for_new_tab()  # should not raise
 
@@ -544,7 +592,7 @@ class TestWebUseToolTruncation:
         buttons = "\n".join(f'<button>Button{i}</button>' for i in range(200))
         html_file = tmp_path / "big.html"
         html_file.write_text(f"<html><body>{buttons}</body></html>")
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
             # Call with small max_chars to trigger truncation
@@ -563,7 +611,7 @@ class TestWebUseToolNewTab:
         html_file.write_text(
             '<html><body><a href="about:blank" target="_blank">Open New</a></body></html>'
         )
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
             # Find the link element
@@ -587,7 +635,7 @@ class TestWebUseToolEmptyNameLocator:
         """Element with empty name uses get_by_role without name."""
         html_file = tmp_path / "emptyname.html"
         html_file.write_text('<html><body><button></button></body></html>')
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
             # Check if there's a button with empty name
@@ -613,7 +661,7 @@ class TestWebUseToolAskUser:
 
         html_file = tmp_path / "ask.html"
         html_file.write_text('<html><body><p>Test page</p></body></html>')
-        tool = WebUseTool(wait_for_user_callback=callback)
+        tool = WebUseTool(wait_for_user_callback=callback, headless=True)
         try:
             tool._ensure_browser()
             result = tool.ask_user_browser_action(
@@ -627,7 +675,7 @@ class TestWebUseToolAskUser:
 
     def test_ask_user_browser_action_no_callback(self, tmp_path: Path) -> None:
         """ask_user_browser_action works without a callback."""
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             html_file = tmp_path / "ask3.html"
             html_file.write_text('<html><body><p>Hello</p></body></html>')
@@ -675,7 +723,7 @@ class TestWebUseToolResolveLocatorInvisible:
             "<button>Submit</button>"
             "</body></html>"
         )
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
             # Both buttons should be in the accessibility snapshot

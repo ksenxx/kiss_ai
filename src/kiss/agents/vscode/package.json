@@ -22,6 +22,29 @@
   "icon": "media/icon.png",
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kissSorcarContainer",
+          "title": "KISS Sorcar",
+          "icon": "media/kiss-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "kissSorcarContainer": [
+        {
+          "id": "kissSorcar.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "kissSorcar.chatView",
+        "contents": "Start a new conversation with KISS Sorcar.\n[New Conversation](command:kissSorcar.newConversation)\n[Open Chat](command:kissSorcar.openPanel)"
+      }
+    ],
     "commands": [
       {
         "command": "kissSorcar.openPanel",

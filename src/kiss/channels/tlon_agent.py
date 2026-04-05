@@ -12,7 +12,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import logging
 import queue
 import sys
 import threading
@@ -30,8 +29,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
-
-logger = logging.getLogger(__name__)
 
 _TLON_DIR = Path.home() / ".kiss" / "channels" / "tlon"
 

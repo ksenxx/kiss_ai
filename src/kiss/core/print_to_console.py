@@ -1,6 +1,5 @@
 """Console output formatting for KISS agents."""
 
-import logging
 import sys
 from typing import Any
 
@@ -19,7 +18,6 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-logger = logging.getLogger(__name__)
 
 class ConsolePrinter(StreamEventParser, Printer):
     def __init__(self, file: Any = None) -> None:

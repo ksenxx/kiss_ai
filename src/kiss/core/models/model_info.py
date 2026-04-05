@@ -11,14 +11,11 @@ FLAKY MODEL MARKERS:
 - Models with comments like "SLOW" may timeout on some requests
 """
 
-import logging
 from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, TokenCallback
-
-logger = logging.getLogger(__name__)
 
 
 class ModelInfo:
@@ -633,6 +630,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),
     "zai-org/GLM-5": _mi(202752, 1.00, 3.20),
     # ==========================================================================
+    # Claude Code CLI models (cc/ prefix) — subsidized pricing via CC subscription
+    # ==========================================================================
+    "cc/opus": _mi(200000, 0.00, 0.00, fc=False),
+    "cc/sonnet": _mi(200000, 0.00, 0.00, fc=False),
+    "cc/haiku": _mi(200000, 0.00, 0.00, fc=False),
+    # ==========================================================================
     # Auto-discovered models (verify pricing and capabilities)
     # ==========================================================================
 }
@@ -789,6 +792,16 @@ def model(
             keys.MINIMAX_API_KEY,
             model_config,
             token_callback,
+        )
+    if model_name.startswith("cc/"):
+        from kiss.core.models import ClaudeCodeModel
+
+        if ClaudeCodeModel is None:  # pragma: no cover – always available
+            raise KISSError("ClaudeCodeModel could not be loaded.")
+        return ClaudeCodeModel(  # type: ignore[no-any-return]
+            model_name=model_name,
+            model_config=model_config,
+            token_callback=token_callback,
         )
     raise KISSError(f"Unknown model name: {model_name}")
 

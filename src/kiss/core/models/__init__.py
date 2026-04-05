@@ -11,12 +11,14 @@ __all__ = [
     "Attachment",
     "Model",
     "AnthropicModel",
+    "ClaudeCodeModel",
     "OpenAICompatibleModel",
     "GeminiModel",
 ]
 
 _LAZY_IMPORTS = {
     "AnthropicModel": "kiss.core.models.anthropic_model",
+    "ClaudeCodeModel": "kiss.core.models.claude_code_model",
     "OpenAICompatibleModel": "kiss.core.models.openai_compatible_model",
     "GeminiModel": "kiss.core.models.gemini_model",
 }

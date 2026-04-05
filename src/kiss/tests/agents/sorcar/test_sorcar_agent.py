@@ -181,7 +181,7 @@ class TestCliWaitForUser:
 class TestSorcarAgentCallbackWiring:
     def test_ask_user_question_without_callback(self) -> None:
         agent = SorcarAgent("test")
-        agent.web_use_tool = WebUseTool(user_data_dir=None)
+        agent.web_use_tool = WebUseTool(user_data_dir=None, headless=True)
         try:
             tools = agent._get_tools()
             ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")

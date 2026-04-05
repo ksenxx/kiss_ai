@@ -154,6 +154,174 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         assert status_false_idx == stopped_idx + 1
 
 
+class TestTaskEndEventPersistence(unittest.TestCase):
+    """task_done/task_stopped/task_error events are persisted in the DB."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect_db(self.tmpdir)
+        _init_git_repo(self.tmpdir)
+        self.server, self.events, self.lock = _make_server(self.tmpdir)
+        self.original_run = _patch_run()
+
+    def tearDown(self) -> None:
+        _unpatch_run(self.original_run)
+        _restore_db(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_task_done_persisted_in_db(self) -> None:
+        """Successful task persists task_done event in the events table."""
+        self.server._handle_command({
+            "type": "run", "prompt": "test done persist",
+            "model": "claude-opus-4-6", "workDir": self.tmpdir,
+        })
+        t = self.server._task_thread
+        assert t is not None
+        t.join(timeout=10)
+
+        events = th._load_task_chat_events("test done persist")
+        types = [e.get("type") for e in events]
+        assert "task_done" in types
+
+    def test_task_stopped_persisted_in_db(self) -> None:
+        """Stopped task persists task_stopped event in the events table."""
+        _unpatch_run(self.original_run)
+        parent = cast(Any, SorcarAgent.__mro__[1])
+        saved = parent.run
+
+        def raise_ki(self_agent: object, **kwargs: object) -> str:
+            raise KeyboardInterrupt("stopped")
+
+        parent.run = raise_ki
+        try:
+            self.server._handle_command({
+                "type": "run", "prompt": "test stop persist",
+                "model": "claude-opus-4-6", "workDir": self.tmpdir,
+            })
+            t = self.server._task_thread
+            assert t is not None
+            t.join(timeout=10)
+        finally:
+            parent.run = saved
+            self.original_run = _patch_run()
+
+        events = th._load_task_chat_events("test stop persist")
+        types = [e.get("type") for e in events]
+        assert "task_stopped" in types
+
+    def test_task_stopped_result_saved(self) -> None:
+        """Stopped task saves a meaningful result string."""
+        _unpatch_run(self.original_run)
+        parent = cast(Any, SorcarAgent.__mro__[1])
+        saved = parent.run
+
+        def raise_ki(self_agent: object, **kwargs: object) -> str:
+            raise KeyboardInterrupt("stopped")
+
+        parent.run = raise_ki
+        try:
+            self.server._handle_command({
+                "type": "run", "prompt": "test stop result",
+                "model": "claude-opus-4-6", "workDir": self.tmpdir,
+            })
+            t = self.server._task_thread
+            assert t is not None
+            t.join(timeout=10)
+        finally:
+            parent.run = saved
+            self.original_run = _patch_run()
+
+        entries = th._load_history()
+        entry = next(
+            (e for e in entries if e["task"] == "test stop result"),
+            None,
+        )
+        assert entry is not None
+        assert "stopped" in str(entry["result"]).lower()
+
+
+class TestPeriodicEventFlush(unittest.TestCase):
+    """Verify events are periodically flushed to DB during task execution."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect_db(self.tmpdir)
+        _init_git_repo(self.tmpdir)
+        self.server = VSCodeServer()
+        self.server._flush_interval = 1  # speed up for testing
+        # Redirect stdout so VSCodePrinter.broadcast doesn't pollute test output
+        import io
+        import sys
+        self._real_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+
+    def tearDown(self) -> None:
+        import sys
+        sys.stdout = self._real_stdout
+        _restore_db(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_events_flushed_before_task_completes(self) -> None:
+        """Partial events are saved to DB while task is still running."""
+        parent = cast(Any, SorcarAgent.__mro__[1])
+        saved_run = parent.run
+        resume = threading.Event()
+
+        def slow_run(self_agent: object, **kwargs: object) -> str:
+            printer = kwargs.get("printer")
+            if printer:
+                printer.broadcast({"type": "text_delta", "text": "partial "})  # type: ignore[union-attr,attr-defined]
+                printer.broadcast({"type": "text_delta", "text": "output"})  # type: ignore[union-attr,attr-defined]
+            resume.wait(timeout=15)
+            return "success: true\nsummary: slow\n"
+
+        parent.run = slow_run
+        try:
+            self.server._handle_command({
+                "type": "run", "prompt": "test periodic flush",
+                "model": "claude-opus-4-6", "workDir": self.tmpdir,
+            })
+            import time
+            time.sleep(3)  # wait for at least 1 flush cycle
+
+            # Events should be in DB while task is still running
+            events = th._load_task_chat_events("test periodic flush")
+            types = [e.get("type") for e in events]
+            assert "text_delta" in types, f"Expected text_delta in {types}"
+
+            # Result should still be "Agent Failed Abruptly" (not overwritten)
+            entries = th._load_history()
+            entry = next(
+                (e for e in entries if e["task"] == "test periodic flush"),
+                None,
+            )
+            assert entry is not None
+            assert entry["result"] == "Agent Failed Abruptly"
+
+            resume.set()
+            t = self.server._task_thread
+            assert t is not None
+            t.join(timeout=10)
+        finally:
+            parent.run = saved_run
+
+    def test_peek_recording_returns_snapshot(self) -> None:
+        """peek_recording returns events without stopping the recording."""
+        self.server.printer.start_recording(999)
+        self.server.printer.broadcast({"type": "text_delta", "text": "hello"})
+        events = self.server.printer.peek_recording(999)
+        assert len(events) == 1
+        assert events[0]["text"] == "hello"
+        # Recording still active — stop_recording should also return events
+        final = self.server.printer.stop_recording(999)
+        assert len(final) == 1
+
+    def test_peek_recording_empty_when_not_recording(self) -> None:
+        """peek_recording returns empty list for unknown recording ID."""
+        events = self.server.printer.peek_recording(12345)
+        assert events == []
+
+
 class TestTypescriptIsRunningFix(unittest.TestCase):
     """Verify SorcarTab.ts sets _isRunning=false on task end events."""
 
