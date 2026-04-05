@@ -190,7 +190,7 @@ def channel_main(
         )
         parser.add_argument(
             "--allow-users", default="",
-            help="Comma-separated user IDs to allow",
+            help="Comma-separated usernames or user IDs to allow",
         )
     args = parser.parse_args()
 
@@ -198,9 +198,19 @@ def channel_main(
         from kiss.channels.background_agent import ChannelDaemon
 
         backend = make_daemon_backend()
-        allow_users = (
-            [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
-        )
+        allow_users_raw = [u.strip() for u in args.allow_users.split(",") if u.strip()]
+        allow_users: list[str] | None = None
+        if allow_users_raw:
+            allow_users = []
+            for raw in allow_users_raw:
+                resolved = backend.find_user(raw)
+                if resolved:
+                    if resolved != raw:
+                        print(f"  Resolved user {raw!r} -> {resolved}")
+                    allow_users.append(resolved)
+                else:
+                    allow_users.append(raw)
+            allow_users = allow_users or None
         daemon = ChannelDaemon(
             backend=backend,
             channel_name=args.daemon_channel,
