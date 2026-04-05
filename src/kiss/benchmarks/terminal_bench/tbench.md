@@ -90,15 +90,22 @@ module must be installed in the system Python.
 
 ### Background services
 
+**Critical**: The verifier runs in a separate process AFTER your agent
+process exits. Any service you started in the foreground or with a simple
+`&` will be killed when your shell session ends. The verifier will then
+find nothing running and score 0 — even if your solution was correct.
+
 For tasks that require a running service at verification time:
 
 1. Use `systemctl enable --now <service>` if systemd is available.
-1. Otherwise: `nohup /path/to/cmd >/var/log/svc.log 2>&1 &`
+   This ensures the service survives process exit AND restarts on reboot.
+1. Otherwise use `nohup`: `nohup /path/to/cmd >/var/log/svc.log 2>&1 &`
+   Then disown it: `disown %1` so it is not tied to your shell session.
 1. Immediately verify the service responds: `curl localhost:<port>` or
    `ss -tlnp | grep <port>`.
-1. **At the END of your work**, re-verify the service is still running.
-   The verifier runs AFTER the agent exits — if the service dies with
-   your shell session, the test fails.
+1. **Immediately before calling finish()**, re-verify the service is
+   still running AND responding. A service that starts but crashes
+   seconds later will fail the verifier.
 
 ### Build tasks
 
@@ -205,7 +212,9 @@ Read service logs for clues.
   directories where the test does not expect them. Keep source directories
   and build outputs that the verifier checks.
 - For tasks requiring running services, ensure services run as background
-  daemons that survive after sorcar exits. Use nohup or systemd. Verify
-  the service is still running AND responding at the END of your work.
+  daemons that survive after sorcar exits. Use `systemctl enable --now`
+  or `nohup ... & disown`. A foreground process or bare `&` WILL be
+  killed when your shell exits. Verify the service is still running AND
+  responding immediately before calling finish().
 - When the test imports a Python module, that module must be installed in
   the SYSTEM Python (pip install), not in any isolated environment.
