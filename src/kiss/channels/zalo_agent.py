@@ -23,12 +23,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import (
     ThreadedHTTPServer,
@@ -36,7 +30,9 @@ from kiss.channels._backend_utils import (
     wait_for_matching_message,
 )
 from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
     ToolMethodBackend,
+    channel_main,
     clear_json_config,
     load_json_config,
     save_json_config,
@@ -413,7 +409,7 @@ class ZaloChannelBackend(ToolMethodBackend):
 
 
 
-class ZaloAgent(StatefulSorcarAgent):
+class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Zalo OA API tools."""
 
     def __init__(self) -> None:
@@ -424,10 +420,14 @@ class ZaloAgent(StatefulSorcarAgent):
             self._backend._access_token = cfg["access_token"]
             self._backend._oa_id = cfg.get("oa_id", "")
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + Zalo auth tools + Zalo API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return bool(self._backend._access_token)
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
         agent = self
+
 
         def check_zalo_auth() -> str:
             """Check if Zalo credentials are configured and valid.
@@ -485,90 +485,29 @@ class ZaloAgent(StatefulSorcarAgent):
             agent._backend._oa_id = ""
             return "Zalo authentication cleared."
 
-        tools.extend([check_zalo_auth, authenticate_zalo, clear_zalo_auth])
+        return [check_zalo_auth, authenticate_zalo, clear_zalo_auth]
 
-        if agent._backend._access_token:  # pragma: no branch
-            tools.extend(agent._backend.get_tool_methods())
 
-        return tools
+def _make_daemon_backend() -> ZaloChannelBackend:
+    """Create a configured ZaloChannelBackend for daemon mode."""
+    backend = ZaloChannelBackend()
+    cfg = _load_config()
+    if not cfg:  # pragma: no branch
+        print("Not authenticated. Run: kiss-zalo -t 'authenticate'")
+        sys.exit(1)
+    backend._access_token = cfg["access_token"]
+    backend._oa_id = cfg.get("oa_id", "")
+    return backend
 
 
 def main() -> None:
     """Run the ZaloAgent from the command line with chat persistence."""
-    import time as time_mod
-
-    if len(sys.argv) <= 1:  # pragma: no branch
-        print("Usage: kiss-zalo [-m MODEL] [-t TASK] [-n] [--daemon]")
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
-    parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
-    parser.add_argument("--allow-users", default="", help="Comma-separated user IDs to allow")
-    args = parser.parse_args()
-
-    if args.daemon:  # pragma: no branch
-        from kiss.channels.background_agent import ChannelDaemon
-
-        backend = ZaloChannelBackend()
-        cfg = _load_config()
-        if not cfg:  # pragma: no branch
-            print("Not authenticated. Run: kiss-zalo -t 'authenticate'")
-            sys.exit(1)
-        backend._access_token = cfg["access_token"]
-        backend._oa_id = cfg.get("oa_id", "")
-        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
-        daemon = ChannelDaemon(
-            backend=backend,
-            channel_name="",
-            agent_name="Zalo Background Agent",
-            extra_tools=backend.get_tool_methods(),
-            model_name=args.model_name,
-            max_budget=args.max_budget,
-            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
-            poll_interval=1.0,
-            allow_users=allow_users,
-        )
-        print("Starting Zalo daemon... (Ctrl+C to stop)")
-        try:
-            daemon.run()
-        except KeyboardInterrupt:
-            print("Daemon stopped.")
-        return
-
-    agent = ZaloAgent()
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
+    channel_main(
+        ZaloAgent, "kiss-zalo",
+        channel_name="Zalo",
+        make_daemon_backend=_make_daemon_backend,
+        daemon_poll_interval=1.0,
+    )
 
 if __name__ == "__main__":
     main()

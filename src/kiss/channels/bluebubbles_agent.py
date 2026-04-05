@@ -20,16 +20,12 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
     ToolMethodBackend,
+    channel_main,
     clear_json_config,
     load_json_config,
     save_json_config,
@@ -339,7 +335,7 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
 
 
 
-class BlueBubblesAgent(StatefulSorcarAgent):
+class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only)."""
 
     def __init__(self) -> None:
@@ -350,10 +346,14 @@ class BlueBubblesAgent(StatefulSorcarAgent):
             self._backend._server_url = cfg["server_url"].rstrip("/")
             self._backend._password = cfg["password"]
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + BlueBubbles auth tools + API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return bool(self._backend._server_url)
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
         agent = self
+
 
         def check_bluebubbles_auth() -> str:
             """Check if BlueBubbles is configured and reachable.
@@ -405,91 +405,28 @@ class BlueBubblesAgent(StatefulSorcarAgent):
             agent._backend._password = ""
             return "BlueBubbles configuration cleared."
 
-        tools.extend([check_bluebubbles_auth, authenticate_bluebubbles, clear_bluebubbles_auth])
+        return [check_bluebubbles_auth, authenticate_bluebubbles, clear_bluebubbles_auth]
 
-        if agent._backend._server_url:  # pragma: no branch
-            tools.extend(agent._backend.get_tool_methods())
 
-        return tools
+def _make_daemon_backend() -> BlueBubblesChannelBackend:
+    """Create a configured BlueBubblesChannelBackend for daemon mode."""
+    backend = BlueBubblesChannelBackend()
+    cfg = _load_config()
+    if not cfg:  # pragma: no branch
+        print("Not configured. Run: kiss-bluebubbles -t 'authenticate'")
+        sys.exit(1)
+    backend._server_url = cfg["server_url"].rstrip("/")
+    backend._password = cfg["password"]
+    return backend
 
 
 def main() -> None:
     """Run the BlueBubblesAgent from the command line with chat persistence."""
-    import sys
-    import time as time_mod
-
-    if len(sys.argv) <= 1:  # pragma: no branch
-        print("Usage: kiss-bluebubbles [-m MODEL] [-t TASK] [-n] [--daemon]")
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
-    parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
-    parser.add_argument("--daemon-channel", default="", help="Chat GUID to monitor")
-    parser.add_argument("--allow-users", default="", help="Comma-separated addresses to allow")
-    args = parser.parse_args()
-
-    if args.daemon:  # pragma: no branch
-        from kiss.channels.background_agent import ChannelDaemon
-
-        backend = BlueBubblesChannelBackend()
-        cfg = _load_config()
-        if not cfg:  # pragma: no branch
-            print("Not configured. Run: kiss-bluebubbles -t 'authenticate'")
-            sys.exit(1)
-        backend._server_url = cfg["server_url"].rstrip("/")
-        backend._password = cfg["password"]
-        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
-        daemon = ChannelDaemon(
-            backend=backend,
-            channel_name=args.daemon_channel,
-            agent_name="BlueBubbles Background Agent",
-            extra_tools=backend.get_tool_methods(),
-            model_name=args.model_name,
-            max_budget=args.max_budget,
-            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
-            allow_users=allow_users,
-        )
-        print("Starting BlueBubbles daemon... (Ctrl+C to stop)")
-        try:
-            daemon.run()
-        except KeyboardInterrupt:
-            print("Daemon stopped.")
-        return
-
-    agent = BlueBubblesAgent()
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
+    channel_main(
+        BlueBubblesAgent, "kiss-bluebubbles",
+        channel_name="BlueBubbles",
+        make_daemon_backend=_make_daemon_backend,
+    )
 
 if __name__ == "__main__":
     main()

@@ -13,22 +13,17 @@ Usage::
 from __future__ import annotations
 
 import json
-import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
     ToolMethodBackend,
+    channel_main,
     clear_json_config,
     load_json_config,
     save_json_config,
@@ -358,7 +353,7 @@ class TwitchChannelBackend(ToolMethodBackend):
 
 
 
-class TwitchAgent(StatefulSorcarAgent):
+class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Twitch Helix API tools."""
 
     def __init__(self) -> None:
@@ -369,10 +364,14 @@ class TwitchAgent(StatefulSorcarAgent):
             self._backend._client_id = cfg["client_id"]
             self._backend._access_token = cfg["access_token"]
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + Twitch auth tools + Twitch API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return bool(self._backend._client_id)
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
         agent = self
+
 
         def check_twitch_auth() -> str:
             """Check if Twitch credentials are configured and valid.
@@ -443,59 +442,12 @@ class TwitchAgent(StatefulSorcarAgent):
             agent._backend._access_token = ""
             return "Twitch authentication cleared."
 
-        tools.extend([check_twitch_auth, authenticate_twitch, clear_twitch_auth])
-
-        if agent._backend._client_id:  # pragma: no branch
-            tools.extend(agent._backend.get_tool_methods())
-
-        return tools
+        return [check_twitch_auth, authenticate_twitch, clear_twitch_auth]
 
 
 def main() -> None:
     """Run the TwitchAgent from the command line with chat persistence."""
-    import time as time_mod
-
-    if len(sys.argv) <= 1:  # pragma: no branch
-        print("Usage: kiss-twitch [-m MODEL] [-t TASK] [-n]")
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
-    args = parser.parse_args()
-
-    agent = TwitchAgent()
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
+    channel_main(TwitchAgent, "kiss-twitch")
 
 if __name__ == "__main__":
     main()

@@ -17,15 +17,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import is_headless_environment, wait_for_matching_message
-from kiss.channels._channel_agent_utils import ToolMethodBackend
+from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
+    ToolMethodBackend,
+    channel_main,
+)
 
 _GCHAT_DIR = Path.home() / ".kiss" / "channels" / "googlechat"
 _SCOPES = [
@@ -501,7 +499,7 @@ class GoogleChatChannelBackend(ToolMethodBackend):
 # ---------------------------------------------------------------------------
 
 
-class GoogleChatAgent(StatefulSorcarAgent):
+class GoogleChatAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Google Chat API tools.
 
     Example::
@@ -517,10 +515,14 @@ class GoogleChatAgent(StatefulSorcarAgent):
         if service:  # pragma: no branch
             self._backend._service = service
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + Google Chat auth tools + API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return self._backend._service is not None
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
         agent = self
+
 
         def check_googlechat_auth() -> str:
             """Check if Google Chat credentials are configured and valid.
@@ -594,93 +596,27 @@ class GoogleChatAgent(StatefulSorcarAgent):
             agent._backend._service = None
             return "Google Chat authentication cleared."
 
-        tools.extend([check_googlechat_auth, authenticate_googlechat, clear_googlechat_auth])
+        return [check_googlechat_auth, authenticate_googlechat, clear_googlechat_auth]
 
-        if agent._backend._service is not None:  # pragma: no branch
-            tools.extend(agent._backend.get_tool_methods())
 
-        return tools
+def _make_daemon_backend() -> GoogleChatChannelBackend:
+    """Create a configured GoogleChatChannelBackend for daemon mode."""
+    backend = GoogleChatChannelBackend()
+    service = _load_service()
+    if not service:  # pragma: no branch
+        print("Not authenticated. Run: kiss-gchat -t 'authenticate'")
+        sys.exit(1)
+    backend._service = service
+    return backend
 
 
 def main() -> None:
     """Run the GoogleChatAgent from the command line with chat persistence."""
-    import sys
-    import time as time_mod
-
-    if len(sys.argv) <= 1:  # pragma: no branch
-        print(
-            "Usage: kiss-gchat [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--daemon]"
-        )
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
-    parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
-    parser.add_argument("--daemon-channel", default="", help="Space name to monitor")
-    parser.add_argument("--allow-users", default="", help="Comma-separated user IDs to allow")
-    args = parser.parse_args()
-
-    if args.daemon:  # pragma: no branch
-        from kiss.channels.background_agent import ChannelDaemon
-
-        backend = GoogleChatChannelBackend()
-        service = _load_service()
-        if not service:  # pragma: no branch
-            print("Not authenticated. Run: kiss-gchat -t 'authenticate'")
-            sys.exit(1)
-        backend._service = service
-        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
-        daemon = ChannelDaemon(
-            backend=backend,
-            channel_name=args.daemon_channel,
-            agent_name="Google Chat Background Agent",
-            extra_tools=backend.get_tool_methods(),
-            model_name=args.model_name,
-            max_budget=args.max_budget,
-            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
-            allow_users=allow_users,
-        )
-        print("Starting Google Chat daemon... (Ctrl+C to stop)")
-        try:
-            daemon.run()
-        except KeyboardInterrupt:
-            print("Daemon stopped.")
-        return
-
-    agent = GoogleChatAgent()
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
+    channel_main(
+        GoogleChatAgent, "kiss-gchat",
+        channel_name="Google Chat",
+        make_daemon_backend=_make_daemon_backend,
+    )
 
 if __name__ == "__main__":
     main()

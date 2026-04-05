@@ -20,16 +20,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
     ToolMethodBackend,
+    channel_main,
     clear_json_config,
     load_json_config,
     save_json_config,
@@ -399,7 +395,7 @@ class IRCChannelBackend(ToolMethodBackend):
 
 
 
-class IRCAgent(StatefulSorcarAgent):
+class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with IRC tools."""
 
     def __init__(self) -> None:
@@ -409,10 +405,14 @@ class IRCAgent(StatefulSorcarAgent):
         if cfg:  # pragma: no branch
             self._backend._nick = cfg.get("nick", "")
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + IRC auth tools + IRC API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return bool(self._backend._nick)
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
         agent = self
+
 
         def check_irc_auth() -> str:
             """Check if IRC is configured and connected.
@@ -476,91 +476,29 @@ class IRCAgent(StatefulSorcarAgent):
             agent._backend._sock = None
             return "IRC configuration cleared."
 
-        tools.extend([check_irc_auth, authenticate_irc, clear_irc_auth])
+        return [check_irc_auth, authenticate_irc, clear_irc_auth]
 
-        if agent._backend._nick:  # pragma: no branch
-            tools.extend(agent._backend.get_tool_methods())
 
-        return tools
+def _make_daemon_backend() -> IRCChannelBackend:
+    """Create a configured IRCChannelBackend for daemon mode."""
+    backend = IRCChannelBackend()
+    cfg = _load_config()
+    if not cfg:  # pragma: no branch
+        print("Not configured. Run: kiss-irc -t 'authenticate'")
+        sys.exit(1)
+    backend._nick = cfg["nick"]
+    backend.connect()
+    return backend
 
 
 def main() -> None:
     """Run the IRCAgent from the command line with chat persistence."""
-    import time as time_mod
-
-    if len(sys.argv) <= 1:  # pragma: no branch
-        print("Usage: kiss-irc [-m MODEL] [-t TASK] [-n] [--daemon]")
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
-    parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
-    parser.add_argument("--daemon-channel", default="", help="IRC channel to monitor")
-    parser.add_argument("--allow-users", default="", help="Comma-separated nicks to allow")
-    args = parser.parse_args()
-
-    if args.daemon:  # pragma: no branch
-        from kiss.channels.background_agent import ChannelDaemon
-
-        backend = IRCChannelBackend()
-        cfg = _load_config()
-        if not cfg:  # pragma: no branch
-            print("Not configured. Run: kiss-irc -t 'authenticate'")
-            sys.exit(1)
-        backend._nick = cfg["nick"]
-        backend.connect()
-        allow_users = [u.strip() for u in args.allow_users.split(",") if u.strip()] or None
-        daemon = ChannelDaemon(
-            backend=backend,
-            channel_name=args.daemon_channel,
-            agent_name="IRC Background Agent",
-            extra_tools=backend.get_tool_methods(),
-            model_name=args.model_name,
-            max_budget=args.max_budget,
-            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
-            poll_interval=1.0,
-            allow_users=allow_users,
-        )
-        print("Starting IRC daemon... (Ctrl+C to stop)")
-        try:
-            daemon.run()
-        except KeyboardInterrupt:
-            print("Daemon stopped.")
-        return
-
-    agent = IRCAgent()
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
+    channel_main(
+        IRCAgent, "kiss-irc",
+        channel_name="IRC",
+        make_daemon_backend=_make_daemon_backend,
+        daemon_poll_interval=1.0,
+    )
 
 if __name__ == "__main__":
     main()

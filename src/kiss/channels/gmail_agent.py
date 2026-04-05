@@ -28,15 +28,13 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import is_headless_environment, wait_for_matching_message
-from kiss.channels._channel_agent_utils import ToolMethodBackend
+from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
+    ToolMethodBackend,
+    channel_main,
+)
 
 _GMAIL_DIR = Path.home() / ".kiss" / "channels" / "gmail"
 _SCOPES = [
@@ -1009,7 +1007,7 @@ class GmailChannelBackend(ToolMethodBackend):
 # ---------------------------------------------------------------------------
 
 
-class GmailAgent(StatefulSorcarAgent):
+class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Gmail API tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
@@ -1048,10 +1046,14 @@ class GmailAgent(StatefulSorcarAgent):
         kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
         return super().run(**kwargs)
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + Gmail auth tools + Gmail API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return self._backend._service is not None
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
         agent = self
+
 
         def check_gmail_auth() -> str:
             """Check if Gmail OAuth2 credentials are configured and valid.
@@ -1156,70 +1158,13 @@ class GmailAgent(StatefulSorcarAgent):
                 "https://console.cloud.google.com/apis/credentials"
             )
 
-        tools.extend([
-            check_gmail_auth, authenticate_gmail, clear_gmail_auth,
-            start_gmail_browser_setup,
-        ])
-
-        if agent._backend._service is not None:
-            tools.extend(agent._backend.get_tool_methods())
-
-        return tools
+        return [check_gmail_auth, authenticate_gmail, clear_gmail_auth,
+            start_gmail_browser_setup,]
 
 
 def main() -> None:
     """Run the GmailAgent from the command line with chat persistence."""
-    import sys
-    import time as time_mod
-
-    if len(sys.argv) <= 1:  # pragma: no branch
-        print(
-            "Usage: kiss-gmail [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n]"
-        )
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument(
-        "-n", "--new", action="store_true",
-        help="Start a new chat session",
-    )
-    args = parser.parse_args()
-
-    agent = GmailAgent()
-
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
+    channel_main(GmailAgent, "kiss-gmail")
 
 if __name__ == "__main__":
     main()

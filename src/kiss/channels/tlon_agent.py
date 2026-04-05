@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import queue
-import sys
 import threading
 import time
 from pathlib import Path
@@ -21,16 +20,12 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
     ToolMethodBackend,
+    channel_main,
     clear_json_config,
     load_json_config,
     save_json_config,
@@ -295,7 +290,7 @@ class TlonChannelBackend(ToolMethodBackend):
 
 
 
-class TlonAgent(StatefulSorcarAgent):
+class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools."""
 
     def __init__(self) -> None:
@@ -305,10 +300,14 @@ class TlonAgent(StatefulSorcarAgent):
         if cfg:  # pragma: no branch
             self._backend._ship_url = cfg["ship_url"]
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + Tlon auth tools + Tlon API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return bool(self._backend._ship_url)
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
         agent = self
+
 
         def check_tlon_auth() -> str:
             """Check if Tlon/Urbit is configured.
@@ -360,59 +359,12 @@ class TlonAgent(StatefulSorcarAgent):
             agent._backend._ship_url = ""
             return "Tlon configuration cleared."
 
-        tools.extend([check_tlon_auth, authenticate_tlon, clear_tlon_auth])
-
-        if agent._backend._ship_url:  # pragma: no branch
-            tools.extend(agent._backend.get_tool_methods())
-
-        return tools
+        return [check_tlon_auth, authenticate_tlon, clear_tlon_auth]
 
 
 def main() -> None:
     """Run the TlonAgent from the command line with chat persistence."""
-    import time as time_mod
-
-    if len(sys.argv) <= 1:  # pragma: no branch
-        print("Usage: kiss-tlon [-m MODEL] [-t TASK] [-n]")
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument("-n", "--new", action="store_true", help="Start a new chat session")
-    args = parser.parse_args()
-
-    agent = TlonAgent()
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
+    channel_main(TlonAgent, "kiss-tlon")
 
 if __name__ == "__main__":
     main()

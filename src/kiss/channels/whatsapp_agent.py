@@ -25,12 +25,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import (
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import (
     ThreadedHTTPServer,
@@ -38,7 +32,9 @@ from kiss.channels._backend_utils import (
     wait_for_matching_message,
 )
 from kiss.channels._channel_agent_utils import (
+    BaseChannelAgent,
     ToolMethodBackend,
+    channel_main,
     clear_json_config,
     load_json_config,
     save_json_config,
@@ -861,7 +857,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
 # ---------------------------------------------------------------------------
 
 
-class WhatsAppAgent(StatefulSorcarAgent):
+class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
@@ -890,9 +886,12 @@ class WhatsAppAgent(StatefulSorcarAgent):
             self._backend._phone_number_id = cfg["phone_number_id"]
             self._backend._waba_id = cfg.get("waba_id", "")
 
-    def _get_tools(self) -> list:
-        """Return SorcarAgent tools + WhatsApp auth tools + WhatsApp API tools."""
-        tools = super()._get_tools()
+    def _is_authenticated(self) -> bool:
+        """Return True if WhatsApp credentials are configured."""
+        return bool(self._backend._access_token)
+
+    def _get_auth_tools(self) -> list:
+        """Return WhatsApp authentication tool functions."""
         agent = self
 
         def check_whatsapp_auth() -> str:
@@ -984,66 +983,12 @@ class WhatsAppAgent(StatefulSorcarAgent):
             agent._backend._waba_id = ""
             return "WhatsApp authentication cleared."
 
-        tools.extend([check_whatsapp_auth, authenticate_whatsapp, clear_whatsapp_auth])
-
-        if agent._backend._access_token:
-            tools.extend(agent._backend.get_tool_methods())
-
-        return tools
+        return [check_whatsapp_auth, authenticate_whatsapp, clear_whatsapp_auth]
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
     """Run the WhatsAppAgent from the command line with chat persistence."""
-    import sys
-    import time as time_mod
-
-    if len(sys.argv) <= 1:
-        print(
-            "Usage: kiss-whatsapp [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n]"
-        )
-        sys.exit(1)
-
-    parser = _build_arg_parser()
-    parser.add_argument(
-        "-n", "--new", action="store_true",
-        help="Start a new chat session",
-    )
-    args = parser.parse_args()
-
-    agent = WhatsAppAgent()
-
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-    start_time = time_mod.time()
-    agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
+    channel_main(WhatsAppAgent, "kiss-whatsapp")
 
 
 if __name__ == "__main__":
