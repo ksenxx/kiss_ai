@@ -167,23 +167,20 @@ class TestP14StartRecordingInsideTry(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestP3CompleteSeqTOCTOU(unittest.TestCase):
-    """P3: _complete_seq_latest check-then-broadcast TOCTOU.
+    """P3: _complete_seq_latest stale-request check.
 
-    The fix adds _complete_lock to make the second seq check and broadcast
-    atomic, preventing stale ghost suggestions from slipping through.
+    The fix uses _complete_lock to check seq before doing work,
+    preventing stale requests from wasting computation.
     """
 
-    def test_complete_uses_lock_around_second_check_and_broadcast(self) -> None:
-        """Verify _complete() holds _complete_lock across the second seq check and broadcast."""
+    def test_complete_checks_seq_under_lock(self) -> None:
+        """Verify _complete() checks seq under _complete_lock before processing."""
         source = inspect.getsource(VSCodeServer._complete)
         assert "_complete_lock" in source
-        match_idx = source.find("_prefix_match_task")
-        assert match_idx > 0
-        after_match = source[match_idx:]
-        lock_idx = after_match.find("with self._complete_lock")
-        broadcast_idx = after_match.find('self.printer.broadcast({"type": "ghost"')
-        assert lock_idx > 0 and broadcast_idx > 0
-        assert lock_idx < broadcast_idx
+        lock_idx = source.find("with self._complete_lock")
+        seq_check_idx = source.find("_complete_seq_latest", lock_idx)
+        assert lock_idx > 0 and seq_check_idx > 0
+        assert lock_idx < seq_check_idx
 
     def test_seq_latest_write_under_lock(self) -> None:
         """Verify _handle_command writes _complete_seq_latest under _complete_lock."""

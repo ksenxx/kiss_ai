@@ -114,7 +114,7 @@ class VSCodeServer:
         )
         self._complete_worker.start()
         self._task_history_id: int | None = None
-        self._flush_interval = 5  # seconds between crash-recovery flushes
+        self._flush_interval: float = 5  # seconds between crash-recovery flushes
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -281,18 +281,17 @@ class VSCodeServer:
         rec_id = self._recording_id
 
         # start_recording inside try so stop_recording always runs (P14 fix)
-        result_summary = ""
+        result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
         flush_stop = threading.Event()
-        flush_thread: threading.Thread | None = None
+        flush_thread = threading.Thread(
+            target=self._periodic_event_flush,
+            args=(rec_id, flush_stop),
+            daemon=True,
+        )
+        flush_thread.start()
         try:
             self.printer.start_recording(rec_id)
-            flush_thread = threading.Thread(
-                target=self._periodic_event_flush,
-                args=(rec_id, flush_stop),
-                daemon=True,
-            )
-            flush_thread.start()
             self._task_history_id = None
             try:
                 self.agent.run(
@@ -321,8 +320,7 @@ class VSCodeServer:
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
             flush_stop.set()
-            if flush_thread is not None:
-                flush_thread.join(timeout=2)
+            flush_thread.join(timeout=2)
             _record_model_usage(model)
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
@@ -341,14 +339,13 @@ class VSCodeServer:
                 self._refresh_file_cache()
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
-                if result_summary:
-                    self._generate_followup_async(
-                        prompt,
-                        result_summary,
-                        model,
-                        gen,
-                        self._task_history_id,
-                    )
+                self._generate_followup_async(
+                    prompt,
+                    result_summary,
+                    model,
+                    gen,
+                    self._task_history_id,
+                )
                 self._task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
                 logger.debug("Cleanup interrupted", exc_info=True)
@@ -536,7 +533,7 @@ class VSCodeServer:
         def _run() -> None:
             try:
                 suggestion = generate_followup_text(
-                    task, result, fast_model_for(model)
+                    task, result, fast_model_for()
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
                     # P12 fix: only broadcast if still same task generation
@@ -619,7 +616,7 @@ class VSCodeServer:
         for candidate in candidates:
             if candidate.startswith(partial) and len(candidate) > len(partial):
                 suffix = candidate[len(partial):]
-                if len(suffix) > len(best):  # pragma: no branch
+                if len(suffix) > len(best):
                     best = suffix
         return best
 
@@ -666,10 +663,7 @@ class VSCodeServer:
         else:
             fast = self._complete_from_active_file(query, snapshot_file, snapshot_content)
         fast = clip_autocomplete_suggestion(query, fast)
-        with self._complete_lock:
-            if seq >= 0 and seq != self._complete_seq_latest:
-                return
-            self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
+        self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
 
     def _refresh_file_cache(self) -> None:
         """Refresh the file cache from disk in a background thread.
@@ -722,7 +716,7 @@ class VSCodeServer:
         """Call LLM to generate commit message from diff text."""
         agent = KISSAgent("Commit Message Generator")
         raw = agent.run(
-            model_name=fast_model_for(self._selected_model),
+            model_name=fast_model_for(),
             prompt_template=(
                 "Generate a nicely markdown formatted, informative git commit message for "
                 "these changes. Use conventional commit format with a clear subject "

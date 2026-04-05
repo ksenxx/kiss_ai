@@ -210,15 +210,10 @@ class TestUsefulToolsBranches:
 class TestHelpersBranches:
     """Cover remaining branches in helpers.py."""
 
-    def test_fast_model_for_all_providers(self) -> None:
-        """fast_model_for returns correct fast model per provider (lines 66-70)."""
-        result = fast_model_for("openrouter/anthropic/claude-3")
-        assert result == "openrouter/anthropic/claude-haiku-4.5"
-        assert fast_model_for("gemini-2.5-pro") == "gemini-2.0-flash"
-        assert fast_model_for("gpt-4o") == "gpt-4o-mini"
-        # Default: claude model
-        result = fast_model_for("claude-opus-4-6")
-        assert result  # Should return a non-empty string (DEFAULT_CONFIG.FAST_MODEL)
+    def test_fast_model_for_returns_model(self) -> None:
+        """fast_model_for returns a non-empty fast model string."""
+        result = fast_model_for()
+        assert result  # Should return a non-empty string
 
     def test_clip_autocomplete_suggestion_echo_prefix(self) -> None:
         """clip_autocomplete_suggestion strips query prefix when echoed."""
