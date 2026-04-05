@@ -162,25 +162,25 @@ def channel_main(
             required config is missing. Pass ``None`` to disable daemon mode.
         daemon_poll_interval: Message poll interval for daemon mode in seconds.
     """
-    from kiss.agents.sorcar.cli_helpers import _build_arg_parser
-    from kiss.agents.sorcar.sorcar_agent import (
-        _resolve_task,
-        cli_ask_user_question,
-        cli_wait_for_user,
+    from kiss.agents.sorcar.cli_helpers import (
+        _apply_chat_args,
+        _build_chat_arg_parser,
+        _build_run_kwargs,
+        _print_recent_chats,
+        _print_run_stats,
     )
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]
-        parts.append("[-w WORK_DIR] [-t TASK] [-f FILE] [-n]")
+        parts.append(
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]"
+        )
         if make_daemon_backend is not None:
             parts.append("[--daemon]")
         print(" ".join(parts))
         sys.exit(1)
 
-    parser = _build_arg_parser()
-    parser.add_argument(
-        "-n", "--new", action="store_true", help="Start a new chat session"
-    )
+    parser = _build_chat_arg_parser()
     if make_daemon_backend is not None:
         parser.add_argument(
             "--daemon", action="store_true", help="Run as background daemon"
@@ -193,6 +193,10 @@ def channel_main(
             help="Comma-separated usernames or user IDs to allow",
         )
     args = parser.parse_args()
+
+    if args.list_chat_id:
+        _print_recent_chats()
+        sys.exit(0)
 
     if make_daemon_backend is not None and getattr(args, "daemon", False):
         from kiss.channels.background_agent import ChannelDaemon
@@ -230,34 +234,10 @@ def channel_main(
         return
 
     agent = agent_cls()
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.new:  # pragma: no branch
-        agent.new_chat()
-    else:
-        agent.resume_chat(task_description)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:  # pragma: no branch
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
+    _apply_chat_args(agent, args)
 
     start_time = _time.time()
-    agent.run(**run_kwargs)
+    agent.run(**_build_run_kwargs(args))
     elapsed = _time.time() - start_time
 
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
+    _print_run_stats(agent, elapsed)

@@ -210,6 +210,27 @@ def test_channel_main_usage_includes_daemon_flag(
         sys.argv = original_argv
 
 
+def test_channel_main_usage_includes_chat_flags(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """channel_main() usage includes [--chat-id ID] and [-l] flags."""
+    from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+    class FakeAgent(BaseChannelAgent, StatefulSorcarAgent):
+        pass
+
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["test-cli"]
+        with pytest.raises(SystemExit):
+            channel_main(FakeAgent, "kiss-test")
+        captured = capsys.readouterr()
+        assert "--chat-id ID" in captured.out
+        assert "[-l]" in captured.out
+    finally:
+        sys.argv = original_argv
+
+
 def test_channel_main_usage_no_daemon_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -226,6 +247,28 @@ def test_channel_main_usage_no_daemon_flag(
             channel_main(FakeAgent, "kiss-test")
         captured = capsys.readouterr()
         assert "--daemon" not in captured.out
+    finally:
+        sys.argv = original_argv
+
+
+def test_channel_main_list_chats_exits(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """channel_main() with -l prints recent chats and exits."""
+    from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+    class FakeAgent(BaseChannelAgent, StatefulSorcarAgent):
+        pass
+
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["test-cli", "-l"]
+        with pytest.raises(SystemExit) as exc_info:
+            channel_main(FakeAgent, "kiss-test")
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        # Either shows chats or "No chat sessions found."
+        assert captured.out  # something was printed
     finally:
         sys.argv = original_argv
 
