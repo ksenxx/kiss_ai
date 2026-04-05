@@ -56,24 +56,18 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  let _chatFocused = false;
   let _focusToggling = false;
-  context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor(() => {
-      _chatFocused = false;
-    })
-  );
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.toggleFocus', async () => {
       if (_focusToggling) return;
       _focusToggling = true;
       try {
-        if (_chatFocused) {
-          _chatFocused = false;
-          await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        const tab = tabManager!.getActiveTab();
+        if (tab && tab.panel.active) {
+          // Chat tab is currently focused → switch to text editor
+          await vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
         } else {
-          _chatFocused = true;
-          const tab = tabManager!.getActiveTab();
+          // Text editor is focused → switch to chat tab
           if (tab) {
             await tab.focusChatInput();
           } else {
@@ -89,8 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.focusEditor', () => {
-      _chatFocused = false;
-      vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+      vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
     })
   );
 

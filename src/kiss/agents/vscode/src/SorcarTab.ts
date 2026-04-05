@@ -337,7 +337,7 @@ export class SorcarTab {
       }
 
       case 'focusEditor':
-        vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
         break;
     }
   }

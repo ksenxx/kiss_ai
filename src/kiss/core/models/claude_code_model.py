@@ -8,6 +8,10 @@
 This lets you use Claude models through a Claude Code subscription at
 subsidized per-token pricing. The model invokes ``claude --print --tools ""``
 in single-shot mode, so **no agentic tool use** is involved.
+
+For agentic use, tool descriptions are injected into the prompt and the
+model's text output is parsed for tool-call JSON — the same approach used
+for DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
 """
 
 import json
@@ -19,6 +23,10 @@ from typing import Any
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment, Model, TokenCallback
+from kiss.core.models.openai_compatible_model import (
+    _build_text_based_tools_prompt,
+    _parse_text_based_tool_calls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +56,9 @@ class ClaudeCodeModel(Model):
     as the ``--model`` flag to the ``claude`` CLI (e.g. ``cc/opus`` →
     ``--model opus``).
 
-    Only text generation is supported — tool/function calling and embeddings
-    are **not** available through this backend.
+    Tool calling is supported via text-based prompting: tool descriptions
+    are injected into the system prompt and the model's text output is
+    parsed for JSON ``tool_calls`` blocks.  Embeddings are not available.
     """
 
     def __init__(
@@ -86,7 +95,8 @@ class ClaudeCodeModel(Model):
         """Build a single prompt string from the conversation history.
 
         For multi-turn conversations, formats all messages into a single
-        text block since the Claude CLI is stateless.
+        text block since the Claude CLI is stateless.  Tool-result messages
+        (``role == "tool"``) are rendered as ``[Tool Result]: …``.
 
         Returns:
             The assembled prompt string.
@@ -96,11 +106,13 @@ class ClaudeCodeModel(Model):
         parts: list[str] = []
         for msg in self.conversation:
             role = msg["role"]
-            content = msg["content"]
+            content = msg.get("content", "")
             if role == "user":
                 parts.append(f"[User]: {content}")
             elif role == "assistant":
                 parts.append(f"[Assistant]: {content}")
+            elif role == "tool":
+                parts.append(f"[Tool Result]: {content}")
         return "\n\n".join(parts)
 
     def _build_cli_args(self, use_streaming: bool = False) -> list[str]:
@@ -253,71 +265,59 @@ class ClaudeCodeModel(Model):
         function_map: dict[str, Callable[..., Any]],
         tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Run Claude Code CLI as a full agent with its built-in tools.
+        """Generate with text-based tool calling via the Claude Code CLI.
 
-        The CLI executes the entire agentic loop internally (Bash, Edit,
-        Read, Write) and returns the final result.  A synthetic ``finish``
-        tool call is returned so the framework's loop terminates cleanly.
+        Tool descriptions are injected into the system prompt.  The model's
+        text output is parsed for JSON ``tool_calls`` blocks, which are
+        returned to the framework for execution — the CLI itself runs in
+        pure LLM mode (``--tools ""``), **not** as an agent.
 
         Args:
-            function_map: Ignored — the CLI uses its own built-in tools.
-            tools_schema: Ignored — the CLI uses its own tool definitions.
+            function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Ignored (text-based tool calling builds its own prompt).
 
         Returns:
-            Tuple of ``([finish_call], "", response_json)``.
+            Tuple of ``(function_calls, content, response)``.
         """
-        prompt = self._build_prompt()
-        timeout = self.model_config.get("timeout", 3600)
+        tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        cli = _find_claude_cli()
-        args = [
-            cli,
-            "--print",
-            "--dangerously-skip-permissions",
-            "--bare",
-            "--no-session-persistence",
-            "--model", self._cli_model,
-            "--output-format", "json",
-        ]
-
-        system_instruction = self.model_config.get("system_instruction")
-        if system_instruction:
-            args.extend(["--system-prompt", system_instruction])
+        # Temporarily augment the system prompt with tool descriptions
+        original_system = self.model_config.get("system_instruction", "")
+        self.model_config["system_instruction"] = (
+            (original_system + "\n\n" + tools_prompt).strip()
+        )
 
         try:
-            result = subprocess.run(
-                args,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as e:  # pragma: no cover
-            raise KISSError(f"Claude Code CLI timed out after {timeout}s") from e
+            content, response = self.generate()
+        finally:
+            # Restore original system instruction
+            if original_system:
+                self.model_config["system_instruction"] = original_system
+            else:
+                self.model_config.pop("system_instruction", None)
 
-        if result.returncode != 0:  # pragma: no cover
-            raise KISSError(
-                f"Claude Code CLI failed (exit {result.returncode}): "
-                f"{result.stderr.strip()}"
-            )
+        # generate() appended a plain assistant message — replace it with
+        # one that includes tool_calls if any were found in the text.
+        function_calls = _parse_text_based_tool_calls(content)
 
-        try:
-            response = json.loads(result.stdout)
-        except json.JSONDecodeError as e:  # pragma: no cover
-            raise KISSError(f"Failed to parse Claude Code CLI output: {e}") from e
+        if function_calls:
+            self.conversation[-1] = {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": fc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": fc["name"],
+                            "arguments": json.dumps(fc["arguments"]),
+                        },
+                    }
+                    for fc in function_calls
+                ],
+            }
 
-        content = response.get("result", "")
-        self.conversation.append({"role": "assistant", "content": content})
-
-        finish_call: dict[str, Any] = {
-            "name": "finish",
-            "arguments": {
-                "success": "true",
-                "is_continue": "false",
-                "summary": content,
-            },
-        }
-        return [finish_call], "", response
+        return function_calls, content, response
 
     def extract_input_output_token_counts_from_response(
         self, response: Any

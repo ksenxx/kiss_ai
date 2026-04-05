@@ -146,6 +146,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "deepseek-ai/DeepSeek-R1": _mi(163840, 3.00, 7.00, fc=False),  # Serves R1-0528
     "deepseek-ai/DeepSeek-R1-0528": _mi(163840, 3.00, 7.00),  # NEW
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": _mi(131072, 2.00, 2.00),  # NEW
+    "deepseek-ai/DeepSeek-V3-0324": _mi(163840, 1.25, 1.25),  # NEW
     "deepseek-ai/DeepSeek-V3.1": _mi(131072, 0.60, 1.70, fc=False),
     "essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
     "gemini-2.0-flash": _mi(1048576, 0.10, 0.40),
@@ -163,6 +164,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-3.1-pro-preview": _mi(1048576, 2.00, 12.00),  # 1M context, 64k output
     "gemini-embedding-001": _emb(2048, 0.15),  # Newest embedding model
     "gemini-embedding-2-preview": _emb(8192, 0.00),  # NEW: needs pricing
+    "google/gemma-2-27b-it": _mi(8192, 0.80, 0.80),  # NEW
     "google/gemma-3n-E4B-it": _mi(32768, 0.02, 0.04, fc=False),
     "gpt-3.5-turbo": _mi(16385, 0.50, 1.50),  # NEW
     "gpt-3.5-turbo-0125": _mi(16385, 0.50, 1.50),
@@ -239,6 +241,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-realtime-mini": _mi(128000, 0.60, 2.40, fc=False),
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),  # 1024 dimensions
     "meta-llama/Llama-3-70b-chat-hf": _mi(8192, 0.88, 0.88, fc=False),
+    "meta-llama/Llama-3-8b-chat-hf": _mi(8192, 0.20, 0.20),  # NEW
     "meta-llama/Llama-3.1-405B-Instruct": _mi(4096, 3.50, 3.50),  # NEW
     "meta-llama/Llama-3.2-1B-Instruct": _mi(131072, 0.06, 0.06),  # NEW
     "meta-llama/Llama-3.2-3B-Instruct-Turbo": _mi(131072, 0.06, 0.06, fc=False),  # Dep 2026-03
@@ -246,6 +249,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "meta-llama/Llama-3.3-70B-Instruct-Turbo-test": _mi(131072, 0.88, 0.88),  # NEW
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": _mi(1048576, 0.27, 0.85),
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": _mi(1048576, 0.18, 0.59),  # NEW
+    "meta-llama/Meta-Llama-3-70B-Instruct-Turbo": _mi(8192, 0.88, 0.88),  # NEW
     "meta-llama/Meta-Llama-3-8B-Instruct": _mi(8192, 0.20, 0.20),  # NEW
     "meta-llama/Meta-Llama-3-8B-Instruct-Lite": _mi(8192, 0.10, 0.10, fc=False),
     "meta-llama/Meta-Llama-3.1-70B-Instruct-Reference": _mi(8192, 0.90, 0.90),  # NEW
@@ -256,6 +260,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "minimax-m2.5-lightning": _mi(1000000, 0.30, 2.40),  # Lightning: 100 TPS
     "MiniMaxAI/MiniMax-M2.5": _mi(196608, 0.30, 1.20),
     "mistralai/Ministral-3-14B-Instruct-2512": _mi(262144, 0.20, 0.20, fc=False),
+    "mistralai/Mistral-7B-Instruct-v0.1": _mi(32768, 0.20, 0.20),  # NEW
     "mistralai/Mistral-7B-Instruct-v0.2": _mi(32768, 0.20, 0.20, fc=False),
     "mistralai/Mistral-7B-Instruct-v0.3": _mi(32768, 0.20, 0.20, fc=False),  # NEW
     "mistralai/Mistral-Small-24B-Instruct-2501": _mi(32768, 0.10, 0.30, fc=False),
@@ -264,6 +269,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "moonshotai/Kimi-K2-Instruct-0905": _mi(262144, 1.00, 3.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2-Thinking": _mi(262144, 1.20, 4.00, fc=False),  # Dep 2026-03
     "moonshotai/Kimi-K2.5": _mi(262144, 0.50, 2.80),
+    "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF": _mi(32768, 0.88, 0.88),  # NEW
     "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.06, 0.25),  # NEW
     "o1": _mi(200000, 15.00, 60.00, fc=False),  # SLOW: reasoning model
     "o1-2024-12-17": _mi(200000, 15.00, 60.00),  # NEW
@@ -306,7 +312,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthracite-org/magnum-v4-72b": _mi(16384, 3.00, 5.00, fc=False),
     "openrouter/anthropic/claude-3-haiku": _mi(200000, 0.25, 1.25),
     "openrouter/anthropic/claude-3.5-haiku": _mi(200000, 0.80, 4.00),  # Deprecated
-    "openrouter/anthropic/claude-3.5-sonnet": _mi(200000, 6.00, 30.00),  # NEW
     "openrouter/anthropic/claude-3.7-sonnet": _mi(200000, 3.00, 15.00),  # NEW
     "openrouter/anthropic/claude-3.7-sonnet:thinking": _mi(200000, 3.00, 15.00),  # Deprecated
     "openrouter/anthropic/claude-haiku-4.5": _mi(200000, 1.00, 5.00),
@@ -372,6 +377,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemma-3-27b-it": _mi(131072, 0.08, 0.16, fc=False),
     "openrouter/google/gemma-3-4b-it": _mi(131072, 0.04, 0.08, fc=False),
     "openrouter/google/gemma-3n-e4b-it": _mi(32768, 0.02, 0.04, fc=False),
+    "openrouter/google/gemma-4-26b-a4b-it": _mi(262144, 0.13, 0.40),  # NEW
+    "openrouter/google/gemma-4-31b-it": _mi(262144, 0.14, 0.40),  # NEW
     "openrouter/google/lyria-3-clip-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
     "openrouter/google/lyria-3-pro-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
     "openrouter/gryphe/mythomax-l2-13b": _mi(4096, 0.06, 0.06, fc=False),
@@ -383,8 +390,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/inflection/inflection-3-productivity": _mi(8000, 2.50, 10.00, fc=False),
     "openrouter/kwaipilot/kat-coder-pro-v2": _mi(256000, 0.30, 1.20),  # NEW
     "openrouter/liquid/lfm-2-24b-a2b": _mi(32768, 0.03, 0.12),  # NEW
-    "openrouter/liquid/lfm-2.2-6b": _mi(32768, 0.01, 0.02, fc=False),
-    "openrouter/liquid/lfm2-8b-a1b": _mi(32768, 0.01, 0.02, fc=False),
     "openrouter/mancer/weaver": _mi(8000, 0.75, 1.00, fc=False),
     "openrouter/meituan/longcat-flash-chat": _mi(131072, 0.20, 0.80, fc=False),
     "openrouter/meta-llama/llama-3-70b-instruct": _mi(8192, 0.51, 0.74, fc=False),
@@ -406,7 +411,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/minimax/minimax-m2": _mi(196608, 0.255, 1.00, fc=False),
     "openrouter/minimax/minimax-m2-her": _mi(65536, 0.30, 1.20, fc=False),  # Roleplay model
     "openrouter/minimax/minimax-m2.1": _mi(196608, 0.27, 0.95),
-    "openrouter/minimax/minimax-m2.5": _mi(196600, 0.118, 1.25),
+    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.118, 0.99),
     "openrouter/minimax/minimax-m2.7": _mi(204800, 0.30, 1.20),  # NEW
     "openrouter/mistralai/codestral-2508": _mi(256000, 0.30, 0.90, fc=False),
     "openrouter/mistralai/devstral-2512": _mi(262144, 0.40, 2.00, fc=False),
@@ -436,7 +441,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2": _mi(131072, 0.57, 2.30, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-0905": _mi(131072, 0.40, 2.00, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-thinking": _mi(131072, 0.47, 2.00, fc=False),  # SLOW
-    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.383, 1.909),  # Multimodal + agentic
+    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.383, 1.72),  # Multimodal + agentic
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
     "openrouter/nex-agi/deepseek-v3.1-nex-n1": _mi(131072, 0.135, 0.50, fc=False),
@@ -608,8 +613,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-5": _mi(80000, 0.72, 2.30),  # 744B MoE - FC verified
     "openrouter/z-ai/glm-5-turbo": _mi(202752, 1.20, 4.00),  # NEW
     "openrouter/z-ai/glm-5v-turbo": _mi(202752, 1.20, 4.00),  # NEW
+    "Qwen/Qwen2-VL-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),  # NEW
     "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
+    "Qwen/Qwen2.5-72B-Instruct-Turbo": _mi(131072, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
     "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.20, 0.60, fc=False),
     "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),  # Dep 2026-03
@@ -632,12 +639,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Claude Code CLI models (cc/ prefix) — subsidized pricing via CC subscription
     # ==========================================================================
-    "cc/opus": _mi(200000, 0.00, 0.00, fc=False),
-    "cc/sonnet": _mi(200000, 0.00, 0.00, fc=False),
-    "cc/haiku": _mi(200000, 0.00, 0.00, fc=False),
-    # ==========================================================================
-    # Auto-discovered models (verify pricing and capabilities)
-    # ==========================================================================
+    "cc/opus": _mi(200000, 0.00, 0.00),
+    "cc/sonnet": _mi(200000, 0.00, 0.00),
+    "cc/haiku": _mi(200000, 0.00, 0.00),
 }
 
 # Populate cache pricing for known providers.

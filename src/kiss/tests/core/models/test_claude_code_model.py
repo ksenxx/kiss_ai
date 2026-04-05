@@ -72,6 +72,16 @@ class TestBuildPrompt:
         assert "[Assistant]: Hello!" in prompt
         assert "[User]: How are you?" in prompt
 
+    def test_tool_result_messages(self) -> None:
+        m = ClaudeCodeModel("cc/opus")
+        m.conversation = [
+            {"role": "user", "content": "Do something"},
+            {"role": "assistant", "content": "Calling tool"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "tool output"},
+        ]
+        prompt = m._build_prompt()
+        assert "[Tool Result]: tool output" in prompt
+
 
 class TestBuildCliArgs:
     def test_basic_args(self) -> None:
@@ -106,6 +116,28 @@ class TestBuildCliArgs:
         assert "--system-prompt" in args
         idx = args.index("--system-prompt")
         assert args[idx + 1] == "Be concise."
+
+
+class TestGenerateAndProcessWithTools:
+    def test_system_prompt_restored_after_tool_call(self) -> None:
+        """Verify the system instruction is restored even if generate fails."""
+        m = ClaudeCodeModel("cc/opus", model_config={"system_instruction": "Be helpful."})
+        m.initialize("test")
+        # generate() will fail because CLI is not mocked, but system prompt should be restored
+        try:
+            m.generate_and_process_with_tools({"finish": lambda result: result})
+        except Exception:
+            pass
+        assert m.model_config.get("system_instruction") == "Be helpful."
+
+    def test_system_prompt_restored_when_originally_empty(self) -> None:
+        m = ClaudeCodeModel("cc/opus")
+        m.initialize("test")
+        try:
+            m.generate_and_process_with_tools({"finish": lambda result: result})
+        except Exception:
+            pass
+        assert "system_instruction" not in m.model_config
 
 
 class TestUnsupportedMethods:
@@ -174,9 +206,9 @@ class TestModelInfoEntries:
         assert "cc/sonnet" in MODEL_INFO
         assert "cc/haiku" in MODEL_INFO
 
-    def test_cc_models_no_function_calling(self) -> None:
+    def test_cc_models_support_function_calling(self) -> None:
         for name in ("cc/opus", "cc/sonnet", "cc/haiku"):
-            assert not MODEL_INFO[name].is_function_calling_supported
+            assert MODEL_INFO[name].is_function_calling_supported
 
 
 @requires_claude_cli
@@ -250,31 +282,41 @@ class TestGenerateIntegration:
         assert m.conversation == []
 
     @pytest.mark.timeout(120)
-    def test_generate_and_process_with_tools_agentic(self, tmp_path: object) -> None:
-        """Test that generate_and_process_with_tools runs the CLI as a full agent."""
-        import tempfile
-        from pathlib import Path
+    def test_generate_and_process_with_tools_text_based(self) -> None:
+        """Test text-based tool calling — CLI acts as pure LLM, not agent."""
 
-        with tempfile.TemporaryDirectory() as work_dir:
-            m = ClaudeCodeModel(
-                "cc/haiku",
-                model_config={
-                    "system_instruction": f"Work dir: {work_dir}. "
-                    "Create files in the work directory.",
-                },
-            )
-            m.initialize(
-                f"Create a file called test_output.txt in {work_dir} "
-                "containing 'agent works'. Do nothing else."
-            )
-            calls, text, response = m.generate_and_process_with_tools({})
-            # Should return a synthetic finish call
-            assert len(calls) == 1
-            assert calls[0]["name"] == "finish"
-            assert calls[0]["arguments"]["success"] == "true"
-            assert calls[0]["arguments"]["is_continue"] == "false"
-            assert isinstance(calls[0]["arguments"]["summary"], str)
-            # The CLI agent should have created the file
-            output_file = Path(work_dir) / "test_output.txt"
-            assert output_file.exists()
-            assert "agent works" in output_file.read_text()
+        def add(a: str, b: str) -> str:
+            """Add two numbers.
+
+            Args:
+                a: First number.
+                b: Second number.
+
+            Returns:
+                The sum as a string.
+            """
+            return str(int(a) + int(b))
+
+        def finish(result: str) -> str:
+            """Return the final answer.
+
+            Args:
+                result: The result string.
+
+            Returns:
+                The result.
+            """
+            return result
+
+        m = ClaudeCodeModel("cc/haiku")
+        m.initialize(
+            "What is 3 + 4? Use the add tool, then call finish with the answer."
+        )
+        calls, content, response = m.generate_and_process_with_tools(
+            {"add": add, "finish": finish}
+        )
+        # Should have parsed at least one tool call from text
+        assert len(calls) >= 1
+        assert calls[0]["name"] in ("add", "finish")
+        assert "arguments" in calls[0]
+        assert isinstance(response, dict)

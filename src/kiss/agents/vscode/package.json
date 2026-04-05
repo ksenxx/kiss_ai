@@ -48,11 +48,16 @@
     "commands": [
       {
         "command": "kissSorcar.openPanel",
-        "title": "KISS: Open Sorcar Chat"
+        "title": "KISS: Open Sorcar Chat",
+        "icon": {
+          "light": "media/kiss-icon.svg",
+          "dark": "media/kiss-icon.svg"
+        }
       },
       {
         "command": "kissSorcar.newConversation",
-        "title": "KISS: New Conversation"
+        "title": "KISS: New Conversation",
+        "icon": "media/kiss-icon.png"
       },
       {
         "command": "kissSorcar.stopTask",
@@ -77,6 +82,12 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "kissSorcar.newConversation",
+          "group": "navigation@-1"
+        }
+      ],
       "scm/inputBox": [
         {
           "command": "kissSorcar.generateCommitMessage",

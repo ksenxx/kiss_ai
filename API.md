@@ -4438,11 +4438,11 @@ ______________________________________________________________________
 
   - **Returns:** tuple\[str, Any\]: (generated_text, parsed_json_response).
 
-- **generate_and_process_with_tools** — Run Claude Code CLI as a full agent with its built-in tools. The CLI executes the entire agentic loop internally (Bash, Edit, Read, Write) and returns the final result. A synthetic `finish` tool call is returned so the framework's loop terminates cleanly.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generate with text-based tool calling via the Claude Code CLI. Tool descriptions are injected into the system prompt. The model's text output is parsed for JSON `tool_calls` blocks, which are returned to the framework for execution — the CLI itself runs in pure LLM mode (`--tools ""`), **not** as an agent.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
-  - `function_map`: Ignored — the CLI uses its own built-in tools.
-  - `tools_schema`: Ignored — the CLI uses its own tool definitions.
-  - **Returns:** Tuple of `([finish_call], "", response_json)`.
+  - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Ignored (text-based tool calling builds its own prompt).
+  - **Returns:** Tuple of `(function_calls, content, response)`.
 
 - **extract_input_output_token_counts_from_response** — Extract token counts from the Claude Code CLI JSON response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
@@ -7350,11 +7350,11 @@ ______________________________________________________________________
 
   - **Returns:** tuple\[str, Any\]: (generated_text, parsed_json_response).
 
-- **generate_and_process_with_tools** — Run Claude Code CLI as a full agent with its built-in tools. The CLI executes the entire agentic loop internally (Bash, Edit, Read, Write) and returns the final result. A synthetic `finish` tool call is returned so the framework's loop terminates cleanly.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
+- **generate_and_process_with_tools** — Generate with text-based tool calling via the Claude Code CLI. Tool descriptions are injected into the system prompt. The model's text output is parsed for JSON `tool_calls` blocks, which are returned to the framework for execution — the CLI itself runs in pure LLM mode (`--tools ""`), **not** as an agent.<br/>`generate_and_process_with_tools(function_map: dict[str, Callable[..., Any]], tools_schema: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], str, Any]`
 
-  - `function_map`: Ignored — the CLI uses its own built-in tools.
-  - `tools_schema`: Ignored — the CLI uses its own tool definitions.
-  - **Returns:** Tuple of `([finish_call], "", response_json)`.
+  - `function_map`: Dictionary mapping function names to callable functions.
+  - `tools_schema`: Ignored (text-based tool calling builds its own prompt).
+  - **Returns:** Tuple of `(function_calls, content, response)`.
 
 - **extract_input_output_token_counts_from_response** — Extract token counts from the Claude Code CLI JSON response.<br/>`extract_input_output_token_counts_from_response(response: Any) -> tuple[int, int, int, int]`
 
