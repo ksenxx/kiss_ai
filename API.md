@@ -31,6 +31,7 @@
   - [`kiss.docker`](#kissdocker)
     - [`kiss.docker.docker_manager`](#kissdockerdocker_manager)
       - [`kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentssorcarstateful_sorcar_agent)
+      - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
         - [`kiss.agents.vscode.kiss_project.src.kiss`](#kissagentsvscodekiss_projectsrckiss)
@@ -46,6 +47,7 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentsvscodekiss_projectsrckissagentssorcarstateful_sorcar_agent)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.useful_tools`](#kissagentsvscodekiss_projectsrckissagentssorcaruseful_tools)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.web_use_tool`](#kissagentsvscodekiss_projectsrckissagentssorcarweb_use_tool)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentsvscodekiss_projectsrckissagentssorcarworktree_sorcar_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode`](#kissagentsvscodekiss_projectsrckissagentsvscode)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.browser_ui`](#kissagentsvscodekiss_projectsrckissagentsvscodebrowser_ui)
               - [`kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.helpers`](#kissagentsvscodekiss_projectsrckissagentsvscodehelpers)
@@ -1140,6 +1142,37 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+#### `kiss.agents.sorcar.worktree_sorcar_agent` — *Worktree-based agent that runs each task on an isolated git branch.*
+
+##### `class WorktreeSorcarAgent(StatefulSorcarAgent)` — SorcarAgent that isolates every task in a git worktree.
+
+**Constructor:** `WorktreeSorcarAgent(name: str) -> None`
+
+- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. If a branch from this chat session is already pending, returns an error asking the user to merge or discard first. Falls back to direct execution (no worktree) when: - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+
+  - `prompt_template`: The task prompt.
+  - `**kwargs`: All other arguments forwarded to `StatefulSorcarAgent.run()`.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
+
+- **merge** — Merge the task branch into the original branch. Every step is idempotent — safe to re-run after a crash. Auto-commits any uncommitted changes in the worktree before merging.<br/>`merge() -> str`
+
+  - **Returns:** Success message, or error message if merge fails.
+
+- **discard** — Throw away the task branch and worktree. Every step is idempotent — safe to call multiple times.<br/>`discard() -> str`
+
+  - **Returns:** Confirmation message.
+
+- **merge_instructions** — Return human-readable merge/discard instructions.<br/>`merge_instructions() -> str`
+
+  - **Returns:** Multi-line string with automatic merge, manual merge, and discard instructions.
+
+- **cleanup** — Scan for orphaned `kiss/wt-*` branches and worktrees.<br/>`cleanup(repo_root: Path | str) -> str`
+
+  - `repo_root`: Root of the git repository to scan.
+  - **Returns:** Summary of findings and any cleanup actions taken.
+
+______________________________________________________________________
+
 #### `kiss.agents.vscode` — *KISS Sorcar VS Code Extension backend.*
 
 ______________________________________________________________________
@@ -1703,6 +1736,37 @@ ______________________________________________________________________
 - **get_tools** — Return callable web tools for registration with an agent.<br/>`get_tools() -> list[Callable[..., str]]`
 
   - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content, ask_user_browser_action. Does not include close.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.worktree_sorcar_agent` — *Worktree-based agent that runs each task on an isolated git branch.*
+
+##### `class WorktreeSorcarAgent(StatefulSorcarAgent)` — SorcarAgent that isolates every task in a git worktree.
+
+**Constructor:** `WorktreeSorcarAgent(name: str) -> None`
+
+- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. If a branch from this chat session is already pending, returns an error asking the user to merge or discard first. Falls back to direct execution (no worktree) when: - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+
+  - `prompt_template`: The task prompt.
+  - `**kwargs`: All other arguments forwarded to `StatefulSorcarAgent.run()`.
+  - **Returns:** YAML string with 'success' and 'summary' keys.
+
+- **merge** — Merge the task branch into the original branch. Every step is idempotent — safe to re-run after a crash. Auto-commits any uncommitted changes in the worktree before merging.<br/>`merge() -> str`
+
+  - **Returns:** Success message, or error message if merge fails.
+
+- **discard** — Throw away the task branch and worktree. Every step is idempotent — safe to call multiple times.<br/>`discard() -> str`
+
+  - **Returns:** Confirmation message.
+
+- **merge_instructions** — Return human-readable merge/discard instructions.<br/>`merge_instructions() -> str`
+
+  - **Returns:** Multi-line string with automatic merge, manual merge, and discard instructions.
+
+- **cleanup** — Scan for orphaned `kiss/wt-*` branches and worktrees.<br/>`cleanup(repo_root: Path | str) -> str`
+
+  - `repo_root`: Root of the git repository to scan.
+  - **Returns:** Summary of findings and any cleanup actions taken.
 
 ______________________________________________________________________
 
