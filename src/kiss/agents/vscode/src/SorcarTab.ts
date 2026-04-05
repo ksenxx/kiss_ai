@@ -202,6 +202,7 @@ export class SorcarTab {
       return;
     }
     this._updateTabTitle(prompt);
+    this.sendToWebview({ type: 'setTaskText', text: prompt } as ToWebviewMessage);
     this.sendToWebview({ type: 'status', running: true });
     this._agentProcess.sendCommand({
       type: 'run',

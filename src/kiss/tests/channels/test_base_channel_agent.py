@@ -46,7 +46,8 @@ ALL_AGENTS = [
 
 def _get_agent_class(module_path: str, class_name: str) -> type:
     mod = importlib.import_module(module_path)
-    return getattr(mod, class_name)
+    cls: type = getattr(mod, class_name)
+    return cls
 
 
 @pytest.mark.parametrize(

@@ -553,6 +553,10 @@
       }
       replayTaskEvents(ev.events || []);
       break;
+    case 'setTaskText':
+      setTaskText(ev.text || '');
+      if (welcome) welcome.style.display = 'none';
+      break;
     case 'focusInput':
       inp.focus();
       setTimeout(function() { inp.focus(); }, 100);

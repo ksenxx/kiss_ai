@@ -77,7 +77,8 @@ export type ToWebviewMessage =
   | { type: 'ghost'; suggestion: string; query: string }
   | { type: 'commitMessage'; message: string; error?: string }
   | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string }
-  | { type: 'inputHistory'; tasks: string[] };
+  | { type: 'inputHistory'; tasks: string[] }
+  | { type: 'setTaskText'; text: string };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
