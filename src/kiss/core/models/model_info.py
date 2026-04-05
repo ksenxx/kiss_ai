@@ -824,9 +824,17 @@ def get_available_models() -> list[str]:
         "gemini-": keys.GEMINI_API_KEY,
         "minimax-": keys.MINIMAX_API_KEY,
     }
+    # Check once whether the claude CLI is available for cc/ models
+    import shutil
+
+    has_claude_cli = shutil.which("claude") is not None
     result = []
     for name, info in MODEL_INFO.items():
         if not info.is_generation_supported:
+            continue
+        if name.startswith("cc/"):
+            if has_claude_cli:
+                result.append(name)
             continue
         api_key = ""
         for prefix, key in prefix_to_key.items():

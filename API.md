@@ -94,7 +94,6 @@
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.kiss_agent`](#kissagentsvscodekiss_projectsrckisscorekiss_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.kiss_error`](#kissagentsvscodekiss_projectsrckisscorekiss_error)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.models`](#kissagentsvscodekiss_projectsrckisscoremodels)
-              - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_batch_model`](#kissagentsvscodekiss_projectsrckisscoremodelsanthropic_batch_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_model`](#kissagentsvscodekiss_projectsrckisscoremodelsanthropic_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.claude_code_model`](#kissagentsvscodekiss_projectsrckisscoremodelsclaude_code_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.gemini_model`](#kissagentsvscodekiss_projectsrckisscoremodelsgemini_model)
@@ -1770,10 +1769,9 @@ ______________________________________________________________________
 - `name`: The model name string.
 - **Returns:** Tuple of (display name, numeric sort order).
 
-**`fast_model_for`** — Return a cheap/fast model from the same provider as the user's selected model.<br/>`def fast_model_for(selected_model: str) -> str`
+**`fast_model_for`** — Return a cheap/fast model based on which API keys are available. Priority: Anthropic/OpenRouter/Together → Gemini → OpenAI.<br/>`def fast_model_for() -> str`
 
-- `selected_model`: The user's currently selected model name.
-- **Returns:** A fast model name compatible with the same provider/API key.
+- **Returns:** A fast model name for the first available provider.
 
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
@@ -4307,7 +4305,7 @@ ______________________________________________________________________
 #### `kiss.agents.vscode.kiss_project.src.kiss.core.models` — *Model implementations for different LLM providers.*
 
 ```python
-from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Model, AnthropicBatchModel, AnthropicModel, ClaudeCodeModel, OpenAICompatibleModel, GeminiModel
+from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Model, AnthropicModel, ClaudeCodeModel, OpenAICompatibleModel, GeminiModel
 ```
 
 ##### `class Attachment` — A file attachment (image or document) to include in a prompt.
@@ -4371,19 +4369,6 @@ from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Mod
 - **set_usage_info_for_messages** — Sets token information to append to messages sent to the LLM.<br/>`set_usage_info_for_messages(usage_info: str) -> None`
 
   - `usage_info`: The usage information string to append.
-
-______________________________________________________________________
-
-#### `kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_batch_model` — *Anthropic Batch API model — routes requests through the Message Batches API.*
-
-##### `class AnthropicBatchModel(AnthropicModel)` — A model that uses the Anthropic Message Batches API for 50% cheaper inference.
-
-**Constructor:** `AnthropicBatchModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
-
-- `model_name`: Full model name including `batch/` prefix.
-- `api_key`: The Anthropic API key for authentication.
-- `model_config`: Optional configuration. Recognised extra keys: - `poll_interval` (float): Seconds between polls (default 2.0). - `poll_timeout` (float): Max seconds to wait (default 86400).
-- `token_callback`: Ignored — batch API does not support streaming.
 
 ______________________________________________________________________
 
