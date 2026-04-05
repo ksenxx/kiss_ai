@@ -162,8 +162,8 @@ def channel_main(
             required config is missing. Pass ``None`` to disable daemon mode.
         daemon_poll_interval: Message poll interval for daemon mode in seconds.
     """
+    from kiss.agents.sorcar.cli_helpers import _build_arg_parser
     from kiss.agents.sorcar.sorcar_agent import (
-        _build_arg_parser,
         _resolve_task,
         cli_ask_user_question,
         cli_wait_for_user,

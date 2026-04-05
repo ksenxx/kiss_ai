@@ -226,45 +226,6 @@ class SorcarAgent(RelentlessAgent):
             self._ask_user_question_callback = None
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build and return the argument parser for main().
-
-    Returns:
-        Configured ArgumentParser instance.
-    """
-    parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
-    parser.add_argument(
-        "-m", "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
-    )
-    parser.add_argument(
-        "-e", "--endpoint", type=str, default=None, help="Custom endpoint for local model"
-    )
-    parser.add_argument(
-        "-b", "--max_budget", type=float, default=100.0, help="Maximum budget in USD"
-    )
-    parser.add_argument("-w", "--work_dir", type=str, default=None, help="Working directory")
-    parser.add_argument(
-        "-v", "--verbose",
-        type=lambda x: str(x).lower() == "true",
-        default=True,
-        help="Print output to console",
-    )
-    parser.add_argument(
-        "--no-web",
-        action="store_true",
-        default=False,
-        help="Disable browser/web tools (terminal-only mode)",
-    )
-    parser.add_argument(
-        "-t", "--task", type=str, default=None, help="Prompt template/task description"
-    )
-    parser.add_argument(
-        "-f", "--file", type=str, default=None,
-        help="Path to a file whose contents to use as the task",
-    )
-    return parser
-
-
 _DEFAULT_TASK = """
 can you find what the current weather is in San Francisco and summarize it?
 """
@@ -321,6 +282,11 @@ def cli_ask_user_question(question: str) -> str:
 def main() -> None:  # pragma: no cover – CLI entry point requires API
     import time as time_mod
 
+    from kiss.agents.sorcar.cli_helpers import (
+        _build_arg_parser,
+        _build_fallback_run_kwargs,
+        _build_run_kwargs,
+    )
 
     if len(sys.argv) <= 1:
         print("Usage: sorcar_agent.py [-m MODEL_NAME] [-e ENDPOINT] [-b MAX_BUDGET] "
@@ -332,35 +298,9 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     try:
         args = parser.parse_args()
     except Exception:
-        task_description = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else ""
-        work_dir = str(Path(".").resolve())
-        run_kwargs: dict[str, Any] = {
-            "prompt_template": task_description,
-            "work_dir": work_dir,
-            "wait_for_user_callback": cli_wait_for_user,
-            "ask_user_question_callback": cli_ask_user_question,
-        }
+        run_kwargs = _build_fallback_run_kwargs()
     else:
-        task_description = _resolve_task(args)
-        if args.work_dir is not None:
-            work_dir = args.work_dir
-            Path(work_dir).mkdir(parents=True, exist_ok=True)
-        else:
-            work_dir = str(Path(".").resolve())
-        model_config = {}
-        if args.endpoint:
-            model_config["base_url"] = args.endpoint
-        run_kwargs = {
-            "prompt_template": task_description,
-            "model_name": args.model_name,
-            "max_budget": args.max_budget,
-            "model_config": model_config,
-            "work_dir": work_dir,
-            "web_tools": not args.no_web,
-            "verbose": args.verbose,
-            "wait_for_user_callback": cli_wait_for_user,
-            "ask_user_question_callback": cli_ask_user_question,
-        }
+        run_kwargs = _build_run_kwargs(args)
 
     start_time = time_mod.time()
     result = agent.run(**run_kwargs)
@@ -376,7 +316,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         print(result_data.get("summary", result))
     else:
         print(result)
-    print("Work directory was: " + work_dir)
+    print(f"Work directory was: {run_kwargs.get('work_dir', '.')}")
     print(f"Time: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")
     print(f"Total tokens: {agent.total_tokens_used}")

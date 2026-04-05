@@ -446,6 +446,48 @@ def _load_last_chat_id() -> str:
     return row["chat_id"] if row and row["chat_id"] else ""
 
 
+def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
+    """List recent chat sessions with their tasks and results.
+
+    Returns the most recent *limit* distinct chat sessions, ordered by
+    most-recent-first.  Each entry contains the ``chat_id`` and a list
+    of ``tasks`` (each with ``task``, ``result``, ``timestamp``) in
+    chronological order.
+
+    Args:
+        limit: Maximum number of chat sessions to return.
+
+    Returns:
+        List of dicts, each with ``chat_id`` (str) and ``tasks``
+        (list of dicts with ``task``, ``result``, ``timestamp``).
+    """
+    db = _get_db()
+    # Get the most recent chat_ids by their latest task timestamp
+    chat_rows = db.execute(
+        "SELECT chat_id, MAX(timestamp) AS latest "
+        "FROM task_history WHERE chat_id != '' "
+        "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    result: list[dict[str, object]] = []
+    for cr in chat_rows:
+        cid = cr["chat_id"]
+        tasks = db.execute(
+            "SELECT task, result, timestamp FROM task_history "
+            "WHERE chat_id = ? ORDER BY timestamp ASC",
+            (cid,),
+        ).fetchall()
+        result.append({
+            "chat_id": cid,
+            "tasks": [
+                {"task": t["task"], "result": t["result"],
+                 "timestamp": t["timestamp"]}
+                for t in tasks
+            ],
+        })
+    return result
+
+
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 

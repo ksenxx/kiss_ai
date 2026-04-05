@@ -8,11 +8,17 @@ management — the same workflow that the VS Code extension performs in
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.cli_helpers import (
+    _apply_chat_args,
+    _build_chat_arg_parser,
+    _build_run_kwargs,
+    _print_recent_chats,
+    _print_run_stats,
+)
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _generate_chat_id,
@@ -20,13 +26,7 @@ from kiss.agents.sorcar.persistence import (
     _load_task_chat_id,
     _save_task_result,
 )
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-    _build_arg_parser,
-    _resolve_task,
-    cli_ask_user_question,
-    cli_wait_for_user,
-)
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 class StatefulSorcarAgent(SorcarAgent):
@@ -146,46 +146,25 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     if len(sys.argv) <= 1:
         print(
             "Usage: stateful_sorcar_agent [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n]"
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]"
         )
         sys.exit(1)
 
-    parser = _build_arg_parser()
-    parser.add_argument(
-        "-n", "--new", action="store_true",
-        help="Start a new chat session",
-    )
+    parser = _build_chat_arg_parser()
     args = parser.parse_args()
 
+    if args.list_chat_id:
+        _print_recent_chats()
+        sys.exit(0)
+
     agent = StatefulSorcarAgent("Stateful Sorcar Agent")
-
-    task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    model_config: dict[str, Any] = {}
-    if args.endpoint:
-        model_config["base_url"] = args.endpoint
-
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": task_description,
-        "model_name": args.model_name,
-        "max_budget": args.max_budget,
-        "model_config": model_config,
-        "work_dir": work_dir,
-        "web_tools": not args.no_web,
-        "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
-        "ask_user_question_callback": cli_ask_user_question,
-    }
+    _apply_chat_args(agent, args)
 
     start_time = time_mod.time()
-    agent.run(**run_kwargs)
+    agent.run(**_build_run_kwargs(args))
     elapsed = time_mod.time() - start_time
 
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
+    _print_run_stats(agent, elapsed)
 
 
 if __name__ == "__main__":

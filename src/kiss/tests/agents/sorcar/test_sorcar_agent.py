@@ -7,9 +7,9 @@ import queue
 from pathlib import Path
 from typing import Any, cast
 
+from kiss.agents.sorcar.cli_helpers import _build_arg_parser
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
-    _build_arg_parser,
     _resolve_task,
     cli_ask_user_question,
     cli_wait_for_user,
