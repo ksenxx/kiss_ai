@@ -58,7 +58,7 @@ The trajectory of the agent is stored in the file: {trajectory_file}
 """
 
 
-def finish(success: bool, is_continue: bool, summary: str) -> str:
+def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
     """Finish execution with status and summary.
 
     Args:
