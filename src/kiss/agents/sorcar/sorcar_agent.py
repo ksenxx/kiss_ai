@@ -367,9 +367,15 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     elapsed = time_mod.time() - start_time
 
     print("FINAL RESULT:")
-    result_data = yaml.safe_load(result)
-    print("Completed successfully: " + str(result_data["success"]))
-    print(result_data["summary"])
+    try:
+        result_data = yaml.safe_load(result)
+    except Exception:
+        result_data = None
+    if isinstance(result_data, dict):
+        print("Completed successfully: " + str(result_data.get("success", False)))
+        print(result_data.get("summary", result))
+    else:
+        print(result)
     print("Work directory was: " + work_dir)
     print(f"Time: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")

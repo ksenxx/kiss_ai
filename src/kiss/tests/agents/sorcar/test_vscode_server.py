@@ -35,12 +35,20 @@ class TestModelVendorOrder(unittest.TestCase):
             "gpt-4o",
             "openrouter/x",
             "minimax-large",
+            "cc/opus",
         ]
         sorted_names = sorted(names, key=_model_vendor_order)
         assert sorted_names[0] == "claude-opus-4-6"
-        assert sorted_names[1] == "gpt-4o"
-        assert sorted_names[2] == "gemini-2.0-flash"
+        assert sorted_names[1] == "cc/opus"
+        assert sorted_names[2] == "gpt-4o"
+        assert sorted_names[3] == "gemini-2.0-flash"
         assert sorted_names[-1] in ("unknown-model", "together/some-model")
+
+    def test_cc_models_are_anthropic(self) -> None:
+        assert _model_vendor_name("cc/opus") == "Anthropic"
+        assert _model_vendor_name("cc/sonnet") == "Anthropic"
+        assert _model_vendor_name("cc/haiku") == "Anthropic"
+        assert _model_vendor_order("cc/opus") == 0
 
 
 class TestGetFiles(unittest.TestCase):

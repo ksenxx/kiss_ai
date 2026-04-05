@@ -38,7 +38,7 @@ def model_vendor(name: str) -> tuple[str, int]:
     Returns:
         Tuple of (display name, numeric sort order).
     """
-    if name.startswith("claude-"):
+    if name.startswith("claude-") or name.startswith("cc/"):
         return "Anthropic", 0
     if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
         return "OpenAI", 1

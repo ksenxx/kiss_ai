@@ -125,8 +125,12 @@ class StatefulSorcarAgent(SorcarAgent):
         result_summary = ""
         try:
             result = super().run(prompt_template=agent_prompt, **kwargs)
-            result_yaml = yaml.safe_load(result)
-            result_summary = result_yaml.get("summary", "") if result_yaml else ""
+            try:
+                result_yaml = yaml.safe_load(result)
+                if isinstance(result_yaml, dict):
+                    result_summary = result_yaml.get("summary", "")
+            except Exception:
+                result_summary = result[:500] if result else ""
             return result
         except Exception:
             result_summary = "Task failed"
