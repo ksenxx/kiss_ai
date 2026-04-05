@@ -110,10 +110,6 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""),
         description="MiniMax API key (can also be set via MINIMAX_API_KEY env var)",
     )
-    FAST_MODEL: str = Field(
-        default="claude-haiku-4-5",
-        description="Model for fast operations like commit and suggestion generation",
-    )
 
 
 DEFAULT_CONFIG: Any = Config()
