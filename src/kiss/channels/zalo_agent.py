@@ -35,6 +35,12 @@ from kiss.channels._backend_utils import (
     stop_http_server,
     wait_for_matching_message,
 )
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,41 +57,20 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, str] | None:
     """Load stored Zalo config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and data.get("access_token"):  # pragma: no branch
-            return {
-                "access_token": data["access_token"],
-                "oa_id": data.get("oa_id", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("access_token",))
 
 
-def _save_config(access_token: str, oa_id: str = "") -> None:
+def _save_config(access_token: str, oa_id: str) -> None:
     """Save Zalo config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "access_token": access_token.strip(),
-        "oa_id": oa_id.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(_config_path(), {"access_token": access_token.strip(), "oa_id": oa_id.strip()})
 
 
 def _clear_config() -> None:
     """Delete the stored Zalo config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    clear_json_config(_config_path())
 
 
-class ZaloChannelBackend:
+class ZaloChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Zalo OA API.
 
     Uses webhook queue pattern for receiving inbound messages.
@@ -426,20 +411,6 @@ class ZaloChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class ZaloAgent(StatefulSorcarAgent):
@@ -524,7 +495,6 @@ class ZaloAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the ZaloAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

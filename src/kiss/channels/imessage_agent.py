@@ -25,6 +25,12 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _IMESSAGE_DIR = Path.home() / ".kiss" / "channels" / "imessage"
 
@@ -41,28 +47,17 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, str] | None:
     """Load stored iMessage config (minimal, no credentials needed)."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ())
 
 
 def _save_config() -> None:
     """Save iMessage config marker to disk."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"enabled": True}, indent=2))
+    save_json_config(_config_path(), {"enabled": "true"})
 
 
 def _clear_config() -> None:
-    """Delete the stored iMessage config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    """Delete the stored Imessage config."""
+    clear_json_config(_config_path())
 
 
 def _run_osascript(script: str) -> tuple[str, str]:
@@ -74,7 +69,7 @@ def _run_osascript(script: str) -> tuple[str, str]:
     return result.stdout.strip(), result.stderr.strip()
 
 
-class IMessageChannelBackend:
+class IMessageChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for iMessage via AppleScript."""
 
     def __init__(self) -> None:
@@ -254,20 +249,6 @@ end tell'''
             "messages": [],
         })
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class IMessageAgent(StatefulSorcarAgent):

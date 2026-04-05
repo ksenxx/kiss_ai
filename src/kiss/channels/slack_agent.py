@@ -34,6 +34,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +66,8 @@ def _load_token() -> str | None:
     Returns:
         The bot token string, or None if not found or invalid.
     """
-    path = _token_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict):
-            tok = data.get("access_token", "")
-            return tok if tok else None
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    cfg = load_json_config(_token_path(), ("access_token",))
+    return cfg["access_token"] if cfg else None
 
 
 def _save_token(token: str) -> None:
@@ -79,18 +76,12 @@ def _save_token(token: str) -> None:
     Args:
         token: The bot token string (e.g. ``xoxb-...``).
     """
-    path = _token_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"access_token": token.strip()}, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(_token_path(), {"access_token": token.strip()})
 
 
 def _clear_token() -> None:
     """Delete the stored Slack bot token."""
-    path = _token_path()
-    if path.exists():
-        path.unlink()
+    clear_json_config(_token_path())
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +96,7 @@ def _clear_token() -> None:
 _REPLY_POLL_INTERVAL = 2.0
 
 
-class SlackChannelBackend:
+class SlackChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Slack.
 
     Provides channel monitoring, message sending, and reply waiting for
@@ -803,46 +794,11 @@ class SlackChannelBackend:
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent.
-
-        Automatically discovers all public methods of this class,
-        excluding ChannelBackend protocol/infrastructure methods.
-
-        Returns:
-            List of callable tool methods for Slack API operations.
-        """
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 # ---------------------------------------------------------------------------
 # SlackAgent
 # ---------------------------------------------------------------------------
-
-
-def _make_slack_tools(client: WebClient) -> list:
-    """Create Slack API tool functions from a WebClient instance.
-
-    Args:
-        client: An authenticated ``slack_sdk.WebClient``.
-
-    Returns:
-        List of callable tool methods for Slack API operations.
-    """
-    backend = SlackChannelBackend()
-    backend._client = client
-    return backend.get_tool_methods()
 
 
 class SlackAgent(StatefulSorcarAgent):
@@ -998,7 +954,6 @@ class SlackAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the SlackAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:

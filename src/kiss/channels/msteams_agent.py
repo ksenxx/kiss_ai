@@ -28,6 +28,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _MSTEAMS_DIR = Path.home() / ".kiss" / "channels" / "msteams"
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -39,47 +45,26 @@ def _config_path() -> Path:
 
 
 def _load_config() -> dict[str, str] | None:
-    """Load stored MS Teams config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if (  # pragma: no branch
-            isinstance(data, dict) and data.get("tenant_id") and data.get("client_id")
-        ):
-            return {
-                "tenant_id": data["tenant_id"],
-                "client_id": data["client_id"],
-                "client_secret": data["client_secret"],
-                "bot_id": data.get("bot_id", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    """Load stored Msteams config from disk."""
+    return load_json_config(_config_path(), ("tenant_id", "client_id",))
 
 
-def _save_config(
-    tenant_id: str, client_id: str, client_secret: str, bot_id: str = ""
-) -> None:
-    """Save MS Teams config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "tenant_id": tenant_id.strip(),
-        "client_id": client_id.strip(),
-        "client_secret": client_secret.strip(),
-        "bot_id": bot_id.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+def _save_config(tenant_id: str, client_id: str, client_secret: str, bot_id: str) -> None:
+    """Save Msteams config to disk with restricted permissions."""
+    save_json_config(
+        _config_path(),
+        {
+            "tenant_id": tenant_id.strip(),
+            "client_id": client_id.strip(),
+            "client_secret": client_secret.strip(),
+            "bot_id": bot_id.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
-    """Delete the stored MS Teams config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    """Delete the stored Msteams config."""
+    clear_json_config(_config_path())
 
 
 def _get_access_token(tenant_id: str, client_id: str, client_secret: str) -> str:
@@ -95,7 +80,7 @@ def _get_access_token(tenant_id: str, client_id: str, client_secret: str) -> str
     return str(data.get("access_token", ""))
 
 
-class MSTeamsChannelBackend:
+class MSTeamsChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Microsoft Teams via Graph API."""
 
     def __init__(self) -> None:
@@ -451,20 +436,6 @@ class MSTeamsChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class MSTeamsAgent(StatefulSorcarAgent):
@@ -562,7 +533,6 @@ class MSTeamsAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the MSTeamsAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

@@ -2022,7 +2022,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.bluebubbles_agent` — *BlueBubbles Agent — StatefulSorcarAgent extension with BlueBubbles REST API tools.*
 
-##### `class BlueBubblesChannelBackend` — ChannelBackend implementation for BlueBubbles REST API.
+##### `class BlueBubblesChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for BlueBubbles REST API.
 
 **Constructor:** `BlueBubblesChannelBackend() -> None`
 
@@ -2081,8 +2081,6 @@ ______________________________________________________________________
 
   - `chat_guid`: Chat GUID to mark as read.
   - **Returns:** JSON string with ok status.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class BlueBubblesAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only).
 
@@ -2205,7 +2203,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.feishu_agent` — *Feishu/Lark Agent — StatefulSorcarAgent extension with Feishu Open Platform tools.*
 
-##### `class FeishuChannelBackend` — ChannelBackend implementation for Feishu/Lark Open Platform.
+##### `class FeishuChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Feishu/Lark Open Platform.
 
 **Constructor:** `FeishuChannelBackend() -> None`
 
@@ -2274,8 +2272,6 @@ ______________________________________________________________________
   - `user_id_type`: ID type ("open_id", "user_id", "union_id"). Default: "open_id".
   - **Returns:** JSON string with user info.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class FeishuAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Feishu/Lark Open Platform tools.
 
 **Constructor:** `FeishuAgent() -> None`
@@ -2284,7 +2280,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.gmail_agent` — *Gmail Agent — StatefulSorcarAgent extension with Gmail API tools.*
 
-##### `class GmailChannelBackend` — ChannelBackend implementation for Gmail.
+##### `class GmailChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Gmail.
 
 **Constructor:** `GmailChannelBackend() -> None`
 
@@ -2430,10 +2426,6 @@ ______________________________________________________________________
   - `thread_id`: Thread ID (from list_messages or get_message).
   - **Returns:** JSON string with all messages in the thread.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for Gmail API operations.
-
 ##### `class GmailAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Gmail API tools.
 
 **Constructor:** `GmailAgent() -> None`
@@ -2444,7 +2436,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.googlechat_agent` — *Google Chat Agent — StatefulSorcarAgent extension with Google Chat API tools.*
 
-##### `class GoogleChatChannelBackend` — ChannelBackend implementation for Google Chat API.
+##### `class GoogleChatChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Google Chat API.
 
 **Constructor:** `GoogleChatChannelBackend() -> None`
 
@@ -2525,8 +2517,6 @@ ______________________________________________________________________
   - `space_type`: Space type ("SPACE" or "GROUP_CHAT"). Default: "SPACE".
   - **Returns:** JSON string with space name and display name.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class GoogleChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Google Chat API tools.
 
 **Constructor:** `GoogleChatAgent() -> None`
@@ -2535,7 +2525,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.imessage_agent` — *iMessage Agent — StatefulSorcarAgent extension with iMessage tools via AppleScript.*
 
-##### `class IMessageChannelBackend` — ChannelBackend implementation for iMessage via AppleScript.
+##### `class IMessageChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for iMessage via AppleScript.
 
 **Constructor:** `IMessageChannelBackend() -> None`
 
@@ -2585,8 +2575,6 @@ ______________________________________________________________________
   - `limit`: Maximum messages to return. Default: 20.
   - **Returns:** JSON string with message list (basic).
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class IMessageAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with iMessage tools (macOS only).
 
 **Constructor:** `IMessageAgent() -> None`
@@ -2595,7 +2583,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.irc_agent` — *IRC Agent — StatefulSorcarAgent extension with IRC tools.*
 
-##### `class IRCChannelBackend` — ChannelBackend implementation for IRC via raw socket.
+##### `class IRCChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for IRC via raw socket.
 
 **Constructor:** `IRCChannelBackend() -> None`
 
@@ -2682,8 +2670,6 @@ ______________________________________________________________________
   - `password`: NickServ password.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class IRCAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with IRC tools.
 
 **Constructor:** `IRCAgent() -> None`
@@ -2692,7 +2678,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.line_agent` — *LINE Agent — StatefulSorcarAgent extension with LINE Messaging API tools.*
 
-##### `class LineChannelBackend` — ChannelBackend implementation for LINE Messaging API.
+##### `class LineChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for LINE Messaging API.
 
 **Constructor:** `LineChannelBackend() -> None`
 
@@ -2751,8 +2737,6 @@ ______________________________________________________________________
   - `preview_url`: URL of the preview image.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class LineAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with LINE Messaging API tools.
 
 **Constructor:** `LineAgent() -> None`
@@ -2761,7 +2745,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.matrix_agent` — *Matrix Agent — StatefulSorcarAgent extension with Matrix protocol tools.*
 
-##### `class MatrixChannelBackend` — ChannelBackend implementation for Matrix via matrix-nio.
+##### `class MatrixChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Matrix via matrix-nio.
 
 **Constructor:** `MatrixChannelBackend() -> None`
 
@@ -2844,8 +2828,6 @@ ______________________________________________________________________
   - `user_id`: User ID (@user:server.org).
   - **Returns:** JSON string with display name and avatar.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class MatrixAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Matrix protocol tools.
 
 **Constructor:** `MatrixAgent() -> None`
@@ -2854,7 +2836,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.mattermost_agent` — *Mattermost Agent — StatefulSorcarAgent extension with Mattermost REST API tools.*
 
-##### `class MattermostChannelBackend` — ChannelBackend implementation for Mattermost REST API.
+##### `class MattermostChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Mattermost REST API.
 
 **Constructor:** `MattermostChannelBackend() -> None`
 
@@ -2942,8 +2924,6 @@ ______________________________________________________________________
   - `emoji_name`: Emoji name (without colons, e.g. "thumbsup").
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class MattermostAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Mattermost REST API tools.
 
 **Constructor:** `MattermostAgent() -> None`
@@ -2952,7 +2932,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.msteams_agent` — *Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.*
 
-##### `class MSTeamsChannelBackend` — ChannelBackend implementation for Microsoft Teams via Graph API.
+##### `class MSTeamsChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Microsoft Teams via Graph API.
 
 **Constructor:** `MSTeamsChannelBackend() -> None`
 
@@ -3034,8 +3014,6 @@ ______________________________________________________________________
   - `top`: Maximum members to return. Default: 50.
   - **Returns:** JSON string with member list.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class MSTeamsAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Microsoft Teams Graph API tools.
 
 **Constructor:** `MSTeamsAgent() -> None`
@@ -3044,7 +3022,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.nextcloud_talk_agent` — *Nextcloud Talk Agent — StatefulSorcarAgent extension with Nextcloud Talk API tools.*
 
-##### `class NextcloudTalkChannelBackend` — ChannelBackend implementation for Nextcloud Talk REST API.
+##### `class NextcloudTalkChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Nextcloud Talk REST API.
 
 **Constructor:** `NextcloudTalkChannelBackend() -> None`
 
@@ -3118,8 +3096,6 @@ ______________________________________________________________________
   - `message_id`: Message ID to delete.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class NextcloudTalkAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nextcloud Talk API tools.
 
 **Constructor:** `NextcloudTalkAgent() -> None`
@@ -3128,7 +3104,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.nostr_agent` — *Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.*
 
-##### `class NostrChannelBackend` — ChannelBackend implementation for Nostr protocol via pynostr.
+##### `class NostrChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Nostr protocol via pynostr.
 
 **Constructor:** `NostrChannelBackend() -> None`
 
@@ -3197,8 +3173,6 @@ ______________________________________________________________________
   - `relay_url`: Relay URL to remove.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class NostrAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nostr protocol tools.
 
 **Constructor:** `NostrAgent() -> None`
@@ -3207,7 +3181,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.phone_control_agent` — *Phone Control Agent — StatefulSorcarAgent extension with Android phone control tools.*
 
-##### `class PhoneControlChannelBackend` — ChannelBackend implementation for Android phone control via REST API.
+##### `class PhoneControlChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Android phone control via REST API.
 
 **Constructor:** `PhoneControlChannelBackend() -> None`
 
@@ -3283,8 +3257,6 @@ ______________________________________________________________________
   - `text`: Reply text.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class PhoneControlAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Android phone control tools.
 
 **Constructor:** `PhoneControlAgent() -> None`
@@ -3293,7 +3265,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.signal_agent` — *Signal Agent — StatefulSorcarAgent extension with Signal CLI tools.*
 
-##### `class SignalChannelBackend` — ChannelBackend implementation for Signal via signal-cli.
+##### `class SignalChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Signal via signal-cli.
 
 **Constructor:** `SignalChannelBackend() -> None`
 
@@ -3345,8 +3317,6 @@ ______________________________________________________________________
 
   - **Returns:** JSON string with group list.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class SignalAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Signal CLI tools.
 
 **Constructor:** `SignalAgent() -> None`
@@ -3355,7 +3325,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.slack_agent` — *Slack Agent — StatefulSorcarAgent extension with Slack API tools.*
 
-##### `class SlackChannelBackend` — ChannelBackend implementation for Slack.
+##### `class SlackChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Slack.
 
 **Constructor:** `SlackChannelBackend() -> None`
 
@@ -3513,10 +3483,6 @@ ______________________________________________________________________
   - `channel`: Channel ID (e.g. "C01234567").
   - **Returns:** JSON string with channel details (name, topic, purpose, num_members, created, creator).
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for Slack API operations.
-
 ##### `class SlackAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent() -> None`
@@ -3527,7 +3493,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.sms_agent` — *SMS Agent — StatefulSorcarAgent extension with Twilio SMS tools.*
 
-##### `class SMSChannelBackend` — ChannelBackend implementation for Twilio SMS.
+##### `class SMSChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Twilio SMS.
 
 **Constructor:** `SMSChannelBackend() -> None`
 
@@ -3618,8 +3584,6 @@ ______________________________________________________________________
   - `message_sid`: Message SID to cancel.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class SMSAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twilio SMS tools.
 
 **Constructor:** `SMSAgent() -> None`
@@ -3628,7 +3592,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.synology_chat_agent` — *Synology Chat Agent — StatefulSorcarAgent extension with Synology Chat webhook API.*
 
-##### `class SynologyChatChannelBackend` — ChannelBackend implementation for Synology Chat webhooks.
+##### `class SynologyChatChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Synology Chat webhooks.
 
 **Constructor:** `SynologyChatChannelBackend() -> None`
 
@@ -3665,8 +3629,6 @@ ______________________________________________________________________
   - `text`: Message text.
   - `file_url`: URL of the file to attach.
   - **Returns:** JSON string with ok status.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class SynologyChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Synology Chat webhook tools.
 
@@ -3805,7 +3767,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.tlon_agent` — *Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.*
 
-##### `class TlonChannelBackend` — ChannelBackend implementation for Tlon/Urbit Eyre HTTP.
+##### `class TlonChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Tlon/Urbit Eyre HTTP.
 
 **Constructor:** `TlonChannelBackend() -> None`
 
@@ -3871,8 +3833,6 @@ ______________________________________________________________________
   - `path`: Scry path (starting with /).
   - **Returns:** JSON string with scry result.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class TlonAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools.
 
 **Constructor:** `TlonAgent() -> None`
@@ -3881,7 +3841,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.twitch_agent` — *Twitch Agent — StatefulSorcarAgent extension with Twitch Helix API + Chat tools.*
 
-##### `class TwitchChannelBackend` — ChannelBackend implementation for Twitch Helix API.
+##### `class TwitchChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Twitch Helix API.
 
 **Constructor:** `TwitchChannelBackend() -> None`
 
@@ -3961,8 +3921,6 @@ ______________________________________________________________________
   - `broadcaster_id`: Broadcaster ID.
   - `has_delay`: Whether to add a 5-second delay. Default: False.
   - **Returns:** JSON string with clip edit URL.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class TwitchAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twitch Helix API tools.
 
@@ -4130,7 +4088,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.channels.zalo_agent` — *Zalo Agent — StatefulSorcarAgent extension with Zalo Official Account API tools.*
 
-##### `class ZaloChannelBackend` — ChannelBackend implementation for Zalo OA API.
+##### `class ZaloChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Zalo OA API.
 
 **Constructor:** `ZaloChannelBackend() -> None`
 
@@ -4201,8 +4159,6 @@ ______________________________________________________________________
 
   - `file_path`: Local path to the image file.
   - **Returns:** JSON string with ok status and attachment_id.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class ZaloAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
 
@@ -5154,7 +5110,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.bluebubbles_agent` — *BlueBubbles Agent — StatefulSorcarAgent extension with BlueBubbles REST API tools.*
 
-##### `class BlueBubblesChannelBackend` — ChannelBackend implementation for BlueBubbles REST API.
+##### `class BlueBubblesChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for BlueBubbles REST API.
 
 **Constructor:** `BlueBubblesChannelBackend() -> None`
 
@@ -5213,8 +5169,6 @@ ______________________________________________________________________
 
   - `chat_guid`: Chat GUID to mark as read.
   - **Returns:** JSON string with ok status.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class BlueBubblesAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only).
 
@@ -5337,7 +5291,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.feishu_agent` — *Feishu/Lark Agent — StatefulSorcarAgent extension with Feishu Open Platform tools.*
 
-##### `class FeishuChannelBackend` — ChannelBackend implementation for Feishu/Lark Open Platform.
+##### `class FeishuChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Feishu/Lark Open Platform.
 
 **Constructor:** `FeishuChannelBackend() -> None`
 
@@ -5406,8 +5360,6 @@ ______________________________________________________________________
   - `user_id_type`: ID type ("open_id", "user_id", "union_id"). Default: "open_id".
   - **Returns:** JSON string with user info.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class FeishuAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Feishu/Lark Open Platform tools.
 
 **Constructor:** `FeishuAgent() -> None`
@@ -5416,7 +5368,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.gmail_agent` — *Gmail Agent — StatefulSorcarAgent extension with Gmail API tools.*
 
-##### `class GmailChannelBackend` — ChannelBackend implementation for Gmail.
+##### `class GmailChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Gmail.
 
 **Constructor:** `GmailChannelBackend() -> None`
 
@@ -5562,10 +5514,6 @@ ______________________________________________________________________
   - `thread_id`: Thread ID (from list_messages or get_message).
   - **Returns:** JSON string with all messages in the thread.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for Gmail API operations.
-
 ##### `class GmailAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Gmail API tools.
 
 **Constructor:** `GmailAgent() -> None`
@@ -5576,7 +5524,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.googlechat_agent` — *Google Chat Agent — StatefulSorcarAgent extension with Google Chat API tools.*
 
-##### `class GoogleChatChannelBackend` — ChannelBackend implementation for Google Chat API.
+##### `class GoogleChatChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Google Chat API.
 
 **Constructor:** `GoogleChatChannelBackend() -> None`
 
@@ -5657,8 +5605,6 @@ ______________________________________________________________________
   - `space_type`: Space type ("SPACE" or "GROUP_CHAT"). Default: "SPACE".
   - **Returns:** JSON string with space name and display name.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class GoogleChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Google Chat API tools.
 
 **Constructor:** `GoogleChatAgent() -> None`
@@ -5667,7 +5613,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.imessage_agent` — *iMessage Agent — StatefulSorcarAgent extension with iMessage tools via AppleScript.*
 
-##### `class IMessageChannelBackend` — ChannelBackend implementation for iMessage via AppleScript.
+##### `class IMessageChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for iMessage via AppleScript.
 
 **Constructor:** `IMessageChannelBackend() -> None`
 
@@ -5717,8 +5663,6 @@ ______________________________________________________________________
   - `limit`: Maximum messages to return. Default: 20.
   - **Returns:** JSON string with message list (basic).
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class IMessageAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with iMessage tools (macOS only).
 
 **Constructor:** `IMessageAgent() -> None`
@@ -5727,7 +5671,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.irc_agent` — *IRC Agent — StatefulSorcarAgent extension with IRC tools.*
 
-##### `class IRCChannelBackend` — ChannelBackend implementation for IRC via raw socket.
+##### `class IRCChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for IRC via raw socket.
 
 **Constructor:** `IRCChannelBackend() -> None`
 
@@ -5814,8 +5758,6 @@ ______________________________________________________________________
   - `password`: NickServ password.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class IRCAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with IRC tools.
 
 **Constructor:** `IRCAgent() -> None`
@@ -5824,7 +5766,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.line_agent` — *LINE Agent — StatefulSorcarAgent extension with LINE Messaging API tools.*
 
-##### `class LineChannelBackend` — ChannelBackend implementation for LINE Messaging API.
+##### `class LineChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for LINE Messaging API.
 
 **Constructor:** `LineChannelBackend() -> None`
 
@@ -5883,8 +5825,6 @@ ______________________________________________________________________
   - `preview_url`: URL of the preview image.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class LineAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with LINE Messaging API tools.
 
 **Constructor:** `LineAgent() -> None`
@@ -5893,7 +5833,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.matrix_agent` — *Matrix Agent — StatefulSorcarAgent extension with Matrix protocol tools.*
 
-##### `class MatrixChannelBackend` — ChannelBackend implementation for Matrix via matrix-nio.
+##### `class MatrixChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Matrix via matrix-nio.
 
 **Constructor:** `MatrixChannelBackend() -> None`
 
@@ -5976,8 +5916,6 @@ ______________________________________________________________________
   - `user_id`: User ID (@user:server.org).
   - **Returns:** JSON string with display name and avatar.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class MatrixAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Matrix protocol tools.
 
 **Constructor:** `MatrixAgent() -> None`
@@ -5986,7 +5924,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.mattermost_agent` — *Mattermost Agent — StatefulSorcarAgent extension with Mattermost REST API tools.*
 
-##### `class MattermostChannelBackend` — ChannelBackend implementation for Mattermost REST API.
+##### `class MattermostChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Mattermost REST API.
 
 **Constructor:** `MattermostChannelBackend() -> None`
 
@@ -6074,8 +6012,6 @@ ______________________________________________________________________
   - `emoji_name`: Emoji name (without colons, e.g. "thumbsup").
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class MattermostAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Mattermost REST API tools.
 
 **Constructor:** `MattermostAgent() -> None`
@@ -6084,7 +6020,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.msteams_agent` — *Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.*
 
-##### `class MSTeamsChannelBackend` — ChannelBackend implementation for Microsoft Teams via Graph API.
+##### `class MSTeamsChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Microsoft Teams via Graph API.
 
 **Constructor:** `MSTeamsChannelBackend() -> None`
 
@@ -6166,8 +6102,6 @@ ______________________________________________________________________
   - `top`: Maximum members to return. Default: 50.
   - **Returns:** JSON string with member list.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class MSTeamsAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Microsoft Teams Graph API tools.
 
 **Constructor:** `MSTeamsAgent() -> None`
@@ -6176,7 +6110,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.nextcloud_talk_agent` — *Nextcloud Talk Agent — StatefulSorcarAgent extension with Nextcloud Talk API tools.*
 
-##### `class NextcloudTalkChannelBackend` — ChannelBackend implementation for Nextcloud Talk REST API.
+##### `class NextcloudTalkChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Nextcloud Talk REST API.
 
 **Constructor:** `NextcloudTalkChannelBackend() -> None`
 
@@ -6250,8 +6184,6 @@ ______________________________________________________________________
   - `message_id`: Message ID to delete.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class NextcloudTalkAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nextcloud Talk API tools.
 
 **Constructor:** `NextcloudTalkAgent() -> None`
@@ -6260,7 +6192,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.nostr_agent` — *Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.*
 
-##### `class NostrChannelBackend` — ChannelBackend implementation for Nostr protocol via pynostr.
+##### `class NostrChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Nostr protocol via pynostr.
 
 **Constructor:** `NostrChannelBackend() -> None`
 
@@ -6329,8 +6261,6 @@ ______________________________________________________________________
   - `relay_url`: Relay URL to remove.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class NostrAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nostr protocol tools.
 
 **Constructor:** `NostrAgent() -> None`
@@ -6339,7 +6269,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.phone_control_agent` — *Phone Control Agent — StatefulSorcarAgent extension with Android phone control tools.*
 
-##### `class PhoneControlChannelBackend` — ChannelBackend implementation for Android phone control via REST API.
+##### `class PhoneControlChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Android phone control via REST API.
 
 **Constructor:** `PhoneControlChannelBackend() -> None`
 
@@ -6415,8 +6345,6 @@ ______________________________________________________________________
   - `text`: Reply text.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class PhoneControlAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Android phone control tools.
 
 **Constructor:** `PhoneControlAgent() -> None`
@@ -6425,7 +6353,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.signal_agent` — *Signal Agent — StatefulSorcarAgent extension with Signal CLI tools.*
 
-##### `class SignalChannelBackend` — ChannelBackend implementation for Signal via signal-cli.
+##### `class SignalChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Signal via signal-cli.
 
 **Constructor:** `SignalChannelBackend() -> None`
 
@@ -6477,8 +6405,6 @@ ______________________________________________________________________
 
   - **Returns:** JSON string with group list.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class SignalAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Signal CLI tools.
 
 **Constructor:** `SignalAgent() -> None`
@@ -6487,7 +6413,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.slack_agent` — *Slack Agent — StatefulSorcarAgent extension with Slack API tools.*
 
-##### `class SlackChannelBackend` — ChannelBackend implementation for Slack.
+##### `class SlackChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Slack.
 
 **Constructor:** `SlackChannelBackend() -> None`
 
@@ -6645,10 +6571,6 @@ ______________________________________________________________________
   - `channel`: Channel ID (e.g. "C01234567").
   - **Returns:** JSON string with channel details (name, topic, purpose, num_members, created, creator).
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent. Automatically discovers all public methods of this class, excluding ChannelBackend protocol/infrastructure methods.<br/>`get_tool_methods() -> list`
-
-  - **Returns:** List of callable tool methods for Slack API operations.
-
 ##### `class SlackAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent() -> None`
@@ -6659,7 +6581,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.sms_agent` — *SMS Agent — StatefulSorcarAgent extension with Twilio SMS tools.*
 
-##### `class SMSChannelBackend` — ChannelBackend implementation for Twilio SMS.
+##### `class SMSChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Twilio SMS.
 
 **Constructor:** `SMSChannelBackend() -> None`
 
@@ -6750,8 +6672,6 @@ ______________________________________________________________________
   - `message_sid`: Message SID to cancel.
   - **Returns:** JSON string with ok status.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class SMSAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twilio SMS tools.
 
 **Constructor:** `SMSAgent() -> None`
@@ -6760,7 +6680,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.synology_chat_agent` — *Synology Chat Agent — StatefulSorcarAgent extension with Synology Chat webhook API.*
 
-##### `class SynologyChatChannelBackend` — ChannelBackend implementation for Synology Chat webhooks.
+##### `class SynologyChatChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Synology Chat webhooks.
 
 **Constructor:** `SynologyChatChannelBackend() -> None`
 
@@ -6797,8 +6717,6 @@ ______________________________________________________________________
   - `text`: Message text.
   - `file_url`: URL of the file to attach.
   - **Returns:** JSON string with ok status.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class SynologyChatAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Synology Chat webhook tools.
 
@@ -6937,7 +6855,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.tlon_agent` — *Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.*
 
-##### `class TlonChannelBackend` — ChannelBackend implementation for Tlon/Urbit Eyre HTTP.
+##### `class TlonChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Tlon/Urbit Eyre HTTP.
 
 **Constructor:** `TlonChannelBackend() -> None`
 
@@ -7003,8 +6921,6 @@ ______________________________________________________________________
   - `path`: Scry path (starting with /).
   - **Returns:** JSON string with scry result.
 
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
-
 ##### `class TlonAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools.
 
 **Constructor:** `TlonAgent() -> None`
@@ -7013,7 +6929,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.twitch_agent` — *Twitch Agent — StatefulSorcarAgent extension with Twitch Helix API + Chat tools.*
 
-##### `class TwitchChannelBackend` — ChannelBackend implementation for Twitch Helix API.
+##### `class TwitchChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Twitch Helix API.
 
 **Constructor:** `TwitchChannelBackend() -> None`
 
@@ -7093,8 +7009,6 @@ ______________________________________________________________________
   - `broadcaster_id`: Broadcaster ID.
   - `has_delay`: Whether to add a 5-second delay. Default: False.
   - **Returns:** JSON string with clip edit URL.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class TwitchAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twitch Helix API tools.
 
@@ -7262,7 +7176,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.zalo_agent` — *Zalo Agent — StatefulSorcarAgent extension with Zalo Official Account API tools.*
 
-##### `class ZaloChannelBackend` — ChannelBackend implementation for Zalo OA API.
+##### `class ZaloChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Zalo OA API.
 
 **Constructor:** `ZaloChannelBackend() -> None`
 
@@ -7333,8 +7247,6 @@ ______________________________________________________________________
 
   - `file_path`: Local path to the image file.
   - **Returns:** JSON string with ok status and attachment_id.
-
-- **get_tool_methods** — Return list of bound tool methods for use by the LLM agent.<br/>`get_tool_methods() -> list`
 
 ##### `class ZaloAgent(StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
 

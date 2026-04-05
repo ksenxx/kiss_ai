@@ -27,6 +27,12 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _TWITCH_DIR = Path.home() / ".kiss" / "channels" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"
@@ -39,52 +45,28 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, str] | None:
     """Load stored Twitch config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if (  # pragma: no branch
-            isinstance(data, dict) and data.get("client_id") and data.get("access_token")
-        ):
-            return {
-                "client_id": data["client_id"],
-                "client_secret": data.get("client_secret", ""),
-                "access_token": data["access_token"],
-                "channel_name": data.get("channel_name", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("client_id", "access_token",))
 
 
-def _save_config(
-    client_id: str,
-    client_secret: str,
-    access_token: str,
-    channel_name: str = "",
-) -> None:
+def _save_config(client_id: str, client_secret: str, access_token: str, channel_name: str) -> None:
     """Save Twitch config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "client_id": client_id.strip(),
-        "client_secret": client_secret.strip(),
-        "access_token": access_token.strip(),
-        "channel_name": channel_name.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(
+        _config_path(),
+        {
+            "client_id": client_id.strip(),
+            "client_secret": client_secret.strip(),
+            "access_token": access_token.strip(),
+            "channel_name": channel_name.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
     """Delete the stored Twitch config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    clear_json_config(_config_path())
 
 
-class TwitchChannelBackend:
+class TwitchChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Twitch Helix API."""
 
     def __init__(self) -> None:
@@ -374,20 +356,6 @@ class TwitchChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class TwitchAgent(StatefulSorcarAgent):
@@ -485,7 +453,6 @@ class TwitchAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the TwitchAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

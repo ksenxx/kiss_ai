@@ -26,6 +26,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _MATTERMOST_DIR = Path.home() / ".kiss" / "channels" / "mattermost"
 
@@ -37,47 +43,28 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, str] | None:
     """Load stored Mattermost config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and data.get("url") and data.get("token"):  # pragma: no branch
-            return {
-                "url": data["url"],
-                "token": data["token"],
-                "port": str(data.get("port", 443)),
-                "scheme": data.get("scheme", "https"),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("url", "token",))
 
 
-def _save_config(
-    url: str, token: str, port: int = 443, scheme: str = "https"
-) -> None:
+def _save_config(url: str, token: str, port: str, scheme: str) -> None:
     """Save Mattermost config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "url": url.strip(),
-        "token": token.strip(),
-        "port": port,
-        "scheme": scheme,
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(
+        _config_path(),
+        {
+            "url": url.strip(),
+            "token": token.strip(),
+            "port": port.strip(),
+            "scheme": scheme.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
     """Delete the stored Mattermost config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    clear_json_config(_config_path())
 
 
-class MattermostChannelBackend:
+class MattermostChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Mattermost REST API."""
 
     def __init__(self) -> None:
@@ -441,20 +428,6 @@ class MattermostChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class MattermostAgent(StatefulSorcarAgent):
@@ -534,7 +507,7 @@ class MattermostAgent(StatefulSorcarAgent):
                 })
                 driver.login()
                 me = driver.users.get_user("me")
-                _save_config(url, token, port, scheme)
+                _save_config(url, token, str(port), scheme)
                 agent._backend._driver = driver
                 return json.dumps({
                     "ok": True,
@@ -564,7 +537,6 @@ class MattermostAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the MattermostAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch
