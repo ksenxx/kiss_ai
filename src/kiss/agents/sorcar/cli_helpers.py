@@ -29,7 +29,7 @@ def _print_recent_chats() -> None:
     if not chats:
         print("No chat sessions found.")
         return
-    for entry in chats:
+    for entry in reversed(chats):
         chat_id = entry["chat_id"]
         tasks = entry["tasks"]
         assert isinstance(tasks, list)
