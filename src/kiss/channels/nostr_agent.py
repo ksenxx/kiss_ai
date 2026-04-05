@@ -25,6 +25,12 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_wait_for_user,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _NOSTR_DIR = Path.home() / ".kiss" / "channels" / "nostr"
 
@@ -34,43 +40,22 @@ def _config_path() -> Path:
     return _NOSTR_DIR / "config.json"
 
 
-def _load_config() -> dict[str, Any] | None:
+def _load_config() -> dict[str, str] | None:
     """Load stored Nostr config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and data.get("private_key"):  # pragma: no branch
-            return {
-                "private_key": data["private_key"],
-                "relays": data.get("relays", "wss://relay.damus.io"),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("private_key",))
 
 
-def _save_config(private_key: str, relays: str = "wss://relay.damus.io") -> None:
+def _save_config(private_key: str, relays: str) -> None:
     """Save Nostr config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "private_key": private_key.strip(),
-        "relays": relays,
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(_config_path(), {"private_key": private_key.strip(), "relays": relays.strip()})
 
 
 def _clear_config() -> None:
     """Delete the stored Nostr config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    clear_json_config(_config_path())
 
 
-class NostrChannelBackend:
+class NostrChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Nostr protocol via pynostr."""
 
     def __init__(self) -> None:
@@ -335,20 +320,6 @@ class NostrChannelBackend:
             _save_config(cfg["private_key"], cfg["relays"])
         return json.dumps({"ok": True, "relays": self._relays})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class NostrAgent(StatefulSorcarAgent):
@@ -450,7 +421,6 @@ class NostrAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the NostrAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

@@ -29,6 +29,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _TLON_DIR = Path.home() / ".kiss" / "channels" / "tlon"
 
@@ -40,37 +46,20 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, str] | None:
     """Load stored Tlon config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and data.get("ship_url"):  # pragma: no branch
-            return {"ship_url": data["ship_url"], "code": data.get("code", "")}
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("ship_url",))
 
 
 def _save_config(ship_url: str, code: str) -> None:
     """Save Tlon config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(
-        {"ship_url": ship_url.strip().rstrip("/"), "code": code.strip()}, indent=2
-    ))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(_config_path(), {"ship_url": ship_url.strip(), "code": code.strip()})
 
 
 def _clear_config() -> None:
     """Delete the stored Tlon config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    clear_json_config(_config_path())
 
 
-class TlonChannelBackend:
+class TlonChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Tlon/Urbit Eyre HTTP."""
 
     def __init__(self) -> None:
@@ -304,20 +293,6 @@ class TlonChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class TlonAgent(StatefulSorcarAgent):
@@ -395,7 +370,6 @@ class TlonAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the TlonAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

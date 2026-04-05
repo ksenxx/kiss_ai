@@ -28,6 +28,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _IRC_DIR = Path.home() / ".kiss" / "channels" / "irc"
 
@@ -37,55 +43,31 @@ def _config_path() -> Path:
     return _IRC_DIR / "config.json"
 
 
-def _load_config() -> dict[str, Any] | None:
-    """Load stored IRC config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and data.get("server") and data.get("nick"):  # pragma: no branch
-            return {
-                "server": data["server"],
-                "port": int(data.get("port", 6667)),
-                "nick": data["nick"],
-                "password": data.get("password", ""),
-                "use_tls": bool(data.get("use_tls", False)),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+def _load_config() -> dict[str, str] | None:
+    """Load stored Irc config from disk."""
+    return load_json_config(_config_path(), ("server", "nick",))
 
 
-def _save_config(
-    server: str,
-    nick: str,
-    port: int = 6667,
-    password: str = "",
-    use_tls: bool = False,
-) -> None:
-    """Save IRC config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "server": server.strip(),
-        "nick": nick.strip(),
-        "port": port,
-        "password": password,
-        "use_tls": use_tls,
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+def _save_config(server: str, nick: str, port: str, password: str, use_tls: str) -> None:
+    """Save Irc config to disk with restricted permissions."""
+    save_json_config(
+        _config_path(),
+        {
+            "server": server.strip(),
+            "nick": nick.strip(),
+            "port": port.strip(),
+            "password": password.strip(),
+            "use_tls": use_tls.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
-    """Delete the stored IRC config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    """Delete the stored Irc config."""
+    clear_json_config(_config_path())
 
 
-class IRCChannelBackend:
+class IRCChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for IRC via raw socket."""
 
     def __init__(self) -> None:
@@ -103,7 +85,7 @@ class IRCChannelBackend:
             return False
         try:
             self._nick = cfg["nick"]
-            sock = socket.create_connection((cfg["server"], cfg["port"]), timeout=30)
+            sock = socket.create_connection((cfg["server"], int(cfg["port"])), timeout=30)
             if cfg.get("use_tls"):  # pragma: no branch
                 import ssl
                 context = ssl.create_default_context()
@@ -266,7 +248,7 @@ class IRCChannelBackend:
             JSON string with ok status.
         """
         try:
-            _save_config(server, nick, port, password, use_tls)
+            _save_config(server, nick, str(port), password, str(use_tls))
             success = self.connect()
             if success:  # pragma: no branch
                 return json.dumps({"ok": True, "message": f"Connected to {server} as {nick}"})
@@ -415,20 +397,6 @@ class IRCChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class IRCAgent(StatefulSorcarAgent):
@@ -485,7 +453,7 @@ class IRCAgent(StatefulSorcarAgent):
             for val, name in [(server, "server"), (nick, "nick")]:  # pragma: no branch
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
-            _save_config(server, nick, port, password, use_tls)
+            _save_config(server, nick, str(port), password, str(use_tls))
             agent._backend._nick = nick.strip()
             success = agent._backend.connect()
             if success:  # pragma: no branch
@@ -518,7 +486,6 @@ class IRCAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the IRCAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

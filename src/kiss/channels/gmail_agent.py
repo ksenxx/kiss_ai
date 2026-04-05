@@ -36,6 +36,7 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import is_headless_environment, wait_for_matching_message
+from kiss.channels._channel_agent_utils import ToolMethodBackend
 
 _GMAIL_DIR = Path.home() / ".kiss" / "channels" / "gmail"
 _SCOPES = [
@@ -227,7 +228,7 @@ def _extract_attachments(payload: dict) -> list[dict[str, Any]]:  # type: ignore
 # ---------------------------------------------------------------------------
 
 
-class GmailChannelBackend:
+class GmailChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Gmail.
 
     Provides email monitoring, sending, and reply waiting for
@@ -1001,27 +1002,6 @@ class GmailChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent.
-
-        Automatically discovers all public methods of this class,
-        excluding ChannelBackend protocol/infrastructure methods.
-
-        Returns:
-            List of callable tool methods for Gmail API operations.
-        """
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 # ---------------------------------------------------------------------------

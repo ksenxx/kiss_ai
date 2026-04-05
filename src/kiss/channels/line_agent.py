@@ -33,6 +33,12 @@ from kiss.channels._backend_utils import (
     stop_http_server,
     wait_for_matching_message,
 )
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,42 +53,27 @@ def _config_path() -> Path:
 
 
 def _load_config() -> dict[str, str] | None:
-    """Load stored LINE config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and data.get("channel_access_token"):  # pragma: no branch
-            return {
-                "channel_access_token": data["channel_access_token"],
-                "channel_secret": data.get("channel_secret", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    """Load stored Line config from disk."""
+    return load_json_config(_config_path(), ("channel_access_token",))
 
 
-def _save_config(channel_access_token: str, channel_secret: str = "") -> None:
-    """Save LINE config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "channel_access_token": channel_access_token.strip(),
-        "channel_secret": channel_secret.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+def _save_config(channel_access_token: str, channel_secret: str) -> None:
+    """Save Line config to disk with restricted permissions."""
+    save_json_config(
+        _config_path(),
+        {
+            "channel_access_token": channel_access_token.strip(),
+            "channel_secret": channel_secret.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
-    """Delete the stored LINE config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    """Delete the stored Line config."""
+    clear_json_config(_config_path())
 
 
-class LineChannelBackend:
+class LineChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for LINE Messaging API.
 
     Uses webhook queue pattern for receiving inbound messages.
@@ -357,20 +348,6 @@ class LineChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class LineAgent(StatefulSorcarAgent):
@@ -458,7 +435,6 @@ class LineAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the LineAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

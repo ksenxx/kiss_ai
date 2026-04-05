@@ -8,6 +8,7 @@
 import base64
 import dataclasses
 import inspect
+import json
 import mimetypes
 import types as types_module
 from abc import ABC, abstractmethod
@@ -118,6 +119,36 @@ class Model(ABC):
         """
         self.conversation = []
         self.usage_info_for_messages = ""
+
+    def _replace_last_assistant_with_tool_calls(
+        self, content: str, function_calls: list[dict[str, Any]]
+    ) -> None:
+        """Replace the last assistant message with one that includes tool calls.
+
+        Used by text-based tool calling paths (ClaudeCodeModel, OpenAIModel)
+        where ``generate()`` already appended a plain assistant message and it
+        needs to be upgraded to include parsed tool call metadata.
+
+        Args:
+            content: The full text content of the assistant message.
+            function_calls: Parsed tool calls, each with ``id``, ``name``,
+                and ``arguments`` (dict).
+        """
+        self.conversation[-1] = {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [
+                {
+                    "id": fc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": fc["name"],
+                        "arguments": json.dumps(fc["arguments"]),
+                    },
+                }
+                for fc in function_calls
+            ],
+        }
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.model_name})"

@@ -583,24 +583,8 @@ class OpenAICompatibleModel(Model):
         function_calls = _parse_text_based_tool_calls(content_clean)
 
         if function_calls:
-            # Store tool calls in conversation for proper result handling
-            self.conversation.append(
-                {
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": [
-                        {
-                            "id": fc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": fc["name"],
-                                "arguments": json.dumps(fc["arguments"]),
-                            },
-                        }
-                        for fc in function_calls
-                    ],
-                }
-            )
+            self.conversation.append({"role": "assistant", "content": content})
+            self._replace_last_assistant_with_tool_calls(content, function_calls)
         else:
             self.conversation.append({"role": "assistant", "content": content})
 

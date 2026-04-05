@@ -26,6 +26,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _SMS_DIR = Path.home() / ".kiss" / "channels" / "sms"
 
@@ -36,46 +42,28 @@ def _config_path() -> Path:
 
 
 def _load_config() -> dict[str, str] | None:
-    """Load stored Twilio SMS config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if (  # pragma: no branch
-            isinstance(data, dict) and data.get("account_sid") and data.get("auth_token")
-        ):
-            return {
-                "account_sid": data["account_sid"],
-                "auth_token": data["auth_token"],
-                "from_number": data.get("from_number", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    """Load stored Sms config from disk."""
+    return load_json_config(_config_path(), ("account_sid", "auth_token",))
 
 
-def _save_config(account_sid: str, auth_token: str, from_number: str = "") -> None:
-    """Save Twilio config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "account_sid": account_sid.strip(),
-        "auth_token": auth_token.strip(),
-        "from_number": from_number.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+def _save_config(account_sid: str, auth_token: str, from_number: str) -> None:
+    """Save Sms config to disk with restricted permissions."""
+    save_json_config(
+        _config_path(),
+        {
+            "account_sid": account_sid.strip(),
+            "auth_token": auth_token.strip(),
+            "from_number": from_number.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
-    """Delete the stored SMS config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    """Delete the stored Sms config."""
+    clear_json_config(_config_path())
 
 
-class SMSChannelBackend:
+class SMSChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Twilio SMS."""
 
     def __init__(self) -> None:
@@ -452,20 +440,6 @@ class SMSChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class SMSAgent(StatefulSorcarAgent):
@@ -561,7 +535,6 @@ class SMSAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the SMSAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch

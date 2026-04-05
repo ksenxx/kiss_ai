@@ -20,8 +20,8 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.channels.slack_agent import (
     SlackAgent,
+    SlackChannelBackend,
     _load_token,
-    _make_slack_tools,
     _save_token,
     _token_path,
     main,
@@ -90,7 +90,7 @@ _SLACK_TOOL_ERROR_CASES = [
 
 
 class TestSlackTools:
-    """Tests for _make_slack_tools tool creation."""
+    """Tests for SlackChannelBackend tool methods."""
 
     @pytest.mark.parametrize("tool_name,kwargs", _SLACK_TOOL_ERROR_CASES)
     def test_tool_returns_error_on_invalid_token(
@@ -99,8 +99,9 @@ class TestSlackTools:
         """Every Slack tool returns {ok: false, error: ...} with invalid token."""
         from slack_sdk import WebClient
 
-        client = WebClient(token="xoxb-invalid-token-for-test")
-        tools = _make_slack_tools(client)
+        backend = SlackChannelBackend()
+        backend._client = WebClient(token="xoxb-invalid-token-for-test")
+        tools = backend.get_tool_methods()
         fn = next(t for t in tools if t.__name__ == tool_name)
         result = json.loads(fn(**kwargs))
         assert result["ok"] is False

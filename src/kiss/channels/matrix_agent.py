@@ -26,6 +26,12 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
+from kiss.channels._channel_agent_utils import (
+    ToolMethodBackend,
+    clear_json_config,
+    load_json_config,
+    save_json_config,
+)
 
 _MATRIX_DIR = Path.home() / ".kiss" / "channels" / "matrix"
 
@@ -37,54 +43,28 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, str] | None:
     """Load stored Matrix config from disk."""
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        if (  # pragma: no branch
-            isinstance(data, dict)
-            and data.get("homeserver_url")
-            and data.get("access_token")
-        ):
-            return {
-                "homeserver_url": data["homeserver_url"],
-                "access_token": data["access_token"],
-                "device_id": data.get("device_id", ""),
-                "user_id": data.get("user_id", ""),
-            }
-        return None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_json_config(_config_path(), ("homeserver_url", "access_token",))
 
 
-def _save_config(
-    homeserver_url: str,
-    access_token: str,
-    device_id: str = "",
-    user_id: str = "",
-) -> None:
+def _save_config(homeserver_url: str, access_token: str, device_id: str, user_id: str) -> None:
     """Save Matrix config to disk with restricted permissions."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "homeserver_url": homeserver_url.strip(),
-        "access_token": access_token.strip(),
-        "device_id": device_id.strip(),
-        "user_id": user_id.strip(),
-    }, indent=2))
-    if sys.platform != "win32":  # pragma: no branch
-        path.chmod(0o600)
+    save_json_config(
+        _config_path(),
+        {
+            "homeserver_url": homeserver_url.strip(),
+            "access_token": access_token.strip(),
+            "device_id": device_id.strip(),
+            "user_id": user_id.strip(),
+        },
+    )
 
 
 def _clear_config() -> None:
     """Delete the stored Matrix config."""
-    path = _config_path()
-    if path.exists():  # pragma: no branch
-        path.unlink()
+    clear_json_config(_config_path())
 
 
-class MatrixChannelBackend:
+class MatrixChannelBackend(ToolMethodBackend):
     """ChannelBackend implementation for Matrix via matrix-nio."""
 
     def __init__(self) -> None:
@@ -441,20 +421,6 @@ class MatrixChannelBackend:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_tool_methods(self) -> list:
-        """Return list of bound tool methods for use by the LLM agent."""
-        non_tool = frozenset({
-            "connect", "find_channel", "find_user", "join_channel",
-            "poll_messages", "send_message", "wait_for_reply",
-            "is_from_bot", "strip_bot_mention", "disconnect", "get_tool_methods",
-        })
-        return [
-            getattr(self, name)
-            for name in sorted(dir(self))
-            if not name.startswith("_")
-            and name not in non_tool
-            and callable(getattr(self, name))
-        ]
 
 
 class MatrixAgent(StatefulSorcarAgent):
@@ -561,7 +527,6 @@ class MatrixAgent(StatefulSorcarAgent):
 
 def main() -> None:
     """Run the MatrixAgent from the command line with chat persistence."""
-    import sys
     import time as time_mod
 
     if len(sys.argv) <= 1:  # pragma: no branch
