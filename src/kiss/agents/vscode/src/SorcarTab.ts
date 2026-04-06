@@ -52,13 +52,11 @@ export class SorcarTab {
   private _isRunning: boolean = false;
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
-  private _activeEditorDisposable?: vscode.Disposable;
   private _commitPending: boolean = false;
   private _pendingNewChat: boolean = false;
   private _disposed: boolean = false;
   private _loadLastSession: boolean;
   private _lastTask: string = '';
-  private _lastEditorFile: string = '';
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
   get panel(): vscode.WebviewPanel { return this._panel; }
@@ -74,9 +72,6 @@ export class SorcarTab {
     this._loadLastSession = loadLastSession;
     this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
-
-    // Capture active editor file before panel creation (panel steals focus)
-    this._lastEditorFile = vscode.window.activeTextEditor?.document.uri.fsPath || '';
 
     // Create editor-area WebviewPanel
     this._panel = vscode.window.createWebviewPanel(
@@ -95,11 +90,6 @@ export class SorcarTab {
 
     this._panel.iconPath = vscode.Uri.joinPath(this._extensionUri, 'media', 'kiss-icon.svg');
     this._panel.webview.html = this._getHtmlContent(this._panel.webview);
-
-    // Track active editor changes
-    this._activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(() => {
-      this._sendActiveFileInfo();
-    });
 
     // Handle messages from webview
     this._panel.webview.onDidReceiveMessage(
@@ -166,12 +156,28 @@ export class SorcarTab {
     }
   }
 
-  private _sendActiveFileInfo(): void {
-    const editor = vscode.window.activeTextEditor;
-    if (editor) {
-      this._lastEditorFile = editor.document.uri.fsPath;
+  /**
+   * Dynamically find the file path of the visible text editor tab.
+   * Checks the active text editor first; if unavailable (e.g. when the
+   * Sorcar webview panel has focus), scans all tab groups for an active
+   * tab whose input is a text file.
+   */
+  private _getVisibleEditorFile(): string {
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor) {
+      return activeEditor.document.uri.fsPath;
     }
-    const fpath = this._lastEditorFile;
+    for (const group of vscode.window.tabGroups.all) {
+      const activeTab = group.activeTab;
+      if (activeTab && activeTab.input instanceof vscode.TabInputText) {
+        return activeTab.input.uri.fsPath;
+      }
+    }
+    return '';
+  }
+
+  private _sendActiveFileInfo(): void {
+    const fpath = this._getVisibleEditorFile();
     const isPrompt = !!fpath && fpath.toLowerCase().endsWith('.md');
     this.sendToWebview({
       type: 'activeFileInfo',
@@ -254,7 +260,7 @@ export class SorcarTab {
         this._startTask(
           message.prompt,
           message.model,
-          this._lastEditorFile || undefined,
+          this._getVisibleEditorFile() || undefined,
           message.attachments,
         );
         break;
@@ -322,13 +328,14 @@ export class SorcarTab {
         break;
 
       case 'complete': {
-        const completeDoc = this._lastEditorFile
-          ? vscode.workspace.textDocuments.find(d => d.uri.fsPath === this._lastEditorFile)
+        const editorFile = this._getVisibleEditorFile();
+        const completeDoc = editorFile
+          ? vscode.workspace.textDocuments.find(d => d.uri.fsPath === editorFile)
           : undefined;
         this._agentProcess.sendCommand({
           type: 'complete',
           query: message.query,
-          activeFile: this._lastEditorFile || undefined,
+          activeFile: editorFile || undefined,
           activeFileContent: completeDoc?.getText(),
         });
         break;
@@ -340,7 +347,7 @@ export class SorcarTab {
 
       case 'runPrompt': {
         if (this._isRunning) return;
-        const promptPath = this._lastEditorFile;
+        const promptPath = this._getVisibleEditorFile();
         if (!promptPath || !promptPath.toLowerCase().endsWith('.md')) return;
         const promptDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === promptPath);
         if (!promptDoc) return;
@@ -364,7 +371,7 @@ export class SorcarTab {
     this._startTask(
       prompt.trim(),
       this._selectedModel,
-      this._lastEditorFile || undefined,
+      this._getVisibleEditorFile() || undefined,
     );
   }
 
@@ -430,7 +437,6 @@ export class SorcarTab {
   public dispose(): void {
     if (this._disposed) return;
     this._disposed = true;
-    this._activeEditorDisposable?.dispose();
     this._agentProcess.dispose();
     this._onCommitMessage.dispose();
   }

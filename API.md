@@ -2073,13 +2073,14 @@ ______________________________________________________________________
 
 - `path`: Config file path.
 
-**`channel_main`** — Standard CLI entry point shared by all channel agents. Handles argument parsing, daemon mode, and interactive (one-shot) mode. Each channel agent's `main()` delegates to this function.<br/>`def channel_main(agent_cls: type, cli_name: str, *, channel_name: str = '', make_daemon_backend: Callable[[], Any] | None = None, daemon_poll_interval: float = 3.0) -> None`
+**`channel_main`** — Standard CLI entry point shared by all channel agents. Handles argument parsing, daemon mode, and interactive (one-shot) mode. Each channel agent's `main()` delegates to this function.<br/>`def channel_main(agent_cls: type, cli_name: str, *, channel_name: str = '', make_daemon_backend: Callable[..., Any] | None = None, daemon_poll_interval: float = 3.0, extra_usage: str = '') -> None`
 
 - `agent_cls`: The channel Agent class to instantiate (e.g. `SlackAgent`).
 - `cli_name`: CLI command name for the usage message (e.g. `"kiss-slack"`).
 - `channel_name`: Human-readable channel name (e.g. `"Slack"`). Used in daemon messages and agent naming.
-- `make_daemon_backend`: Factory that creates and configures a backend for daemon mode. Should call `sys.exit(1)` if required config is missing. Pass `None` to disable daemon mode.
+- `make_daemon_backend`: Factory that creates and configures a backend for daemon mode. May accept a `workspace` keyword argument; if so, the `--workspace` CLI value is forwarded. Should call `sys.exit(1)` if required config is missing. Pass `None` to disable daemon mode.
 - `daemon_poll_interval`: Message poll interval for daemon mode in seconds.
+- `extra_usage`: Additional usage flags to append to the usage line (e.g. `"[--list-workspaces]"`).
 
 ______________________________________________________________________
 
@@ -3401,9 +3402,9 @@ ______________________________________________________________________
 
 ##### `class SlackChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Slack.
 
-**Constructor:** `SlackChannelBackend() -> None`
+**Constructor:** `SlackChannelBackend(workspace: str = 'default') -> None`
 
-- **connect** — Authenticate with Slack using the stored bot token.<br/>`connect() -> bool`
+- **connect** — Authenticate with Slack using the stored bot token. Uses the workspace set at construction time to load the appropriate token.<br/>`connect() -> bool`
 
   - **Returns:** True on success, False on failure.
 
@@ -3559,7 +3560,7 @@ ______________________________________________________________________
 
 ##### `class SlackAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
 
-**Constructor:** `SlackAgent() -> None`
+**Constructor:** `SlackAgent(workspace: str = 'default') -> None`
 
 - **run** — Run with Slack-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
 
@@ -5171,13 +5172,14 @@ ______________________________________________________________________
 
 - `path`: Config file path.
 
-**`channel_main`** — Standard CLI entry point shared by all channel agents. Handles argument parsing, daemon mode, and interactive (one-shot) mode. Each channel agent's `main()` delegates to this function.<br/>`def channel_main(agent_cls: type, cli_name: str, *, channel_name: str = '', make_daemon_backend: Callable[[], Any] | None = None, daemon_poll_interval: float = 3.0) -> None`
+**`channel_main`** — Standard CLI entry point shared by all channel agents. Handles argument parsing, daemon mode, and interactive (one-shot) mode. Each channel agent's `main()` delegates to this function.<br/>`def channel_main(agent_cls: type, cli_name: str, *, channel_name: str = '', make_daemon_backend: Callable[..., Any] | None = None, daemon_poll_interval: float = 3.0, extra_usage: str = '') -> None`
 
 - `agent_cls`: The channel Agent class to instantiate (e.g. `SlackAgent`).
 - `cli_name`: CLI command name for the usage message (e.g. `"kiss-slack"`).
 - `channel_name`: Human-readable channel name (e.g. `"Slack"`). Used in daemon messages and agent naming.
-- `make_daemon_backend`: Factory that creates and configures a backend for daemon mode. Should call `sys.exit(1)` if required config is missing. Pass `None` to disable daemon mode.
+- `make_daemon_backend`: Factory that creates and configures a backend for daemon mode. May accept a `workspace` keyword argument; if so, the `--workspace` CLI value is forwarded. Should call `sys.exit(1)` if required config is missing. Pass `None` to disable daemon mode.
 - `daemon_poll_interval`: Message poll interval for daemon mode in seconds.
+- `extra_usage`: Additional usage flags to append to the usage line (e.g. `"[--list-workspaces]"`).
 
 ______________________________________________________________________
 
@@ -6499,9 +6501,9 @@ ______________________________________________________________________
 
 ##### `class SlackChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Slack.
 
-**Constructor:** `SlackChannelBackend() -> None`
+**Constructor:** `SlackChannelBackend(workspace: str = 'default') -> None`
 
-- **connect** — Authenticate with Slack using the stored bot token.<br/>`connect() -> bool`
+- **connect** — Authenticate with Slack using the stored bot token. Uses the workspace set at construction time to load the appropriate token.<br/>`connect() -> bool`
 
   - **Returns:** True on success, False on failure.
 
@@ -6657,7 +6659,7 @@ ______________________________________________________________________
 
 ##### `class SlackAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
 
-**Constructor:** `SlackAgent() -> None`
+**Constructor:** `SlackAgent(workspace: str = 'default') -> None`
 
 - **run** — Run with Slack-specific system prompt encouraging browser-based auth.<br/>`run(**kwargs: Any) -> str`
 

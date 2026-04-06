@@ -7,7 +7,7 @@ run():  (blocking main loop)
     Connect to backend with exponential-backoff retry.
     Join the named channel.
     Poll for new messages in a loop.
-    Reconnect on staleness (no events for a while) or errors.
+    Reconnect on errors with exponential backoff (reset on success).
 
 On each inbound message:
     Skip bot's own messages and non-allowed users.
@@ -49,7 +49,6 @@ _POLL_INTERVAL = 3.0
 _RECONNECT_BASE = 2.0
 _RECONNECT_MAX = 60.0
 _RECONNECT_ATTEMPTS = 5
-_STALE_THRESHOLD = 300.0
 _HANDLER_JOIN_TIMEOUT = 5.0
 _REPLY_WAIT_TIMEOUT = 300.0
 
@@ -95,33 +94,35 @@ class ChannelDaemon:
         self._sender_states_lock = threading.Lock()
         self._handler_threads: set[threading.Thread] = set()
         self._handler_threads_lock = threading.Lock()
-        self._last_event_at: float = time.time()
         self._stop_event = threading.Event()
 
     def run(self) -> None:
         """Start the daemon loop. Blocks until stop() is called or fatal error."""
         Base.reset_global_budget()
-        reconnect_delay = _RECONNECT_BASE
-        attempts = 0
+        self._reconnect_attempts = 0
+        self._reconnect_delay = _RECONNECT_BASE
         while not self._stop_event.is_set():
             try:
                 self._connect_and_poll()
-                reconnect_delay = _RECONNECT_BASE
-                attempts = 0
             except Exception as e:
-                attempts += 1
-                if _RECONNECT_ATTEMPTS > 0 and attempts >= _RECONNECT_ATTEMPTS:  # pragma: no branch
+                self._reconnect_attempts += 1
+                if (  # pragma: no branch
+                    _RECONNECT_ATTEMPTS > 0
+                    and self._reconnect_attempts >= _RECONNECT_ATTEMPTS
+                ):
                     logger.error("Max reconnect attempts reached: %s", e)
                     raise
                 logger.warning(
                     "Channel error (attempt %d): %s. Retrying in %.1fs",
-                    attempts,
+                    self._reconnect_attempts,
                     e,
-                    reconnect_delay,
+                    self._reconnect_delay,
                 )
-                if self._stop_event.wait(reconnect_delay):  # pragma: no branch
+                if self._stop_event.wait(self._reconnect_delay):  # pragma: no branch
                     break
-                reconnect_delay = min(reconnect_delay * 2, _RECONNECT_MAX)
+                self._reconnect_delay = min(
+                    self._reconnect_delay * 2, _RECONNECT_MAX
+                )
 
     def stop(self) -> None:
         """Signal the daemon to stop and wait briefly for handler cleanup."""
@@ -130,10 +131,17 @@ class ChannelDaemon:
         self._join_handler_threads()
 
     def _connect_and_poll(self) -> None:
-        """Connect to channel and run the polling loop."""
+        """Connect to channel and run the polling loop.
+
+        Resets the retry counter on successful connect so that transient
+        poll errors don't accumulate across otherwise-healthy sessions.
+        """
         if not self._backend.connect():  # pragma: no branch
             raise RuntimeError(f"Failed to connect: {self._backend.connection_info}")
         logger.info("Connected: %s", self._backend.connection_info)
+        # Reset retry state on successful connection.
+        self._reconnect_attempts = 0
+        self._reconnect_delay = _RECONNECT_BASE
 
         try:
             channel_id = ""
@@ -145,16 +153,9 @@ class ChannelDaemon:
                 logger.info("Joined channel: %s (%s)", self._channel_name, channel_id)
 
             oldest = str(time.time())
-            self._last_event_at = time.time()
 
             while not self._stop_event.is_set():  # pragma: no branch
-                if time.time() - self._last_event_at > _STALE_THRESHOLD:  # pragma: no branch
-                    logger.warning("No events for %.0fs — reconnecting", _STALE_THRESHOLD)
-                    raise RuntimeError("Stale connection detected")
-
                 messages, oldest = self._backend.poll_messages(channel_id, oldest)
-                if messages:  # pragma: no branch
-                    self._last_event_at = time.time()
 
                 for msg in messages:  # pragma: no branch
                     if self._backend.is_from_bot(msg):  # pragma: no branch
@@ -248,6 +249,7 @@ class ChannelDaemon:
             state.chat_id = agent.chat_id
 
         tools = list(self._extra_tools)
+        replied = threading.Event()
 
         def reply(message: str) -> str:
             """Send a reply to the current conversation.
@@ -258,6 +260,7 @@ class ChannelDaemon:
             Returns:
                 JSON string with ok status.
             """
+            replied.set()
             try:
                 self._backend.send_message(channel_id, message, thread_ts)
                 return json.dumps({"ok": True})
@@ -265,23 +268,6 @@ class ChannelDaemon:
                 return json.dumps({"ok": False, "error": str(e)})
 
         tools.append(reply)
-
-        replied = threading.Event()
-        original_reply = reply
-
-        def reply_with_tracking(message: str) -> str:
-            """Send a reply to the current conversation.
-
-            Args:
-                message: Text to send as the bot's reply.
-
-            Returns:
-                JSON string with ok status.
-            """
-            replied.set()
-            return original_reply(message)
-
-        tools[-1] = reply_with_tracking
 
         Path(self._work_dir).mkdir(parents=True, exist_ok=True)
         try:
@@ -297,17 +283,33 @@ class ChannelDaemon:
             if not replied.is_set():  # pragma: no branch
                 result_yaml = yaml.safe_load(result)
                 summary = (result_yaml.get("summary", "") if result_yaml else "") or result
-                self._backend.send_message(channel_id, summary, thread_ts)
+                self._send_reply(channel_id, summary, thread_ts)
         except Exception as e:
             logger.error("Agent error for %s: %s", session_key, e, exc_info=True)
+            self._send_reply(
+                channel_id, f"Error processing your message: {e}", thread_ts
+            )
+
+    def _send_reply(
+        self, channel_id: str, text: str, thread_ts: str
+    ) -> None:
+        """Send a reply message, retrying once on transient failure.
+
+        Args:
+            channel_id: Channel to post to.
+            text: Message text.
+            thread_ts: Thread timestamp for threading.
+        """
+        for attempt in range(2):
             try:
-                self._backend.send_message(
-                    channel_id,
-                    f"Error processing your message: {e}",
-                    thread_ts,
-                )
+                self._backend.send_message(channel_id, text, thread_ts)
+                return
             except Exception:
-                pass
+                if attempt == 0:
+                    logger.warning("Reply failed, retrying...", exc_info=True)
+                    time.sleep(1)
+                else:
+                    logger.error("Reply failed after retry", exc_info=True)
 
     def _disconnect_backend(self) -> None:
         """Best-effort backend cleanup hook for stop and reconnect paths."""

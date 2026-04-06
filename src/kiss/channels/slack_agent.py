@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import sys
 import threading
 import time
@@ -47,37 +48,65 @@ _SLACK_DIR = Path.home() / ".kiss" / "channels" / "slack"
 # ---------------------------------------------------------------------------
 
 
-def _token_path() -> Path:
-    """Return the path to the stored Slack bot token file.
+def _token_path(workspace: str = "default") -> Path:
+    """Return the path to the stored Slack bot token file for a workspace.
+
+    Args:
+        workspace: Workspace identifier used to key the token storage.
+            Defaults to ``"default"``.
 
     Returns:
-        Path to ``~/.kiss/channels/slack/token.json``.
+        Path to ``~/.kiss/channels/slack/{workspace}/token.json``.
     """
-    return _SLACK_DIR / "token.json"
+    return _SLACK_DIR / workspace / "token.json"
 
 
-def _load_token() -> str | None:
+def _migrate_legacy_token() -> None:
+    """Migrate a legacy token file to the workspace-keyed path.
+
+    Moves ``~/.kiss/channels/slack/token.json`` to
+    ``~/.kiss/channels/slack/default/token.json`` if the legacy file
+    exists and the new location does not.
+    """
+    legacy = _SLACK_DIR / "token.json"
+    dest = _token_path("default")
+    if legacy.is_file() and not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        legacy.rename(dest)
+
+
+def _load_token(workspace: str = "default") -> str | None:
     """Load a stored Slack bot token from disk.
+
+    Args:
+        workspace: Workspace identifier. Defaults to ``"default"``.
 
     Returns:
         The bot token string, or None if not found or invalid.
     """
-    cfg = load_json_config(_token_path(), ("access_token",))
+    if workspace == "default":
+        _migrate_legacy_token()
+    cfg = load_json_config(_token_path(workspace), ("access_token",))
     return cfg["access_token"] if cfg else None
 
 
-def _save_token(token: str) -> None:
+def _save_token(token: str, workspace: str = "default") -> None:
     """Save a Slack bot token to disk with restricted permissions.
 
     Args:
         token: The bot token string (e.g. ``xoxb-...``).
+        workspace: Workspace identifier. Defaults to ``"default"``.
     """
-    save_json_config(_token_path(), {"access_token": token.strip()})
+    save_json_config(_token_path(workspace), {"access_token": token.strip()})
 
 
-def _clear_token() -> None:
-    """Delete the stored Slack bot token."""
-    clear_json_config(_token_path())
+def _clear_token(workspace: str = "default") -> None:
+    """Delete the stored Slack bot token for a workspace.
+
+    Args:
+        workspace: Workspace identifier. Defaults to ``"default"``.
+    """
+    clear_json_config(_token_path(workspace))
 
 
 # ---------------------------------------------------------------------------
@@ -100,18 +129,22 @@ class SlackChannelBackend(ToolMethodBackend):
     defined in ``kiss.channels``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: str = "default") -> None:
         self._client: WebClient | None = None
         self._bot_user_id: str = ""
         self._connection_info: str = ""
+        self._workspace = workspace
 
     def connect(self) -> bool:
         """Authenticate with Slack using the stored bot token.
 
+        Uses the workspace set at construction time to load the
+        appropriate token.
+
         Returns:
             True on success, False on failure.
         """
-        token = _load_token()
+        token = _load_token(self._workspace)
         if not token:
             self._connection_info = (
                 "No Slack token found. Please store a bot token first.\n"
@@ -817,10 +850,11 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
         )
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: str = "default") -> None:
         super().__init__("Slack Agent")
-        self._backend = SlackChannelBackend()
-        token = _load_token()
+        self._workspace = workspace
+        self._backend = SlackChannelBackend(workspace=workspace)
+        token = _load_token(workspace)
         if token:
             self._backend._client = WebClient(token=token, retry_handlers=[])
 
@@ -877,8 +911,8 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
         def authenticate_slack(token: str) -> str:
             """Store and validate a Slack bot token.
 
-            Saves the token to ~/.kiss/channels/slack/token.json and
-            validates it with auth.test.
+            Saves the token under the current workspace (set via
+            ``--workspace``).  Validates it with auth.test.
 
             Args:
                 token: Slack bot token (starts with 'xoxb-' for bot tokens
@@ -893,13 +927,14 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
             agent._backend._client = WebClient(token=token, retry_handlers=[])
             try:
                 resp = agent._backend._client.auth_test()
-                _save_token(token)
+                _save_token(token, workspace=agent._workspace)
                 return json.dumps(
                     {
                         "ok": True,
                         "message": "Slack token saved and validated.",
                         "team": resp.get("team", ""),
                         "user": resp.get("user", ""),
+                        "workspace": agent._workspace,
                     }
                 )
             except SlackApiError as e:
@@ -909,12 +944,12 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
                 )
 
         def clear_slack_auth() -> str:
-            """Clear the stored Slack authentication token.
+            """Clear the stored Slack authentication token for the current workspace.
 
             Returns:
                 Status message.
             """
-            _clear_token()
+            _clear_token(workspace=agent._workspace)
             agent._backend._client = None
             return "Slack authentication cleared."
 
@@ -946,12 +981,73 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
         ]
 
 
-def _make_daemon_backend() -> SlackChannelBackend:
-    """Create a configured SlackChannelBackend for daemon mode."""
-    backend = SlackChannelBackend()
-    token = _load_token()
+def _delete_workspace(workspace: str) -> None:
+    """Delete a workspace's token directory from disk.
+
+    Removes the entire ``~/.kiss/channels/slack/{workspace}/`` directory,
+    including the token file and any other workspace-specific files.
+
+    Args:
+        workspace: Workspace identifier to delete.
+    """
+    ws_dir = _SLACK_DIR / workspace
+    if not ws_dir.is_dir():
+        print(f"Workspace {workspace!r} not found.")
+        sys.exit(1)
+    shutil.rmtree(ws_dir)
+    print(f"Workspace {workspace!r} deleted.")
+
+
+def _list_workspaces() -> None:
+    """Display all authenticated Slack workspaces and their token status.
+
+    Scans ``~/.kiss/channels/slack/`` for workspace subdirectories
+    containing ``token.json`` files.  For each workspace, validates the
+    token against the Slack API and prints the workspace name, status,
+    team name, and bot user.
+    """
+    if not _SLACK_DIR.is_dir():
+        print("No workspaces found.")
+        return
+    workspaces: list[str] = []
+    for entry in sorted(_SLACK_DIR.iterdir()):
+        if entry.is_dir() and (entry / "token.json").is_file():
+            workspaces.append(entry.name)
+    if not workspaces:
+        print("No workspaces found.")
+        return
+    print(f"{'Workspace':<20} {'Status':<12} {'Team':<20} {'Bot User'}")
+    print("-" * 72)
+    for ws in workspaces:
+        token = _load_token(ws)
+        if not token:
+            print(f"{ws:<20} {'no token':<12} {'-':<20} -")
+            continue
+        try:
+            client = WebClient(token=token, retry_handlers=[])
+            resp = client.auth_test()
+            team = str(resp.get("team", ""))
+            user = str(resp.get("user", ""))
+            print(f"{ws:<20} {'✓ valid':<12} {team:<20} {user}")
+        except SlackApiError:
+            print(f"{ws:<20} {'✗ invalid':<12} {'-':<20} -")
+        except Exception:
+            print(f"{ws:<20} {'✗ error':<12} {'-':<20} -")
+
+
+def _make_daemon_backend(workspace: str = "default") -> SlackChannelBackend:
+    """Create a configured SlackChannelBackend for daemon mode.
+
+    Args:
+        workspace: Workspace identifier for token lookup.
+    """
+    backend = SlackChannelBackend(workspace=workspace)
+    token = _load_token(workspace)
     if not token:  # pragma: no branch
-        print("Not authenticated. Run: kiss-slack -t 'authenticate'")
+        print(
+            f"Not authenticated for workspace {workspace!r}. "
+            f"Run: kiss-slack --workspace {workspace} -t 'authenticate'"
+        )
         sys.exit(1)
     backend._client = WebClient(token=token, retry_handlers=[])
     return backend
@@ -959,10 +1055,21 @@ def _make_daemon_backend() -> SlackChannelBackend:
 
 def main() -> None:
     """Run the SlackAgent from the command line with chat persistence."""
+    if "--list-workspaces" in sys.argv:
+        _list_workspaces()
+        return
+    if "--delete-workspace" in sys.argv:
+        idx = sys.argv.index("--delete-workspace")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: kiss-slack --delete-workspace <workspace>")
+            sys.exit(1)
+        _delete_workspace(sys.argv[idx + 1])
+        return
     channel_main(
         SlackAgent, "kiss-slack",
         channel_name="Slack",
         make_daemon_backend=_make_daemon_backend,
+        extra_usage="[--list-workspaces] [--delete-workspace WS]",
     )
 
 

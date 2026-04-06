@@ -144,8 +144,9 @@ def channel_main(
     cli_name: str,
     *,
     channel_name: str = "",
-    make_daemon_backend: Callable[[], Any] | None = None,
+    make_daemon_backend: Callable[..., Any] | None = None,
     daemon_poll_interval: float = 3.0,
+    extra_usage: str = "",
 ) -> None:
     """Standard CLI entry point shared by all channel agents.
 
@@ -158,10 +159,16 @@ def channel_main(
         channel_name: Human-readable channel name (e.g. ``"Slack"``).
             Used in daemon messages and agent naming.
         make_daemon_backend: Factory that creates and configures a
-            backend for daemon mode. Should call ``sys.exit(1)`` if
-            required config is missing. Pass ``None`` to disable daemon mode.
+            backend for daemon mode.  May accept a ``workspace`` keyword
+            argument; if so, the ``--workspace`` CLI value is forwarded.
+            Should call ``sys.exit(1)`` if required config is missing.
+            Pass ``None`` to disable daemon mode.
         daemon_poll_interval: Message poll interval for daemon mode in seconds.
+        extra_usage: Additional usage flags to append to the usage line
+            (e.g. ``"[--list-workspaces]"``).
     """
+    import inspect
+
     from kiss.agents.sorcar.cli_helpers import (
         _apply_chat_args,
         _build_chat_arg_parser,
@@ -175,12 +182,20 @@ def channel_main(
         parts.append(
             "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]"
         )
+        parts.append("[--workspace WS]")
         if make_daemon_backend is not None:
             parts.append("[--daemon]")
+        if extra_usage:
+            parts.append(extra_usage)
         print(" ".join(parts))
         sys.exit(1)
 
     parser = _build_chat_arg_parser()
+    parser.add_argument(
+        "--workspace", default="default",
+        help="Workspace identifier for multi-workspace token management"
+             " (default: 'default')",
+    )
     if make_daemon_backend is not None:
         parser.add_argument(
             "--daemon", action="store_true", help="Run as background daemon"
@@ -198,10 +213,16 @@ def channel_main(
         _print_recent_chats()
         sys.exit(0)
 
+    workspace: str = args.workspace
+
     if make_daemon_backend is not None and getattr(args, "daemon", False):
         from kiss.channels.background_agent import ChannelDaemon
 
-        backend = make_daemon_backend()
+        sig = inspect.signature(make_daemon_backend)
+        if "workspace" in sig.parameters:
+            backend = make_daemon_backend(workspace=workspace)
+        else:
+            backend = make_daemon_backend()
         allow_users_raw = [u.strip() for u in args.allow_users.split(",") if u.strip()]
         allow_users: list[str] | None = None
         if allow_users_raw:
@@ -233,7 +254,11 @@ def channel_main(
             print("Daemon stopped.")
         return
 
-    agent = agent_cls()
+    sig = inspect.signature(agent_cls)
+    if "workspace" in sig.parameters:
+        agent = agent_cls(workspace=workspace)
+    else:
+        agent = agent_cls()
     _apply_chat_args(agent, args)
 
     start_time = _time.time()

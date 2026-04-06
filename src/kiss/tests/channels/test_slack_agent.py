@@ -19,9 +19,14 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.channels.slack_agent import (
+    _SLACK_DIR,
     SlackAgent,
     SlackChannelBackend,
+    _clear_token,
+    _delete_workspace,
+    _list_workspaces,
     _load_token,
+    _migrate_legacy_token,
     _save_token,
     _token_path,
     main,
@@ -68,6 +73,433 @@ class TestTokenPersistence:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('"just a string"')
         assert _load_token() is None
+
+
+class TestWorkspaceTokenPaths:
+    """Tests for workspace-keyed token storage and legacy migration."""
+
+    def setup_method(self) -> None:
+        # Back up both default and any workspace tokens
+        self._default_backup = _backup_and_clear()
+        self._created_dirs: list[Path] = []
+
+    def teardown_method(self) -> None:
+        # Clean up workspace dirs we created
+        for d in self._created_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        _restore(self._default_backup)
+
+    def test_token_path_default(self) -> None:
+        """_token_path() returns workspace-keyed path under default/."""
+        path = _token_path()
+        assert path == _SLACK_DIR / "default" / "token.json"
+
+    def test_token_path_custom_workspace(self) -> None:
+        """_token_path(workspace) returns workspace-keyed path."""
+        path = _token_path("my-workspace")
+        assert path == _SLACK_DIR / "my-workspace" / "token.json"
+
+    def test_save_load_custom_workspace(self) -> None:
+        """Tokens saved under a workspace can be loaded back."""
+        ws = "test-ws-save-load"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-ws-token", workspace=ws)
+        assert _load_token(workspace=ws) == "xoxb-ws-token"
+        # Default workspace should not have this token
+        assert _load_token() is None
+
+    def test_clear_custom_workspace(self) -> None:
+        """_clear_token removes only the specified workspace's token."""
+        ws = "test-ws-clear"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-to-clear", workspace=ws)
+        _clear_token(workspace=ws)
+        assert _load_token(workspace=ws) is None
+
+    def test_multiple_workspaces_isolated(self) -> None:
+        """Tokens for different workspaces are stored independently."""
+        ws_a, ws_b = "test-ws-a", "test-ws-b"
+        self._created_dirs.extend([_SLACK_DIR / ws_a, _SLACK_DIR / ws_b])
+        _save_token("xoxb-token-a", workspace=ws_a)
+        _save_token("xoxb-token-b", workspace=ws_b)
+        assert _load_token(workspace=ws_a) == "xoxb-token-a"
+        assert _load_token(workspace=ws_b) == "xoxb-token-b"
+
+    def test_migrate_legacy_token(self) -> None:
+        """Legacy token at _SLACK_DIR/token.json migrates to default/."""
+        legacy = _SLACK_DIR / "token.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text('{"access_token": "xoxb-legacy"}')
+        try:
+            _migrate_legacy_token()
+            assert not legacy.exists()
+            assert _load_token() == "xoxb-legacy"
+        finally:
+            # Clean up in case of failure
+            if legacy.exists():
+                legacy.unlink()
+
+    def test_migrate_skips_when_default_exists(self) -> None:
+        """Migration does not overwrite an existing default token."""
+        legacy = _SLACK_DIR / "token.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text('{"access_token": "xoxb-old-legacy"}')
+        _save_token("xoxb-existing-default")
+        try:
+            _migrate_legacy_token()
+            # Legacy file untouched because default already exists
+            assert legacy.exists()
+            assert _load_token() == "xoxb-existing-default"
+        finally:
+            if legacy.exists():
+                legacy.unlink()
+
+    def test_migrate_noop_when_no_legacy(self) -> None:
+        """Migration is a no-op when no legacy file exists."""
+        legacy = _SLACK_DIR / "token.json"
+        if legacy.exists():
+            legacy.unlink()
+        _migrate_legacy_token()
+        assert _load_token() is None
+
+    def test_load_triggers_migration(self) -> None:
+        """_load_token() with default workspace triggers migration."""
+        legacy = _SLACK_DIR / "token.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text('{"access_token": "xoxb-auto-migrate"}')
+        try:
+            token = _load_token()
+            assert token == "xoxb-auto-migrate"
+            assert not legacy.exists()
+        finally:
+            if legacy.exists():
+                legacy.unlink()
+
+    def test_load_non_default_skips_migration(self) -> None:
+        """_load_token(workspace=X) for non-default does not trigger migration."""
+        legacy = _SLACK_DIR / "token.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text('{"access_token": "xoxb-stays"}')
+        try:
+            assert _load_token(workspace="other") is None
+            assert legacy.exists()  # Legacy file untouched
+        finally:
+            if legacy.exists():
+                legacy.unlink()
+
+
+class TestWorkspaceSlackAgent:
+    """Tests for SlackAgent and SlackChannelBackend with workspace parameter."""
+
+    def setup_method(self) -> None:
+        self._default_backup = _backup_and_clear()
+        self._created_dirs: list[Path] = []
+
+    def teardown_method(self) -> None:
+        for d in self._created_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        _restore(self._default_backup)
+
+    def test_agent_default_workspace(self) -> None:
+        """SlackAgent() uses 'default' workspace."""
+        agent = SlackAgent()
+        assert agent._workspace == "default"
+
+    def test_agent_custom_workspace(self) -> None:
+        """SlackAgent(workspace=X) uses workspace X for token loading."""
+        ws = "test-ws-agent"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-ws-agent-token", workspace=ws)
+        agent = SlackAgent(workspace=ws)
+        assert agent._workspace == ws
+        assert agent._backend._client is not None
+
+    def test_agent_custom_workspace_no_token(self) -> None:
+        """SlackAgent(workspace=X) with no token leaves client as None."""
+        agent = SlackAgent(workspace="nonexistent-ws")
+        assert agent._backend._client is None
+
+    def test_backend_workspace_stored(self) -> None:
+        """SlackChannelBackend stores workspace for connect()."""
+        backend = SlackChannelBackend(workspace="my-ws")
+        assert backend._workspace == "my-ws"
+
+    def test_auth_tools_use_workspace(self) -> None:
+        """authenticate_slack saves token under the agent's workspace."""
+        ws = "test-ws-auth"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        agent = SlackAgent(workspace=ws)
+        agent.web_use_tool = None
+        tools = agent._get_tools()
+        auth = next(t for t in tools if t.__name__ == "authenticate_slack")
+        # Will fail auth.test but should not save token
+        result = json.loads(auth(token="xoxb-invalid-ws-test"))
+        assert result["ok"] is False
+        assert _load_token(workspace=ws) is None
+
+    def test_clear_auth_uses_workspace(self) -> None:
+        """clear_slack_auth clears only the agent's workspace token."""
+        ws = "test-ws-clear-auth"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-to-clear-ws", workspace=ws)
+        _save_token("xoxb-keep-default")
+        agent = SlackAgent(workspace=ws)
+        agent.web_use_tool = None
+        tools = agent._get_tools()
+        clear = next(t for t in tools if t.__name__ == "clear_slack_auth")
+        clear()
+        assert _load_token(workspace=ws) is None
+        assert _load_token() == "xoxb-keep-default"
+
+    def test_cli_workspace_flag_in_usage(self) -> None:
+        """main() with no args shows --workspace in usage."""
+        original_argv = sys.argv
+        sys.argv = ["kiss-slack"]
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                main()
+        except SystemExit:
+            pass
+        finally:
+            sys.argv = original_argv
+        assert "--workspace" in buf.getvalue()
+
+
+class TestListWorkspaces:
+    """Tests for _list_workspaces() and --list-workspaces CLI flag."""
+
+    def setup_method(self) -> None:
+        self._default_backup = _backup_and_clear()
+        self._created_dirs: list[Path] = []
+
+    def teardown_method(self) -> None:
+        for d in self._created_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        _restore(self._default_backup)
+
+    def test_no_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """_list_workspaces() prints 'No workspaces found.' when _SLACK_DIR missing."""
+        # Temporarily rename _SLACK_DIR if it exists
+        import kiss.channels.slack_agent as mod
+
+        original = mod._SLACK_DIR
+        mod._SLACK_DIR = Path(tempfile.mkdtemp()) / "nonexistent"
+        try:
+            _list_workspaces()
+            out = capsys.readouterr().out
+            assert "No workspaces found" in out
+        finally:
+            mod._SLACK_DIR = original
+
+    def test_empty_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """_list_workspaces() prints 'No workspaces found.' when no workspace dirs."""
+        import kiss.channels.slack_agent as mod
+
+        original = mod._SLACK_DIR
+        empty_dir = Path(tempfile.mkdtemp())
+        mod._SLACK_DIR = empty_dir
+        try:
+            _list_workspaces()
+            out = capsys.readouterr().out
+            assert "No workspaces found" in out
+        finally:
+            mod._SLACK_DIR = original
+            shutil.rmtree(empty_dir, ignore_errors=True)
+
+    def test_workspace_with_invalid_token(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_list_workspaces() shows '✗ invalid' for a bad token."""
+        ws = "test-ws-list-invalid"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-invalid-for-list-test", workspace=ws)
+        _list_workspaces()
+        out = capsys.readouterr().out
+        assert ws in out
+        assert "✗ invalid" in out
+
+    def test_workspace_with_no_token_value(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_list_workspaces() shows 'no token' for empty/malformed token file."""
+        ws = "test-ws-list-notoken"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        (ws_dir / "token.json").write_text("{}")
+        _list_workspaces()
+        out = capsys.readouterr().out
+        assert ws in out
+        assert "no token" in out
+
+    def test_multiple_workspaces_listed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_list_workspaces() lists all workspaces with token files."""
+        for name in ("ws-alpha", "ws-beta"):
+            d = _SLACK_DIR / name
+            self._created_dirs.append(d)
+            _save_token(f"xoxb-{name}", workspace=name)
+        _list_workspaces()
+        out = capsys.readouterr().out
+        assert "ws-alpha" in out
+        assert "ws-beta" in out
+        assert "Workspace" in out  # header
+
+    def test_dirs_without_token_skipped(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_list_workspaces() ignores subdirs without token.json."""
+        import kiss.channels.slack_agent as mod
+
+        original = mod._SLACK_DIR
+        tmp = Path(tempfile.mkdtemp())
+        mod._SLACK_DIR = tmp
+        (tmp / "has-token").mkdir()
+        (tmp / "has-token" / "token.json").write_text(
+            '{"access_token": "xoxb-x"}'
+        )
+        (tmp / "no-token-dir").mkdir()
+        try:
+            _list_workspaces()
+            out = capsys.readouterr().out
+            assert "has-token" in out
+            assert "no-token-dir" not in out
+        finally:
+            mod._SLACK_DIR = original
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cli_list_workspaces_flag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """main() with --list-workspaces runs _list_workspaces() and returns."""
+        ws = "test-ws-cli-list"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-cli-list-test", workspace=ws)
+        original_argv = sys.argv
+        sys.argv = ["kiss-slack", "--list-workspaces"]
+        try:
+            main()
+        finally:
+            sys.argv = original_argv
+        out = capsys.readouterr().out
+        assert ws in out
+
+    def test_cli_usage_shows_list_workspaces(self) -> None:
+        """main() with no args shows --list-workspaces in usage."""
+        original_argv = sys.argv
+        sys.argv = ["kiss-slack"]
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                main()
+        except SystemExit:
+            pass
+        finally:
+            sys.argv = original_argv
+        assert "--list-workspaces" in buf.getvalue()
+
+
+class TestDeleteWorkspace:
+    """Tests for _delete_workspace() and --delete-workspace CLI flag."""
+
+    def setup_method(self) -> None:
+        self._default_backup = _backup_and_clear()
+        self._created_dirs: list[Path] = []
+
+    def teardown_method(self) -> None:
+        for d in self._created_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        _restore(self._default_backup)
+
+    def test_delete_existing_workspace(self) -> None:
+        """_delete_workspace() removes the workspace directory."""
+        ws = "test-ws-delete"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-delete-me", workspace=ws)
+        assert ws_dir.is_dir()
+        _delete_workspace(ws)
+        assert not ws_dir.exists()
+
+    def test_delete_nonexistent_workspace(self) -> None:
+        """_delete_workspace() exits with code 1 for missing workspace."""
+        with pytest.raises(SystemExit) as exc_info:
+            _delete_workspace("no-such-workspace")
+        assert exc_info.value.code == 1
+
+    def test_delete_preserves_other_workspaces(self) -> None:
+        """Deleting one workspace does not affect others."""
+        ws_del = "test-ws-del-target"
+        ws_keep = "test-ws-del-keep"
+        self._created_dirs.extend(
+            [_SLACK_DIR / ws_del, _SLACK_DIR / ws_keep]
+        )
+        _save_token("xoxb-del-target", workspace=ws_del)
+        _save_token("xoxb-del-keep", workspace=ws_keep)
+        _delete_workspace(ws_del)
+        assert not (_SLACK_DIR / ws_del).exists()
+        assert _load_token(workspace=ws_keep) == "xoxb-del-keep"
+
+    def test_cli_delete_workspace_flag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """main() with --delete-workspace removes the workspace."""
+        ws = "test-ws-cli-del"
+        ws_dir = _SLACK_DIR / ws
+        self._created_dirs.append(ws_dir)
+        _save_token("xoxb-cli-del", workspace=ws)
+        original_argv = sys.argv
+        sys.argv = ["kiss-slack", "--delete-workspace", ws]
+        try:
+            main()
+        finally:
+            sys.argv = original_argv
+        assert not ws_dir.exists()
+        out = capsys.readouterr().out
+        assert "deleted" in out.lower()
+
+    def test_cli_delete_workspace_missing_arg(self) -> None:
+        """main() with --delete-workspace but no value exits with code 1."""
+        original_argv = sys.argv
+        sys.argv = ["kiss-slack", "--delete-workspace"]
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+        finally:
+            sys.argv = original_argv
+
+    def test_cli_usage_shows_delete_workspace(self) -> None:
+        """main() with no args shows --delete-workspace in usage."""
+        import io
+        from contextlib import redirect_stdout
+
+        original_argv = sys.argv
+        sys.argv = ["kiss-slack"]
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                main()
+        except SystemExit:
+            pass
+        finally:
+            sys.argv = original_argv
+        assert "--delete-workspace" in buf.getvalue()
 
 
 _SLACK_TOOL_ERROR_CASES = [
