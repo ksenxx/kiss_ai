@@ -67,7 +67,7 @@ class AnthropicBatchModel(AnthropicModel):
             token_callback=None,  # Batch API does not stream
         )
 
-    def _build_create_kwargs(self) -> dict[str, Any]:
+    def _build_create_kwargs(self, tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Build kwargs, substituting the stripped API model name.
 
         The parent checks ``self.model_name`` for feature detection (thinking,
@@ -77,7 +77,7 @@ class AnthropicBatchModel(AnthropicModel):
         saved = self.model_name
         self.model_name = self._api_model_name
         try:
-            kwargs = super()._build_create_kwargs()
+            kwargs = super()._build_create_kwargs(tools=tools)
         finally:
             self.model_name = saved
         kwargs["model"] = self._api_model_name

@@ -21,11 +21,11 @@
 - Call finish(success=True, summary="detailed summary of what was accomplished
   and the results that the user requested in the task") immediately when task is complete.
 - Whenever the user asks the agent for information, show it in the results
-  as nicely formatted markdown text. Don't tell the user to see the answer in the 
-  chat window because the user is not going to see the chat conversations. 
+  as nicely formatted markdown text. Don't tell the user to see the answer in the
+  chat window because the user is not going to see the chat conversations.
   If the answer to the user question is long, then
-  create a nicely formatted html page, use PageDrop to upload the 
-  html file, get an instant link, and give the link to the user in the result. 
+  create a nicely formatted html page, use PageDrop to upload the
+  html file, get an instant link, and give the link to the user in the result.
   You can call the public API of PageDrop with curl:
 
 ```

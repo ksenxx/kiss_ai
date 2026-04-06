@@ -7,7 +7,6 @@ no mocks, patches, fakes, or test doubles.
 from __future__ import annotations
 
 import inspect
-import os
 import tempfile
 import threading
 from pathlib import Path
@@ -20,8 +19,8 @@ from typing import Any
 class TestB1FastModelForRouting:
     def test_anthropic_key_returns_claude_haiku(self) -> None:
         """With ANTHROPIC_API_KEY set, returns direct claude-haiku-4-5."""
-        from kiss.core.config import DEFAULT_CONFIG
         from kiss.agents.vscode.helpers import fast_model_for
+        from kiss.core.config import DEFAULT_CONFIG
 
         saved = DEFAULT_CONFIG.ANTHROPIC_API_KEY
         try:
@@ -33,8 +32,8 @@ class TestB1FastModelForRouting:
 
     def test_openrouter_only_returns_openrouter_model(self) -> None:
         """With only OPENROUTER_API_KEY, returns openrouter/ prefixed model."""
-        from kiss.core.config import DEFAULT_CONFIG
         from kiss.agents.vscode.helpers import fast_model_for
+        from kiss.core.config import DEFAULT_CONFIG
 
         saved_a = DEFAULT_CONFIG.ANTHROPIC_API_KEY
         saved_o = DEFAULT_CONFIG.OPENROUTER_API_KEY
@@ -52,8 +51,8 @@ class TestB1FastModelForRouting:
 
     def test_together_only_returns_together_model(self) -> None:
         """With only TOGETHER_API_KEY, returns a Together-compatible model."""
-        from kiss.core.config import DEFAULT_CONFIG
         from kiss.agents.vscode.helpers import fast_model_for
+        from kiss.core.config import DEFAULT_CONFIG
 
         saved_a = DEFAULT_CONFIG.ANTHROPIC_API_KEY
         saved_o = DEFAULT_CONFIG.OPENROUTER_API_KEY
@@ -565,7 +564,7 @@ class TestB20ArtifactDirLocking:
         source = inspect.getsource(get_artifact_dir)
         lines = source.split("\n")
         # Should have two checks for _artifact_dir is None
-        none_checks = [l for l in lines if "_artifact_dir is None" in l]
+        none_checks = [line for line in lines if "_artifact_dir is None" in line]
         assert len(none_checks) >= 2, (
             f"Should have double-checked locking (2 None checks), "
             f"found {len(none_checks)}"
