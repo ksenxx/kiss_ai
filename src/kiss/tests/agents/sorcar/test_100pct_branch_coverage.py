@@ -939,6 +939,43 @@ class TestVSCodeServerUncoveredBranches:
         finally:
             _restore_db(saved)
 
+    def test_check_merge_conflict_dirty_worktree(self, tmp_path: Path) -> None:
+        """_check_merge_conflict detects dirty files that overlap with merge."""
+        saved = _redirect_db(str(tmp_path))
+        try:
+            repo = tmp_path / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=repo, capture_output=True,
+            )
+            subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
+            (repo / "f.txt").write_text("content")
+            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
+
+            # Create a branch that modifies f.txt
+            subprocess.run(["git", "checkout", "-b", "test-branch"], cwd=repo, capture_output=True)
+            (repo / "f.txt").write_text("branch content")
+            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "mod"], cwd=repo, capture_output=True)
+            subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True)
+
+            # Dirty the same file in the working tree
+            (repo / "f.txt").write_text("dirty local change")
+
+            server = VSCodeServer()
+            server.agent._wt_branch = "test-branch"
+            server.agent._original_branch = "main"
+            server.agent._repo_root = repo
+            server.work_dir = str(repo)
+
+            # Should detect overlap between dirty file and merge changeset
+            assert server._check_merge_conflict() is True
+        finally:
+            _restore_db(saved)
+
     def test_handle_worktree_action_unknown(self) -> None:
         """_handle_worktree_action with unknown action (server.py line end)."""
         server = VSCodeServer()

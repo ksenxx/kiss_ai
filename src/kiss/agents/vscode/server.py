@@ -753,20 +753,38 @@ class VSCodeServer:
     def _check_merge_conflict(self) -> bool:
         """Check if merging the worktree branch into original would conflict.
 
-        Uses ``git merge-tree --write-tree`` which performs a virtual
-        merge without touching the working tree.
+        Checks two things:
+        1. Tree-level conflicts via ``git merge-tree --write-tree``.
+        2. Uncommitted changes in the main working tree that overlap
+           with files modified by the merge (which would cause
+           ``git merge`` to refuse the merge).
 
         Returns:
-            True if the merge would produce conflicts, False otherwise.
+            True if the merge would fail, False otherwise.
         """
         if not self.agent._wt_branch or not self.agent._original_branch:
             return False
         repo_root = str(self.agent._repo_root) if self.agent._repo_root else self.work_dir
+        # Check 1: tree-level merge conflicts
         result = _git(repo_root,
                       "merge-tree", "--write-tree",
                       self.agent._original_branch,
                       self.agent._wt_branch)
-        return result.returncode != 0
+        if result.returncode != 0:
+            return True
+        # Check 2: dirty working tree files that overlap with merge changes
+        merge_files = _git(repo_root,
+                           "diff", "--name-only",
+                           self.agent._original_branch,
+                           self.agent._wt_branch)
+        if merge_files.returncode != 0 or not merge_files.stdout.strip():
+            return False
+        dirty = _git(repo_root, "diff", "--name-only")
+        if dirty.returncode != 0 or not dirty.stdout.strip():
+            return False
+        dirty_set = set(dirty.stdout.strip().splitlines())
+        merge_set = set(merge_files.stdout.strip().splitlines())
+        return bool(dirty_set & merge_set)
 
     def _get_worktree_changed_files(self) -> list[str]:
         """List files changed in the worktree branch vs the original.
