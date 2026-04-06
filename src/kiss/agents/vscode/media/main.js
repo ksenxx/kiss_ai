@@ -728,7 +728,7 @@
       vscode.postMessage({ type: 'worktreeAction', action: 'discard' });
     });
 
-    btns.appendChild(mergeBtn);
+    if (!ev.hasConflict) btns.appendChild(mergeBtn);
     btns.appendChild(manualBtn);
     btns.appendChild(discardBtn);
     bar.appendChild(btns);

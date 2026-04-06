@@ -322,6 +322,7 @@ class VSCodeServer:
                             "worktreeDir": str(self.agent._wt_dir),
                             "originalBranch": self.agent._original_branch,
                             "changedFiles": changed,
+                            "hasConflict": self._check_merge_conflict(),
                         })
                     else:
                         self.agent.discard()
@@ -719,6 +720,24 @@ class VSCodeServer:
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
+
+    def _check_merge_conflict(self) -> bool:
+        """Check if merging the worktree branch into original would conflict.
+
+        Uses ``git merge-tree --write-tree`` which performs a virtual
+        merge without touching the working tree.
+
+        Returns:
+            True if the merge would produce conflicts, False otherwise.
+        """
+        if not self.agent._wt_branch or not self.agent._original_branch:
+            return False
+        repo_root = str(self.agent._repo_root) if self.agent._repo_root else self.work_dir
+        result = _git(repo_root,
+                      "merge-tree", "--write-tree",
+                      self.agent._original_branch,
+                      self.agent._wt_branch)
+        return result.returncode != 0
 
     def _get_worktree_changed_files(self) -> list[str]:
         """List files changed in the worktree branch vs the original.
