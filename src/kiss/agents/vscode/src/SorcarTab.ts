@@ -115,9 +115,6 @@ export class SorcarTab {
       if (msg.type === 'task_events' && (msg as any).task) {
         this._updateTabTitle((msg as any).task);
       }
-      if (msg.type === 'worktree_done') {
-        this._handleWorktreeDone(msg as any);
-      }
       this.sendToWebview(msg);
       if (msg.type === 'status') {
         this._isRunning = msg.running;
@@ -188,28 +185,6 @@ export class SorcarTab {
       filename: isPrompt ? path.basename(fpath) : '',
       path: fpath,
     } as ToWebviewMessage);
-  }
-
-  /**
-   * Handle worktree task completion: open diff editor for the first
-   * changed file. Merge/discard/manual buttons are shown in the webview
-   * chat input area (the ``worktree_done`` message is forwarded to the
-   * webview by the caller).
-   */
-  private async _handleWorktreeDone(msg: {
-    branch: string;
-    worktreeDir: string;
-    originalBranch: string;
-    changedFiles: string[];
-  }): Promise<void> {
-    if (msg.changedFiles.length > 0) {
-      const file = msg.changedFiles[0];
-      const origUri = vscode.Uri.file(path.join(this._getWorkDir(), file));
-      const wtUri = vscode.Uri.file(path.join(msg.worktreeDir, file));
-      await vscode.commands.executeCommand('vscode.diff',
-        origUri, wtUri,
-        `${file} (original ↔ agent changes)`);
-    }
   }
 
   /**
