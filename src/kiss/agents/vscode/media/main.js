@@ -691,6 +691,7 @@
       worktreeBar.parentNode.removeChild(worktreeBar);
     }
     worktreeBar = null;
+    if (inputContainer) inputContainer.style.display = '';
   }
 
   function showWorktreeActions(ev) {
@@ -732,6 +733,8 @@
     btns.appendChild(discardBtn);
     bar.appendChild(btns);
 
+    // Hide the input container and show the worktree bar in its place
+    if (inputContainer) inputContainer.style.display = 'none';
     var area = document.getElementById('input-area');
     area.insertBefore(bar, area.firstChild);
     worktreeBar = bar;
