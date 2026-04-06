@@ -22,41 +22,19 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _SMS_DIR = Path.home() / ".kiss" / "channels" / "sms"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored SMS config file."""
-    return _SMS_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Sms config from disk."""
-    return load_json_config(_config_path(), ("account_sid", "auth_token",))
-
-
-def _save_config(account_sid: str, auth_token: str, from_number: str) -> None:
-    """Save Sms config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "account_sid": account_sid.strip(),
-            "auth_token": auth_token.strip(),
-            "from_number": from_number.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Sms config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(
+    _SMS_DIR,
+    (
+        "account_sid",
+        "auth_token",
+    ),
+)
 
 
 class SMSChannelBackend(ToolMethodBackend):
@@ -69,7 +47,7 @@ class SMSChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Twilio using stored config."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Twilio config found."
             return False
@@ -117,12 +95,14 @@ class SMSChannelBackend(ToolMethodBackend):
                 if oldest and ts <= oldest:  # pragma: no branch
                     continue
                 new_oldest = ts
-                messages.append({
-                    "ts": ts,
-                    "user": msg.from_,
-                    "text": msg.body,
-                    "sid": msg.sid,
-                })
+                messages.append(
+                    {
+                        "ts": ts,
+                        "user": msg.from_,
+                        "text": msg.body,
+                        "sid": msg.sid,
+                    }
+                )
             return messages, new_oldest
         except Exception:
             return [], oldest
@@ -180,9 +160,7 @@ class SMSChannelBackend(ToolMethodBackend):
         """
         assert self._client is not None
         try:
-            msg = self._client.messages.create(
-                to=to, from_=self._from_number, body=body
-            )
+            msg = self._client.messages.create(to=to, from_=self._from_number, body=body)
             return json.dumps({"ok": True, "sid": msg.sid, "status": msg.status})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -261,15 +239,17 @@ class SMSChannelBackend(ToolMethodBackend):
         assert self._client is not None
         try:
             msg = self._client.messages(message_sid).fetch()
-            return json.dumps({
-                "ok": True,
-                "sid": msg.sid,
-                "from": msg.from_,
-                "to": msg.to,
-                "body": msg.body,
-                "status": msg.status,
-                "date_sent": str(msg.date_sent) if msg.date_sent else "",
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "sid": msg.sid,
+                    "from": msg.from_,
+                    "to": msg.to,
+                    "body": msg.body,
+                    "status": msg.status,
+                    "date_sent": str(msg.date_sent) if msg.date_sent else "",
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -310,13 +290,15 @@ class SMSChannelBackend(ToolMethodBackend):
         assert self._client is not None
         try:
             account = self._client.api.accounts(self._client.username).fetch()
-            return json.dumps({
-                "ok": True,
-                "sid": account.sid,
-                "friendly_name": account.friendly_name,
-                "status": account.status,
-                "type": account.type,
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "sid": account.sid,
+                    "friendly_name": account.friendly_name,
+                    "status": account.status,
+                    "type": account.type,
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -352,16 +334,12 @@ class SMSChannelBackend(ToolMethodBackend):
         """
         assert self._client is not None
         try:
-            call = self._client.calls.create(
-                to=to, from_=self._from_number, url=url, method=method
-            )
+            call = self._client.calls.create(to=to, from_=self._from_number, url=url, method=method)
             return json.dumps({"ok": True, "sid": call.sid, "status": call.status})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_calls(
-        self, to: str = "", from_: str = "", limit: int = 20
-    ) -> str:
+    def list_calls(self, to: str = "", from_: str = "", limit: int = 20) -> str:
         """List recent Twilio calls.
 
         Args:
@@ -408,15 +386,17 @@ class SMSChannelBackend(ToolMethodBackend):
         assert self._client is not None
         try:
             call = self._client.calls(call_sid).fetch()
-            return json.dumps({
-                "ok": True,
-                "sid": call.sid,
-                "from": call.from_,
-                "to": call.to,
-                "status": call.status,
-                "duration": call.duration,
-                "direction": call.direction,
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "sid": call.sid,
+                    "from": call.from_,
+                    "to": call.to,
+                    "status": call.status,
+                    "duration": call.duration,
+                    "direction": call.direction,
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -437,14 +417,13 @@ class SMSChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Twilio SMS tools."""
 
     def __init__(self) -> None:
         super().__init__("SMS Agent")
         self._backend = SMSChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
                 from twilio.rest import Client
@@ -462,7 +441,6 @@ class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
         """Return channel-specific authentication tool functions."""
         agent = self
 
-
         def check_sms_auth() -> str:
             """Check if Twilio credentials are configured and valid.
 
@@ -477,18 +455,18 @@ class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 result = json.loads(agent._backend.get_account_info())
                 if result.get("ok"):  # pragma: no branch
-                    return json.dumps({
-                        "ok": True,
-                        "account": result.get("friendly_name", ""),
-                        "from_number": agent._backend._from_number,
-                    })
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "account": result.get("friendly_name", ""),
+                            "from_number": agent._backend._from_number,
+                        }
+                    )
                 return json.dumps({"ok": False, "error": "Authentication failed."})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
-        def authenticate_sms(
-            account_sid: str, auth_token: str, from_number: str = ""
-        ) -> str:
+        def authenticate_sms(account_sid: str, auth_token: str, from_number: str = "") -> str:
             """Store and validate Twilio credentials.
 
             Args:
@@ -509,7 +487,13 @@ class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
                 client.api.accounts(account_sid.strip()).fetch()
                 agent._backend._client = client
                 agent._backend._from_number = from_number.strip()
-                _save_config(account_sid, auth_token, from_number)
+                _config.save(
+                    {
+                        "account_sid": account_sid.strip(),
+                        "auth_token": auth_token.strip(),
+                        "from_number": from_number.strip(),
+                    }
+                )
                 return json.dumps({"ok": True, "message": "Twilio credentials saved."})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
@@ -520,7 +504,7 @@ class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._client = None
             agent._backend._from_number = ""
             return "SMS authentication cleared."
@@ -531,11 +515,12 @@ class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> SMSChannelBackend:
     """Create a configured SMSChannelBackend for daemon mode."""
     backend = SMSChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-sms -t 'authenticate'")
         sys.exit(1)
     from twilio.rest import Client
+
     backend._client = Client(cfg["account_sid"], cfg["auth_token"])
     backend._from_number = cfg.get("from_number", "")
     return backend
@@ -544,10 +529,12 @@ def _make_daemon_backend() -> SMSChannelBackend:
 def main() -> None:
     """Run the SMSAgent from the command line with chat persistence."""
     channel_main(
-        SMSAgent, "kiss-sms",
+        SMSAgent,
+        "kiss-sms",
         channel_name="SMS",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

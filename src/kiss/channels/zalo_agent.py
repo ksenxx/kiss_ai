@@ -31,11 +31,9 @@ from kiss.channels._backend_utils import (
 )
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,26 +42,7 @@ _DEFAULT_WEBHOOK_PORT = 18082
 
 _ZALO_DIR = Path.home() / ".kiss" / "channels" / "zalo"
 _API_BASE = "https://openapi.zalo.me/v2.0/oa"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Zalo config file."""
-    return _ZALO_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Zalo config from disk."""
-    return load_json_config(_config_path(), ("access_token",))
-
-
-def _save_config(access_token: str, oa_id: str) -> None:
-    """Save Zalo config to disk with restricted permissions."""
-    save_json_config(_config_path(), {"access_token": access_token.strip(), "oa_id": oa_id.strip()})
-
-
-def _clear_config() -> None:
-    """Delete the stored Zalo config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_ZALO_DIR, ("access_token",))
 
 
 class ZaloChannelBackend(ToolMethodBackend):
@@ -85,7 +64,7 @@ class ZaloChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Load Zalo config and start webhook server."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Zalo config found."
             return False
@@ -110,11 +89,13 @@ class ZaloChannelBackend(ToolMethodBackend):
                     if event_name == "user_send_text":  # pragma: no branch
                         sender = data.get("sender", {})
                         message = data.get("message", {})
-                        backend._message_queue.put({
-                            "ts": str(data.get("timestamp", "")),
-                            "user": sender.get("id", ""),
-                            "text": message.get("text", ""),
-                        })
+                        backend._message_queue.put(
+                            {
+                                "ts": str(data.get("timestamp", "")),
+                                "user": sender.get("id", ""),
+                                "text": message.get("text", ""),
+                            }
+                        )
                 except Exception:
                     pass
                 self.send_response(200)
@@ -225,9 +206,7 @@ class ZaloChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def send_image_message(
-        self, to_user_id: str, image_url: str, caption: str = ""
-    ) -> str:
+    def send_image_message(self, to_user_id: str, image_url: str, caption: str = "") -> str:
         """Send an image message to a Zalo user.
 
         Args:
@@ -256,10 +235,12 @@ class ZaloChannelBackend(ToolMethodBackend):
                 timeout=30,
             )
             data = resp.json()
-            return json.dumps({
-                "ok": data.get("error") == 0,
-                "message": data.get("message", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": data.get("error") == 0,
+                    "message": data.get("message", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -348,16 +329,14 @@ class ZaloChannelBackend(ToolMethodBackend):
             )
             data = resp.json()
             if data.get("error") == 0:  # pragma: no branch
-                return json.dumps(
-                    {"ok": True, "conversations": data.get("data", {})}, indent=2
-                )[:8000]
+                return json.dumps({"ok": True, "conversations": data.get("data", {})}, indent=2)[
+                    :8000
+                ]
             return json.dumps({"ok": False, "error": data.get("message", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_conversation(
-        self, user_id: str, offset: int = 0, count: int = 20
-    ) -> str:
+    def get_conversation(self, user_id: str, offset: int = 0, count: int = 20) -> str:
         """Get conversation history with a specific user.
 
         Args:
@@ -408,14 +387,13 @@ class ZaloChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Zalo OA API tools."""
 
     def __init__(self) -> None:
         super().__init__("Zalo Agent")
         self._backend = ZaloChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._access_token = cfg["access_token"]
             self._backend._oa_id = cfg.get("oa_id", "")
@@ -427,7 +405,6 @@ class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_zalo_auth() -> str:
             """Check if Zalo credentials are configured and valid.
@@ -468,7 +445,7 @@ class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 result = json.loads(agent._backend.get_oa_info())
                 if result.get("ok"):  # pragma: no branch
-                    _save_config(access_token, oa_id)
+                    _config.save({"access_token": access_token.strip(), "oa_id": oa_id.strip()})
                     return json.dumps({"ok": True, "message": "Zalo credentials saved."})
                 return json.dumps({"ok": False, "error": "Could not verify credentials."})
             except Exception as e:
@@ -480,7 +457,7 @@ class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._access_token = ""
             agent._backend._oa_id = ""
             return "Zalo authentication cleared."
@@ -491,7 +468,7 @@ class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> ZaloChannelBackend:
     """Create a configured ZaloChannelBackend for daemon mode."""
     backend = ZaloChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-zalo -t 'authenticate'")
         sys.exit(1)
@@ -503,11 +480,13 @@ def _make_daemon_backend() -> ZaloChannelBackend:
 def main() -> None:
     """Run the ZaloAgent from the command line with chat persistence."""
     channel_main(
-        ZaloAgent, "kiss-zalo",
+        ZaloAgent,
+        "kiss-zalo",
         channel_name="Zalo",
         make_daemon_backend=_make_daemon_backend,
         daemon_poll_interval=1.0,
     )
+
 
 if __name__ == "__main__":
     main()

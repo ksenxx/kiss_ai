@@ -58,6 +58,21 @@ The trajectory of the agent is stored in the file: {trajectory_file}
 """
 
 
+def _str_to_bool(value: str | bool) -> bool:
+    """Coerce a string or bool to a Python bool.
+
+    Args:
+        value: A string ("true", "1", "yes" → True; anything else → False)
+            or an already-boolean value.
+
+    Returns:
+        The boolean interpretation of *value*.
+    """
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes")
+    return bool(value)
+
+
 def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
     """Finish execution with status and summary.
 
@@ -68,12 +83,12 @@ def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
             agent did with the reason for doing that along with
             relevant code snippets
     """
-    if isinstance(success, str):
-        success = success.lower() in ("true", "1", "yes")
-    if isinstance(is_continue, str):
-        is_continue = is_continue.lower() in ("true", "1", "yes")
     result: str = yaml.dump(
-        {"success": bool(success), "is_continue": bool(is_continue), "summary": summary},
+        {
+            "success": _str_to_bool(success),
+            "is_continue": _str_to_bool(is_continue),
+            "summary": summary,
+        },
         sort_keys=False,
     )
     return result
@@ -234,13 +249,8 @@ class RelentlessAgent(Base):
             if not isinstance(payload, dict):  # pragma: no cover
                 payload = {}
 
-            success = payload.get("success", False)
-            if isinstance(success, str):  # pragma: no cover
-                success = success.lower() in ("true", "1", "yes")
-
-            is_continue = payload.get("is_continue", False)
-            if isinstance(is_continue, str):  # pragma: no cover
-                is_continue = is_continue.lower() in ("true", "1", "yes")
+            success = _str_to_bool(payload.get("success", False))
+            is_continue = _str_to_bool(payload.get("is_continue", False))
 
             if not is_continue or success:
                 return result

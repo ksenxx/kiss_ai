@@ -29,11 +29,9 @@ from kiss.channels._backend_utils import (
 )
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,32 +39,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_WEBHOOK_PORT = 18081
 
 _LINE_DIR = Path.home() / ".kiss" / "channels" / "line"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored LINE config file."""
-    return _LINE_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Line config from disk."""
-    return load_json_config(_config_path(), ("channel_access_token",))
-
-
-def _save_config(channel_access_token: str, channel_secret: str) -> None:
-    """Save Line config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "channel_access_token": channel_access_token.strip(),
-            "channel_secret": channel_secret.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Line config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_LINE_DIR, ("channel_access_token",))
 
 
 class LineChannelBackend(ToolMethodBackend):
@@ -84,7 +57,7 @@ class LineChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with LINE and start webhook server."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No LINE config found."
             return False
@@ -116,14 +89,16 @@ class LineChannelBackend(ToolMethodBackend):
                             msg = event.get("message", {})
                             if msg.get("type") == "text":  # pragma: no branch
                                 source = event.get("source", {})
-                                backend._message_queue.put({
-                                    "ts": str(event.get("timestamp", "")),
-                                    "user": source.get("userId", ""),
-                                    "text": msg.get("text", ""),
-                                    "reply_token": event.get("replyToken", ""),
-                                    "group_id": source.get("groupId", ""),
-                                    "room_id": source.get("roomId", ""),
-                                })
+                                backend._message_queue.put(
+                                    {
+                                        "ts": str(event.get("timestamp", "")),
+                                        "user": source.get("userId", ""),
+                                        "text": msg.get("text", ""),
+                                        "reply_token": event.get("replyToken", ""),
+                                        "group_id": source.get("groupId", ""),
+                                        "room_id": source.get("roomId", ""),
+                                    }
+                                )
                 except Exception:
                     pass
                 self.send_response(200)
@@ -180,10 +155,9 @@ class LineChannelBackend(ToolMethodBackend):
         try:
             from linebot.v3.messaging import PushMessageRequest, TextMessage
 
-            self._api.push_message(PushMessageRequest(
-                to=channel_id,
-                messages=[TextMessage(text=text)]
-            ))
+            self._api.push_message(
+                PushMessageRequest(to=channel_id, messages=[TextMessage(text=text)])
+            )
         except Exception:
             pass
 
@@ -255,9 +229,7 @@ class LineChannelBackend(ToolMethodBackend):
 
             msgs_data = json.loads(messages_json)
             messages = [
-                TextMessage(text=m.get("text", ""))
-                for m in msgs_data
-                if m.get("type") == "text"
+                TextMessage(text=m.get("text", "")) for m in msgs_data if m.get("type") == "text"
             ]
             self._api.reply_message(ReplyMessageRequest(replyToken=reply_token, messages=messages))
             return json.dumps({"ok": True})
@@ -276,13 +248,15 @@ class LineChannelBackend(ToolMethodBackend):
         assert self._api is not None
         try:
             profile = self._api.get_profile(user_id)
-            return json.dumps({
-                "ok": True,
-                "display_name": profile.display_name,
-                "user_id": profile.user_id,
-                "picture_url": profile.picture_url or "",
-                "status_message": profile.status_message or "",
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "display_name": profile.display_name,
+                    "user_id": profile.user_id,
+                    "picture_url": profile.picture_url or "",
+                    "status_message": profile.status_message or "",
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -295,11 +269,13 @@ class LineChannelBackend(ToolMethodBackend):
         assert self._api is not None
         try:
             quota = self._api.get_message_quota()
-            return json.dumps({
-                "ok": True,
-                "type": quota.type,
-                "value": quota.value if hasattr(quota, "value") else None,
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "type": quota.type,
+                    "value": quota.value if hasattr(quota, "value") else None,
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -319,9 +295,7 @@ class LineChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def push_image_message(
-        self, to: str, image_url: str, preview_url: str
-    ) -> str:
+    def push_image_message(self, to: str, image_url: str, preview_url: str) -> str:
         """Send a push image message.
 
         Args:
@@ -336,14 +310,17 @@ class LineChannelBackend(ToolMethodBackend):
         try:
             from linebot.v3.messaging import ImageMessage, PushMessageRequest
 
-            self._api.push_message(PushMessageRequest(
-                to=to,
-                messages=[ImageMessage(originalContentUrl=image_url, previewImageUrl=preview_url)]
-            ))
+            self._api.push_message(
+                PushMessageRequest(
+                    to=to,
+                    messages=[
+                        ImageMessage(originalContentUrl=image_url, previewImageUrl=preview_url)
+                    ],
+                )
+            )
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -352,7 +329,7 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("LINE Agent")
         self._backend = LineChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
                 from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
@@ -369,7 +346,6 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_line_auth() -> str:
             """Check if LINE credentials are configured and valid.
@@ -390,9 +366,7 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
-        def authenticate_line(
-            channel_access_token: str, channel_secret: str = ""
-        ) -> str:
+        def authenticate_line(channel_access_token: str, channel_secret: str = "") -> str:
             """Store and validate LINE channel credentials.
 
             Args:
@@ -410,7 +384,12 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
                 configuration = Configuration(access_token=channel_access_token.strip())
                 api = MessagingApi(ApiClient(configuration))
                 agent._backend._api = api
-                _save_config(channel_access_token, channel_secret)
+                _config.save(
+                    {
+                        "channel_access_token": channel_access_token.strip(),
+                        "channel_secret": channel_secret.strip(),
+                    }
+                )
                 return json.dumps({"ok": True, "message": "LINE credentials saved."})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
@@ -421,7 +400,7 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._api = None
             return "LINE authentication cleared."
 
@@ -431,11 +410,12 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> LineChannelBackend:
     """Create a configured LineChannelBackend for daemon mode."""
     backend = LineChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-line -t 'authenticate'")
         sys.exit(1)
     from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
+
     configuration = Configuration(access_token=cfg["channel_access_token"])
     backend._api = MessagingApi(ApiClient(configuration))
     return backend
@@ -444,11 +424,13 @@ def _make_daemon_backend() -> LineChannelBackend:
 def main() -> None:
     """Run the LineAgent from the command line with chat persistence."""
     channel_main(
-        LineAgent, "kiss-line",
+        LineAgent,
+        "kiss-line",
         channel_name="LINE",
         make_daemon_backend=_make_daemon_backend,
         daemon_poll_interval=1.0,
     )
+
 
 if __name__ == "__main__":
     main()

@@ -23,41 +23,19 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _NEXTCLOUD_DIR = Path.home() / ".kiss" / "channels" / "nextcloud"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Nextcloud config file."""
-    return _NEXTCLOUD_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Nextcloud Talk config from disk."""
-    return load_json_config(_config_path(), ("url", "username",))
-
-
-def _save_config(url: str, username: str, password: str) -> None:
-    """Save Nextcloud Talk config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "url": url.strip(),
-            "username": username.strip(),
-            "password": password.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Nextcloud Talk config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(
+    _NEXTCLOUD_DIR,
+    (
+        "url",
+        "username",
+    ),
+)
 
 
 class NextcloudTalkChannelBackend(ToolMethodBackend):
@@ -97,7 +75,7 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Nextcloud Talk."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Nextcloud config found."
             return False
@@ -153,12 +131,14 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
                 msg_id = msg.get("id", 0)
                 if msg_id > self._last_message_id:  # pragma: no branch
                     self._last_message_id = msg_id
-                messages.append({
-                    "ts": str(msg.get("timestamp", "")),
-                    "user": msg.get("actorId", ""),
-                    "text": msg.get("message", ""),
-                    "id": str(msg_id),
-                })
+                messages.append(
+                    {
+                        "ts": str(msg.get("timestamp", "")),
+                        "user": msg.get("actorId", ""),
+                        "text": msg.get("message", ""),
+                        "id": str(msg_id),
+                    }
+                )
             return messages, str(self._last_message_id)
         except Exception:
             return [], oldest
@@ -236,9 +216,7 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def create_room(
-        self, room_type: int = 3, invite: str = "", room_name: str = ""
-    ) -> str:
+    def create_room(self, room_type: int = 3, invite: str = "", room_name: str = "") -> str:
         """Create a Nextcloud Talk room.
 
         Args:
@@ -257,11 +235,13 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
                 data["roomName"] = room_name
             result = self._post("/room", data)
             room = result.get("ocs", {}).get("data", {})
-            return json.dumps({
-                "ok": True,
-                "token": room.get("token", ""),
-                "name": room.get("displayName", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "token": room.get("token", ""),
+                    "name": room.get("displayName", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -374,14 +354,13 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Nextcloud Talk API tools."""
 
     def __init__(self) -> None:
         super().__init__("Nextcloud Talk Agent")
         self._backend = NextcloudTalkChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._url = cfg["url"]
             self._backend._auth = (cfg["username"], cfg["password"])
@@ -393,7 +372,6 @@ class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_nextcloud_auth() -> str:
             """Check if Nextcloud Talk credentials are configured and valid.
@@ -435,7 +413,13 @@ class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
                 result = self._backend.list_rooms()
                 data = json.loads(result)
                 if data.get("ok"):  # pragma: no branch
-                    _save_config(url, username, password)
+                    _config.save(
+                        {
+                            "url": url.strip(),
+                            "username": username.strip(),
+                            "password": password.strip(),
+                        }
+                    )
                     return json.dumps({"ok": True, "message": "Nextcloud credentials saved."})
                 return json.dumps({"ok": False, "error": "Authentication failed."})
             except Exception as e:
@@ -447,7 +431,7 @@ class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._url = ""
             agent._backend._auth = ("", "")
             return "Nextcloud authentication cleared."
@@ -458,7 +442,7 @@ class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> NextcloudTalkChannelBackend:
     """Create a configured NextcloudTalkChannelBackend for daemon mode."""
     backend = NextcloudTalkChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-nextcloud -t 'authenticate'")
         sys.exit(1)
@@ -470,10 +454,12 @@ def _make_daemon_backend() -> NextcloudTalkChannelBackend:
 def main() -> None:
     """Run the NextcloudTalkAgent from the command line with chat persistence."""
     channel_main(
-        NextcloudTalkAgent, "kiss-nextcloud",
+        NextcloudTalkAgent,
+        "kiss-nextcloud",
         channel_name="Nextcloud Talk",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

@@ -112,8 +112,7 @@ class ChannelDaemon:
             except Exception as e:
                 self._reconnect_attempts += 1
                 if (  # pragma: no branch
-                    _RECONNECT_ATTEMPTS > 0
-                    and self._reconnect_attempts >= _RECONNECT_ATTEMPTS
+                    _RECONNECT_ATTEMPTS > 0 and self._reconnect_attempts >= _RECONNECT_ATTEMPTS
                 ):
                     logger.error("Max reconnect attempts reached: %s", e)
                     raise
@@ -125,9 +124,7 @@ class ChannelDaemon:
                 )
                 if self._stop_event.wait(self._reconnect_delay):  # pragma: no branch
                     break
-                self._reconnect_delay = min(
-                    self._reconnect_delay * 2, _RECONNECT_MAX
-                )
+                self._reconnect_delay = min(self._reconnect_delay * 2, _RECONNECT_MAX)
 
     def stop(self) -> None:
         """Signal the daemon to stop and wait briefly for handler cleanup."""
@@ -211,9 +208,7 @@ class ChannelDaemon:
             threads = list(self._active_threads.items())
         for thread_ts, thread_oldest in threads:
             try:
-                msgs, new_oldest = self._poll_thread_fn(
-                    channel_id, thread_ts, thread_oldest
-                )
+                msgs, new_oldest = self._poll_thread_fn(channel_id, thread_ts, thread_oldest)
             except Exception:
                 logger.debug("Error polling thread %s", thread_ts, exc_info=True)
                 continue
@@ -236,9 +231,7 @@ class ChannelDaemon:
                 self._sender_states[session_key] = state
             return state
 
-    def _start_sender_worker(
-        self, session_key: str, channel_id: str, state: _SenderState
-    ) -> None:
+    def _start_sender_worker(self, session_key: str, channel_id: str, state: _SenderState) -> None:
         """Start a managed worker for queued messages from one sender."""
         if not state.lock.acquire(blocking=False):
             return
@@ -255,9 +248,7 @@ class ChannelDaemon:
             self._handler_threads.add(thread)
         thread.start()
 
-    def _process_sender_queue(
-        self, session_key: str, channel_id: str, state: _SenderState
-    ) -> None:
+    def _process_sender_queue(self, session_key: str, channel_id: str, state: _SenderState) -> None:
         """Drain queued messages for one sender sequentially.
 
         Re-checks the queue under the lock before releasing to prevent
@@ -334,13 +325,9 @@ class ChannelDaemon:
                 self._send_reply(channel_id, summary, thread_ts)
         except Exception as e:
             logger.error("Agent error for %s: %s", session_key, e, exc_info=True)
-            self._send_reply(
-                channel_id, f"Error processing your message: {e}", thread_ts
-            )
+            self._send_reply(channel_id, f"Error processing your message: {e}", thread_ts)
 
-    def _send_reply(
-        self, channel_id: str, text: str, thread_ts: str
-    ) -> None:
+    def _send_reply(self, channel_id: str, text: str, thread_ts: str) -> None:
         """Send a reply message, retrying once on transient failure.
 
         Args:

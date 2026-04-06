@@ -5,18 +5,22 @@
 
 """OpenAI-compatible model implementation for custom endpoints."""
 
-import inspect
 import json
 import logging
 import re
-import uuid
 from collections.abc import Callable
 from typing import Any
 
 from openai import OpenAI
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, TokenCallback
+from kiss.core.models.model import (
+    Attachment,
+    Model,
+    TokenCallback,
+    _build_text_based_tools_prompt,
+    _parse_text_based_tool_calls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,120 +74,6 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
         final_answer = think_pattern.sub("", content).strip()
         return reasoning, final_answer
     return "", content
-
-
-def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
-    """Build a text-based tools description for models without native function calling.
-
-    Args:
-        function_map: Dictionary mapping function names to callable functions.
-
-    Returns:
-        A formatted prompt string describing available tools and how to call them,
-        or an empty string if no functions are provided.
-    """
-    if not function_map:
-        return ""
-
-    tools_desc = []
-    for func_name, func in function_map.items():
-        sig = inspect.signature(func)
-        doc = inspect.getdoc(func) or f"Function {func_name}"
-
-        # Build parameter descriptions
-        params = []
-        for param_name, param in sig.parameters.items():
-            param_type = param.annotation
-            type_name = getattr(param_type, "__name__", str(param_type))
-            if type_name == "_empty":
-                type_name = "any"
-            params.append(f"    - {param_name} ({type_name})")
-
-        params_str = "\n".join(params) if params else "    (no parameters)"
-        first_line = doc.split(chr(10))[0]
-        tools_desc.append(f"- **{func_name}**: {first_line}\n  Parameters:\n{params_str}")
-
-    return f"""
-## Available Tools
-
-To call a tool, output a JSON object in the following format:
-
-```json
-{{"tool_calls": [{{"name": "tool_name", "arguments": {{"arg1": "value1", "arg2": "value2"}}}}]}}
-```
-
-You can call multiple tools at once by including multiple objects in the tool_calls array.
-
-### Tools:
-{chr(10).join(tools_desc)}
-
-IMPORTANT: When you want to call a tool, output ONLY the JSON object with tool_calls.
-Do not include any other text before or after the JSON.
-When you have the final answer, call the `finish` tool with your result.
-"""
-
-
-def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
-    """Parse tool calls from text-based model output.
-
-    Looks for JSON objects with tool_calls array in the content.
-
-    Args:
-        content: The text content to parse for tool calls.
-
-    Returns:
-        A list of function call dictionaries, each containing 'id', 'name',
-        and 'arguments' keys. Returns empty list if no valid tool calls found.
-    """
-    function_calls: list[dict[str, Any]] = []
-
-    # Try to find JSON in the content - look for tool_calls pattern
-    # First try to find JSON code blocks
-    json_patterns = [
-        r"```json\s*(\{.*?\})\s*```",  # JSON in code blocks
-        r"```\s*(\{.*?\})\s*```",  # JSON in generic code blocks
-        r"(\{[^{}]*\"tool_calls\"[^{}]*\[[^\]]*\][^{}]*\})",  # Inline JSON with tool_calls
-    ]
-
-    for pattern in json_patterns:
-        matches = re.findall(pattern, content, re.DOTALL)
-        for match in matches:
-            try:
-                data = json.loads(match)
-                if "tool_calls" in data and isinstance(data["tool_calls"], list):
-                    for tc in data["tool_calls"]:
-                        if "name" in tc:
-                            function_calls.append(
-                                {
-                                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                                    "name": tc["name"],
-                                    "arguments": tc.get("arguments", {}),
-                                }
-                            )
-                    if function_calls:
-                        return function_calls
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                continue
-
-    # Also try to parse the entire content as JSON (in case model outputs clean JSON)
-    try:
-        data = json.loads(content.strip())
-        if "tool_calls" in data and isinstance(data["tool_calls"], list):
-            for tc in data["tool_calls"]:
-                if "name" in tc:
-                    function_calls.append(
-                        {
-                            "id": f"call_{uuid.uuid4().hex[:8]}",
-                            "name": tc["name"],
-                            "arguments": tc.get("arguments", {}),
-                        }
-                    )
-    except json.JSONDecodeError:
-        logger.debug("Exception caught", exc_info=True)
-        pass
-
-    return function_calls
 
 
 class OpenAICompatibleModel(Model):

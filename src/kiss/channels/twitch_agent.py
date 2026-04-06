@@ -22,43 +22,20 @@ import requests
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _TWITCH_DIR = Path.home() / ".kiss" / "channels" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Twitch config file."""
-    return _TWITCH_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Twitch config from disk."""
-    return load_json_config(_config_path(), ("client_id", "access_token",))
-
-
-def _save_config(client_id: str, client_secret: str, access_token: str, channel_name: str) -> None:
-    """Save Twitch config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "client_id": client_id.strip(),
-            "client_secret": client_secret.strip(),
-            "access_token": access_token.strip(),
-            "channel_name": channel_name.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Twitch config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(
+    _TWITCH_DIR,
+    (
+        "client_id",
+        "access_token",
+    ),
+)
 
 
 class TwitchChannelBackend(ToolMethodBackend):
@@ -89,7 +66,7 @@ class TwitchChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Twitch using stored config."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Twitch config found."
             return False
@@ -172,15 +149,17 @@ class TwitchChannelBackend(ToolMethodBackend):
             if not streams:  # pragma: no branch
                 return json.dumps({"ok": True, "live": False, "channel": broadcaster_login})
             stream = streams[0]
-            return json.dumps({
-                "ok": True,
-                "live": True,
-                "title": stream.get("title", ""),
-                "game_name": stream.get("game_name", ""),
-                "viewer_count": stream.get("viewer_count", 0),
-                "started_at": stream.get("started_at", ""),
-                "language": stream.get("language", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "live": True,
+                    "title": stream.get("title", ""),
+                    "game_name": stream.get("game_name", ""),
+                    "viewer_count": stream.get("viewer_count", 0),
+                    "started_at": stream.get("started_at", ""),
+                    "language": stream.get("language", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -244,9 +223,7 @@ class TwitchChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def send_chat_message(
-        self, broadcaster_id: str, sender_id: str, message: str
-    ) -> str:
+    def send_chat_message(self, broadcaster_id: str, sender_id: str, message: str) -> str:
         """Send a message to a Twitch chat.
 
         Args:
@@ -258,11 +235,14 @@ class TwitchChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            result = self._post("/chat/messages", {
-                "broadcaster_id": broadcaster_id,
-                "sender_id": sender_id,
-                "message": message,
-            })
+            result = self._post(
+                "/chat/messages",
+                {
+                    "broadcaster_id": broadcaster_id,
+                    "sender_id": sender_id,
+                    "message": message,
+                },
+            )
             return json.dumps({"ok": True, **result})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -352,14 +332,13 @@ class TwitchChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Twitch Helix API tools."""
 
     def __init__(self) -> None:
         super().__init__("Twitch Agent")
         self._backend = TwitchChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._client_id = cfg["client_id"]
             self._backend._access_token = cfg["access_token"]
@@ -371,7 +350,6 @@ class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_twitch_auth() -> str:
             """Check if Twitch credentials are configured and valid.
@@ -388,10 +366,12 @@ class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
                 result = agent._backend._get("/users")
                 if "data" in result:  # pragma: no branch
                     users = result["data"]
-                    return json.dumps({
-                        "ok": True,
-                        "login": users[0].get("login", "") if users else "",
-                    })
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "login": users[0].get("login", "") if users else "",
+                        }
+                    )
                 return json.dumps({"ok": False, "error": str(result)})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
@@ -421,12 +401,21 @@ class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 result = agent._backend._get("/users")
                 if "data" in result:  # pragma: no branch
-                    _save_config(client_id, client_secret, access_token, channel_name)
-                    return json.dumps({
-                        "ok": True,
-                        "message": "Twitch credentials saved.",
-                        "login": result["data"][0].get("login", "") if result["data"] else "",
-                    })
+                    _config.save(
+                        {
+                            "client_id": client_id.strip(),
+                            "client_secret": client_secret.strip(),
+                            "access_token": access_token.strip(),
+                            "channel_name": channel_name.strip(),
+                        }
+                    )
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "message": "Twitch credentials saved.",
+                            "login": result["data"][0].get("login", "") if result["data"] else "",
+                        }
+                    )
                 return json.dumps({"ok": False, "error": str(result)})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
@@ -437,7 +426,7 @@ class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._client_id = ""
             agent._backend._access_token = ""
             return "Twitch authentication cleared."
@@ -448,6 +437,7 @@ class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
 def main() -> None:
     """Run the TwitchAgent from the command line with chat persistence."""
     channel_main(TwitchAgent, "kiss-twitch")
+
 
 if __name__ == "__main__":
     main()

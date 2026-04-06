@@ -3,18 +3,27 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Abstract base class for LLM provider model implementations."""
+"""Abstract base class for LLM provider model implementations.
+
+Also contains shared text-based tool calling helpers used by models that
+lack native function calling support (e.g. DeepSeek R1, Claude Code CLI).
+"""
 
 import base64
 import dataclasses
 import inspect
 import json
+import logging
 import mimetypes
+import re
 import types as types_module
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
+
+logger = logging.getLogger(__name__)
 
 # Type alias for the synchronous token streaming callback.
 TokenCallback = Callable[[str], None]
@@ -193,6 +202,36 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
+    def _find_tool_call_ids_from_last_assistant(self) -> list[tuple[str, str]]:
+        """Find tool call (name, id) pairs from the last assistant message.
+
+        Searches backwards through the conversation for the most recent
+        assistant message containing tool calls and extracts their IDs.
+
+        Returns:
+            list[tuple[str, str]]: A list of (function_name, tool_call_id) tuples,
+                or an empty list if no assistant message with tool calls is found.
+        """
+        for msg in reversed(self.conversation):
+            if msg.get("role") == "assistant":
+                # OpenAI-style: tool_calls list with function.name and id
+                if msg.get("tool_calls"):
+                    return [
+                        (tc["function"]["name"], tc["id"]) for tc in msg["tool_calls"]
+                    ]
+                # Anthropic-style: content list with tool_use blocks
+                content = msg.get("content")
+                if isinstance(content, list):
+                    ids = [
+                        (b.get("name", ""), b.get("id", ""))
+                        for b in content
+                        if b.get("type") == "tool_use"
+                    ]
+                    if ids:
+                        return ids
+                break
+        return []
+
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
@@ -203,13 +242,7 @@ class Model(ABC):
         Args:
             function_results: List of tuples containing (function_name, result_dict).
         """
-        tool_calls: list[dict[str, str]] = []
-        for msg in reversed(self.conversation):
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                tool_calls = [
-                    {"name": tc["function"]["name"], "id": tc["id"]} for tc in msg["tool_calls"]
-                ]
-                break
+        tool_calls = self._find_tool_call_ids_from_last_assistant()
 
         for i, (func_name, result_dict) in enumerate(function_results):
             result_content = result_dict.get("result", str(result_dict))
@@ -217,7 +250,7 @@ class Model(ABC):
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
 
             if i < len(tool_calls):
-                tool_call_id = tool_calls[i]["id"]
+                tool_call_id = tool_calls[i][1]
             else:
                 tool_call_id = f"call_{func_name}_{i}"
 
@@ -454,3 +487,123 @@ class Model(ABC):
 
         # Default to string for unknown types
         return {"type": "string"}
+
+
+# =========================================================================
+# Text-based tool calling helpers (shared by OpenAICompatibleModel,
+# ClaudeCodeModel, and any future model without native function calling)
+# =========================================================================
+
+
+def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
+    """Build a text-based tools description for models without native function calling.
+
+    Args:
+        function_map: Dictionary mapping function names to callable functions.
+
+    Returns:
+        A formatted prompt string describing available tools and how to call them,
+        or an empty string if no functions are provided.
+    """
+    if not function_map:
+        return ""
+
+    tools_desc = []
+    for func_name, func in function_map.items():
+        sig = inspect.signature(func)
+        doc = inspect.getdoc(func) or f"Function {func_name}"
+
+        # Build parameter descriptions
+        params = []
+        for param_name, param in sig.parameters.items():
+            param_type = param.annotation
+            type_name = getattr(param_type, "__name__", str(param_type))
+            if type_name == "_empty":
+                type_name = "any"
+            params.append(f"    - {param_name} ({type_name})")
+
+        params_str = "\n".join(params) if params else "    (no parameters)"
+        first_line = doc.split(chr(10))[0]
+        tools_desc.append(f"- **{func_name}**: {first_line}\n  Parameters:\n{params_str}")
+
+    return f"""
+## Available Tools
+
+To call a tool, output a JSON object in the following format:
+
+```json
+{{"tool_calls": [{{"name": "tool_name", "arguments": {{"arg1": "value1", "arg2": "value2"}}}}]}}
+```
+
+You can call multiple tools at once by including multiple objects in the tool_calls array.
+
+### Tools:
+{chr(10).join(tools_desc)}
+
+IMPORTANT: When you want to call a tool, output ONLY the JSON object with tool_calls.
+Do not include any other text before or after the JSON.
+When you have the final answer, call the `finish` tool with your result.
+"""
+
+
+def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
+    """Parse tool calls from text-based model output.
+
+    Looks for JSON objects with tool_calls array in the content.
+
+    Args:
+        content: The text content to parse for tool calls.
+
+    Returns:
+        A list of function call dictionaries, each containing 'id', 'name',
+        and 'arguments' keys. Returns empty list if no valid tool calls found.
+    """
+    function_calls: list[dict[str, Any]] = []
+
+    # Try to find JSON in the content - look for tool_calls pattern
+    # First try to find JSON code blocks
+    json_patterns = [
+        r"```json\s*(\{.*?\})\s*```",  # JSON in code blocks
+        r"```\s*(\{.*?\})\s*```",  # JSON in generic code blocks
+        r"(\{[^{}]*\"tool_calls\"[^{}]*\[[^\]]*\][^{}]*\})",  # Inline JSON with tool_calls
+    ]
+
+    for pattern in json_patterns:
+        matches = re.findall(pattern, content, re.DOTALL)
+        for match in matches:
+            try:
+                data = json.loads(match)
+                if "tool_calls" in data and isinstance(data["tool_calls"], list):
+                    for tc in data["tool_calls"]:
+                        if "name" in tc:
+                            function_calls.append(
+                                {
+                                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                                    "name": tc["name"],
+                                    "arguments": tc.get("arguments", {}),
+                                }
+                            )
+                    if function_calls:
+                        return function_calls
+            except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
+                continue
+
+    # Also try to parse the entire content as JSON (in case model outputs clean JSON)
+    try:
+        data = json.loads(content.strip())
+        if "tool_calls" in data and isinstance(data["tool_calls"], list):
+            for tc in data["tool_calls"]:
+                if "name" in tc:
+                    function_calls.append(
+                        {
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "name": tc["name"],
+                            "arguments": tc.get("arguments", {}),
+                        }
+                    )
+    except json.JSONDecodeError:
+        logger.debug("Exception caught", exc_info=True)
+        pass
+
+    return function_calls

@@ -22,39 +22,13 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _TELEGRAM_DIR = Path.home() / ".kiss" / "channels" / "telegram"
-
-
-# ---------------------------------------------------------------------------
-# Config persistence
-# ---------------------------------------------------------------------------
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Telegram config file."""
-    return _TELEGRAM_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Telegram bot token from disk."""
-    return load_json_config(_config_path(), ("bot_token",))
-
-
-def _save_config(bot_token: str) -> None:
-    """Save Telegram bot token to disk with restricted permissions."""
-    save_json_config(_config_path(), {"bot_token": bot_token.strip()})
-
-
-def _clear_config() -> None:
-    """Delete the stored Telegram config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +50,7 @@ class TelegramChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Telegram using the stored bot token."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Telegram token found."
             return False
@@ -123,13 +97,15 @@ class TelegramChannelBackend(ToolMethodBackend):
                 if msg and msg.text:  # pragma: no branch
                     chat_id = str(msg.chat.id)
                     if not channel_id or chat_id == channel_id:  # pragma: no branch
-                        messages.append({
-                            "ts": str(msg.date.timestamp()) if msg.date else "",
-                            "user": str(msg.from_user.id) if msg.from_user else "",
-                            "text": msg.text,
-                            "message_id": str(msg.message_id),
-                            "chat_id": chat_id,
-                        })
+                        messages.append(
+                            {
+                                "ts": str(msg.date.timestamp()) if msg.date else "",
+                                "user": str(msg.from_user.id) if msg.from_user else "",
+                                "text": msg.text,
+                                "message_id": str(msg.message_id),
+                                "chat_id": chat_id,
+                            }
+                        )
             return messages, oldest
         except Exception:
             return [], oldest
@@ -176,9 +152,7 @@ class TelegramChannelBackend(ToolMethodBackend):
     # Telegram API tool methods
     # -------------------------------------------------------------------
 
-    def send_text(
-        self, chat_id: str, text: str, reply_to_message_id: str = ""
-    ) -> str:
+    def send_text(self, chat_id: str, text: str, reply_to_message_id: str = "") -> str:
         """Send a text message to a Telegram chat.
 
         Args:
@@ -227,9 +201,7 @@ class TelegramChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def send_document(
-        self, chat_id: str, document_path: str, caption: str = ""
-    ) -> str:
+    def send_document(self, chat_id: str, document_path: str, caption: str = "") -> str:
         """Send a document/file to a Telegram chat.
 
         Args:
@@ -249,9 +221,7 @@ class TelegramChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def edit_message_text(
-        self, chat_id: str, message_id: str, text: str
-    ) -> str:
+    def edit_message_text(self, chat_id: str, message_id: str, text: str) -> str:
         """Edit an existing message text.
 
         Args:
@@ -265,9 +235,7 @@ class TelegramChannelBackend(ToolMethodBackend):
         assert self._bot is not None
         try:
             cid: Any = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
-            self._bot.edit_message_text(
-                chat_id=cid, message_id=int(message_id), text=text
-            )
+            self._bot.edit_message_text(chat_id=cid, message_id=int(message_id), text=text)
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -342,14 +310,17 @@ class TelegramChannelBackend(ToolMethodBackend):
         try:
             cid: Any = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
             chat = self._bot.get_chat(chat_id=cid)
-            return json.dumps({
-                "ok": True,
-                "id": chat.id,
-                "title": chat.title or "",
-                "type": chat.type,
-                "username": chat.username or "",
-                "description": chat.description or "",
-            }, indent=2)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "id": chat.id,
+                    "title": chat.title or "",
+                    "type": chat.type,
+                    "username": chat.username or "",
+                    "description": chat.description or "",
+                },
+                indent=2,
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -385,13 +356,15 @@ class TelegramChannelBackend(ToolMethodBackend):
             cid: Any = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
             member = self._bot.get_chat_member(chat_id=cid, user_id=int(user_id))
             user = member.user
-            return json.dumps({
-                "ok": True,
-                "user_id": user.id,
-                "username": user.username or "",
-                "first_name": user.first_name or "",
-                "status": member.status,
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "user_id": user.id,
+                    "username": user.username or "",
+                    "first_name": user.first_name or "",
+                    "status": member.status,
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -450,13 +423,15 @@ class TelegramChannelBackend(ToolMethodBackend):
             results = []
             for u in updates:  # pragma: no branch
                 msg = u.message or u.channel_post
-                results.append({
-                    "update_id": u.update_id,
-                    "chat_id": str(msg.chat.id) if msg else "",
-                    "user_id": str(msg.from_user.id) if msg and msg.from_user else "",
-                    "text": msg.text or "" if msg else "",
-                    "message_id": str(msg.message_id) if msg else "",
-                })
+                results.append(
+                    {
+                        "update_id": u.update_id,
+                        "chat_id": str(msg.chat.id) if msg else "",
+                        "user_id": str(msg.from_user.id) if msg and msg.from_user else "",
+                        "text": msg.text or "" if msg else "",
+                        "message_id": str(msg.message_id) if msg else "",
+                    }
+                )
             return json.dumps({"ok": True, "updates": results}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -484,16 +459,13 @@ class TelegramChannelBackend(ToolMethodBackend):
             cid: Any = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
             options = json.loads(options_json)
             msg = self._bot.send_poll(
-                chat_id=cid, question=question, options=options,
-                is_anonymous=is_anonymous
+                chat_id=cid, question=question, options=options, is_anonymous=is_anonymous
             )
             return json.dumps({"ok": True, "message_id": msg.message_id})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def forward_message(
-        self, chat_id: str, from_chat_id: str, message_id: str
-    ) -> str:
+    def forward_message(self, chat_id: str, from_chat_id: str, message_id: str) -> str:
         """Forward a message to another chat.
 
         Args:
@@ -518,7 +490,6 @@ class TelegramChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 # ---------------------------------------------------------------------------
 # TelegramAgent
 # ---------------------------------------------------------------------------
@@ -536,7 +507,7 @@ class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("Telegram Agent")
         self._backend = TelegramChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
                 from telegram import Bot
@@ -553,7 +524,6 @@ class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
         """Return channel-specific authentication tool functions."""
         agent = self
 
-
         def check_telegram_auth() -> str:
             """Check if the Telegram bot token is configured and valid.
 
@@ -567,12 +537,14 @@ class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
                 )
             try:
                 me = agent._backend._bot.get_me()
-                return json.dumps({
-                    "ok": True,
-                    "username": me.username,
-                    "first_name": me.first_name,
-                    "id": me.id,
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "username": me.username,
+                        "first_name": me.first_name,
+                        "id": me.id,
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
@@ -593,14 +565,16 @@ class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
 
                 bot = Bot(token=bot_token)
                 me = bot.get_me()
-                _save_config(bot_token)
+                _config.save({"bot_token": bot_token.strip()})
                 agent._backend._bot = bot
-                return json.dumps({
-                    "ok": True,
-                    "message": "Telegram token saved and validated.",
-                    "username": me.username,
-                    "id": me.id,
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Telegram token saved and validated.",
+                        "username": me.username,
+                        "id": me.id,
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
@@ -610,7 +584,7 @@ class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._bot = None
             return "Telegram authentication cleared."
 
@@ -620,11 +594,12 @@ class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> TelegramChannelBackend:
     """Create a configured TelegramChannelBackend for daemon mode."""
     backend = TelegramChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-telegram -t 'authenticate'")
         sys.exit(1)
     from telegram import Bot
+
     backend._bot = Bot(token=cfg["bot_token"])
     return backend
 
@@ -632,10 +607,12 @@ def _make_daemon_backend() -> TelegramChannelBackend:
 def main() -> None:
     """Run the TelegramAgent from the command line with chat persistence."""
     channel_main(
-        TelegramAgent, "kiss-telegram",
+        TelegramAgent,
+        "kiss-telegram",
         channel_name="Telegram",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

@@ -22,42 +22,19 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _MATRIX_DIR = Path.home() / ".kiss" / "channels" / "matrix"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Matrix config file."""
-    return _MATRIX_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Matrix config from disk."""
-    return load_json_config(_config_path(), ("homeserver_url", "access_token",))
-
-
-def _save_config(homeserver_url: str, access_token: str, device_id: str, user_id: str) -> None:
-    """Save Matrix config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "homeserver_url": homeserver_url.strip(),
-            "access_token": access_token.strip(),
-            "device_id": device_id.strip(),
-            "user_id": user_id.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Matrix config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(
+    _MATRIX_DIR,
+    (
+        "homeserver_url",
+        "access_token",
+    ),
+)
 
 
 class MatrixChannelBackend(ToolMethodBackend):
@@ -70,7 +47,7 @@ class MatrixChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Matrix using stored config."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Matrix config found."
             return False
@@ -128,12 +105,14 @@ class MatrixChannelBackend(ToolMethodBackend):
                 if room:  # pragma: no branch
                     for event in room.timeline.events:  # pragma: no branch
                         if isinstance(event, RoomMessageText):  # pragma: no branch
-                            messages.append({
-                                "ts": str(event.server_timestamp),
-                                "user": event.sender,
-                                "text": event.body,
-                                "event_id": event.event_id,
-                            })
+                            messages.append(
+                                {
+                                    "ts": str(event.server_timestamp),
+                                    "user": event.sender,
+                                    "text": event.body,
+                                    "event_id": event.event_id,
+                                }
+                            )
             return messages, self._next_batch
         except Exception:
             return [], oldest
@@ -192,6 +171,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _get() -> Any:
                 return await self._client.joined_rooms()
 
@@ -213,6 +193,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _join() -> Any:
                 return await self._client.join(room_id_or_alias)
 
@@ -233,6 +214,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _leave() -> None:
                 await self._client.room_leave(room_id)
 
@@ -254,6 +236,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _send() -> Any:
                 return await self._client.room_send(
                     room_id,
@@ -279,6 +262,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _send() -> Any:
                 return await self._client.room_send(
                     room_id,
@@ -303,6 +287,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _get() -> Any:
                 return await self._client.joined_members(room_id)
 
@@ -328,6 +313,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _invite() -> None:
                 await self._client.room_invite(room_id, user_id)
 
@@ -350,6 +336,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _kick() -> None:
                 await self._client.room_kick(room_id, user_id, reason=reason)
 
@@ -379,6 +366,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _create() -> Any:
                 return await self._client.room_create(
                     name=name,
@@ -405,18 +393,20 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+
             async def _get() -> Any:
                 return await self._client.get_profile(user_id)
 
             resp = asyncio.run(_get())
-            return json.dumps({
-                "ok": True,
-                "display_name": getattr(resp, "displayname", ""),
-                "avatar_url": getattr(resp, "avatar_url", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "display_name": getattr(resp, "displayname", ""),
+                    "avatar_url": getattr(resp, "avatar_url", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -425,7 +415,7 @@ class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("Matrix Agent")
         self._backend = MatrixChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
                 from nio import AsyncClient
@@ -446,7 +436,6 @@ class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_matrix_auth() -> str:
             """Check if Matrix credentials are configured and valid.
@@ -498,12 +487,21 @@ class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
                 if user_id:  # pragma: no branch
                     client.user_id = user_id.strip()
                 agent._backend._client = client
-                _save_config(homeserver_url, access_token, device_id, user_id)
-                return json.dumps({
-                    "ok": True,
-                    "message": "Matrix credentials saved.",
-                    "homeserver": homeserver_url,
-                })
+                _config.save(
+                    {
+                        "homeserver_url": homeserver_url.strip(),
+                        "access_token": access_token.strip(),
+                        "device_id": device_id.strip(),
+                        "user_id": user_id.strip(),
+                    }
+                )
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Matrix credentials saved.",
+                        "homeserver": homeserver_url,
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
@@ -513,7 +511,7 @@ class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._client = None
             return "Matrix authentication cleared."
 
@@ -523,11 +521,12 @@ class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> MatrixChannelBackend:
     """Create a configured MatrixChannelBackend for daemon mode."""
     backend = MatrixChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-matrix -t 'authenticate'")
         sys.exit(1)
     from nio import AsyncClient
+
     backend._client = AsyncClient(cfg["homeserver_url"])
     backend._client.access_token = cfg["access_token"]
     return backend
@@ -536,10 +535,12 @@ def _make_daemon_backend() -> MatrixChannelBackend:
 def main() -> None:
     """Run the MatrixAgent from the command line with chat persistence."""
     channel_main(
-        MatrixAgent, "kiss-matrix",
+        MatrixAgent,
+        "kiss-matrix",
         channel_name="Matrix",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

@@ -22,42 +22,19 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _MATTERMOST_DIR = Path.home() / ".kiss" / "channels" / "mattermost"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Mattermost config file."""
-    return _MATTERMOST_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Mattermost config from disk."""
-    return load_json_config(_config_path(), ("url", "token",))
-
-
-def _save_config(url: str, token: str, port: str, scheme: str) -> None:
-    """Save Mattermost config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "url": url.strip(),
-            "token": token.strip(),
-            "port": port.strip(),
-            "scheme": scheme.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Mattermost config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(
+    _MATTERMOST_DIR,
+    (
+        "url",
+        "token",
+    ),
+)
 
 
 class MattermostChannelBackend(ToolMethodBackend):
@@ -70,19 +47,21 @@ class MattermostChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Mattermost using stored config."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Mattermost config found."
             return False
         try:
             from mattermostdriver import Driver
 
-            self._driver = Driver({
-                "url": cfg["url"],
-                "token": cfg["token"],
-                "port": int(cfg.get("port", 443)),
-                "scheme": cfg.get("scheme", "https"),
-            })
+            self._driver = Driver(
+                {
+                    "url": cfg["url"],
+                    "token": cfg["token"],
+                    "port": int(cfg.get("port", 443)),
+                    "scheme": cfg.get("scheme", "https"),
+                }
+            )
             self._driver.login()
             me = self._driver.users.get_user("me")
             self._connection_info = f"Authenticated as {me.get('username', '')}"
@@ -116,9 +95,7 @@ class MattermostChannelBackend(ToolMethodBackend):
             return [], oldest
         try:
             since = int(oldest) if oldest else self._last_post_time
-            posts = self._driver.posts.get_posts_for_channel(
-                channel_id, params={"since": since}
-            )
+            posts = self._driver.posts.get_posts_for_channel(channel_id, params={"since": since})
             order = posts.get("order", [])
             posts_data = posts.get("posts", {})
             messages: list[dict[str, Any]] = []
@@ -127,12 +104,14 @@ class MattermostChannelBackend(ToolMethodBackend):
                 post = posts_data.get(post_id, {})
                 ts = str(post.get("create_at", ""))
                 new_oldest = ts
-                messages.append({
-                    "ts": ts,
-                    "user": post.get("user_id", ""),
-                    "text": post.get("message", ""),
-                    "id": post.get("id", ""),
-                })
+                messages.append(
+                    {
+                        "ts": ts,
+                        "user": post.get("user_id", ""),
+                        "text": post.get("message", ""),
+                        "id": post.get("id", ""),
+                    }
+                )
             if messages:  # pragma: no branch
                 self._last_post_time = int(new_oldest) + 1
             return messages, new_oldest
@@ -205,9 +184,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_channels(
-        self, team_id: str, page: int = 0, per_page: int = 60
-    ) -> str:
+    def list_channels(self, team_id: str, page: int = 0, per_page: int = 60) -> str:
         """List channels in a Mattermost team.
 
         Args:
@@ -252,9 +229,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_channel_posts(
-        self, channel_id: str, page: int = 0, per_page: int = 30
-    ) -> str:
+    def list_channel_posts(self, channel_id: str, page: int = 0, per_page: int = 30) -> str:
         """List posts in a Mattermost channel.
 
         Args:
@@ -279,7 +254,8 @@ class MattermostChannelBackend(ToolMethodBackend):
                     "user_id": posts_data[post_id].get("user_id", ""),
                     "create_at": posts_data[post_id].get("create_at", 0),
                 }
-                for post_id in order if post_id in posts_data
+                for post_id in order
+                if post_id in posts_data
             ]
             return json.dumps({"ok": True, "posts": result}, indent=2)[:8000]
         except Exception as e:
@@ -339,15 +315,17 @@ class MattermostChannelBackend(ToolMethodBackend):
         assert self._driver is not None
         try:
             user = self._driver.users.get_user(user_id_or_username)
-            return json.dumps({
-                "ok": True,
-                "id": user.get("id", ""),
-                "username": user.get("username", ""),
-                "email": user.get("email", ""),
-                "first_name": user.get("first_name", ""),
-                "last_name": user.get("last_name", ""),
-                "roles": user.get("roles", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "id": user.get("id", ""),
+                    "username": user.get("username", ""),
+                    "email": user.get("email", ""),
+                    "first_name": user.get("first_name", ""),
+                    "last_name": user.get("last_name", ""),
+                    "roles": user.get("roles", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -417,13 +395,12 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            self._driver.reactions.create_reaction(options={
-                "user_id": user_id, "post_id": post_id, "emoji_name": emoji_name
-            })
+            self._driver.reactions.create_reaction(
+                options={"user_id": user_id, "post_id": post_id, "emoji_name": emoji_name}
+            )
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -432,17 +409,19 @@ class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("Mattermost Agent")
         self._backend = MattermostChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
                 from mattermostdriver import Driver
 
-                self._backend._driver = Driver({
-                    "url": cfg["url"],
-                    "token": cfg["token"],
-                    "port": int(cfg.get("port", 443)),
-                    "scheme": cfg.get("scheme", "https"),
-                })
+                self._backend._driver = Driver(
+                    {
+                        "url": cfg["url"],
+                        "token": cfg["token"],
+                        "port": int(cfg.get("port", 443)),
+                        "scheme": cfg.get("scheme", "https"),
+                    }
+                )
                 self._backend._driver.login()
             except Exception:
                 pass
@@ -454,7 +433,6 @@ class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_mattermost_auth() -> str:
             """Check if Mattermost credentials are configured and valid.
@@ -499,21 +477,32 @@ class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 from mattermostdriver import Driver
 
-                driver = Driver({
-                    "url": url.strip(),
-                    "token": token.strip(),
-                    "port": port,
-                    "scheme": scheme,
-                })
+                driver = Driver(
+                    {
+                        "url": url.strip(),
+                        "token": token.strip(),
+                        "port": port,
+                        "scheme": scheme,
+                    }
+                )
                 driver.login()
                 me = driver.users.get_user("me")
-                _save_config(url, token, str(port), scheme)
+                _config.save(
+                    {
+                        "url": url.strip(),
+                        "token": token.strip(),
+                        "port": str(port),
+                        "scheme": scheme.strip(),
+                    }
+                )
                 agent._backend._driver = driver
-                return json.dumps({
-                    "ok": True,
-                    "message": "Mattermost credentials saved.",
-                    "username": me.get("username", ""),
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Mattermost credentials saved.",
+                        "username": me.get("username", ""),
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
@@ -523,7 +512,7 @@ class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._driver = None
             return "Mattermost authentication cleared."
 
@@ -533,15 +522,20 @@ class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> MattermostChannelBackend:
     """Create a configured MattermostChannelBackend for daemon mode."""
     backend = MattermostChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-mattermost -t 'authenticate'")
         sys.exit(1)
     from mattermostdriver import Driver
-    backend._driver = Driver({
-        "url": cfg["url"], "token": cfg["token"],
-        "port": int(cfg.get("port", 443)), "scheme": cfg.get("scheme", "https"),
-    })
+
+    backend._driver = Driver(
+        {
+            "url": cfg["url"],
+            "token": cfg["token"],
+            "port": int(cfg.get("port", 443)),
+            "scheme": cfg.get("scheme", "https"),
+        }
+    )
     backend._driver.login()
     return backend
 
@@ -549,10 +543,12 @@ def _make_daemon_backend() -> MattermostChannelBackend:
 def main() -> None:
     """Run the MattermostAgent from the command line with chat persistence."""
     channel_main(
-        MattermostAgent, "kiss-mattermost",
+        MattermostAgent,
+        "kiss-mattermost",
         channel_name="Mattermost",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

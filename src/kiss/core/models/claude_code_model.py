@@ -22,8 +22,10 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, TokenCallback
-from kiss.core.models.openai_compatible_model import (
+from kiss.core.models.model import (
+    Attachment,
+    Model,
+    TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
 )

@@ -63,7 +63,7 @@ class TestCacheControlOpenRouter(TestCase):
 
 class TestTextBasedToolsParsing(TestCase):
     def test_parse_text_based_tool_calls_invalid_json(self) -> None:
-        from kiss.core.models.openai_compatible_model import (
+        from kiss.core.models.model import (
             _parse_text_based_tool_calls,
         )
 

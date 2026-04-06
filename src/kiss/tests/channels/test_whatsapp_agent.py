@@ -17,16 +17,14 @@ import pytest
 from kiss.channels.whatsapp_agent import (
     WhatsAppAgent,
     WhatsAppChannelBackend,
-    _config_path,
-    _load_config,
-    _save_config,
+    _config,
     main,
 )
 
 
 def _backup_and_clear() -> str | None:
     """Back up existing config file and remove it."""
-    path = _config_path()
+    path = _config.path
     backup = None
     if path.exists():
         backup = path.read_text()
@@ -36,7 +34,7 @@ def _backup_and_clear() -> str | None:
 
 def _restore(backup: str | None) -> None:
     """Restore a previously backed-up config file."""
-    path = _config_path()
+    path = _config.path
     if backup is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(backup)
@@ -54,28 +52,28 @@ class TestConfigPersistence:
         _restore(self._backup)
 
     def test_load_corrupt_json(self) -> None:
-        path = _config_path()
+        path = _config.path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{bad json!!")
-        assert _load_config() is None
+        assert _config.load() is None
 
     def test_load_non_dict_json(self) -> None:
-        path = _config_path()
+        path = _config.path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('"just a string"')
-        assert _load_config() is None
+        assert _config.load() is None
 
     def test_load_missing_fields(self) -> None:
-        path = _config_path()
+        path = _config.path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"access_token": "tok"}))
-        assert _load_config() is None
+        assert _config.load() is None
 
     def test_load_empty_token(self) -> None:
-        path = _config_path()
+        path = _config.path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"access_token": "", "phone_number_id": "123"}))
-        assert _load_config() is None
+        assert _config.load() is None
 
 
 _INTERACTIVE_JSON = json.dumps({
@@ -189,7 +187,7 @@ class TestWhatsAppAgent:
         assert "developers.facebook.com" in result
 
     def test_check_auth_with_invalid_config(self) -> None:
-        _save_config("invalid-token", "invalid-phone-id")
+        _config.save({"access_token": "invalid-token", "phone_number_id": "invalid-phone-id"})
         agent = WhatsAppAgent()
         agent.web_use_tool = None
         tools = agent._get_tools()
@@ -212,17 +210,17 @@ class TestWhatsAppAgent:
         auth = next(t for t in tools if t.__name__ == "authenticate_whatsapp")
         result = json.loads(auth(access_token="bad-token", phone_number_id="123"))
         assert result["ok"] is False
-        assert _load_config() is None
+        assert _config.load() is None
 
     def test_clear_auth(self) -> None:
-        _save_config("token", "12345")
+        _config.save({"access_token": "token", "phone_number_id": "12345"})
         agent = WhatsAppAgent()
         agent.web_use_tool = None
         tools = agent._get_tools()
         clear = next(t for t in tools if t.__name__ == "clear_whatsapp_auth")
         result = clear()
         assert "cleared" in result.lower()
-        assert _load_config() is None
+        assert _config.load() is None
         assert agent._backend._access_token == ""
 
     def test_clear_auth_when_not_authenticated(self) -> None:

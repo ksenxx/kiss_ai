@@ -68,6 +68,7 @@ def _load_service(sa_path: str = "") -> Any:
     if sa_file.exists():  # pragma: no branch
         try:
             from google.oauth2 import service_account
+
             creds = service_account.Credentials.from_service_account_file(
                 str(sa_file), scopes=_SCOPES
             )
@@ -95,7 +96,6 @@ def _load_service(sa_path: str = "") -> Any:
     except Exception:
         pass
     return None
-
 
 
 def _run_oauth_flow() -> Any:
@@ -205,13 +205,15 @@ class GoogleChatChannelBackend(ToolMethodBackend):
             for msg in raw_msgs:  # pragma: no branch
                 ts = msg.get("createTime", "")
                 new_oldest = ts
-                messages.append({
-                    "ts": ts,
-                    "user": msg.get("sender", {}).get("name", ""),
-                    "text": msg.get("text", ""),
-                    "name": msg.get("name", ""),
-                    "thread": msg.get("thread", {}).get("name", ""),
-                })
+                messages.append(
+                    {
+                        "ts": ts,
+                        "user": msg.get("sender", {}).get("name", ""),
+                        "text": msg.get("text", ""),
+                        "name": msg.get("name", ""),
+                        "thread": msg.get("thread", {}).get("name", ""),
+                    }
+                )
             return messages, new_oldest
         except Exception:
             return [], oldest
@@ -312,9 +314,7 @@ class GoogleChatChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_members(
-        self, space_name: str, page_size: int = 20, page_token: str = ""
-    ) -> str:
+    def list_members(self, space_name: str, page_size: int = 20, page_token: str = "") -> str:
         """List members of a Google Chat space.
 
         Args:
@@ -402,9 +402,7 @@ class GoogleChatChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def post_message(
-        self, space_name: str, text: str, thread_key: str = ""
-    ) -> str:
+    def post_message(self, space_name: str, text: str, thread_key: str = "") -> str:
         """Send a message to a Google Chat space.
 
         Args:
@@ -420,14 +418,14 @@ class GoogleChatChannelBackend(ToolMethodBackend):
             body: dict[str, Any] = {"text": text}
             if thread_key:  # pragma: no branch
                 body["thread"] = {"name": thread_key}
-            msg = self._service.spaces().messages().create(
-                parent=space_name, body=body
-            ).execute()
-            return json.dumps({
-                "ok": True,
-                "name": msg.get("name", ""),
-                "create_time": msg.get("createTime", ""),
-            })
+            msg = self._service.spaces().messages().create(parent=space_name, body=body).execute()
+            return json.dumps(
+                {
+                    "ok": True,
+                    "name": msg.get("name", ""),
+                    "create_time": msg.get("createTime", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -480,18 +478,25 @@ class GoogleChatChannelBackend(ToolMethodBackend):
         """
         assert self._service is not None
         try:
-            space = self._service.spaces().create(body={
-                "displayName": display_name,
-                "spaceType": space_type,
-            }).execute()
-            return json.dumps({
-                "ok": True,
-                "name": space.get("name", ""),
-                "display_name": space.get("displayName", ""),
-            })
+            space = (
+                self._service.spaces()
+                .create(
+                    body={
+                        "displayName": display_name,
+                        "spaceType": space_type,
+                    }
+                )
+                .execute()
+            )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "name": space.get("name", ""),
+                    "display_name": space.get("displayName", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +527,6 @@ class GoogleChatAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_googlechat_auth() -> str:
             """Check if Google Chat credentials are configured and valid.
@@ -578,11 +582,13 @@ class GoogleChatAgent(BaseChannelAgent, StatefulSorcarAgent):
             agent._backend._service = service
             try:
                 resp = agent._backend._service.spaces().list(pageSize=1).execute()
-                return json.dumps({
-                    "ok": True,
-                    "message": "Google Chat authentication successful.",
-                    "space_count": len(resp.get("spaces", [])),
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Google Chat authentication successful.",
+                        "space_count": len(resp.get("spaces", [])),
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": True, "message": "Authenticated.", "error": str(e)})
 
@@ -613,10 +619,12 @@ def _make_daemon_backend() -> GoogleChatChannelBackend:
 def main() -> None:
     """Run the GoogleChatAgent from the command line with chat persistence."""
     channel_main(
-        GoogleChatAgent, "kiss-gchat",
+        GoogleChatAgent,
+        "kiss-gchat",
         channel_name="Google Chat",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

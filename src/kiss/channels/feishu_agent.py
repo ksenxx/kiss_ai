@@ -22,34 +22,19 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _FEISHU_DIR = Path.home() / ".kiss" / "channels" / "feishu"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Feishu config file."""
-    return _FEISHU_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Feishu config from disk."""
-    return load_json_config(_config_path(), ("app_id", "app_secret",))
-
-
-def _save_config(app_id: str, app_secret: str) -> None:
-    """Save Feishu config to disk with restricted permissions."""
-    save_json_config(_config_path(), {"app_id": app_id.strip(), "app_secret": app_secret.strip()})
-
-
-def _clear_config() -> None:
-    """Delete the stored Feishu config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(
+    _FEISHU_DIR,
+    (
+        "app_id",
+        "app_secret",
+    ),
+)
 
 
 class FeishuChannelBackend(ToolMethodBackend):
@@ -61,7 +46,7 @@ class FeishuChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Feishu using stored app credentials."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Feishu config found."
             return False
@@ -69,10 +54,7 @@ class FeishuChannelBackend(ToolMethodBackend):
             import lark_oapi as lark
 
             self._client = (
-                lark.Client.builder()
-                .app_id(cfg["app_id"])
-                .app_secret(cfg["app_secret"])
-                .build()
+                lark.Client.builder().app_id(cfg["app_id"]).app_secret(cfg["app_secret"]).build()
             )
             self._connection_info = f"Connected with app_id {cfg['app_id']}"
             return True
@@ -130,12 +112,14 @@ class FeishuChannelBackend(ToolMethodBackend):
                         text = content.get("text", "")
                     except Exception:
                         text = str(body.content or "")
-                messages.append({
-                    "ts": ts,
-                    "user": item.sender.id if item.sender else "",
-                    "text": text,
-                    "message_id": item.message_id or "",
-                })
+                messages.append(
+                    {
+                        "ts": ts,
+                        "user": item.sender.id if item.sender else "",
+                        "text": text,
+                        "message_id": item.message_id or "",
+                    }
+                )
             return messages, new_oldest
         except Exception:
             return [], oldest
@@ -313,12 +297,14 @@ class FeishuChannelBackend(ToolMethodBackend):
                 return json.dumps({"ok": False, "error": resp.msg})
             messages = []
             for item in resp.data.items or []:  # pragma: no branch
-                messages.append({
-                    "message_id": item.message_id or "",
-                    "msg_type": item.msg_type or "",
-                    "create_time": item.create_time or "",
-                    "sender_id": item.sender.id if item.sender else "",
-                })
+                messages.append(
+                    {
+                        "message_id": item.message_id or "",
+                        "msg_type": item.msg_type or "",
+                        "create_time": item.create_time or "",
+                        "sender_id": item.sender.id if item.sender else "",
+                    }
+                )
             return json.dumps({"ok": True, "messages": messages}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -376,13 +362,16 @@ class FeishuChannelBackend(ToolMethodBackend):
             if not resp.success():  # pragma: no branch
                 return json.dumps({"ok": False, "error": resp.msg})
             data = resp.data
-            return json.dumps({
-                "ok": True,
-                "chat_id": data.chat_id or "",
-                "name": data.name or "",
-                "description": data.description or "",
-                "owner_id": data.owner_id or "",
-            }, indent=2)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "chat_id": data.chat_id or "",
+                    "name": data.name or "",
+                    "description": data.description or "",
+                    "owner_id": data.owner_id or "",
+                },
+                indent=2,
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -405,15 +394,16 @@ class FeishuChannelBackend(ToolMethodBackend):
             if not resp.success():  # pragma: no branch
                 return json.dumps({"ok": False, "error": resp.msg})
             user = resp.data.user
-            return json.dumps({
-                "ok": True,
-                "name": user.name or "" if user else "",
-                "email": user.email or "" if user else "",
-                "open_id": user.open_id or "" if user else "",
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "name": user.name or "" if user else "",
+                    "email": user.email or "" if user else "",
+                    "open_id": user.open_id or "" if user else "",
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -422,7 +412,7 @@ class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("Feishu Agent")
         self._backend = FeishuChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
                 import lark_oapi as lark
@@ -443,7 +433,6 @@ class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_feishu_auth() -> str:
             """Check if Feishu credentials are configured and valid.
@@ -489,7 +478,7 @@ class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
                     .build()
                 )
                 agent._backend._client = client
-                _save_config(app_id, app_secret)
+                _config.save({"app_id": app_id.strip(), "app_secret": app_secret.strip()})
                 return json.dumps({"ok": True, "message": "Feishu credentials saved."})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
@@ -500,7 +489,7 @@ class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._client = None
             return "Feishu authentication cleared."
 
@@ -510,16 +499,14 @@ class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> FeishuChannelBackend:
     """Create a configured FeishuChannelBackend for daemon mode."""
     backend = FeishuChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-feishu -t 'authenticate'")
         sys.exit(1)
     import lark_oapi as lark
+
     backend._client = (
-        lark.Client.builder()
-        .app_id(cfg["app_id"])
-        .app_secret(cfg["app_secret"])
-        .build()
+        lark.Client.builder().app_id(cfg["app_id"]).app_secret(cfg["app_secret"]).build()
     )
     return backend
 
@@ -527,10 +514,12 @@ def _make_daemon_backend() -> FeishuChannelBackend:
 def main() -> None:
     """Run the FeishuAgent from the command line with chat persistence."""
     channel_main(
-        FeishuAgent, "kiss-feishu",
+        FeishuAgent,
+        "kiss-feishu",
         channel_name="Feishu",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

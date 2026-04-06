@@ -98,6 +98,42 @@ def clear_json_config(path: Path) -> None:
         path.unlink()
 
 
+class ChannelConfig:
+    """Encapsulates the 4-function config persistence pattern used by channel agents.
+
+    Replaces the repeated ``_config_path`` / ``_load_config`` / ``_save_config`` /
+    ``_clear_config`` boilerplate in each channel agent module.
+
+    Args:
+        channel_dir: Directory for this channel (e.g. ``~/.kiss/channels/discord``).
+        required_keys: Keys that must be present and non-empty for a valid config.
+    """
+
+    def __init__(self, channel_dir: Path, required_keys: tuple[str, ...]) -> None:
+        self.path = channel_dir / "config.json"
+        self.required_keys = required_keys
+
+    def load(self) -> dict[str, str] | None:
+        """Load the config, returning ``None`` if missing or invalid.
+
+        Returns:
+            Loaded string dictionary, or ``None``.
+        """
+        return load_json_config(self.path, self.required_keys)
+
+    def save(self, data: dict[str, str]) -> None:
+        """Save *data* to the config file with restricted permissions.
+
+        Args:
+            data: String dictionary to persist.
+        """
+        save_json_config(self.path, data)
+
+    def clear(self) -> None:
+        """Delete the config file if it exists."""
+        clear_json_config(self.path)
+
+
 class BaseChannelAgent:
     """Mixin for channel agent classes that provides a standard ``_get_tools()``
     implementation combining auth tools with backend tools.
@@ -179,9 +215,7 @@ def channel_main(
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]
-        parts.append(
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]"
-        )
+        parts.append("[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]")
         parts.append("[--workspace WS]")
         if make_daemon_backend is not None:
             parts.append("[--daemon]")
@@ -192,19 +226,16 @@ def channel_main(
 
     parser = _build_chat_arg_parser()
     parser.add_argument(
-        "--workspace", default="default",
-        help="Workspace identifier for multi-workspace token management"
-             " (default: 'default')",
+        "--workspace",
+        default="default",
+        help="Workspace identifier for multi-workspace token management (default: 'default')",
     )
     if make_daemon_backend is not None:
+        parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
+        parser.add_argument("--daemon-channel", default="", help="Channel/chat to monitor")
         parser.add_argument(
-            "--daemon", action="store_true", help="Run as background daemon"
-        )
-        parser.add_argument(
-            "--daemon-channel", default="", help="Channel/chat to monitor"
-        )
-        parser.add_argument(
-            "--allow-users", default="",
+            "--allow-users",
+            default="",
             help="Comma-separated usernames or user IDs to allow",
         )
     args = parser.parse_args()

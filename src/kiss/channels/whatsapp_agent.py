@@ -33,11 +33,9 @@ from kiss.channels._backend_utils import (
 )
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,52 +44,7 @@ _DEFAULT_WEBHOOK_PORT = 18080
 
 _WHATSAPP_DIR = Path.home() / ".kiss" / "channels" / "whatsapp"
 _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
-
-
-# ---------------------------------------------------------------------------
-# Config persistence
-# ---------------------------------------------------------------------------
-
-
-def _config_path() -> Path:
-    """Return the path to the stored WhatsApp config file.
-
-    Returns:
-        Path to ``~/.kiss/channels/whatsapp/config.json``.
-    """
-    return _WHATSAPP_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored WhatsApp config from disk.
-
-    Returns:
-        Dict with ``access_token`` and ``phone_number_id``, or None.
-    """
-    return load_json_config(_config_path(), ("access_token", "phone_number_id"))
-
-
-def _save_config(access_token: str, phone_number_id: str, waba_id: str = "") -> None:
-    """Save WhatsApp config to disk with restricted permissions.
-
-    Args:
-        access_token: Meta Graph API access token.
-        phone_number_id: WhatsApp Business phone number ID.
-        waba_id: WhatsApp Business Account ID (optional).
-    """
-    save_json_config(
-        _config_path(),
-        {
-            "access_token": access_token.strip(),
-            "phone_number_id": phone_number_id.strip(),
-            "waba_id": waba_id.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored WhatsApp config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_WHATSAPP_DIR, ("access_token", "phone_number_id"))
 
 
 # ---------------------------------------------------------------------------
@@ -167,11 +120,9 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             True on success, False on failure.
         """
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
-            self._connection_info = (
-                "No WhatsApp config found. Please authenticate first."
-            )
+            self._connection_info = "No WhatsApp config found. Please authenticate first."
             return False
         self._access_token = cfg["access_token"]
         self._phone_number_id = cfg["phone_number_id"]
@@ -206,6 +157,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             def do_GET(self) -> None:
                 # Handle webhook verification challenge
                 from urllib.parse import parse_qs, urlparse
+
                 parsed = urlparse(self.path)
                 params = parse_qs(parsed.query)
                 challenge = params.get("hub.challenge", [""])[0]
@@ -303,12 +255,14 @@ class WhatsAppChannelBackend(ToolMethodBackend):
                 text = raw.get("text", {}).get("body", "")
             else:
                 text = f"[{msg_type} message]"
-            messages.append({
-                "ts": raw.get("timestamp", ""),
-                "user": raw.get("from", ""),
-                "text": text,
-                "id": raw.get("id", ""),
-            })
+            messages.append(
+                {
+                    "ts": raw.get("timestamp", ""),
+                    "user": raw.get("from", ""),
+                    "text": text,
+                    "id": raw.get("id", ""),
+                }
+            )
         return messages, oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
@@ -320,12 +274,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             thread_ts: Unused for WhatsApp.
         """
         url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
-        _api_request("POST", url, self._access_token, json_body={
-            "messaging_product": "whatsapp",
-            "to": channel_id,
-            "type": "text",
-            "text": {"body": text},
-        })
+        _api_request(
+            "POST",
+            url,
+            self._access_token,
+            json_body={
+                "messaging_product": "whatsapp",
+                "to": channel_id,
+                "type": "text",
+                "text": {"body": text},
+            },
+        )
 
     def wait_for_reply(
         self,
@@ -345,6 +304,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             The text of the user's reply.
         """
+
         def poll() -> list[dict[str, Any]]:
             matches: list[dict[str, Any]] = []
             others: list[dict[str, Any]] = []
@@ -414,12 +374,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         """
         url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
         try:
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "text",
-                "text": {"preview_url": preview_url, "body": body},
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "text",
+                    "text": {"preview_url": preview_url, "body": body},
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             messages = result.get("messages", [])  # pragma: no cover
@@ -459,12 +424,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             }
             if components:
                 template["components"] = json.loads(components)
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "template",
-                "template": template,
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "template",
+                    "template": template,
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             messages = result.get("messages", [])  # pragma: no cover
@@ -509,12 +479,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
                 media_obj["caption"] = caption
             if filename and media_type == "document":
                 media_obj["filename"] = filename
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": media_type,
-                media_type: media_obj,
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": media_type,
+                    media_type: media_obj,
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             messages = result.get("messages", [])  # pragma: no cover
@@ -536,12 +511,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         """
         url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
         try:
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "reaction",
-                "reaction": {"message_id": message_id, "emoji": emoji},
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "reaction",
+                    "reaction": {"message_id": message_id, "emoji": emoji},
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             messages = result.get("messages", [])  # pragma: no cover
@@ -580,12 +560,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
                 location["name"] = name
             if address:
                 location["address"] = address
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "location",
-                "location": location,
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "location",
+                    "location": location,
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             messages = result.get("messages", [])  # pragma: no cover
@@ -606,12 +591,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         """
         url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
         try:
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "interactive",
-                "interactive": json.loads(interactive_json),
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "interactive",
+                    "interactive": json.loads(interactive_json),
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             messages = result.get("messages", [])  # pragma: no cover
@@ -632,12 +622,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         """
         url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
         try:
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "contacts",
-                "contacts": json.loads(contacts_json),
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "contacts",
+                    "contacts": json.loads(contacts_json),
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             messages = result.get("messages", [])  # pragma: no cover
@@ -657,15 +652,21 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         """
         url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
         try:
-            result = _api_request("POST", url, self._access_token, json_body={
-                "messaging_product": "whatsapp",
-                "status": "read",
-                "message_id": message_id,
-            })
+            result = _api_request(
+                "POST",
+                url,
+                self._access_token,
+                json_body={
+                    "messaging_product": "whatsapp",
+                    "status": "read",
+                    "message_id": message_id,
+                },
+            )
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             return json.dumps(  # pragma: no cover
-                {"ok": True, "success": result.get("success", False)})
+                {"ok": True, "success": result.get("success", False)}
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -731,7 +732,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             return json.dumps(  # pragma: no cover
-                {"ok": True, "success": result.get("success", False)})
+                {"ok": True, "success": result.get("success", False)}
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -760,7 +762,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             return json.dumps(  # pragma: no cover
-                {"ok": True, "media_id": result.get("id", "")})
+                {"ok": True, "media_id": result.get("id", "")}
+            )
         except OSError as e:
             return json.dumps({"ok": False, "error": str(e)})
         except Exception as e:
@@ -780,12 +783,14 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             result = _api_request("GET", url, self._access_token)
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps({  # pragma: no cover
-                "ok": True,
-                "url": result.get("url", ""),
-                "mime_type": result.get("mime_type", ""),
-                "file_size": result.get("file_size", 0),
-            })
+            return json.dumps(
+                {  # pragma: no cover
+                    "ok": True,
+                    "url": result.get("url", ""),
+                    "mime_type": result.get("mime_type", ""),
+                    "file_size": result.get("file_size", 0),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -804,7 +809,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
             return json.dumps(  # pragma: no cover
-                {"ok": True, "success": result.get("success", False)})
+                {"ok": True, "success": result.get("success", False)}
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -822,11 +828,13 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             JSON string with template list (name, status, category, language).
         """
         if not self._waba_id:
-            return json.dumps({
-                "ok": False,
-                "error": "waba_id not configured. Re-authenticate with "
-                         "authenticate_whatsapp() and provide the WABA ID.",
-            })
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "waba_id not configured. Re-authenticate with "
+                    "authenticate_whatsapp() and provide the WABA ID.",
+                }
+            )
         params = f"?limit={limit}"
         if status:
             params += f"&status={status}"
@@ -849,7 +857,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": True, "templates": templates}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 # ---------------------------------------------------------------------------
@@ -880,7 +887,7 @@ class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("WhatsApp Agent")
         self._backend = WhatsAppChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:
             self._backend._access_token = cfg["access_token"]
             self._backend._phone_number_id = cfg["phone_number_id"]
@@ -923,15 +930,19 @@ class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent):
             result = _api_request("GET", url, agent._backend._access_token)
             if "error" in result:
                 return json.dumps({"ok": False, "error": result["error"]})
-            return json.dumps({  # pragma: no cover
-                "ok": True,
-                "phone_number_id": agent._backend._phone_number_id,
-                "verified_name": result.get("verified_name", ""),
-                "display_phone_number": result.get("display_phone_number", ""),
-            })
+            return json.dumps(
+                {  # pragma: no cover
+                    "ok": True,
+                    "phone_number_id": agent._backend._phone_number_id,
+                    "verified_name": result.get("verified_name", ""),
+                    "display_phone_number": result.get("display_phone_number", ""),
+                }
+            )
 
         def authenticate_whatsapp(
-            access_token: str, phone_number_id: str, waba_id: str = "",
+            access_token: str,
+            phone_number_id: str,
+            waba_id: str = "",
         ) -> str:
             """Store and validate WhatsApp Business API credentials.
 
@@ -950,26 +961,33 @@ class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent):
             phone_number_id = phone_number_id.strip()
             if not access_token or not phone_number_id:
                 return "Both access_token and phone_number_id are required."
-            url = (
-                f"{_GRAPH_API_BASE}/{phone_number_id}"
-                "?fields=verified_name,display_phone_number"
-            )
+            url = f"{_GRAPH_API_BASE}/{phone_number_id}?fields=verified_name,display_phone_number"
             result = _api_request("GET", url, access_token)
             if "error" in result:
-                return json.dumps({
-                    "ok": False,
-                    "error": f"Credential validation failed: {result['error']}",
-                })
-            _save_config(access_token, phone_number_id, waba_id)  # pragma: no cover
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": f"Credential validation failed: {result['error']}",
+                    }
+                )
+            _config.save(
+                {
+                    "access_token": access_token.strip(),
+                    "phone_number_id": phone_number_id.strip(),
+                    "waba_id": waba_id.strip(),
+                }
+            )  # pragma: no cover
             agent._backend._access_token = access_token  # pragma: no cover
             agent._backend._phone_number_id = phone_number_id  # pragma: no cover
             agent._backend._waba_id = waba_id.strip()  # pragma: no cover
-            return json.dumps({  # pragma: no cover
-                "ok": True,
-                "message": "WhatsApp credentials saved and validated.",
-                "verified_name": result.get("verified_name", ""),
-                "display_phone_number": result.get("display_phone_number", ""),
-            })
+            return json.dumps(
+                {  # pragma: no cover
+                    "ok": True,
+                    "message": "WhatsApp credentials saved and validated.",
+                    "verified_name": result.get("verified_name", ""),
+                    "display_phone_number": result.get("display_phone_number", ""),
+                }
+            )
 
         def clear_whatsapp_auth() -> str:
             """Clear the stored WhatsApp authentication credentials.
@@ -977,7 +995,7 @@ class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._access_token = ""
             agent._backend._phone_number_id = ""
             agent._backend._waba_id = ""

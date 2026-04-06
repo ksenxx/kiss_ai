@@ -100,7 +100,7 @@ class TestOpenAIModel:
 
 class TestModelHelperFunctions:
     def test_build_text_based_tools_prompt_empty(self):
-        from kiss.core.models.openai_compatible_model import _build_text_based_tools_prompt
+        from kiss.core.models.model import _build_text_based_tools_prompt
 
         assert _build_text_based_tools_prompt({}) == ""
 
