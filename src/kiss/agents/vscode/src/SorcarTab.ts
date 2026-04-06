@@ -238,6 +238,7 @@ export class SorcarTab {
           this._agentProcess.sendCommand({ type: 'getLastSession' });
         }
         this._sendActiveFileInfo();
+        this.sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
         break;
 
       case 'submit': {
@@ -384,7 +385,7 @@ export class SorcarTab {
   public async focusChatInput(): Promise<void> {
     this._panel.reveal();
     await new Promise(r => setTimeout(r, 150));
-    this._panel.webview.postMessage({ type: 'focusInput' });
+    this.sendToWebview({ type: 'focusInput' });
   }
 
   /** Start a new conversation, stopping any running task first. */
