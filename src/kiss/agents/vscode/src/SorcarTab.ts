@@ -115,6 +115,9 @@ export class SorcarTab {
       if (msg.type === 'task_events' && (msg as any).task) {
         this._updateTabTitle((msg as any).task);
       }
+      if (msg.type === 'worktree_done') {
+        this._handleWorktreeDone(msg as any);
+      }
       this.sendToWebview(msg);
       if (msg.type === 'status') {
         this._isRunning = msg.running;
@@ -185,6 +188,46 @@ export class SorcarTab {
       filename: isPrompt ? path.basename(fpath) : '',
       path: fpath,
     } as ToWebviewMessage);
+  }
+
+  /**
+   * Handle worktree task completion: open diff editor and show quick pick
+   * for merge/discard/manual actions.
+   */
+  private async _handleWorktreeDone(msg: {
+    branch: string;
+    worktreeDir: string;
+    originalBranch: string;
+    changedFiles: string[];
+  }): Promise<void> {
+    // Open diff editor for the first changed file
+    if (msg.changedFiles.length > 0) {
+      const file = msg.changedFiles[0];
+      const origUri = vscode.Uri.file(path.join(this._getWorkDir(), file));
+      const wtUri = vscode.Uri.file(path.join(msg.worktreeDir, file));
+      await vscode.commands.executeCommand('vscode.diff',
+        origUri, wtUri,
+        `${file} (original ↔ agent changes)`);
+    }
+
+    // Show quick pick for action
+    const choice = await vscode.window.showQuickPick([
+      { label: '$(check) Merge', description: 'Auto-merge branch into ' + msg.originalBranch, action: 'merge' as const },
+      { label: '$(git-merge) Review & Merge Manually', description: 'Open instructions for manual merge', action: 'manual' as const },
+      { label: '$(trash) Discard', description: 'Delete the branch and worktree', action: 'discard' as const },
+    ], {
+      placeHolder: `Task completed on branch ${msg.branch}. What would you like to do?`,
+      ignoreFocusOut: true,
+    });
+
+    if (choice) {
+      this._agentProcess.sendCommand({
+        type: 'worktreeAction',
+        action: choice.action,
+      });
+    }
+    // If dismissed (Escape), branch stays pending — next task in same chat
+    // will be blocked with merge instructions (existing behavior).
   }
 
   /**

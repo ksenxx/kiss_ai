@@ -62,6 +62,9 @@
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchagent)
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.run`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchrun)
               - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.test_agent`](#kissagentsvscodekiss_projectsrckissbenchmarksterminal_benchtest_agent)
+            - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.webarena`](#kissagentsvscodekiss_projectsrckissbenchmarkswebarena)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.webarena.agent`](#kissagentsvscodekiss_projectsrckissbenchmarkswebarenaagent)
+              - [`kiss.agents.vscode.kiss_project.src.kiss.benchmarks.webarena.run`](#kissagentsvscodekiss_projectsrckissbenchmarkswebarenarun)
           - [`kiss.agents.vscode.kiss_project.src.kiss.channels`](#kissagentsvscodekiss_projectsrckisschannels)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels._backend_utils`](#kissagentsvscodekiss_projectsrckisschannels_backend_utils)
             - [`kiss.agents.vscode.kiss_project.src.kiss.channels._channel_agent_utils`](#kissagentsvscodekiss_projectsrckisschannels_channel_agent_utils)
@@ -121,6 +124,9 @@
       - [`kiss.benchmarks.terminal_bench.agent`](#kissbenchmarksterminal_benchagent)
       - [`kiss.benchmarks.terminal_bench.run`](#kissbenchmarksterminal_benchrun)
       - [`kiss.benchmarks.terminal_bench.test_agent`](#kissbenchmarksterminal_benchtest_agent)
+    - [`kiss.benchmarks.webarena`](#kissbenchmarkswebarena)
+      - [`kiss.benchmarks.webarena.agent`](#kissbenchmarkswebarenaagent)
+      - [`kiss.benchmarks.webarena.run`](#kissbenchmarkswebarenarun)
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels._backend_utils`](#kisschannels_backend_utils)
     - [`kiss.channels._channel_agent_utils`](#kisschannels_channel_agent_utils)
@@ -531,7 +537,7 @@ ______________________________________________________________________
   - `content`: The content to display.
   - `type`: Content type forwarded to each child printer.
   - `**kwargs`: Additional options forwarded to each child printer.
-  - **Returns:** str: The result from the last child printer.
+  - **Returns:** str: The first non-empty result from child printers.
 
 - **token_callback** — Forward a streamed token to all child printers.<br/>`token_callback(token: str) -> None`
 
@@ -1872,7 +1878,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks` — *KISS Sorcar benchmark harnesses for SWE-bench Pro and Terminal-Bench 2.0.*
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks` — *KISS Sorcar benchmark harnesses for SWE-bench Pro, Terminal-Bench 2.0, and WebArena.*
 
 ______________________________________________________________________
 
@@ -1970,6 +1976,10 @@ ______________________________________________________________________
 - `trials`: Number of attempts per task (-k flag). Use 5 for leaderboard.
 - `skip_pre_pull`: If True, skip the image pre-pull step.
 
+**`score_results`** — Print a graded summary table from a harbor results JSON file. Reads harbor's output JSON (list of task result dicts) and prints binary score, partial score (fraction of tests passed), and a summary line. Tasks with no partial score data (skipped or missing metadata) show "-" in the partial column.<br/>`def score_results(results_path: Path) -> None`
+
+- `results_path`: Path to harbor results JSON file.
+
 ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.terminal_bench.test_agent` — *Tests for the terminal bench harbor agent.*
@@ -2011,6 +2021,38 @@ ______________________________________________________________________
 ##### `class TestRunSorcarNotFound` — When sorcar is not installed, run returns early with an error.
 
 - **test_sorcar_missing**<br/>`test_sorcar_missing() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.webarena` — *KISS Sorcar benchmark harness for WebArena.*
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.webarena.agent` — *WebArena agent adapter that delegates to KISS Sorcar.*
+
+##### `class SorcarWebArenaAgent` — Agent that runs KISS Sorcar on WebArena tasks.
+
+**Constructor:** `SorcarWebArenaAgent(model: str | None = None, timeout: int = 600) -> None`
+
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+
+- `timeout`: Max seconds per task before killing sorcar.
+
+- **run_task** — Run sorcar on a single WebArena task. Writes a SYSTEM.md with WebArena-specific instructions before invoking sorcar, then scores the result against reference answers.<br/>`run_task(config_file: Path) -> dict`
+
+  - `config_file`: Path to the WebArena task JSON config file.
+  - **Returns:** Dict with task_id, answer, score, stdout, stderr, return_code.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.kiss_project.src.kiss.benchmarks.webarena.run` — *Run WebArena with the sorcar agent.*
+
+**`run_webarena`** — Run sorcar on WebArena task configs and save results.<br/>`def run_webarena(config_dir: Path, model: str = 'claude-opus-4-6', max_tasks: int | None = None, timeout: int = 600) -> None`
+
+- `config_dir`: Directory containing WebArena JSON task configs.
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+- `max_tasks`: Cap for quick testing (None = all configs).
+- `timeout`: Max seconds per task.
 
 ______________________________________________________________________
 
@@ -4760,7 +4802,7 @@ ______________________________________________________________________
   - `content`: The content to display.
   - `type`: Content type forwarded to each child printer.
   - `**kwargs`: Additional options forwarded to each child printer.
-  - **Returns:** str: The result from the last child printer.
+  - **Returns:** str: The first non-empty result from child printers.
 
 - **token_callback** — Forward a streamed token to all child printers.<br/>`token_callback(token: str) -> None`
 
@@ -4979,7 +5021,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-### `kiss.benchmarks` — *KISS Sorcar benchmark harnesses for SWE-bench Pro and Terminal-Bench 2.0.*
+### `kiss.benchmarks` — *KISS Sorcar benchmark harnesses for SWE-bench Pro, Terminal-Bench 2.0, and WebArena.*
 
 ______________________________________________________________________
 
@@ -5077,6 +5119,10 @@ ______________________________________________________________________
 - `trials`: Number of attempts per task (-k flag). Use 5 for leaderboard.
 - `skip_pre_pull`: If True, skip the image pre-pull step.
 
+**`score_results`** — Print a graded summary table from a harbor results JSON file. Reads harbor's output JSON (list of task result dicts) and prints binary score, partial score (fraction of tests passed), and a summary line. Tasks with no partial score data (skipped or missing metadata) show "-" in the partial column.<br/>`def score_results(results_path: Path) -> None`
+
+- `results_path`: Path to harbor results JSON file.
+
 ______________________________________________________________________
 
 #### `kiss.benchmarks.terminal_bench.test_agent` — *Tests for the terminal bench harbor agent.*
@@ -5118,6 +5164,38 @@ ______________________________________________________________________
 ##### `class TestRunSorcarNotFound` — When sorcar is not installed, run returns early with an error.
 
 - **test_sorcar_missing**<br/>`test_sorcar_missing() -> None`
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.webarena` — *KISS Sorcar benchmark harness for WebArena.*
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.webarena.agent` — *WebArena agent adapter that delegates to KISS Sorcar.*
+
+##### `class SorcarWebArenaAgent` — Agent that runs KISS Sorcar on WebArena tasks.
+
+**Constructor:** `SorcarWebArenaAgent(model: str | None = None, timeout: int = 600) -> None`
+
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+
+- `timeout`: Max seconds per task before killing sorcar.
+
+- **run_task** — Run sorcar on a single WebArena task. Writes a SYSTEM.md with WebArena-specific instructions before invoking sorcar, then scores the result against reference answers.<br/>`run_task(config_file: Path) -> dict`
+
+  - `config_file`: Path to the WebArena task JSON config file.
+  - **Returns:** Dict with task_id, answer, score, stdout, stderr, return_code.
+
+______________________________________________________________________
+
+#### `kiss.benchmarks.webarena.run` — *Run WebArena with the sorcar agent.*
+
+**`run_webarena`** — Run sorcar on WebArena task configs and save results.<br/>`def run_webarena(config_dir: Path, model: str = 'claude-opus-4-6', max_tasks: int | None = None, timeout: int = 600) -> None`
+
+- `config_dir`: Directory containing WebArena JSON task configs.
+- `model`: LLM model name (e.g. "claude-opus-4-6").
+- `max_tasks`: Cap for quick testing (None = all configs).
+- `timeout`: Max seconds per task.
 
 ______________________________________________________________________
 

@@ -33,7 +33,7 @@ from kiss.agents.sorcar.persistence import (
     _search_history,
     _set_latest_chat_events,
 )
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.diff_merge import _git
 from kiss.agents.vscode.helpers import (
@@ -87,7 +87,7 @@ class VSCodeServer:
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        self.agent = StatefulSorcarAgent("Sorcar VS Code")
+        self.agent = WorktreeSorcarAgent("Sorcar VS Code")
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         self._stop_event: threading.Event | None = None
         self._user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
@@ -204,6 +204,10 @@ class VSCodeServer:
             threading.Thread(
                 target=self._generate_commit_message, daemon=True
             ).start()
+        elif cmd_type == "worktreeAction":
+            action = cmd.get("action", "")
+            result = self._handle_worktree_action(action)
+            self.printer.broadcast({"type": "worktree_result", **result})
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
 
@@ -308,6 +312,15 @@ class VSCodeServer:
                 self._task_history_id = self.agent._last_task_id
                 result_summary = self._extract_result_summary(rec_id) or "No summary available"
                 task_end_event = {"type": "task_done"}
+                if self.agent._wt_pending:
+                    self.agent._auto_commit_worktree()
+                    self.printer.broadcast({
+                        "type": "worktree_done",
+                        "branch": self.agent._wt_branch,
+                        "worktreeDir": str(self.agent._wt_dir),
+                        "originalBranch": self.agent._original_branch,
+                        "changedFiles": self._get_worktree_changed_files(),
+                    })
             except KeyboardInterrupt:
                 self._task_history_id = self.agent._last_task_id
                 result_summary = "Task stopped by user"
@@ -702,6 +715,44 @@ class VSCodeServer:
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
+
+    def _get_worktree_changed_files(self) -> list[str]:
+        """List files changed in the worktree branch vs the original.
+
+        Returns:
+            List of relative file paths that differ between the original
+            and worktree branches.
+        """
+        if not self.agent._wt_branch or not self.agent._original_branch:
+            return []
+        repo_root = str(self.agent._repo_root) if self.agent._repo_root else self.work_dir
+        result = _git(repo_root,
+                      "diff", "--name-only",
+                      self.agent._original_branch,
+                      self.agent._wt_branch)
+        return result.stdout.strip().splitlines() if result.returncode == 0 else []
+
+    def _handle_worktree_action(self, action: str) -> dict[str, Any]:
+        """Execute a worktree merge/discard/manual action.
+
+        Args:
+            action: One of ``"merge"``, ``"discard"``, or ``"manual"``.
+
+        Returns:
+            Dict with ``success`` bool, ``message`` string, and
+            optionally ``manual`` bool.
+        """
+        if action == "merge":
+            msg = self.agent.merge()
+            success = "Successfully merged" in msg
+            return {"success": success, "message": msg}
+        elif action == "discard":
+            msg = self.agent.discard()
+            return {"success": True, "message": msg}
+        elif action == "manual":
+            msg = self.agent.merge_instructions()
+            return {"success": True, "message": msg, "manual": True}
+        return {"success": False, "message": f"Unknown action: {action}"}
 
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""

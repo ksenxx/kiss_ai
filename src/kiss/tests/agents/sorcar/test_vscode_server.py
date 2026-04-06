@@ -8,6 +8,7 @@ No mocks — uses real functions from the server module.
 """
 
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -589,6 +590,123 @@ class TestMainJsInputHistory(unittest.TestCase):
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "histCache.unshift(prompt)" in body
+
+
+class TestWorktreeServerIntegration(unittest.TestCase):
+    """Integration tests for worktree support in VSCodeServer."""
+
+    def _git(self, *args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=self.repo, capture_output=True,
+        )
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "repo"
+        self.repo.mkdir()
+        self._git("init")
+        self._git("config", "user.email", "test@test.com")
+        self._git("config", "user.name", "Test")
+        (self.repo / "file.txt").write_text("hello")
+        self._git("add", ".")
+        self._git("commit", "-m", "init")
+
+        self.server = VSCodeServer()
+        self.server.work_dir = str(self.repo)
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_server_uses_worktree_agent(self) -> None:
+        """VSCodeServer should use WorktreeSorcarAgent."""
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+        assert isinstance(self.server.agent, WorktreeSorcarAgent)
+
+    def test_get_worktree_changed_files_no_pending(self) -> None:
+        """Returns empty list when no worktree task is pending."""
+        result = self.server._get_worktree_changed_files()
+        assert result == []
+
+    def test_get_worktree_changed_files_with_branch(self) -> None:
+        """Returns changed files after worktree branch has commits."""
+        self._git("checkout", "-b", "kiss/test-branch")
+        (self.repo / "new_file.py").write_text("print('hi')")
+        self._git("add", ".")
+        self._git("commit", "-m", "add file")
+        self._git("checkout", "main")
+
+        self.server.agent._repo_root = self.repo
+        self.server.agent._wt_branch = "kiss/test-branch"
+        self.server.agent._original_branch = "main"
+
+        result = self.server._get_worktree_changed_files()
+        assert "new_file.py" in result
+
+    def test_handle_worktree_action_unknown(self) -> None:
+        """Unknown action returns failure."""
+        result = self.server._handle_worktree_action("unknown")
+        assert result["success"] is False
+        assert "Unknown action" in result["message"]
+
+    def test_handle_worktree_action_merge(self) -> None:
+        """Merge action calls agent.merge() and returns result."""
+        self._git("checkout", "-b", "kiss/merge-test")
+        (self.repo / "merged.txt").write_text("merged content")
+        self._git("add", ".")
+        self._git("commit", "-m", "add merged")
+        self._git("checkout", "main")
+
+        self.server.agent._repo_root = self.repo
+        self.server.agent._wt_branch = "kiss/merge-test"
+        self.server.agent._original_branch = "main"
+
+        result = self.server._handle_worktree_action("merge")
+        assert result["success"] is True
+        assert "Successfully merged" in result["message"]
+        # Branch should be cleaned up
+        assert self.server.agent._wt_branch is None
+
+    def test_handle_worktree_action_discard(self) -> None:
+        """Discard action removes worktree branch."""
+        self._git("checkout", "-b", "kiss/discard-test")
+        self._git("checkout", "main")
+
+        self.server.agent._repo_root = self.repo
+        self.server.agent._wt_branch = "kiss/discard-test"
+        self.server.agent._original_branch = "main"
+
+        result = self.server._handle_worktree_action("discard")
+        assert result["success"] is True
+        assert "Discarded" in result["message"]
+        assert self.server.agent._wt_branch is None
+
+    def test_handle_worktree_action_manual(self) -> None:
+        """Manual action returns merge instructions."""
+        self.server.agent._repo_root = self.repo
+        self.server.agent._wt_branch = "kiss/manual-test"
+        self.server.agent._original_branch = "main"
+
+        result = self.server._handle_worktree_action("manual")
+        assert result["success"] is True
+        assert result.get("manual") is True
+        assert "kiss/manual-test" in result["message"]
+
+    def test_worktree_action_command_routing(self) -> None:
+        """worktreeAction command is routed to _handle_worktree_action."""
+        self.server.agent._repo_root = self.repo
+        self.server.agent._wt_branch = "kiss/route-test"
+        self.server.agent._original_branch = "main"
+
+        self.server._handle_command({"type": "worktreeAction", "action": "manual"})
+        wt_events = [e for e in self.events if e["type"] == "worktree_result"]
+        assert len(wt_events) == 1
+        assert wt_events[0]["success"] is True
 
 
 if __name__ == "__main__":

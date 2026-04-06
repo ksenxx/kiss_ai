@@ -79,11 +79,13 @@ export type ToWebviewMessage =
   | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string }
   | { type: 'inputHistory'; tasks: string[] }
   | { type: 'setTaskText'; text: string }
-  | { type: 'focusInput' };
+  | { type: 'focusInput' }
+  | { type: 'worktree_done'; branch: string; worktreeDir: string; originalBranch: string; changedFiles: string[] }
+  | { type: 'worktree_result'; success: boolean; message: string; manual?: boolean };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory' | 'worktreeAction';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -97,4 +99,5 @@ export interface AgentCommand {
   path?: string;
   sessionId?: string;
   activeFileContent?: string;
+  action?: 'merge' | 'discard' | 'manual';
 }
