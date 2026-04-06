@@ -314,13 +314,17 @@ class VSCodeServer:
                 task_end_event = {"type": "task_done"}
                 if self.agent._wt_pending:
                     self.agent._auto_commit_worktree()
-                    self.printer.broadcast({
-                        "type": "worktree_done",
-                        "branch": self.agent._wt_branch,
-                        "worktreeDir": str(self.agent._wt_dir),
-                        "originalBranch": self.agent._original_branch,
-                        "changedFiles": self._get_worktree_changed_files(),
-                    })
+                    changed = self._get_worktree_changed_files()
+                    if changed:
+                        self.printer.broadcast({
+                            "type": "worktree_done",
+                            "branch": self.agent._wt_branch,
+                            "worktreeDir": str(self.agent._wt_dir),
+                            "originalBranch": self.agent._original_branch,
+                            "changedFiles": changed,
+                        })
+                    else:
+                        self.agent.discard()
             except KeyboardInterrupt:
                 self._task_history_id = self.agent._last_task_id
                 result_summary = "Task stopped by user"
