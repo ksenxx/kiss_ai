@@ -123,6 +123,9 @@ def _openai_compatible(
 MODEL_INFO: dict[str, ModelInfo] = {
     "arcee-ai/trinity-mini": _mi(128000, 0.04, 0.15, fc=False),
     "BAAI/bge-base-en-v1.5": _emb(512, 0.01),  # 768 dimensions
+    "cc/haiku": _mi(200000, 0.00, 0.00),
+    "cc/opus": _mi(200000, 0.00, 0.00),
+    "cc/sonnet": _mi(200000, 0.00, 0.00),
     "claude-3-5-haiku": _mi(200000, 0.80, 4.00),  # Alias for claude-3-5-haiku-20241022
     "claude-3-haiku-20240307": _mi(200000, 0.25, 1.25),
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
@@ -303,7 +306,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/allenai/olmo-2-0325-32b-instruct": _mi(128000, 0.05, 0.20, fc=False),
     "openrouter/allenai/olmo-3-32b-think": _mi(65536, 0.15, 0.50, fc=False),
     "openrouter/allenai/olmo-3.1-32b-instruct": _mi(65536, 0.20, 0.60, fc=False),
-    "openrouter/allenai/olmo-3.1-32b-think": _mi(65536, 0.15, 0.50, fc=False),
     "openrouter/alpindale/goliath-120b": _mi(6144, 3.75, 7.50, fc=False),
     "openrouter/amazon/nova-2-lite-v1": _mi(1000000, 0.30, 2.50, fc=False),  # Unreliable FC
     "openrouter/amazon/nova-lite-v1": _mi(300000, 0.06, 0.24),
@@ -640,9 +642,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
     # Claude Code CLI models (cc/ prefix) — subsidized pricing via CC subscription
     # ==========================================================================
-    "cc/opus": _mi(200000, 0.00, 0.00),
-    "cc/sonnet": _mi(200000, 0.00, 0.00),
-    "cc/haiku": _mi(200000, 0.00, 0.00),
 }
 
 # Generate batch/ entries for all Claude models at 50% pricing.
