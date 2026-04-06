@@ -7,9 +7,9 @@
 - `src/kiss/core/kiss_agent.py:464` — `KISSAgent.finish(result)` simply returns `result`
 - `src/kiss/core/relentless_agent.py:61` — `finish(success, is_continue, summary)` returns YAML with `{success, is_continue, summary}`
 
-**Problem:** Three completely different `finish()` signatures/semantics exist. `utils.finish` is used by non-relentless agents (e.g. GEPA), `KISSAgent.finish` is the default tool for the base agent loop, and `relentless_agent.finish` is used by RelentlessAgent sub-sessions. The `utils.finish` and `relentless_agent.finish` both produce YAML dicts but with different keys (`status/analysis/result` vs `success/is_continue/summary`). This is confusing and error-prone.
+**Problem:** Three completely different `finish()` signatures/semantics exist. `utils.finish` is used by the CLI `test` command in `src/kiss/agents/kiss.py:173`, `KISSAgent.finish` is the default tool for the base agent loop, and `relentless_agent.finish` is used by RelentlessAgent sub-sessions. The `utils.finish` and `relentless_agent.finish` both produce YAML dicts but with different keys (`status/analysis/result` vs `success/is_continue/summary`). This is confusing and error-prone.
 
-**Fix:** Unify to a single `finish()` function that covers all use cases. The `KISSAgent.finish` is fine as a simple passthrough for the agent loop. The two YAML-producing versions should be unified into one with a superset of parameters, or the one in `utils.py` should be removed since it's only used by GEPA which could use the relentless_agent one.
+**Fix:** Unify to a single `finish()` function that covers all use cases. The `KISSAgent.finish` is fine as a simple passthrough for the agent loop. The two YAML-producing versions should be unified into one with a superset of parameters, or the one in `utils.py` should be removed since it's only used by the CLI `test` command which could use the relentless_agent one.
 
 **Tests:**
 - Integration test that creates a `KISSAgent` and verifies `finish()` returns its argument unchanged
@@ -21,7 +21,7 @@
 ## 2. Duplicated Boolean-from-String Coercion in `relentless_agent.py`
 
 **File:** `src/kiss/core/relentless_agent.py`
-**Lines:** 71-74 (in `finish()`), 237-243 (in `perform_task()`)
+**Lines:** 72, 74 (in `finish()`), 239, 243 (in `perform_task()`)
 
 **Problem:** The pattern `x.lower() in ("true", "1", "yes")` is duplicated 4 times (twice for `success`, twice for `is_continue`). The same str-to-bool coercion logic appears in both `finish()` and `perform_task()`.
 
@@ -36,12 +36,12 @@
 ## 3. Duplicated `add_function_results_to_conversation_and_return` in AnthropicModel
 
 **Files:**
-- `src/kiss/core/models/model.py:196` — Base class implementation (OpenAI-style tool messages)
-- `src/kiss/core/models/anthropic_model.py:281` — Anthropic override (tool_result blocks)
+- `src/kiss/core/models/model.py` — Base class implementation (OpenAI-style tool messages)
+- `src/kiss/core/models/anthropic_model.py` — Anthropic override (tool_result blocks)
 
-**Problem:** Both implementations contain the same core logic: iterate function_results, match to tool calls by position from the last assistant message, append usage info, and add to conversation. The only difference is the message format (OpenAI `role: "tool"` vs Anthropic `type: "tool_result"` blocks). The Anthropic version also supports an explicit `tool_use_id` in `result_dict`, which the base class doesn't.
+**Problem:** Both implementations share the same core pattern: iterate function_results, search backwards through `self.conversation` for the last assistant message to extract tool call IDs by index, append usage info, and add results to conversation. The difference is message format (OpenAI `role: "tool"` vs Anthropic `type: "tool_result"` blocks in a single `role: "user"` message) and the Anthropic version supports an explicit `tool_use_id` in `result_dict`. The reverse-search-and-index-match logic is the true duplication.
 
-**Fix:** This is a necessary override due to format differences, but the `tool_use_id` lookup logic (searching backwards through conversation) is duplicated. Could extract the "find tool call IDs from last assistant message" logic into a shared helper on the base class.
+**Fix:** Extract the "find tool call IDs from last assistant message" logic into a shared helper method on the base class, parameterized by how to extract IDs from assistant message content.
 
 **Tests:**
 - Test base `Model.add_function_results_to_conversation_and_return` with multiple results matching tool calls
@@ -50,11 +50,11 @@
 
 ---
 
-## 4. Channel Agent Config Persistence Boilerplate (Massive Duplication)
+## 4. Channel Agent Config Persistence Boilerplate (Repeated Across 20 Files)
 
-**Files:** Every channel agent (`slack_agent.py`, `discord_agent.py`, `telegram_agent.py`, `matrix_agent.py`, etc. — 23 files)
+**Files:** 20 channel agents with full boilerplate (all except `slack_agent.py`, `gmail_agent.py`, `background_agent.py`; `googlechat_agent.py` has only `_config_path`)
 
-**Problem:** Every channel agent defines the same 4 functions:
+**Problem:** 20 channel agents define the same 4 functions:
 ```python
 def _config_path() -> Path:
     return _CHANNEL_DIR / "config.json"
@@ -68,20 +68,20 @@ def _save_config(**kwargs) -> None:
 def _clear_config() -> None:
     clear_json_config(_config_path())
 ```
-This is ~15-20 lines of boilerplate repeated identically 23 times (only the directory path and required keys differ).
+This is ~15-20 lines of boilerplate repeated identically 20 times (only the directory path, required keys, and `_save_config` signature/fields differ). Note: `slack_agent.py` uses a different pattern (per-workspace token files), `gmail_agent.py` has no config boilerplate, and `background_agent.py` is not a channel agent in the same sense.
 
 **Fix:** Create a `ChannelConfig` class in `_channel_agent_utils.py`:
 ```python
 class ChannelConfig:
-    def __init__(self, channel_name: str, required_keys: tuple[str, ...]):
-        self.path = Path.home() / ".kiss" / "channels" / channel_name / "config.json"
+    def __init__(self, channel_dir: Path, required_keys: tuple[str, ...]):
+        self.path = channel_dir / "config.json"
         self.required_keys = required_keys
-    
+
     def load(self) -> dict[str, str] | None: ...
     def save(self, data: dict[str, str]) -> None: ...
     def clear(self) -> None: ...
 ```
-Then each channel becomes: `_config = ChannelConfig("discord", ("bot_token",))`
+Each channel becomes: `_config = ChannelConfig(_DISCORD_DIR, ("bot_token",))`. Note that `_save_config` functions have varying signatures (e.g. discord takes `bot_token, application_id, guild_ids` while telegram takes only `bot_token`), so the save method should accept a plain dict rather than trying to unify signatures.
 
 **Tests:**
 - Integration test creating a `ChannelConfig`, saving, loading, and clearing data
@@ -93,7 +93,7 @@ Then each channel becomes: `_config = ChannelConfig("discord", ("bot_token",))`
 
 ## 5. Channel Agent `_is_authenticated` / `_get_auth_tools` Pattern Duplication
 
-**Files:** All 23 channel agents
+**Files:** 23 channel agents (all except `background_agent.py`)
 
 **Problem:** Every channel agent has:
 ```python
@@ -106,7 +106,7 @@ def _get_auth_tools(self) -> list:
 ```
 The `_is_authenticated` implementations are all one-liners checking a backend attribute. The `_get_auth_tools` implementations all follow the same pattern: define 3 closures (check, authenticate, clear) that check config, set backend fields, and clear config. The structure is identical; only the field names and authentication logic differ.
 
-**Fix:** This is inherent to the channel-per-file architecture. The `BaseChannelAgent` already abstracts the `_get_tools()` composition. The remaining boilerplate is channel-specific configuration. Could potentially add a `backend.is_authenticated` property to the `ChannelBackend` protocol and have `BaseChannelAgent._is_authenticated` delegate to it, removing the override from all 23 agents.
+**Fix:** This is inherent to the channel-per-file architecture. The `BaseChannelAgent` already abstracts the `_get_tools()` composition. The remaining boilerplate is channel-specific configuration. Could potentially add an `is_authenticated` property to the backend protocol and have `BaseChannelAgent._is_authenticated` delegate to it, removing the override from all 23 agents.
 
 **Tests:**
 - Test `BaseChannelAgent._get_tools()` when `_is_authenticated()` returns True vs False
@@ -114,26 +114,25 @@ The `_is_authenticated` implementations are all one-liners checking a backend at
 
 ---
 
-## 6. `usage_info_for_messages` Appended Inconsistently
+## 6. `usage_info_for_messages` Appended in Multiple Code Paths
 
 **Files:**
-- `src/kiss/core/models/model.py:209-213` (in `add_function_results_to_conversation_and_return`)
-- `src/kiss/core/models/model.py:222-224` (in `add_message_to_conversation`)
-- `src/kiss/core/models/anthropic_model.py:299-300` (in Anthropic override)
+- `src/kiss/core/models/model.py` — `add_function_results_to_conversation_and_return()` appends to each tool result
+- `src/kiss/core/models/model.py` — `add_message_to_conversation()` appends to user messages
+- `src/kiss/core/models/anthropic_model.py` — Anthropic override of `add_function_results_to_conversation_and_return()` appends to each tool_result
 
-**Problem:** Usage info is appended to message content in three different places with slightly different patterns:
-1. In `add_function_results_to_conversation_and_return`: appended to each tool result
-2. In `add_message_to_conversation`: appended to user messages only
-3. In Anthropic's override: appended to each tool_result content
+**Problem:** Usage info is appended in two independent code paths:
+1. In `add_function_results_to_conversation_and_return`: appended to each tool result content
+2. In `add_message_to_conversation`: appended to user messages only (when `role == "user"`)
 
-This means usage info may be duplicated if both tool results and user messages are added in the same turn. The condition `if role == "user" and self.usage_info_for_messages` in `add_message_to_conversation` also has the comment `# pragma: no branch` which is suspicious — it suggests the condition is always true when usage_info is set.
+In normal agent execution (`_execute_step`), only path 1 is taken (via `add_function_results_to_conversation_and_return`). Path 2 is used in separate scenarios: retry messages when the LLM returns zero tool calls, and error recovery prompts. These paths are mutually exclusive per turn, so there is **no actual duplication per turn**. The `# pragma: no branch` on the condition in `add_message_to_conversation` is correct — when this method is called with `role == "user"`, `usage_info_for_messages` is always set.
 
-**Fix:** Consider appending usage info at a single point (e.g., only in tool results, or only in user messages after tool results) to avoid duplication. The current approach has usage info appear in every tool result AND in the follow-up user message.
+**Fix:** The current design is actually correct — both paths serve different scenarios. However, the pattern of appending usage info in multiple places is fragile: any new code path that adds messages must remember to check `usage_info_for_messages`. Consider a single "finalize content" method that adds usage info before appending to conversation, called from both paths.
 
 **Tests:**
 - Test that usage_info is correctly appended to tool results
 - Test that usage_info is correctly appended to user messages
-- Test the interaction: verify usage_info isn't double-appended in a turn with both tool results and user messages
+- Test that each code path independently appends usage_info correctly
 
 ---
 
@@ -155,13 +154,13 @@ This means usage info may be duplicated if both tool results and user messages a
 
 ---
 
-## 8. `_resolve_openai_tools_schema` / `_build_openai_tools_schema` — Unnecessary Indirection
+## 8. `_resolve_openai_tools_schema` — Minor Convenience Wrapper
 
 **File:** `src/kiss/core/models/model.py`
 
-**Problem:** `_resolve_openai_tools_schema` exists only to check `if tools_schema is not None: return tools_schema` before calling `_build_openai_tools_schema`. This is a one-liner check that every model subclass calls. The caching is already handled by `KISSAgent._cached_tools_schema` in `kiss_agent.py`. The `_resolve_openai_tools_schema` method adds unnecessary indirection.
+**Problem:** `_resolve_openai_tools_schema` is a 3-line method that returns `tools_schema` if not None, else calls `_build_openai_tools_schema`. It's used by 3 model subclasses (GeminiModel, AnthropicModel, OpenAICompatibleModel). While it's a trivial null-check, it does provide a consistent pattern for all subclasses and is not truly "unnecessary."
 
-**Fix:** Remove `_resolve_openai_tools_schema` and have each model do the simple `tools_schema or self._build_openai_tools_schema(function_map)` inline since it's a trivial check. Or keep it but rename to something clearer.
+**Fix:** Low priority. Could be inlined (`tools_schema or self._build_openai_tools_schema(function_map)`) in each of the 3 call sites, but the current factoring is reasonable for 3 callers.
 
 **Tests:**
 - Test `_build_openai_tools_schema` with various function types
@@ -175,30 +174,19 @@ This means usage info may be duplicated if both tool results and user messages a
 - `src/kiss/agents/sorcar/useful_tools.py` — `Read`, `Write`, `Edit` (local filesystem)
 - `src/kiss/docker/docker_tools.py` — `Read`, `Write`, `Edit` (via Docker bash)
 
-**Problem:** The `DockerTools` class replicates the exact same validation/error-handling logic as `UsefulTools` but via shell commands. For `Edit`, it generates a Python script that mirrors the exact same logic in `UsefulTools.Edit` (check same string, check file exists, count occurrences, check uniqueness, replace). The docstrings are identical. The error messages are identical.
+**Problem:** The `DockerTools` class replicates the exact same validation/error-handling logic as `UsefulTools` but via shell commands. For `Edit`, it generates an inline Python script that mirrors the exact same logic in `UsefulTools.Edit` (check same string, check file exists, count occurrences, check uniqueness, replace). The docstrings are identical. The error messages are identical.
 
-**Fix:** This duplication is somewhat inherent to the Docker architecture (can't use filesystem directly). However, `DockerTools.Edit` generates an inline Python script that duplicates `UsefulTools.Edit` line-for-line. Consider extracting the core edit logic to a standalone Python script file that can be either imported locally or piped into Docker.
+**Fix:** This duplication is inherent to the Docker architecture (can't use filesystem directly). However, `DockerTools.Edit` generates an inline Python script that duplicates `UsefulTools.Edit` line-for-line. Consider extracting the core edit logic to a standalone Python script file that can be either imported locally or piped into Docker.
 
 **Tests:**
-- Test `DockerTools.Read/Write/Edit` with a mock bash function that simulates container behavior
-- Test error cases: file not found, string not found, multiple occurrences
+- Test `DockerTools.Read/Write/Edit` with a real bash function (e.g., one that runs commands locally via `subprocess.run`) — NOT a mock
+- Test error cases: file not found, string not found, multiple occurrences, same old/new string
 
 ---
 
-## 10. Three Different `finish()` Return Value Patterns
+## 10. _(Merged into Issue 1)_
 
-**Problem:** Across the codebase, there are three distinct patterns for what `finish()` returns:
-1. `KISSAgent.finish(result)` → returns raw string
-2. `relentless_agent.finish(success, is_continue, summary)` → returns YAML `{success, is_continue, summary}`
-3. `utils.finish(status, analysis, result)` → returns YAML `{status, analysis, result}`
-
-Callers must know which `finish()` they're dealing with to parse the result correctly. RelentlessAgent's `perform_task()` parses the YAML looking for `success`/`is_continue`/`summary`. But nothing enforces that the agent's finish tool will produce these keys.
-
-**Fix:** Consider having RelentlessAgent's finish tool be the only one used by relentless agents, and make its return format explicit. Remove `utils.finish` if it's not needed or unify the formats.
-
-**Tests:**
-- Integration test verifying RelentlessAgent correctly parses its finish tool's output
-- Test edge cases where finish returns malformed YAML
+This issue previously duplicated the analysis of Issue 1 (three different `finish()` return value patterns). The content has been consolidated into Issue 1 above.
 
 ---
 
@@ -220,35 +208,35 @@ Callers must know which `finish()` they're dealing with to parse the result corr
 
 **File:** `src/kiss/core/base.py:35-58`
 
-**Problem:** `SYSTEM_PROMPT` is built at module import time with Windows-specific branches (`sys.platform == "win32"`). The `# pragma: no branch` comments on these branches indicate they can't be coverage-tested on the development platform. The conditional reads a file (`SORCAR.md`) at import time, which is a side effect.
+**Problem:** `SYSTEM_PROMPT` is built at module import time with Windows-specific branches (`sys.platform == "win32"`). The `# pragma: no branch` comments are legitimate coverage pragmas — they correctly indicate that one side of the platform branch can never execute in the test environment (macOS/Linux CI). The conditional also reads files (`SYSTEM.md`, `SORCAR.md`) at import time, which is a side effect.
 
-**Fix:** This is acceptable for performance (done once at import), but the `# pragma: no branch` comments are technically AI slop — they suppress coverage warnings rather than addressing the underlying issue. Consider lazy initialization.
+**Fix:** This is acceptable for performance (done once at import). The `# pragma: no branch` comments are standard and appropriate here (not slop). Consider lazy initialization only if import-time file reads become a problem.
 
 **Tests:**
-- Not easily testable across platforms without mocking (which is forbidden). This is an accepted limitation.
+- Not testable across platforms without mocking (which is forbidden). This is an accepted limitation.
 
 ---
 
 ## 13. Inconsistent `verbose` Default Handling
 
 **Files:**
-- `src/kiss/core/base.py:110` — `set_printer()`: `verbose` defaults to `True` if `None`
+- `src/kiss/core/base.py:110` — `set_printer()`: `verbose=None` treated as `True` (via `elif verbose is not False:`)
 - `src/kiss/core/kiss_agent.py:76` — `_reset()`: `self.verbose = verbose if verbose is not None else True`
-- `src/kiss/agents/sorcar/sorcar_agent.py:109` — `_reset()`: passes `verbose if verbose is not None else False`
+- `src/kiss/agents/sorcar/sorcar_agent.py:116` — `_reset()`: passes `verbose if verbose is not None else False`
 
-**Problem:** `SorcarAgent._reset()` passes `verbose=False` as default while `KISSAgent._reset()` uses `verbose=True`. The `set_printer()` method treats `verbose=None` the same as `verbose=True`. This creates confusion: is the default verbose or not?
+**Problem:** `SorcarAgent._reset()` defaults to `verbose=False` while `KISSAgent._reset()` defaults to `verbose=True`. The `set_printer()` method treats `verbose=None` the same as `verbose=True`. This creates confusion: is the default verbose or not? However, this is intentional — `SorcarAgent` runs as an IDE backend where console output should be suppressed by default, while the base agent is used interactively where verbose is desired.
 
-**Fix:** Standardize the default. `SorcarAgent` intentionally defaults to quiet (False) while the base agent defaults to verbose (True). This is probably intentional but should be documented clearly. No code change needed.
+**Fix:** No code change needed. This is intentional behavior. Could add a brief comment in `SorcarAgent._reset()` explaining why the default differs.
 
 ---
 
-## 14. `_ArtifactDirProxy` in `config.py` — Over-Engineered Lazy Directory
+## 14. `_ArtifactDirProxy` in `config.py`
 
 **File:** `src/kiss/core/config.py:63-80`
 
-**Problem:** `_ArtifactDirProxy` is a class with `__fspath__`, `__str__`, `__eq__`, and `__hash__` that exists solely to lazily create an artifact directory. This is over-engineered for what is essentially `os.makedirs(path, exist_ok=True)`. It also has thread-safety via `_artifact_dir_lock` but the proxy object itself doesn't use the lock in `__str__`/`__fspath__`.
+**Problem:** `_ArtifactDirProxy` is a class with `__fspath__`, `__str__`, `__eq__`, and `__hash__` that exists solely to lazily create an artifact directory. The proxy delegates all operations to `get_artifact_dir()`, which correctly uses double-checked locking via `_artifact_dir_lock`. The `__eq__` and `__hash__` methods are unlikely to be exercised in practice.
 
-**Fix:** The proxy delegates to `get_artifact_dir()` which handles locking correctly. The design is actually fine — it's lazy initialization with thread safety. But `__eq__` and `__hash__` could be removed since they're unlikely to be used.
+**Fix:** Low priority. The `__eq__` and `__hash__` could be removed since the proxy is only used as a singleton (`artifact_dir = _ArtifactDirProxy()`). The core lazy-init pattern is reasonable.
 
 **Tests:**
 - Test `artifact_dir` proxy creates directory lazily
@@ -257,13 +245,13 @@ Callers must know which `finish()` they're dealing with to parse the result corr
 
 ---
 
-## 15. `get_config_value` in `utils.py` — Unused Over-Abstraction
+## 15. `get_config_value` in `utils.py` — Unused in Production Code
 
-**File:** `src/kiss/core/utils.py:14-36`
+**File:** `src/kiss/core/utils.py:20-48`
 
-**Problem:** `get_config_value()` is a generic function meant to eliminate `value if value is not None else config.attr` patterns, but searching the codebase shows it's barely used. Most code still uses the inline pattern. It's also a generic function using Python 3.12 syntax (`def get_config_value[T](...)`).
+**Problem:** `get_config_value()` is a generic function meant to eliminate `value if value is not None else config.attr` patterns, but it is **not used in any production code** — only test files exercise it. Most code still uses the inline pattern.
 
-**Fix:** Either adopt it consistently across the codebase or remove it. If kept, verify it's used in enough places to justify its existence.
+**Fix:** Either adopt it consistently across the codebase or remove it. If unused in production, it should be removed to reduce dead code.
 
 **Tests:**
 - Test `get_config_value` with explicit value, config value, and default fallback
@@ -289,19 +277,44 @@ Callers must know which `finish()` they're dealing with to parse the result corr
 
 | # | Issue | Severity | Effort |
 |---|-------|----------|--------|
-| 4 | Channel config persistence boilerplate (23 files) | High | Medium |
+| 4 | Channel config persistence boilerplate (20 files) | High | Medium |
 | 1 | Three inconsistent `finish()` functions | High | Low |
 | 2 | Duplicated bool-from-string coercion | Medium | Low |
 | 7 | Text-based tool calling helpers in wrong module | Medium | Low |
-| 6 | Usage info appended inconsistently | Medium | Medium |
+| 6 | Usage info appended in multiple code paths | Medium | Medium |
 | 3 | Duplicated tool-call ID lookup logic | Medium | Low |
 | 9 | DockerTools duplicates UsefulTools edit logic | Medium | High |
 | 16 | Dead code: `read_project_file` functions | Medium | Low |
+| 15 | Unused `get_config_value` helper | Medium | Low |
 | 11 | Global YAML representer side effect | Low | Low |
-| 8 | Unnecessary `_resolve_openai_tools_schema` indirection | Low | Low |
-| 5 | Channel _is_authenticated boilerplate | Low | Medium |
-| 14 | ArtifactDirProxy over-engineering | Low | Low |
-| 15 | Unused `get_config_value` helper | Low | Low |
-| 13 | Inconsistent verbose defaults | Low | None |
+| 8 | `_resolve_openai_tools_schema` convenience wrapper | Low | Low |
+| 5 | Channel _is_authenticated boilerplate (23 files) | Low | Medium |
+| 14 | ArtifactDirProxy `__eq__`/`__hash__` unused | Low | Low |
+| 13 | Inconsistent verbose defaults (intentional) | Low | None |
 | 12 | Import-time SYSTEM_PROMPT construction | Low | None |
-| 10 | Three different finish return patterns | Low | Low |
+
+---
+
+## Review Corrections Log
+
+The following corrections were made compared to the original analysis:
+
+1. **Issue 1**: Fixed claim that "`utils.finish` is used by GEPA" → it's actually used by the CLI `test` command in `src/kiss/agents/kiss.py:173`. GEPA does not import or use `utils.finish`.
+
+2. **Issue 4**: Fixed count from "23 files" to "20 files" with full boilerplate. Verified: `slack_agent.py` uses per-workspace token files (no `_config_path`/`_load_config`/etc.), `gmail_agent.py` has no config boilerplate, `background_agent.py` has none, and `googlechat_agent.py` has only `_config_path`. Added note that `_save_config()` signatures vary per channel, so the proposed `ChannelConfig.save` should accept a plain dict.
+
+3. **Issue 5**: Fixed count to "23 channel agents" (all except `background_agent.py`). Previously said "All 23" but there are 24 agent files total.
+
+4. **Issue 6**: Corrected analysis — the two code paths (`add_function_results_to_conversation_and_return` and `add_message_to_conversation`) are mutually exclusive per turn in normal execution. There is **no actual duplication per turn**. Removed the incorrect claim about double-appending.
+
+5. **Issue 9**: Fixed test plan from "mock bash function" to "real bash function (e.g., subprocess.run)" to comply with the no-mocks requirement.
+
+6. **Issue 10**: Merged into Issue 1 since it was a duplicate analysis of the same problem.
+
+7. **Issue 12**: Corrected characterization of `# pragma: no branch` from "AI slop" to "legitimate coverage pragma." This is standard Python coverage usage for platform-specific code that cannot be tested on the development/CI platform.
+
+8. **Issue 14**: Corrected claim that proxy "doesn't use the lock in __str__/__fspath__" — it delegates to `get_artifact_dir()` which correctly handles locking.
+
+9. **Issue 15**: Corrected "barely used" to "not used in any production code" — it only appears in test files.
+
+10. **Issue 8**: Softened from "unnecessary indirection" to "minor convenience wrapper" since it's used by 3 model subclasses and provides a consistent pattern.
