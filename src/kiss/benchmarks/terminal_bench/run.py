@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 AGENT_IMPORT_PATH = "kiss.benchmarks.terminal_bench.agent:SorcarHarborAgent"
 
@@ -208,6 +209,64 @@ def run_terminal_bench(
         sys.exit(e.returncode)
 
 
+def score_results(results_path: Path) -> None:
+    """Print a graded summary table from a harbor results JSON file.
+
+    Reads harbor's output JSON (list of task result dicts) and prints
+    binary score, partial score (fraction of tests passed), and a
+    summary line. Tasks with no partial score data (skipped or missing
+    metadata) show "-" in the partial column.
+
+    Args:
+        results_path: Path to harbor results JSON file.
+    """
+    try:
+        results: list[dict[str, Any]] = json.loads(results_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"ERROR: Could not read {results_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    binary_total = 0
+    partial_sum = 0.0
+    partial_count = 0
+
+    print(f"\n{'Task':<45} {'Binary':>7} {'Partial':>8} {'Tests':>10}")
+    print("-" * 73)
+
+    for r in results:
+        task_id = r.get("task_id") or r.get("name") or "unknown"
+        binary = r.get("score", 0)
+        meta = r.get("metadata") or {}
+        passed = meta.get("tests_passed")
+        total = meta.get("tests_total")
+        partial = meta.get("partial_score")
+
+        binary_total += int(bool(binary))
+
+        if partial is not None:
+            partial_sum += partial
+            partial_count += 1
+            partial_str = f"{partial:.1%}"
+            tests_str = f"{passed}/{total}"
+        else:
+            partial_str = "-"
+            tests_str = "-"
+
+        binary_str = "pass" if binary else "fail"
+        print(f"{str(task_id):<45} {binary_str:>7} {partial_str:>8} {tests_str:>10}")
+
+    print("-" * 73)
+    n = len(results)
+    binary_pct = binary_total / n if n else 0.0
+    partial_avg = partial_sum / partial_count if partial_count else 0.0
+    print(f"{'TOTAL':<45} {binary_pct:.1%} ({binary_total}/{n})")
+    if partial_count:
+        print(
+            f"{'PARTIAL AVG (scoreable tasks)':<45} {partial_avg:.1%}"
+            f" ({partial_count} tasks)"
+        )
+
+
 def main() -> None:
     """CLI entry point for Terminal-Bench 2.0 runner."""
     parser = argparse.ArgumentParser(
@@ -241,7 +300,17 @@ def main() -> None:
         action="store_true",
         help="Skip pre-pulling Docker images (not recommended)",
     )
+    parser.add_argument(
+        "--score-results",
+        type=Path,
+        default=None,
+        metavar="RESULTS_JSON",
+        help="Print graded summary from a harbor results JSON file and exit",
+    )
     args = parser.parse_args()
+    if args.score_results:
+        score_results(args.score_results)
+        return
     run_terminal_bench(
         args.model,
         args.dataset,

@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -56,6 +57,40 @@ _SKIP_PHRASES: tuple[str, ...] = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_test_counts(output: str) -> tuple[int, int]:
+    """Extract passed and total test counts from pytest or bash test output.
+
+    Recognises pytest summary lines ("5 passed, 2 failed") and TAP-style
+    lines ("ok 1", "not ok 2") that terminal-bench tasks commonly produce.
+    Returns (passed, total). Both are 0 when no test lines are found.
+
+    Args:
+        output: Combined stdout/stderr from running the test suite.
+
+    Returns:
+        Tuple of (passed_count, total_count).
+    """
+    # pytest: "5 passed, 2 failed, 1 error" or "3 passed"
+    pytest_match = re.search(
+        r"(\d+) passed(?:,\s*(\d+) failed)?(?:,\s*(\d+) error(?:s)?)?",
+        output,
+    )
+    if pytest_match:
+        passed = int(pytest_match.group(1))
+        failed = int(pytest_match.group(2) or 0)
+        errors = int(pytest_match.group(3) or 0)
+        return passed, passed + failed + errors
+
+    # TAP: count "ok N" vs "not ok N" lines
+    ok_count = len(re.findall(r"^ok \d+", output, re.MULTILINE))
+    not_ok_count = len(re.findall(r"^not ok \d+", output, re.MULTILINE))
+    if ok_count or not_ok_count:
+        return ok_count, ok_count + not_ok_count
+
+    return 0, 0
+
 
 _wheel_lock = threading.Lock()
 _wheel_path: Path | None = None
@@ -292,8 +327,12 @@ class SorcarHarborAgent(BaseAgent):
                 environment, retry_task, env, model_flag
             )
 
+        passed, total = _parse_test_counts(test_out)
         context.metadata = {
             "stdout": result.stdout,
             "stderr": result.stderr,
             "return_code": result.return_code,
+            "tests_passed": passed,
+            "tests_total": total,
+            "partial_score": round(passed / total, 3) if total > 0 else None,
         }
