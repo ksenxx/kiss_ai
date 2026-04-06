@@ -191,8 +191,10 @@ export class SorcarTab {
   }
 
   /**
-   * Handle worktree task completion: open diff editor and show quick pick
-   * for merge/discard/manual actions.
+   * Handle worktree task completion: open diff editor for the first
+   * changed file. Merge/discard/manual buttons are shown in the webview
+   * chat input area (the ``worktree_done`` message is forwarded to the
+   * webview by the caller).
    */
   private async _handleWorktreeDone(msg: {
     branch: string;
@@ -200,7 +202,6 @@ export class SorcarTab {
     originalBranch: string;
     changedFiles: string[];
   }): Promise<void> {
-    // Open diff editor for the first changed file
     if (msg.changedFiles.length > 0) {
       const file = msg.changedFiles[0];
       const origUri = vscode.Uri.file(path.join(this._getWorkDir(), file));
@@ -209,25 +210,6 @@ export class SorcarTab {
         origUri, wtUri,
         `${file} (original ↔ agent changes)`);
     }
-
-    // Show quick pick for action
-    const choice = await vscode.window.showQuickPick([
-      { label: '$(check) Merge', description: 'Auto-merge branch into ' + msg.originalBranch, action: 'merge' as const },
-      { label: '$(git-merge) Review & Merge Manually', description: 'Open instructions for manual merge', action: 'manual' as const },
-      { label: '$(trash) Discard', description: 'Delete the branch and worktree', action: 'discard' as const },
-    ], {
-      placeHolder: `Task completed on branch ${msg.branch}. What would you like to do?`,
-      ignoreFocusOut: true,
-    });
-
-    if (choice) {
-      this._agentProcess.sendCommand({
-        type: 'worktreeAction',
-        action: choice.action,
-      });
-    }
-    // If dismissed (Escape), branch stays pending — next task in same chat
-    // will be blocked with merge instructions (existing behavior).
   }
 
   /**
@@ -401,6 +383,13 @@ export class SorcarTab {
         this._startTask(content, this._selectedModel, promptPath);
         break;
       }
+
+      case 'worktreeAction':
+        this._agentProcess.sendCommand({
+          type: 'worktreeAction',
+          action: (message as any).action,
+        });
+        break;
 
       case 'focusEditor':
         vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');

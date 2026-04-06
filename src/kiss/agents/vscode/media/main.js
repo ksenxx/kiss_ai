@@ -446,6 +446,7 @@
     clearOutput();
     resetOutputState();
     removeSpinner();
+    clearWorktreeBar();
     setTaskText('');
     if (welcome) {
       welcome.style.display = '';
@@ -581,6 +582,12 @@
       break;
     case 'commitMessage':
       break;
+    case 'worktree_done':
+      showWorktreeActions(ev);
+      break;
+    case 'worktree_result':
+      handleWorktreeResult(ev);
+      break;
     case 'task_done': {
       var el = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
       var em = Math.floor(el / 60);
@@ -672,6 +679,81 @@
       }
       processOutputEvent(ev);
     });
+    sb();
+  }
+
+  // --- Worktree merge/discard UI ---
+
+  var worktreeBar = null;
+
+  function clearWorktreeBar() {
+    if (worktreeBar && worktreeBar.parentNode) {
+      worktreeBar.parentNode.removeChild(worktreeBar);
+    }
+    worktreeBar = null;
+  }
+
+  function showWorktreeActions(ev) {
+    clearWorktreeBar();
+    var bar = mkEl('div', 'wt-bar');
+    var n = (ev.changedFiles || []).length;
+    var label = mkEl('span', 'wt-label');
+    label.textContent = 'Branch ' + (ev.branch || '') + ' \u2014 '
+      + n + ' file' + (n !== 1 ? 's' : '') + ' changed';
+    bar.appendChild(label);
+
+    var btns = mkEl('div', 'wt-btns');
+    var mergeBtn = mkEl('button', 'wt-btn wt-merge');
+    mergeBtn.textContent = 'Auto Merge';
+    mergeBtn.dataset.tooltip = 'Merge branch into ' + (ev.originalBranch || 'original');
+    mergeBtn.addEventListener('click', function() {
+      disableWtBtns();
+      vscode.postMessage({ type: 'worktreeAction', action: 'merge' });
+    });
+
+    var manualBtn = mkEl('button', 'wt-btn wt-manual');
+    manualBtn.textContent = 'Manual Merge';
+    manualBtn.dataset.tooltip = 'Show manual merge instructions';
+    manualBtn.addEventListener('click', function() {
+      disableWtBtns();
+      vscode.postMessage({ type: 'worktreeAction', action: 'manual' });
+    });
+
+    var discardBtn = mkEl('button', 'wt-btn wt-discard');
+    discardBtn.textContent = 'Discard';
+    discardBtn.dataset.tooltip = 'Delete the branch and worktree';
+    discardBtn.addEventListener('click', function() {
+      disableWtBtns();
+      vscode.postMessage({ type: 'worktreeAction', action: 'discard' });
+    });
+
+    btns.appendChild(mergeBtn);
+    btns.appendChild(manualBtn);
+    btns.appendChild(discardBtn);
+    bar.appendChild(btns);
+
+    var area = document.getElementById('input-area');
+    area.insertBefore(bar, area.firstChild);
+    worktreeBar = bar;
+  }
+
+  function disableWtBtns() {
+    if (!worktreeBar) return;
+    var btns = worktreeBar.querySelectorAll('.wt-btn');
+    btns.forEach(function(b) { b.disabled = true; });
+  }
+
+  function handleWorktreeResult(ev) {
+    clearWorktreeBar();
+    var cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
+    var div = mkEl('div', 'ev ' + cls);
+    var msg = ev.message || '';
+    if (ev.manual) {
+      div.innerHTML = '<pre class="wt-instructions">' + esc(msg) + '</pre>';
+    } else {
+      div.textContent = msg;
+    }
+    O.appendChild(div);
     sb();
   }
 

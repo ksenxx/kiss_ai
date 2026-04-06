@@ -39,7 +39,8 @@ export type FromWebviewMessage =
   | { type: 'generateCommitMessage' }
   | { type: 'runPrompt' }
   | { type: 'focusEditor' }
-  | { type: 'getInputHistory' };
+  | { type: 'getInputHistory' }
+  | { type: 'worktreeAction'; action: 'merge' | 'discard' | 'manual' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
