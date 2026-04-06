@@ -23,6 +23,7 @@ from kiss.core.config import (
 )
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model import (
+    Model,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
 )
@@ -109,7 +110,7 @@ class TestChannelConfig:
 class TestFindToolCallIds:
     """Tests for Model._find_tool_call_ids_from_last_assistant."""
 
-    def _make_openai_model(self) -> object:
+    def _make_openai_model(self) -> Model:
         """Create a minimal model with OpenAI-style conversation."""
         m = model("gpt-4.1-mini")
         m.conversation = []
@@ -167,7 +168,7 @@ class TestFindToolCallIds:
 class TestAddFunctionResults:
     """Tests for Model.add_function_results_to_conversation_and_return (OpenAI base)."""
 
-    def _make_model(self) -> object:
+    def _make_model(self) -> Model:
         m = model("gpt-4.1-mini")
         m.conversation = []
         m.usage_info_for_messages = ""
@@ -419,7 +420,7 @@ class TestParseTextBasedToolCalls:
 class TestBuildOpenaiToolsSchema:
     """Tests for Model._build_openai_tools_schema."""
 
-    def _make_model(self) -> object:
+    def _make_model(self) -> Model:
         return model("gpt-4.1-mini")
 
     def test_basic_function(self) -> None:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import queue
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -51,7 +52,7 @@ from kiss.agents.vscode.server import VSCodeServer
 # Helpers for DB isolation
 # ---------------------------------------------------------------------------
 
-_SavedState = tuple[Path, object, Path]
+_SavedState = tuple[Path, "sqlite3.Connection | None", Path]
 
 
 def _redirect_db(tmpdir: str) -> _SavedState:
@@ -470,11 +471,11 @@ class TestWorktreeBranchCollision:
             created_branches = []
             for offset in range(-5, 10):
                 branch_name = f"{prefix}{ts + offset}"
-                result = subprocess.run(
+                proc = subprocess.run(
                     ["git", "branch", branch_name],
                     cwd=repo, capture_output=True,
                 )
-                if result.returncode == 0:
+                if proc.returncode == 0:
                     created_branches.append(branch_name)
 
             # Now run with an invalid model
