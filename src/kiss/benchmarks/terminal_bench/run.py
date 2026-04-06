@@ -18,6 +18,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 AGENT_IMPORT_PATH = "kiss.benchmarks.terminal_bench.agent:SorcarHarborAgent"
@@ -121,14 +122,21 @@ def pre_pull_images(dataset: str) -> None:
     failed: list[str] = []
     for i, image in enumerate(images, 1):  # pragma: no branch
         print(f"  [{i}/{len(images)}] {image}")
-        result = subprocess.run(
-            ["docker", "pull", image],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:  # pragma: no branch
+        last_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        for attempt in range(3):
+            last_result = subprocess.run(
+                ["docker", "pull", image],
+                capture_output=True,
+                text=True,
+            )
+            if last_result.returncode == 0:
+                break
+            if attempt < 2:
+                print(f"    WARN: pull failed (attempt {attempt + 1}/3), retrying in 5s...")
+                time.sleep(5)
+        if last_result.returncode != 0:
             failed.append(image)
-            print(f"    WARN: pull failed: {result.stdout.strip()}")
+            print(f"    WARN: pull failed after 3 attempts: {last_result.stdout.strip()}")
 
     if failed:  # pragma: no branch
         print(
