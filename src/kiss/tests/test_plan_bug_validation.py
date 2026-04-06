@@ -92,8 +92,8 @@ class TestDaemonStopAwareWaits:
         from kiss.channels.background_agent import ChannelDaemon
 
         source = inspect.getsource(ChannelDaemon.run)
-        assert "self._stop_event.wait(reconnect_delay)" in source
-        assert "time.sleep(reconnect_delay)" not in source
+        assert "self._stop_event.wait(self._reconnect_delay)" in source
+        assert "time.sleep(self._reconnect_delay)" not in source
 
     def test_stop_unblocks_poll_promptly(self) -> None:
         """stop() interrupts a long poll interval within 2 seconds."""

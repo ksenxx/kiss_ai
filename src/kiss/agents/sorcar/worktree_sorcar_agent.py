@@ -526,10 +526,11 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         sys.exit(0)
 
     agent = WorktreeSorcarAgent("Worktree Sorcar Agent")
-    _apply_chat_args(agent, args)
+    run_kwargs = _build_run_kwargs(args)
+    _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
 
     start_time = time_mod.time()
-    result = agent.run(**_build_run_kwargs(args))
+    result = agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(result)

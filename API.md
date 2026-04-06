@@ -672,7 +672,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.sorcar.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
 
-##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
+##### `class WebUseTool` — Browser automation tool using non-headless Playwright Chromium.
 
 **Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, headless: bool = False, **_kwargs: Any) -> None`
 
@@ -719,7 +719,7 @@ ______________________________________________________________________
 
   - **Returns:** "Browser closed." (always, even if nothing was open).
 
-- **ask_user_browser_action** — Open URL in user's default browser for interaction, wait for completion. Use when the agent needs the human to interact with a webpage directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. Opens the URL in the user's default OS browser (Chrome, Safari, Firefox, etc.) rather than a Playwright-controlled window.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
+- **ask_user_browser_action** — Navigate to a URL in Chromium and wait for the user to interact. Use when the agent needs the human to interact with a webpage directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. The Playwright Chromium window is non-headless so the user can see and interact with it directly.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
 
   - `instruction`: What the user should do (e.g. "Please solve the CAPTCHA").
   - `url`: Optional URL to navigate to before handing control to the user.
@@ -1680,7 +1680,7 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.agents.sorcar.web_use_tool` — *Browser automation tool for LLM agents using Playwright.*
 
-##### `class WebUseTool` — Browser automation tool using Playwright + default OS browser.
+##### `class WebUseTool` — Browser automation tool using non-headless Playwright Chromium.
 
 **Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, headless: bool = False, **_kwargs: Any) -> None`
 
@@ -1727,7 +1727,7 @@ ______________________________________________________________________
 
   - **Returns:** "Browser closed." (always, even if nothing was open).
 
-- **ask_user_browser_action** — Open URL in user's default browser for interaction, wait for completion. Use when the agent needs the human to interact with a webpage directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. Opens the URL in the user's default OS browser (Chrome, Safari, Firefox, etc.) rather than a Playwright-controlled window.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
+- **ask_user_browser_action** — Navigate to a URL in Chromium and wait for the user to interact. Use when the agent needs the human to interact with a webpage directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. The Playwright Chromium window is non-headless so the user can see and interact with it directly.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
 
   - `instruction`: What the user should do (e.g. "Please solve the CAPTCHA").
   - `url`: Optional URL to navigate to before handing control to the user.
@@ -3430,6 +3430,14 @@ ______________________________________________________________________
   - `oldest`: Only return messages newer than this timestamp.
   - `limit`: Maximum number of messages to return.
   - **Returns:** Tuple of (messages sorted oldest-first, updated oldest timestamp).
+
+- **poll_thread_messages** — Poll a Slack thread for new replies since *oldest*. Used by the daemon to detect user replies within active threads. The parent message itself is excluded from the results. Retries up to 3 times on transient network errors with exponential backoff (same strategy as `poll_messages`).<br/>`poll_thread_messages(channel_id: str, thread_ts: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Channel ID containing the thread.
+  - `thread_ts`: Timestamp of the parent message (thread root).
+  - `oldest`: Only return messages newer than this timestamp.
+  - `limit`: Maximum number of messages to return.
+  - **Returns:** Tuple of (reply messages sorted oldest-first, updated oldest timestamp).
 
 - **send_message** — Send a message to a Slack channel, optionally in a thread.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
@@ -6529,6 +6537,14 @@ ______________________________________________________________________
   - `oldest`: Only return messages newer than this timestamp.
   - `limit`: Maximum number of messages to return.
   - **Returns:** Tuple of (messages sorted oldest-first, updated oldest timestamp).
+
+- **poll_thread_messages** — Poll a Slack thread for new replies since *oldest*. Used by the daemon to detect user replies within active threads. The parent message itself is excluded from the results. Retries up to 3 times on transient network errors with exponential backoff (same strategy as `poll_messages`).<br/>`poll_thread_messages(channel_id: str, thread_ts: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+
+  - `channel_id`: Channel ID containing the thread.
+  - `thread_ts`: Timestamp of the parent message (thread root).
+  - `oldest`: Only return messages newer than this timestamp.
+  - `limit`: Maximum number of messages to return.
+  - **Returns:** Tuple of (reply messages sorted oldest-first, updated oldest timestamp).
 
 - **send_message** — Send a message to a Slack channel, optionally in a thread.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
