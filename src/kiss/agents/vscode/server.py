@@ -17,6 +17,7 @@ import queue
 import re
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import (
@@ -530,6 +531,7 @@ class VSCodeServer:
             return
         self.agent.resume_chat(task)
         self.printer.broadcast({"type": "task_events", "events": events, "task": task})
+        self._emit_pending_worktree()
 
     def _get_last_session(self) -> None:
         """Load the most recent task from history and replay its events."""
@@ -540,6 +542,33 @@ class VSCodeServer:
                 events = _load_task_chat_events(task)
                 self.agent.resume_chat(task)
                 self.printer.broadcast({"type": "task_events", "events": events, "task": task})
+                self._emit_pending_worktree()
+
+    def _emit_pending_worktree(self) -> None:
+        """Emit ``worktree_done`` if the agent has a pending worktree branch.
+
+        Called after replaying a session so that merge/discard buttons
+        are shown whenever the worktree branch still exists — even if
+        the agent was killed before it could emit the event originally.
+        """
+        # Discover repo root so _restore_from_git can find branches
+        if self.agent._repo_root is None:
+            toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
+            if toplevel.returncode != 0:
+                return
+            self.agent._repo_root = Path(toplevel.stdout.strip())
+        self.agent._restore_from_git()
+        if not self.agent._wt_pending:
+            return
+        changed = self._get_worktree_changed_files()
+        self.printer.broadcast({
+            "type": "worktree_done",
+            "branch": self.agent._wt_branch,
+            "worktreeDir": str(self.agent._wt_dir),
+            "originalBranch": self.agent._original_branch,
+            "changedFiles": changed,
+            "hasConflict": self._check_merge_conflict() if changed else False,
+        })
 
     def _generate_followup_async(
         self, task: str, result: str, model: str, gen: int, task_id: int | None

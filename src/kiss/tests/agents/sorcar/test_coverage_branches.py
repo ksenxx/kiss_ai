@@ -411,6 +411,73 @@ class TestVSCodeServerBranches:
                 th._db_conn = None
             th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
+    def test_emit_pending_worktree_with_branch(self, tmp_path):
+        """_emit_pending_worktree emits worktree_done when branch exists."""
+        server, events = self._make_server()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"],
+                       cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                       cwd=str(repo), capture_output=True)
+        (repo / "f.txt").write_text("hello")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"],
+                       cwd=str(repo), capture_output=True)
+        # Create a branch matching the agent's chat_id
+        chat_id = server.agent._chat_id
+        branch = f"kiss/wt-{chat_id[:12]}-1234567890"
+        subprocess.run(["git", "branch", branch],
+                       cwd=str(repo), capture_output=True)
+        # Store the original branch in git config
+        subprocess.run(["git", "config", f"branch.{branch}.kiss-original", "main"],
+                       cwd=str(repo), capture_output=True)
+        # Make a change on the branch so diff shows something
+        subprocess.run(["git", "checkout", branch],
+                       cwd=str(repo), capture_output=True)
+        (repo / "f.txt").write_text("changed")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "change"],
+                       cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "checkout", "main"],
+                       cwd=str(repo), capture_output=True)
+
+        server.work_dir = str(repo)
+        server._emit_pending_worktree()
+        wt_events = [e for e in events if e.get("type") == "worktree_done"]
+        assert len(wt_events) == 1
+        assert wt_events[0]["branch"] == branch
+        assert "f.txt" in wt_events[0]["changedFiles"]
+
+    def test_emit_pending_worktree_no_branch(self, tmp_path):
+        """_emit_pending_worktree does nothing when no branch exists."""
+        server, events = self._make_server()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"],
+                       cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                       cwd=str(repo), capture_output=True)
+        (repo / "f.txt").write_text("hello")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"],
+                       cwd=str(repo), capture_output=True)
+
+        server.work_dir = str(repo)
+        server._emit_pending_worktree()
+        wt_events = [e for e in events if e.get("type") == "worktree_done"]
+        assert len(wt_events) == 0
+
+    def test_emit_pending_worktree_not_a_repo(self, tmp_path):
+        """_emit_pending_worktree does nothing when not in a git repo."""
+        server, events = self._make_server()
+        server.work_dir = str(tmp_path)
+        server._emit_pending_worktree()
+        wt_events = [e for e in events if e.get("type") == "worktree_done"]
+        assert len(wt_events) == 0
+
     def test_handle_command_generate_commit_message_routing(self):
         """generateCommitMessage is routed properly - routes to thread."""
         with tempfile.TemporaryDirectory() as d:
