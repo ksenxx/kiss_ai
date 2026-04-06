@@ -21,47 +21,25 @@ from typing import Any
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _IMESSAGE_DIR = Path.home() / ".kiss" / "channels" / "imessage"
+_config = ChannelConfig(_IMESSAGE_DIR, ())
 
-_PLATFORM_ERROR = json.dumps({
-    "ok": False,
-    "error": "iMessage tools require macOS with the Messages app.",
-})
-
-
-def _config_path() -> Path:
-    """Return the path to the stored iMessage config file."""
-    return _IMESSAGE_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored iMessage config (minimal, no credentials needed)."""
-    return load_json_config(_config_path(), ())
-
-
-def _save_config() -> None:
-    """Save iMessage config marker to disk."""
-    save_json_config(_config_path(), {"enabled": "true"})
-
-
-def _clear_config() -> None:
-    """Delete the stored Imessage config."""
-    clear_json_config(_config_path())
+_PLATFORM_ERROR = json.dumps(
+    {
+        "ok": False,
+        "error": "iMessage tools require macOS with the Messages app.",
+    }
+)
 
 
 def _run_osascript(script: str) -> tuple[str, str]:
     """Run an AppleScript and return (stdout, stderr)."""
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True, text=True, timeout=30
-    )
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
     return result.stdout.strip(), result.stderr.strip()
 
 
@@ -140,9 +118,7 @@ end tell'''
         """Remove bot mentions from text."""
         return text
 
-    def send_imessage(
-        self, recipient: str, text: str, service: str = "iMessage"
-    ) -> str:
+    def send_imessage(self, recipient: str, text: str, service: str = "iMessage") -> str:
         """Send an iMessage or SMS to a recipient.
 
         Args:
@@ -168,9 +144,7 @@ end tell'''
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def send_attachment(
-        self, recipient: str, file_path: str, service: str = "iMessage"
-    ) -> str:
+    def send_attachment(self, recipient: str, file_path: str, service: str = "iMessage") -> str:
         """Send a file attachment via iMessage.
 
         Args:
@@ -205,23 +179,25 @@ end tell'''
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            script = '''tell application "Messages"
+            script = """tell application "Messages"
     set convos to {}
     repeat with c in every chat
         set end of convos to (id of c as string) & "|" & (display name of c as string)
     end repeat
     return convos
-end tell'''
+end tell"""
             stdout, stderr = _run_osascript(script)
             if stderr:  # pragma: no branch
                 return json.dumps({"ok": False, "error": stderr})
             convos = []
             for item in stdout.split(", "):  # pragma: no branch
                 parts = item.split("|", 1)
-                convos.append({
-                    "id": parts[0].strip(),
-                    "name": parts[1].strip() if len(parts) > 1 else "",
-                })
+                convos.append(
+                    {
+                        "id": parts[0].strip(),
+                        "name": parts[1].strip() if len(parts) > 1 else "",
+                    }
+                )
             return json.dumps({"ok": True, "conversations": convos}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -238,13 +214,14 @@ end tell'''
         """
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
-        return json.dumps({
-            "ok": True,
-            "note": "Full message history requires direct database access. "
-                    "Use BlueBubbles for complete iMessage history access.",
-            "messages": [],
-        })
-
+        return json.dumps(
+            {
+                "ok": True,
+                "note": "Full message history requires direct database access. "
+                "Use BlueBubbles for complete iMessage history access.",
+                "messages": [],
+            }
+        )
 
 
 class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -253,7 +230,7 @@ class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("iMessage Agent")
         self._backend = IMessageChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._enabled = True
 
@@ -264,7 +241,6 @@ class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_imessage_auth() -> str:
             """Check if iMessage is available on this system.
@@ -295,7 +271,7 @@ class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent):
                 return _PLATFORM_ERROR
             try:
                 stdout, _ = _run_osascript('tell application "Messages" to get name')
-                _save_config()
+                _config.save({"enabled": "true"})
                 agent._backend._enabled = True
                 return json.dumps({"ok": True, "message": f"iMessage enabled via {stdout}."})
             except Exception as e:
@@ -307,7 +283,7 @@ class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._enabled = False
             return "iMessage configuration cleared."
 
@@ -317,6 +293,7 @@ class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent):
 def main() -> None:
     """Run the IMessageAgent from the command line with chat persistence."""
     channel_main(IMessageAgent, "kiss-imessage")
+
 
 if __name__ == "__main__":
     main()

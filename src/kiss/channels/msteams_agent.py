@@ -24,54 +24,29 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _MSTEAMS_DIR = Path.home() / ".kiss" / "channels" / "msteams"
+_config = ChannelConfig(_MSTEAMS_DIR, ("tenant_id", "client_id"))
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored MS Teams config file."""
-    return _MSTEAMS_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Msteams config from disk."""
-    return load_json_config(_config_path(), ("tenant_id", "client_id",))
-
-
-def _save_config(tenant_id: str, client_id: str, client_secret: str, bot_id: str) -> None:
-    """Save Msteams config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "tenant_id": tenant_id.strip(),
-            "client_id": client_id.strip(),
-            "client_secret": client_secret.strip(),
-            "bot_id": bot_id.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Msteams config."""
-    clear_json_config(_config_path())
 
 
 def _get_access_token(tenant_id: str, client_id: str, client_secret: str) -> str:
     """Get an OAuth2 access token via client credentials flow."""
     url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    resp = requests.post(url, data={
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "scope": "https://graph.microsoft.com/.default",
-    }, timeout=30)
+    resp = requests.post(
+        url,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+        },
+        timeout=30,
+    )
     data = resp.json()
     return str(data.get("access_token", ""))
 
@@ -107,14 +82,12 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         return resp.json()  # type: ignore[no-any-return]
 
     def _post(self, path: str, body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        resp = requests.post(
-            f"{_GRAPH_BASE}{path}", headers=self._headers(), json=body, timeout=30
-        )
+        resp = requests.post(f"{_GRAPH_BASE}{path}", headers=self._headers(), json=body, timeout=30)
         return resp.json() if resp.content else {"ok": True}  # type: ignore[no-any-return]
 
     def connect(self) -> bool:
         """Authenticate with Microsoft Graph API."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No MS Teams config found."
             return False
@@ -169,12 +142,14 @@ class MSTeamsChannelBackend(ToolMethodBackend):
                 ts = msg.get("lastModifiedDateTime", "")
                 new_oldest = ts
                 body = msg.get("body", {})
-                messages.append({
-                    "ts": ts,
-                    "user": msg.get("from", {}).get("user", {}).get("id", ""),
-                    "text": body.get("content", ""),
-                    "id": msg.get("id", ""),
-                })
+                messages.append(
+                    {
+                        "ts": ts,
+                        "user": msg.get("from", {}).get("user", {}).get("id", ""),
+                        "text": body.get("content", ""),
+                        "id": msg.get("id", ""),
+                    }
+                )
             return messages, new_oldest
         except Exception:
             return [], oldest
@@ -289,9 +264,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_channel_messages(
-        self, team_id: str, channel_id: str, top: int = 20
-    ) -> str:
+    def list_channel_messages(self, team_id: str, channel_id: str, top: int = 20) -> str:
         """List messages in a Teams channel.
 
         Args:
@@ -343,9 +316,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def reply_to_message(
-        self, team_id: str, channel_id: str, message_id: str, content: str
-    ) -> str:
+    def reply_to_message(self, team_id: str, channel_id: str, message_id: str, content: str) -> str:
         """Reply to a Teams channel message.
 
         Args:
@@ -385,9 +356,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def post_chat_message(
-        self, chat_id: str, content: str, content_type: str = "text"
-    ) -> str:
+    def post_chat_message(self, chat_id: str, content: str, content_type: str = "text") -> str:
         """Post a message to a Teams chat.
 
         Args:
@@ -433,14 +402,13 @@ class MSTeamsChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Microsoft Teams Graph API tools."""
 
     def __init__(self) -> None:
         super().__init__("MS Teams Agent")
         self._backend = MSTeamsChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._tenant_id = cfg["tenant_id"]
             self._backend._client_id = cfg["client_id"]
@@ -454,7 +422,6 @@ class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_msteams_auth() -> str:
             """Check if MS Teams credentials are configured and valid.
@@ -493,7 +460,9 @@ class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
                 Validation result or error message.
             """
             cred_pairs = [
-                (tenant_id, "tenant_id"), (client_id, "client_id"), (client_secret, "client_secret")
+                (tenant_id, "tenant_id"),
+                (client_id, "client_id"),
+                (client_secret, "client_secret"),
             ]
             for val, name in cred_pairs:  # pragma: no branch
                 if not val.strip():  # pragma: no branch
@@ -506,7 +475,14 @@ class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
                 token = agent._backend._token()
                 if not token:  # pragma: no branch
                     return json.dumps({"ok": False, "error": "Could not obtain access token."})
-                _save_config(tenant_id, client_id, client_secret, bot_id)
+                _config.save(
+                    {
+                        "tenant_id": tenant_id.strip(),
+                        "client_id": client_id.strip(),
+                        "client_secret": client_secret.strip(),
+                        "bot_id": bot_id.strip(),
+                    }
+                )
                 return json.dumps({"ok": True, "message": "MS Teams credentials saved."})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
@@ -517,7 +493,7 @@ class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._client_id = ""
             agent._backend._client_secret = ""
             agent._backend._tenant_id = ""
@@ -529,7 +505,7 @@ class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> MSTeamsChannelBackend:
     """Create a configured MSTeamsChannelBackend for daemon mode."""
     backend = MSTeamsChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-msteams -t 'authenticate'")
         sys.exit(1)
@@ -543,10 +519,12 @@ def _make_daemon_backend() -> MSTeamsChannelBackend:
 def main() -> None:
     """Run the MSTeamsAgent from the command line with chat persistence."""
     channel_main(
-        MSTeamsAgent, "kiss-msteams",
+        MSTeamsAgent,
+        "kiss-msteams",
         channel_name="MS Teams",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

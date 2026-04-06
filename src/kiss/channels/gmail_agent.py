@@ -110,7 +110,6 @@ def _clear_credentials() -> None:
         path.unlink()
 
 
-
 def _run_oauth_flow() -> Credentials | None:
     """Run the OAuth2 installed-app flow to get new credentials.
 
@@ -204,20 +203,24 @@ def _extract_attachments(payload: dict) -> list[dict[str, Any]]:  # type: ignore
     attachments: list[dict[str, Any]] = []
     for part in payload.get("parts", []):
         if part.get("filename"):
-            attachments.append({
-                "filename": part["filename"],
-                "mime_type": part.get("mimeType", ""),
-                "size": part.get("body", {}).get("size", 0),
-                "attachment_id": part.get("body", {}).get("attachmentId", ""),
-            })
+            attachments.append(
+                {
+                    "filename": part["filename"],
+                    "mime_type": part.get("mimeType", ""),
+                    "size": part.get("body", {}).get("size", 0),
+                    "attachment_id": part.get("body", {}).get("attachmentId", ""),
+                }
+            )
         for subpart in part.get("parts", []):
             if subpart.get("filename"):  # pragma: no branch
-                attachments.append({
-                    "filename": subpart["filename"],
-                    "mime_type": subpart.get("mimeType", ""),
-                    "size": subpart.get("body", {}).get("size", 0),
-                    "attachment_id": subpart.get("body", {}).get("attachmentId", ""),
-                })
+                attachments.append(
+                    {
+                        "filename": subpart["filename"],
+                        "mime_type": subpart.get("mimeType", ""),
+                        "size": subpart.get("body", {}).get("size", 0),
+                        "attachment_id": subpart.get("body", {}).get("attachmentId", ""),
+                    }
+                )
     return attachments
 
 
@@ -246,16 +249,12 @@ class GmailChannelBackend(ToolMethodBackend):
         """
         creds = _load_credentials()
         if not creds:  # pragma: no branch
-            self._connection_info = (
-                "No Gmail credentials found. Please authenticate first."
-            )
+            self._connection_info = "No Gmail credentials found. Please authenticate first."
             return False
         self._service = _build_service(creds)
         try:
             profile = self._service.users().getProfile(userId="me").execute()
-            self._connection_info = (
-                f"Authenticated as {profile.get('emailAddress', '')}"
-            )
+            self._connection_info = f"Authenticated as {profile.get('emailAddress', '')}"
             return True
         except Exception as e:
             self._connection_info = f"Gmail auth failed: {e}"
@@ -344,16 +343,19 @@ class GmailChannelBackend(ToolMethodBackend):
                         .execute()
                     )
                     headers = {
-                        h["name"]: h["value"]
-                        for h in msg.get("payload", {}).get("headers", [])
+                        h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])
                     }
-                    messages.append({
-                        "ts": headers.get("Date", ""),
-                        "user": headers.get("From", ""),
-                        "text": f"Subject: {headers.get('Subject', '')} | {msg.get('snippet', '')}",
-                        "id": stub["id"],
-                        "thread_id": msg.get("threadId", ""),
-                    })
+                    messages.append(
+                        {
+                            "ts": headers.get("Date", ""),
+                            "user": headers.get("From", ""),
+                            "text": (
+                                f"Subject: {headers.get('Subject', '')} | {msg.get('snippet', '')}"
+                            ),
+                            "id": stub["id"],
+                            "thread_id": msg.get("threadId", ""),
+                        }
+                    )
                 except Exception:
                     pass
             return messages, oldest
@@ -426,13 +428,15 @@ class GmailChannelBackend(ToolMethodBackend):
 
         return wait_for_matching_message(
             poll=poll,
-            matches=lambda msg: user_id.lower()
-            in {
-                h["value"].lower()
-                for h in msg.get("payload", {}).get("headers", [])
-                if h.get("name") == "From"
-            }
-            or user_id.lower() in str(msg.get("payload", {})).lower(),
+            matches=lambda msg: (
+                user_id.lower()
+                in {
+                    h["value"].lower()
+                    for h in msg.get("payload", {}).get("headers", [])
+                    if h.get("name") == "From"
+                }
+                or user_id.lower() in str(msg.get("payload", {})).lower()
+            ),
             extract_text=lambda msg: str(msg.get("snippet", "")),
             timeout_seconds=timeout_seconds,
             stop_event=stop_event,
@@ -478,13 +482,15 @@ class GmailChannelBackend(ToolMethodBackend):
         assert self._service is not None
         try:
             profile = self._service.users().getProfile(userId="me").execute()
-            return json.dumps({
-                "ok": True,
-                "email": profile.get("emailAddress", ""),
-                "messages_total": profile.get("messagesTotal", 0),
-                "threads_total": profile.get("threadsTotal", 0),
-                "history_id": profile.get("historyId", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "email": profile.get("emailAddress", ""),
+                    "messages_total": profile.get("messagesTotal", 0),
+                    "threads_total": profile.get("threadsTotal", 0),
+                    "history_id": profile.get("historyId", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -539,19 +545,20 @@ class GmailChannelBackend(ToolMethodBackend):
                         .execute()
                     )
                     headers = {
-                        h["name"]: h["value"]
-                        for h in msg.get("payload", {}).get("headers", [])
+                        h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])
                     }
-                    messages.append({
-                        "id": msg["id"],
-                        "thread_id": msg.get("threadId", ""),
-                        "snippet": msg.get("snippet", ""),
-                        "subject": headers.get("Subject", ""),
-                        "from": headers.get("From", ""),
-                        "to": headers.get("To", ""),
-                        "date": headers.get("Date", ""),
-                        "label_ids": msg.get("labelIds", []),
-                    })
+                    messages.append(
+                        {
+                            "id": msg["id"],
+                            "thread_id": msg.get("threadId", ""),
+                            "snippet": msg.get("snippet", ""),
+                            "subject": headers.get("Subject", ""),
+                            "from": headers.get("From", ""),
+                            "to": headers.get("To", ""),
+                            "date": headers.get("Date", ""),
+                            "label_ids": msg.get("labelIds", []),
+                        }
+                    )
                 except Exception:
                     messages.append({"id": msg_stub["id"], "error": "failed to fetch"})
             result: dict[str, Any] = {"ok": True, "messages": messages}
@@ -586,26 +593,26 @@ class GmailChannelBackend(ToolMethodBackend):
                 .get(userId="me", id=message_id, format=format)
                 .execute()
             )
-            headers = {
-                h["name"]: h["value"]
-                for h in msg.get("payload", {}).get("headers", [])
-            }
+            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
             body_text = _extract_body(msg.get("payload", {}))
             attachments = _extract_attachments(msg.get("payload", {}))
-            return json.dumps({
-                "ok": True,
-                "id": msg["id"],
-                "thread_id": msg.get("threadId", ""),
-                "label_ids": msg.get("labelIds", []),
-                "snippet": msg.get("snippet", ""),
-                "subject": headers.get("Subject", ""),
-                "from": headers.get("From", ""),
-                "to": headers.get("To", ""),
-                "cc": headers.get("Cc", ""),
-                "date": headers.get("Date", ""),
-                "body": body_text[:4000],
-                "attachments": attachments,
-            }, indent=2)[:8000]
+            return json.dumps(
+                {
+                    "ok": True,
+                    "id": msg["id"],
+                    "thread_id": msg.get("threadId", ""),
+                    "label_ids": msg.get("labelIds", []),
+                    "snippet": msg.get("snippet", ""),
+                    "subject": headers.get("Subject", ""),
+                    "from": headers.get("From", ""),
+                    "to": headers.get("To", ""),
+                    "cc": headers.get("Cc", ""),
+                    "date": headers.get("Date", ""),
+                    "body": body_text[:4000],
+                    "attachments": attachments,
+                },
+                indent=2,
+            )[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -643,17 +650,14 @@ class GmailChannelBackend(ToolMethodBackend):
             subtype = "html" if html else "plain"
             message.attach(MIMEText(body, subtype))
             raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            result = (
-                self._service.users()
-                .messages()
-                .send(userId="me", body={"raw": raw})
-                .execute()
+            result = self._service.users().messages().send(userId="me", body={"raw": raw}).execute()
+            return json.dumps(
+                {
+                    "ok": True,
+                    "id": result.get("id", ""),
+                    "thread_id": result.get("threadId", ""),
+                }
             )
-            return json.dumps({
-                "ok": True,
-                "id": result.get("id", ""),
-                "thread_id": result.get("threadId", ""),
-            })
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -688,10 +692,7 @@ class GmailChannelBackend(ToolMethodBackend):
                 )
                 .execute()
             )
-            headers = {
-                h["name"]: h["value"]
-                for h in orig.get("payload", {}).get("headers", [])
-            }
+            headers = {h["name"]: h["value"] for h in orig.get("payload", {}).get("headers", [])}
             thread_id = orig.get("threadId", "")
             subject = headers.get("Subject", "")
             if not subject.lower().startswith("re:"):  # pragma: no branch
@@ -706,9 +707,7 @@ class GmailChannelBackend(ToolMethodBackend):
             if reply_all:  # pragma: no branch
                 orig_to = headers.get("To", "")
                 orig_cc = headers.get("Cc", "")
-                all_recipients = [
-                    r.strip() for r in f"{orig_to},{orig_cc}".split(",") if r.strip()
-                ]
+                all_recipients = [r.strip() for r in f"{orig_to},{orig_cc}".split(",") if r.strip()]
                 message["cc"] = ", ".join(all_recipients)
 
             subtype = "html" if html else "plain"
@@ -720,11 +719,13 @@ class GmailChannelBackend(ToolMethodBackend):
                 .send(userId="me", body={"raw": raw, "threadId": thread_id})
                 .execute()
             )
-            return json.dumps({
-                "ok": True,
-                "id": result.get("id", ""),
-                "thread_id": result.get("threadId", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "id": result.get("id", ""),
+                    "thread_id": result.get("threadId", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -768,11 +769,13 @@ class GmailChannelBackend(ToolMethodBackend):
                 .create(userId="me", body={"message": {"raw": raw}})
                 .execute()
             )
-            return json.dumps({
-                "ok": True,
-                "draft_id": draft.get("id", ""),
-                "message_id": draft.get("message", {}).get("id", ""),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "draft_id": draft.get("id", ""),
+                    "message_id": draft.get("message", {}).get("id", ""),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -853,20 +856,20 @@ class GmailChannelBackend(ToolMethodBackend):
             if add_label_ids:  # pragma: no branch
                 body["addLabelIds"] = [lid.strip() for lid in add_label_ids.split(",")]
             if remove_label_ids:  # pragma: no branch
-                body["removeLabelIds"] = [
-                    lid.strip() for lid in remove_label_ids.split(",")
-                ]
+                body["removeLabelIds"] = [lid.strip() for lid in remove_label_ids.split(",")]
             result = (
                 self._service.users()
                 .messages()
                 .modify(userId="me", id=message_id, body=body)
                 .execute()
             )
-            return json.dumps({
-                "ok": True,
-                "id": result.get("id", ""),
-                "label_ids": result.get("labelIds", []),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "id": result.get("id", ""),
+                    "label_ids": result.get("labelIds", []),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -891,9 +894,7 @@ class GmailChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def create_label(
-        self, name: str, text_color: str = "", background_color: str = ""
-    ) -> str:
+    def create_label(self, name: str, text_color: str = "", background_color: str = "") -> str:
         """Create a new label.
 
         Args:
@@ -917,14 +918,14 @@ class GmailChannelBackend(ToolMethodBackend):
                     "textColor": text_color,
                     "backgroundColor": background_color,
                 }
-            result = (
-                self._service.users().labels().create(userId="me", body=body).execute()
+            result = self._service.users().labels().create(userId="me", body=body).execute()
+            return json.dumps(
+                {
+                    "ok": True,
+                    "id": result.get("id", ""),
+                    "name": result.get("name", ""),
+                }
             )
-            return json.dumps({
-                "ok": True,
-                "id": result.get("id", ""),
-                "name": result.get("name", ""),
-            })
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -947,11 +948,13 @@ class GmailChannelBackend(ToolMethodBackend):
                 .get(userId="me", messageId=message_id, id=attachment_id)
                 .execute()
             )
-            return json.dumps({
-                "ok": True,
-                "data": result.get("data", "")[:4000],
-                "size": result.get("size", 0),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "data": result.get("data", "")[:4000],
+                    "size": result.get("size", 0),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -979,27 +982,28 @@ class GmailChannelBackend(ToolMethodBackend):
             )
             messages = []
             for msg in thread.get("messages", []):  # pragma: no branch
-                headers = {
-                    h["name"]: h["value"]
-                    for h in msg.get("payload", {}).get("headers", [])
-                }
-                messages.append({
-                    "id": msg["id"],
-                    "snippet": msg.get("snippet", ""),
-                    "subject": headers.get("Subject", ""),
-                    "from": headers.get("From", ""),
-                    "to": headers.get("To", ""),
-                    "date": headers.get("Date", ""),
-                    "label_ids": msg.get("labelIds", []),
-                })
-            return json.dumps({
-                "ok": True,
-                "thread_id": thread.get("id", ""),
-                "messages": messages,
-            }, indent=2)[:8000]
+                headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+                messages.append(
+                    {
+                        "id": msg["id"],
+                        "snippet": msg.get("snippet", ""),
+                        "subject": headers.get("Subject", ""),
+                        "from": headers.get("From", ""),
+                        "to": headers.get("To", ""),
+                        "date": headers.get("Date", ""),
+                        "label_ids": msg.get("labelIds", []),
+                    }
+                )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "thread_id": thread.get("id", ""),
+                    "messages": messages,
+                },
+                indent=2,
+            )[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 # ---------------------------------------------------------------------------
@@ -1054,7 +1058,6 @@ class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
         """Return channel-specific authentication tool functions."""
         agent = self
 
-
         def check_gmail_auth() -> str:
             """Check if Gmail OAuth2 credentials are configured and valid.
 
@@ -1080,11 +1083,13 @@ class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
                 )
             try:
                 profile = agent._backend._service.users().getProfile(userId="me").execute()
-                return json.dumps({
-                    "ok": True,
-                    "email": profile.get("emailAddress", ""),
-                    "messages_total": profile.get("messagesTotal", 0),
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "email": profile.get("emailAddress", ""),
+                        "messages_total": profile.get("messagesTotal", 0),
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
@@ -1109,17 +1114,21 @@ class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
             agent._backend._service = _build_service(creds)
             try:
                 profile = agent._backend._service.users().getProfile(userId="me").execute()
-                return json.dumps({
-                    "ok": True,
-                    "message": "Gmail authentication successful.",
-                    "email": profile.get("emailAddress", ""),
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Gmail authentication successful.",
+                        "email": profile.get("emailAddress", ""),
+                    }
+                )
             except Exception as e:
-                return json.dumps({
-                    "ok": True,
-                    "message": "Gmail token saved. Could not verify profile.",
-                    "error": str(e),
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Gmail token saved. Could not verify profile.",
+                        "error": str(e),
+                    }
+                )
 
         def clear_gmail_auth() -> str:
             """Clear the stored Gmail authentication credentials.
@@ -1154,17 +1163,20 @@ class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
                     "https://console.cloud.google.com/apis/credentials and save it to "
                     f"{_credentials_path()}, then call authenticate_gmail()."
                 )
-            return agent.web_use_tool.go_to_url(
-                "https://console.cloud.google.com/apis/credentials"
-            )
+            return agent.web_use_tool.go_to_url("https://console.cloud.google.com/apis/credentials")
 
-        return [check_gmail_auth, authenticate_gmail, clear_gmail_auth,
-            start_gmail_browser_setup,]
+        return [
+            check_gmail_auth,
+            authenticate_gmail,
+            clear_gmail_auth,
+            start_gmail_browser_setup,
+        ]
 
 
 def main() -> None:
     """Run the GmailAgent from the command line with chat persistence."""
     channel_main(GmailAgent, "kiss-gmail")
+
 
 if __name__ == "__main__":
     main()

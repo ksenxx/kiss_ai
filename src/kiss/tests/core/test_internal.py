@@ -8,13 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import pytest
-
-from kiss.core.kiss_error import KISSError
 from kiss.core.utils import (
     add_prefix_to_each_line,
-    read_project_file,
-    read_project_file_from_package,
 )
 
 
@@ -36,13 +31,3 @@ class TestUtilsFunctions(unittest.TestCase):
             )
         finally:
             os.unlink(temp_path)
-
-
-class TestReadProjectFile:
-    def test_read_project_file_not_found(self) -> None:
-        with pytest.raises(KISSError, match="Could not find"):
-            read_project_file("nonexistent/path/to/file.txt")
-
-    def test_read_project_file_from_package_not_found(self) -> None:
-        with pytest.raises(KISSError, match="Could not find"):
-            read_project_file_from_package("nonexistent_file.txt")

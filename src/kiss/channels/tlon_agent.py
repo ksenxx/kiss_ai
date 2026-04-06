@@ -24,34 +24,13 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _TLON_DIR = Path.home() / ".kiss" / "channels" / "tlon"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Tlon config file."""
-    return _TLON_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Tlon config from disk."""
-    return load_json_config(_config_path(), ("ship_url",))
-
-
-def _save_config(ship_url: str, code: str) -> None:
-    """Save Tlon config to disk with restricted permissions."""
-    save_json_config(_config_path(), {"ship_url": ship_url.strip(), "code": code.strip()})
-
-
-def _clear_config() -> None:
-    """Delete the stored Tlon config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_TLON_DIR, ("ship_url",))
 
 
 class TlonChannelBackend(ToolMethodBackend):
@@ -67,7 +46,7 @@ class TlonChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Urbit ship."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Tlon config found."
             return False
@@ -175,9 +154,7 @@ class TlonChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def get_messages(
-        self, group_path: str, channel_name: str, count: int = 20
-    ) -> str:
+    def get_messages(self, group_path: str, channel_name: str, count: int = 20) -> str:
         """Get recent messages from a Tlon channel.
 
         Args:
@@ -195,9 +172,7 @@ class TlonChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def post_message(
-        self, group_path: str, channel_name: str, content: str
-    ) -> str:
+    def post_message(self, group_path: str, channel_name: str, content: str) -> str:
         """Post a message to a Tlon channel.
 
         Args:
@@ -212,17 +187,21 @@ class TlonChannelBackend(ToolMethodBackend):
             result = self.poke(
                 "channels",
                 "channel-action",
-                json.dumps({
-                    "channel-action": {
-                        "post": {
-                            "group": group_path,
-                            "channel": channel_name,
-                            "action": {
-                                "add": {"memo": {"content": [{"inline": [content]}], "author": "~"}}
+                json.dumps(
+                    {
+                        "channel-action": {
+                            "post": {
+                                "group": group_path,
+                                "channel": channel_name,
+                                "action": {
+                                    "add": {
+                                        "memo": {"content": [{"inline": [content]}], "author": "~"}
+                                    }
+                                },
                             }
                         }
                     }
-                }),
+                ),
             )
             return result
         except Exception as e:
@@ -289,14 +268,13 @@ class TlonChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools."""
 
     def __init__(self) -> None:
         super().__init__("Tlon Agent")
         self._backend = TlonChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._ship_url = cfg["ship_url"]
 
@@ -307,7 +285,6 @@ class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_tlon_auth() -> str:
             """Check if Tlon/Urbit is configured.
@@ -343,7 +320,7 @@ class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
                     timeout=10,
                 )
                 if resp.status_code in (200, 204):  # pragma: no branch
-                    _save_config(ship_url, code)
+                    _config.save({"ship_url": ship_url.strip(), "code": code.strip()})
                     return json.dumps({"ok": True, "message": "Tlon configured."})
                 return json.dumps({"ok": False, "error": f"Login failed: {resp.status_code}"})
             except Exception as e:
@@ -355,7 +332,7 @@ class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._ship_url = ""
             return "Tlon configuration cleared."
 
@@ -365,6 +342,7 @@ class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
 def main() -> None:
     """Run the TlonAgent from the command line with chat persistence."""
     channel_main(TlonAgent, "kiss-tlon")
+
 
 if __name__ == "__main__":
     main()

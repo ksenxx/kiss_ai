@@ -215,9 +215,7 @@ class SlackChannelBackend(ToolMethodBackend):
             members: list[dict[str, Any]] = resp.get("members", [])
             for u in members:  # pragma: no branch
                 name_match = u.get("name") == username
-                real_match = (
-                    str(u.get("real_name", "")).lower() == username.lower()
-                )
+                real_match = str(u.get("real_name", "")).lower() == username.lower()
                 if name_match or real_match:  # pragma: no branch
                     return str(u["id"])
             cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
@@ -367,9 +365,7 @@ class SlackChannelBackend(ToolMethodBackend):
         assert client is not None
         seen_ts: set[str] = set()
         try:
-            resp = client.conversations_replies(
-                channel=channel_id, ts=thread_ts, limit=100
-            )
+            resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
             for msg in cast(list[dict[str, Any]], resp.get("messages", [])):
                 seen_ts.add(str(msg["ts"]))
         except SlackApiError:
@@ -377,9 +373,7 @@ class SlackChannelBackend(ToolMethodBackend):
 
         def poll() -> list[dict[str, Any]]:
             try:
-                resp = client.conversations_replies(
-                    channel=channel_id, ts=thread_ts, limit=100
-                )
+                resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
             except (SlackApiError, OSError):
                 logger.debug("Error polling thread replies", exc_info=True)
                 return []
@@ -479,8 +473,12 @@ class SlackChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
     def read_messages(
-        self, channel: str, limit: int = 20, cursor: str = "",
-        oldest: str = "", newest: str = "",
+        self,
+        channel: str,
+        limit: int = 20,
+        cursor: str = "",
+        oldest: str = "",
+        newest: str = "",
     ) -> str:
         """Read messages from a Slack channel.
 
@@ -524,9 +522,7 @@ class SlackChannelBackend(ToolMethodBackend):
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def read_thread(
-        self, channel: str, thread_ts: str, limit: int = 50, cursor: str = ""
-    ) -> str:
+    def read_thread(self, channel: str, thread_ts: str, limit: int = 50, cursor: str = "") -> str:
         """Read replies in a message thread.
 
         Args:
@@ -565,9 +561,7 @@ class SlackChannelBackend(ToolMethodBackend):
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def post_message(
-        self, channel: str, text: str, thread_ts: str = "", blocks: str = ""
-    ) -> str:
+    def post_message(self, channel: str, text: str, thread_ts: str = "", blocks: str = "") -> str:
         """Send a message to a Slack channel.
 
         Args:
@@ -718,10 +712,12 @@ class SlackChannelBackend(ToolMethodBackend):
         try:
             resp = self._client.conversations_create(name=name, is_private=is_private)
             ch: dict[str, Any] = resp.get("channel", {})
-            return json.dumps({
-                "ok": True,
-                "channel": {"id": ch.get("id", ""), "name": ch.get("name", "")},
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "channel": {"id": ch.get("id", ""), "name": ch.get("name", "")},
+                }
+            )
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -777,9 +773,7 @@ class SlackChannelBackend(ToolMethodBackend):
         """
         assert self._client is not None
         try:
-            resp = self._client.search_messages(
-                query=query, count=min(count, 100), sort=sort
-            )
+            resp = self._client.search_messages(query=query, count=min(count, 100), sort=sort)
             msg_data: dict[str, Any] = resp.get("messages", {})
             matches: list[dict[str, Any]] = msg_data.get("matches", [])
             results = [
@@ -813,9 +807,7 @@ class SlackChannelBackend(ToolMethodBackend):
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def upload_file(
-        self, channels: str, content: str, filename: str, title: str = ""
-    ) -> str:
+    def upload_file(self, channels: str, content: str, filename: str, title: str = "") -> str:
         """Upload text content as a file to Slack channels.
 
         Args:
@@ -873,7 +865,6 @@ class SlackChannelBackend(ToolMethodBackend):
             )
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 # ---------------------------------------------------------------------------
@@ -990,9 +981,7 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
                 )
             except SlackApiError as e:
                 agent._backend._client = None
-                return json.dumps(
-                    {"ok": False, "error": f"Token validation failed: {e}"}
-                )
+                return json.dumps({"ok": False, "error": f"Token validation failed: {e}"})
 
         def clear_slack_auth() -> str:
             """Clear the stored Slack authentication token for the current workspace.
@@ -1027,7 +1016,9 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
             return agent.web_use_tool.go_to_url("https://api.slack.com/apps")
 
         return [
-            check_slack_auth, authenticate_slack, clear_slack_auth,
+            check_slack_auth,
+            authenticate_slack,
+            clear_slack_auth,
             start_slack_browser_auth,
         ]
 
@@ -1117,7 +1108,8 @@ def main() -> None:
         _delete_workspace(sys.argv[idx + 1])
         return
     channel_main(
-        SlackAgent, "kiss-slack",
+        SlackAgent,
+        "kiss-slack",
         channel_name="Slack",
         make_daemon_backend=_make_daemon_backend,
         extra_usage="[--list-workspaces] [--delete-workspace WS]",

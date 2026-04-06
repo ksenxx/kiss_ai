@@ -24,41 +24,13 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _PHONE_DIR = Path.home() / ".kiss" / "channels" / "phone"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored phone config file."""
-    return _PHONE_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Phone Control config from disk."""
-    return load_json_config(_config_path(), ("device_ip",))
-
-
-def _save_config(device_ip: str, device_port: str, api_key: str) -> None:
-    """Save Phone Control config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "device_ip": device_ip.strip(),
-            "device_port": device_port.strip(),
-            "api_key": api_key.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Phone Control config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_PHONE_DIR, ("device_ip",))
 
 
 class PhoneControlChannelBackend(ToolMethodBackend):
@@ -81,7 +53,7 @@ class PhoneControlChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Connect to phone companion app."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No phone config found."
             return False
@@ -130,12 +102,14 @@ class PhoneControlChannelBackend(ToolMethodBackend):
             for msg in data.get("messages", []):  # pragma: no branch
                 ts = str(msg.get("timestamp", ""))
                 new_oldest = ts
-                messages.append({
-                    "ts": ts,
-                    "user": msg.get("from", ""),
-                    "text": msg.get("body", ""),
-                    "id": str(msg.get("id", "")),
-                })
+                messages.append(
+                    {
+                        "ts": ts,
+                        "user": msg.get("from", ""),
+                        "text": msg.get("body", ""),
+                        "id": str(msg.get("id", "")),
+                    }
+                )
             return messages, new_oldest
         except Exception:
             return [], oldest
@@ -372,14 +346,13 @@ class PhoneControlChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Android phone control tools."""
 
     def __init__(self) -> None:
         super().__init__("Phone Control Agent")
         self._backend = PhoneControlChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._device_url = f"http://{cfg['device_ip']}:{cfg.get('device_port', 8080)}"
             self._backend._api_key = cfg.get("api_key", "")
@@ -391,7 +364,6 @@ class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_phone_auth() -> str:
             """Check if phone control is configured and device is reachable.
@@ -412,9 +384,7 @@ class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
-        def authenticate_phone(
-            device_ip: str, device_port: int = 8080, api_key: str = ""
-        ) -> str:
+        def authenticate_phone(device_ip: str, device_port: int = 8080, api_key: str = "") -> str:
             """Configure phone control connection.
 
             Args:
@@ -432,7 +402,13 @@ class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 result = json.loads(agent._backend.get_device_info())
                 if result.get("ok"):  # pragma: no branch
-                    _save_config(device_ip, str(device_port), api_key)
+                    _config.save(
+                        {
+                            "device_ip": device_ip.strip(),
+                            "device_port": str(device_port),
+                            "api_key": api_key.strip(),
+                        }
+                    )
                     return json.dumps({"ok": True, "message": "Phone control configured."})
                 return json.dumps({"ok": False, "error": "Could not connect to device."})
             except Exception as e:
@@ -444,7 +420,7 @@ class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._device_url = ""
             agent._backend._api_key = ""
             return "Phone configuration cleared."
@@ -455,7 +431,7 @@ class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> PhoneControlChannelBackend:
     """Create a configured PhoneControlChannelBackend for daemon mode."""
     backend = PhoneControlChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not configured. Run: kiss-phone -t 'authenticate'")
         sys.exit(1)
@@ -467,10 +443,12 @@ def _make_daemon_backend() -> PhoneControlChannelBackend:
 def main() -> None:
     """Run the PhoneControlAgent from the command line with chat persistence."""
     channel_main(
-        PhoneControlAgent, "kiss-phone",
+        PhoneControlAgent,
+        "kiss-phone",
         channel_name="Phone Control",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

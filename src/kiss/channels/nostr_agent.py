@@ -20,34 +20,13 @@ from typing import Any
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _NOSTR_DIR = Path.home() / ".kiss" / "channels" / "nostr"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Nostr config file."""
-    return _NOSTR_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Nostr config from disk."""
-    return load_json_config(_config_path(), ("private_key",))
-
-
-def _save_config(private_key: str, relays: str) -> None:
-    """Save Nostr config to disk with restricted permissions."""
-    save_json_config(_config_path(), {"private_key": private_key.strip(), "relays": relays.strip()})
-
-
-def _clear_config() -> None:
-    """Delete the stored Nostr config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_NOSTR_DIR, ("private_key",))
 
 
 class NostrChannelBackend(ToolMethodBackend):
@@ -61,7 +40,7 @@ class NostrChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Load Nostr keys from stored config."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Nostr config found."
             return False
@@ -208,6 +187,7 @@ class NostrChannelBackend(ToolMethodBackend):
             event.sign(self._private_key.hex())
 
             from pynostr.relay_manager import RelayManager
+
             manager = RelayManager()
             for relay_url in self._relays:  # pragma: no branch
                 manager.add_relay(relay_url)
@@ -229,13 +209,14 @@ class NostrChannelBackend(ToolMethodBackend):
         if not self._private_key:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not authenticated"})
         try:
-
             pub = self._private_key.public_key
-            return json.dumps({
-                "ok": True,
-                "pubkey_hex": pub.hex(),
-                "pubkey_npub": pub.bech32(),
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "pubkey_hex": pub.hex(),
+                    "pubkey_npub": pub.bech32(),
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -293,10 +274,10 @@ class NostrChannelBackend(ToolMethodBackend):
         """
         if relay_url not in self._relays:  # pragma: no branch
             self._relays.append(relay_url)
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             cfg["relays"] = ",".join(self._relays)
-            _save_config(cfg["private_key"], cfg["relays"])
+            _config.save({"private_key": cfg["private_key"], "relays": cfg["relays"]})
         return json.dumps({"ok": True, "relays": self._relays})
 
     def remove_relay(self, relay_url: str) -> str:
@@ -309,12 +290,11 @@ class NostrChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         self._relays = [r for r in self._relays if r != relay_url]
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             cfg["relays"] = ",".join(self._relays)
-            _save_config(cfg["private_key"], cfg["relays"])
+            _config.save({"private_key": cfg["private_key"], "relays": cfg["relays"]})
         return json.dumps({"ok": True, "relays": self._relays})
-
 
 
 class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -323,7 +303,7 @@ class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("Nostr Agent")
         self._backend = NostrChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             try:
                 from pynostr.key import PrivateKey
@@ -347,7 +327,6 @@ class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
         """Return channel-specific authentication tool functions."""
         agent = self
 
-
         def check_nostr_auth() -> str:
             """Check if Nostr key is configured.
 
@@ -359,15 +338,19 @@ class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
                     "Not configured for Nostr. Use authenticate_nostr(private_key=...) "
                     "to configure. Provide an nsec... key or hex private key."
                 )
-            return json.loads(agent._backend.get_profile()).get("ok") and json.dumps({
-                "ok": True,
-                "pubkey": agent._backend._public_key[:16] + "...",
-                "relays": agent._backend._relays,
-            }) or json.dumps({"ok": False, "error": "Key error"})
+            return (
+                json.loads(agent._backend.get_profile()).get("ok")
+                and json.dumps(
+                    {
+                        "ok": True,
+                        "pubkey": agent._backend._public_key[:16] + "...",
+                        "relays": agent._backend._relays,
+                    }
+                )
+                or json.dumps({"ok": False, "error": "Key error"})
+            )
 
-        def authenticate_nostr(
-            private_key: str, relays: str = "wss://relay.damus.io"
-        ) -> str:
+        def authenticate_nostr(private_key: str, relays: str = "wss://relay.damus.io") -> str:
             """Configure Nostr with a private key.
 
             Args:
@@ -390,12 +373,14 @@ class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
                 agent._backend._private_key = pk
                 agent._backend._public_key = pk.public_key.hex()
                 agent._backend._relays = [r.strip() for r in relays.split(",") if r.strip()]
-                _save_config(pk_str, relays)
-                return json.dumps({
-                    "ok": True,
-                    "message": "Nostr key configured.",
-                    "pubkey": pk.public_key.hex()[:16] + "...",
-                })
+                _config.save({"private_key": pk_str.strip(), "relays": relays.strip()})
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Nostr key configured.",
+                        "pubkey": pk.public_key.hex()[:16] + "...",
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
@@ -405,7 +390,7 @@ class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._private_key = None
             agent._backend._public_key = ""
             return "Nostr configuration cleared."
@@ -416,6 +401,7 @@ class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
 def main() -> None:
     """Run the NostrAgent from the command line with chat persistence."""
     channel_main(NostrAgent, "kiss-nostr")
+
 
 if __name__ == "__main__":
     main()

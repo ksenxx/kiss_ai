@@ -24,43 +24,19 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _IRC_DIR = Path.home() / ".kiss" / "channels" / "irc"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored IRC config file."""
-    return _IRC_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Irc config from disk."""
-    return load_json_config(_config_path(), ("server", "nick",))
-
-
-def _save_config(server: str, nick: str, port: str, password: str, use_tls: str) -> None:
-    """Save Irc config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "server": server.strip(),
-            "nick": nick.strip(),
-            "port": port.strip(),
-            "password": password.strip(),
-            "use_tls": use_tls.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Irc config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(
+    _IRC_DIR,
+    (
+        "server",
+        "nick",
+    ),
+)
 
 
 class IRCChannelBackend(ToolMethodBackend):
@@ -75,7 +51,7 @@ class IRCChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Connect to IRC server."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No IRC config found."
             return False
@@ -84,6 +60,7 @@ class IRCChannelBackend(ToolMethodBackend):
             sock = socket.create_connection((cfg["server"], int(cfg["port"])), timeout=30)
             if cfg.get("use_tls"):  # pragma: no branch
                 import ssl
+
                 context = ssl.create_default_context()
                 sock = context.wrap_socket(sock, server_hostname=cfg["server"])
             self.disconnect()
@@ -94,9 +71,7 @@ class IRCChannelBackend(ToolMethodBackend):
             self._send_raw(f"NICK {cfg['nick']}")
             self._send_raw(f"USER {cfg['nick']} 0 * :{cfg['nick']}")
             self._connection_info = f"Connected to {cfg['server']} as {cfg['nick']}"
-            self._reader_thread = threading.Thread(
-                target=self._read_loop, daemon=True
-            )
+            self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._reader_thread.start()
             time.sleep(1.0)  # Wait for server greeting
             return True
@@ -138,12 +113,14 @@ class IRCChannelBackend(ToolMethodBackend):
                 nick = prefix.split("!")[0]
                 target = parts[2]
                 text = parts[3].lstrip(":")
-                self._message_queue.put({
-                    "ts": str(time.time()),
-                    "user": nick,
-                    "text": text,
-                    "target": target,
-                })
+                self._message_queue.put(
+                    {
+                        "ts": str(time.time()),
+                        "user": nick,
+                        "text": text,
+                        "target": target,
+                    }
+                )
 
     @property
     def connection_info(self) -> str:
@@ -218,7 +195,7 @@ class IRCChannelBackend(ToolMethodBackend):
         """Remove bot mention from text."""
         prefix = f"{self._nick}: "
         if text.startswith(prefix):  # pragma: no branch
-            return text[len(prefix):]
+            return text[len(prefix) :]
         return text
 
     def connect_irc(
@@ -244,7 +221,15 @@ class IRCChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            _save_config(server, nick, str(port), password, str(use_tls))
+            _config.save(
+                {
+                    "server": server.strip(),
+                    "nick": nick.strip(),
+                    "port": str(port),
+                    "password": password,
+                    "use_tls": str(use_tls),
+                }
+            )
             success = self.connect()
             if success:  # pragma: no branch
                 return json.dumps({"ok": True, "message": f"Connected to {server} as {nick}"})
@@ -394,14 +379,13 @@ class IRCChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with IRC tools."""
 
     def __init__(self) -> None:
         super().__init__("IRC Agent")
         self._backend = IRCChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._nick = cfg.get("nick", "")
 
@@ -412,7 +396,6 @@ class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_irc_auth() -> str:
             """Check if IRC is configured and connected.
@@ -425,11 +408,13 @@ class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
                     "Not configured for IRC. Use authenticate_irc(server=..., nick=...) "
                     "to configure and connect."
                 )
-            return json.dumps({
-                "ok": True,
-                "nick": agent._backend._nick,
-                "connected": agent._backend._sock is not None,
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "nick": agent._backend._nick,
+                    "connected": agent._backend._sock is not None,
+                }
+            )
 
         def authenticate_irc(
             server: str,
@@ -453,7 +438,15 @@ class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
             for val, name in [(server, "server"), (nick, "nick")]:  # pragma: no branch
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
-            _save_config(server, nick, str(port), password, str(use_tls))
+            _config.save(
+                {
+                    "server": server.strip(),
+                    "nick": nick.strip(),
+                    "port": str(port),
+                    "password": password,
+                    "use_tls": str(use_tls),
+                }
+            )
             agent._backend._nick = nick.strip()
             success = agent._backend.connect()
             if success:  # pragma: no branch
@@ -466,7 +459,7 @@ class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._nick = ""
             if agent._backend._sock:  # pragma: no branch
                 try:
@@ -482,7 +475,7 @@ class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> IRCChannelBackend:
     """Create a configured IRCChannelBackend for daemon mode."""
     backend = IRCChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not configured. Run: kiss-irc -t 'authenticate'")
         sys.exit(1)
@@ -494,11 +487,13 @@ def _make_daemon_backend() -> IRCChannelBackend:
 def main() -> None:
     """Run the IRCAgent from the command line with chat persistence."""
     channel_main(
-        IRCAgent, "kiss-irc",
+        IRCAgent,
+        "kiss-irc",
         channel_name="IRC",
         make_daemon_backend=_make_daemon_backend,
         daemon_poll_interval=1.0,
     )
+
 
 if __name__ == "__main__":
     main()

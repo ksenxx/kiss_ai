@@ -31,11 +31,9 @@ from kiss.channels._backend_utils import (
 )
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,26 +41,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_WEBHOOK_PORT = 18083
 
 _SYNOLOGY_DIR = Path.home() / ".kiss" / "channels" / "synology"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Synology config file."""
-    return _SYNOLOGY_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Synology Chat config from disk."""
-    return load_json_config(_config_path(), ("webhook_url",))
-
-
-def _save_config(webhook_url: str, token: str) -> None:
-    """Save Synology Chat config to disk with restricted permissions."""
-    save_json_config(_config_path(), {"webhook_url": webhook_url.strip(), "token": token.strip()})
-
-
-def _clear_config() -> None:
-    """Delete the stored Synology Chat config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_SYNOLOGY_DIR, ("webhook_url",))
 
 
 class SynologyChatChannelBackend(ToolMethodBackend):
@@ -83,7 +62,7 @@ class SynologyChatChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Load Synology config and start webhook server."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Synology Chat config found."
             return False
@@ -109,12 +88,14 @@ class SynologyChatChannelBackend(ToolMethodBackend):
                     payload = json.loads(payload_str)
                     token = payload.get("token", "")
                     if not backend._token or token == backend._token:  # pragma: no branch
-                        backend._message_queue.put({
-                            "ts": str(payload.get("timestamp", "")),
-                            "user": payload.get("user_id", ""),
-                            "text": payload.get("text", ""),
-                            "channel_id": payload.get("channel_id", ""),
-                        })
+                        backend._message_queue.put(
+                            {
+                                "ts": str(payload.get("timestamp", "")),
+                                "user": payload.get("user_id", ""),
+                                "text": payload.get("text", ""),
+                                "channel_id": payload.get("channel_id", ""),
+                            }
+                        )
                 except Exception:
                     pass
                 self.send_response(200)
@@ -254,14 +235,13 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Synology Chat webhook tools."""
 
     def __init__(self) -> None:
         super().__init__("Synology Chat Agent")
         self._backend = SynologyChatChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._webhook_url = cfg["webhook_url"]
             self._backend._token = cfg.get("token", "")
@@ -274,7 +254,6 @@ class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
         """Return channel-specific authentication tool functions."""
         agent = self
 
-
         def check_synology_auth() -> str:
             """Check if Synology Chat is configured.
 
@@ -286,10 +265,12 @@ class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
                     "Not configured for Synology Chat. Use authenticate_synology() to configure.\n"
                     "You need the incoming webhook URL from Synology Chat integration settings."
                 )
-            return json.dumps({
-                "ok": True,
-                "webhook_url": agent._backend._webhook_url[:50] + "...",
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "webhook_url": agent._backend._webhook_url[:50] + "...",
+                }
+            )
 
         def authenticate_synology(webhook_url: str, token: str = "") -> str:
             """Configure Synology Chat webhook.
@@ -305,7 +286,7 @@ class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
                 return "webhook_url cannot be empty."
             agent._backend._webhook_url = webhook_url.strip()
             agent._backend._token = token.strip()
-            _save_config(webhook_url, token)
+            _config.save({"webhook_url": webhook_url.strip(), "token": token.strip()})
             return json.dumps({"ok": True, "message": "Synology Chat configured."})
 
         def clear_synology_auth() -> str:
@@ -314,7 +295,7 @@ class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._webhook_url = ""
             agent._backend._token = ""
             return "Synology Chat configuration cleared."
@@ -325,7 +306,7 @@ class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> SynologyChatChannelBackend:
     """Create a configured SynologyChatChannelBackend for daemon mode."""
     backend = SynologyChatChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not configured. Run: kiss-synology -t 'authenticate'")
         sys.exit(1)
@@ -337,11 +318,13 @@ def _make_daemon_backend() -> SynologyChatChannelBackend:
 def main() -> None:
     """Run the SynologyChatAgent from the command line with chat persistence."""
     channel_main(
-        SynologyChatAgent, "kiss-synology",
+        SynologyChatAgent,
+        "kiss-synology",
         channel_name="Synology Chat",
         make_daemon_backend=_make_daemon_backend,
         daemon_poll_interval=1.0,
     )
+
 
 if __name__ == "__main__":
     main()

@@ -15,6 +15,7 @@ from kiss.core.relentless_agent import (
     IMPORTANT_INSTRUCTIONS,
     TASK_PROMPT,
     RelentlessAgent,
+    _str_to_bool,
     finish,
 )
 from kiss.tests.conftest import requires_gemini_api_key
@@ -50,6 +51,30 @@ class TestTemplateConstants(unittest.TestCase):
         self.assertIn("Continue", formatted)
 
 
+class TestStrToBool(unittest.TestCase):
+    """Tests for the _str_to_bool helper."""
+
+    def test_string_true_variants(self) -> None:
+        self.assertTrue(_str_to_bool("true"))
+        self.assertTrue(_str_to_bool("True"))
+        self.assertTrue(_str_to_bool("TRUE"))
+        self.assertTrue(_str_to_bool("1"))
+        self.assertTrue(_str_to_bool("yes"))
+        self.assertTrue(_str_to_bool("Yes"))
+
+    def test_string_false_variants(self) -> None:
+        self.assertFalse(_str_to_bool("false"))
+        self.assertFalse(_str_to_bool("False"))
+        self.assertFalse(_str_to_bool("0"))
+        self.assertFalse(_str_to_bool("no"))
+        self.assertFalse(_str_to_bool(""))
+        self.assertFalse(_str_to_bool("anything"))
+
+    def test_bool_passthrough(self) -> None:
+        self.assertTrue(_str_to_bool(True))
+        self.assertFalse(_str_to_bool(False))
+
+
 class TestFinish(unittest.TestCase):
     """Tests for the finish() tool function."""
 
@@ -59,6 +84,28 @@ class TestFinish(unittest.TestCase):
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
         self.assertTrue(parsed["is_continue"])
+
+    def test_finish_string_false(self) -> None:
+        """finish() converts string 'false' / '0' / 'no' to bool False."""
+        for s_val, c_val in [("false", "no"), ("0", "false"), ("no", "0")]:
+            result = finish(success=s_val, is_continue=c_val, summary="y")  # type: ignore[arg-type]
+            parsed = yaml.safe_load(result)
+            self.assertFalse(parsed["success"])
+            self.assertFalse(parsed["is_continue"])
+
+    def test_finish_string_one(self) -> None:
+        """finish() converts string '1' to bool True."""
+        result = finish(success="1", is_continue="1", summary="z")  # type: ignore[arg-type]
+        parsed = yaml.safe_load(result)
+        self.assertTrue(parsed["success"])
+        self.assertTrue(parsed["is_continue"])
+
+    def test_finish_bool_values(self) -> None:
+        """finish() passes through bool values."""
+        result = finish(success=True, is_continue=False, summary="done")
+        parsed = yaml.safe_load(result)
+        self.assertTrue(parsed["success"])
+        self.assertFalse(parsed["is_continue"])
 
 
 @requires_gemini_api_key

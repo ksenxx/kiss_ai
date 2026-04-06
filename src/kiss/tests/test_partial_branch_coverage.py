@@ -16,30 +16,6 @@ from pydantic import BaseModel
 # === core/utils.py partial branches ===
 
 
-class TestGetConfigValue:
-    """Cover branches in get_config_value where value/config_value is not None."""
-
-    def test_explicit_value_returned(self) -> None:
-        """When value is not None, it is returned immediately (line 37->38)."""
-        from kiss.core.utils import get_config_value
-
-        class Cfg:
-            x: int = 99
-
-        result = get_config_value(42, Cfg(), "x", default=0)
-        assert result == 42
-
-    def test_config_value_used(self) -> None:
-        """When value is None but config has the attr, config value is used (line 40->41)."""
-        from kiss.core.utils import get_config_value
-
-        class Cfg:
-            x: int = 99
-
-        result = get_config_value(None, Cfg(), "x", default=0)
-        assert result == 99
-
-
 class TestEscapeInvalidTemplateFieldNames:
     """Cover branches for conversion and format_spec in _escape_fragment."""
 

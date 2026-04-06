@@ -25,49 +25,14 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _DISCORD_DIR = Path.home() / ".kiss" / "channels" / "discord"
 _API_BASE = "https://discord.com/api/v10"
-
-
-# ---------------------------------------------------------------------------
-# Config persistence
-# ---------------------------------------------------------------------------
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Discord config file."""
-    return _DISCORD_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Discord bot token from disk."""
-    return load_json_config(_config_path(), ("bot_token",))
-
-
-def _save_config(
-    bot_token: str, application_id: str = "", guild_ids: str = ""
-) -> None:
-    """Save Discord config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "bot_token": bot_token.strip(),
-            "application_id": application_id.strip(),
-            "guild_ids": guild_ids.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Discord config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_DISCORD_DIR, ("bot_token",))
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +77,7 @@ class DiscordChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Authenticate with Discord using the stored bot token."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Discord token found."
             return False
@@ -195,12 +160,14 @@ class DiscordChannelBackend(ToolMethodBackend):
             messages = []
             for m in msgs:  # pragma: no branch
                 new_oldest = m["id"]
-                messages.append({
-                    "ts": m.get("timestamp", ""),
-                    "user": m.get("author", {}).get("id", ""),
-                    "text": m.get("content", ""),
-                    "id": m.get("id", ""),
-                })
+                messages.append(
+                    {
+                        "ts": m.get("timestamp", ""),
+                        "user": m.get("author", {}).get("id", ""),
+                        "text": m.get("content", ""),
+                        "id": m.get("id", ""),
+                    }
+                )
             return messages, new_oldest
         except Exception:
             return [], oldest
@@ -434,6 +401,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         try:
             from urllib.parse import quote
+
             emoji_url = f"{_API_BASE}/channels/{channel_id}/messages/{message_id}"
             emoji_url += f"/reactions/{quote(emoji)}/@me"
             resp = requests.put(emoji_url, headers=self._headers(), timeout=30)
@@ -470,9 +438,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_guild_members(
-        self, guild_id: str, limit: int = 100, after: str = ""
-    ) -> str:
+    def list_guild_members(self, guild_id: str, limit: int = 100, after: str = "") -> str:
         """List members of a guild.
 
         Args:
@@ -503,9 +469,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def create_invite(
-        self, channel_id: str, max_age: int = 86400, max_uses: int = 0
-    ) -> str:
+    def create_invite(self, channel_id: str, max_age: int = 86400, max_uses: int = 0) -> str:
         """Create an invite link for a channel.
 
         Args:
@@ -523,14 +487,15 @@ class DiscordChannelBackend(ToolMethodBackend):
             )
             if "code" not in result:  # pragma: no branch
                 return json.dumps({"ok": False, "error": str(result)})
-            return json.dumps({
-                "ok": True,
-                "code": result["code"],
-                "url": f"https://discord.gg/{result['code']}",
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "code": result["code"],
+                    "url": f"https://discord.gg/{result['code']}",
+                }
+            )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +515,7 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("Discord Agent")
         self._backend = DiscordChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._bot_token = cfg["bot_token"]
 
@@ -574,7 +539,6 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
         """Return channel-specific authentication tool functions."""
         agent = self
 
-
         def check_discord_auth() -> str:
             """Check if the Discord bot token is configured and valid.
 
@@ -591,11 +555,13 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 result = agent._backend._get("/users/@me")
                 if "id" in result:  # pragma: no branch
-                    return json.dumps({
-                        "ok": True,
-                        "username": result.get("username", ""),
-                        "id": result.get("id", ""),
-                    })
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "username": result.get("username", ""),
+                            "id": result.get("id", ""),
+                        }
+                    )
                 return json.dumps({"ok": False, "error": str(result)})
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
@@ -622,13 +588,21 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 result = agent._backend._get("/users/@me")
                 if "id" in result:  # pragma: no branch
-                    _save_config(bot_token, application_id, guild_ids)
-                    return json.dumps({
-                        "ok": True,
-                        "message": "Discord token saved and validated.",
-                        "username": result.get("username", ""),
-                        "id": result.get("id", ""),
-                    })
+                    _config.save(
+                        {
+                            "bot_token": bot_token.strip(),
+                            "application_id": application_id.strip(),
+                            "guild_ids": guild_ids.strip(),
+                        }
+                    )
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "message": "Discord token saved and validated.",
+                            "username": result.get("username", ""),
+                            "id": result.get("id", ""),
+                        }
+                    )
                 agent._backend._bot_token = ""
                 return json.dumps({"ok": False, "error": str(result)})
             except Exception as e:
@@ -641,7 +615,7 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._bot_token = ""
             return "Discord authentication cleared."
 
@@ -667,14 +641,18 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
                 )
             return agent.web_use_tool.go_to_url("https://discord.com/developers/applications")
 
-        return [check_discord_auth, authenticate_discord, clear_discord_auth,
-            start_discord_browser_auth,]
+        return [
+            check_discord_auth,
+            authenticate_discord,
+            clear_discord_auth,
+            start_discord_browser_auth,
+        ]
 
 
 def _make_daemon_backend() -> DiscordChannelBackend:
     """Create a configured DiscordChannelBackend for daemon mode."""
     backend = DiscordChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-discord -t 'authenticate'")
         sys.exit(1)
@@ -685,10 +663,12 @@ def _make_daemon_backend() -> DiscordChannelBackend:
 def main() -> None:
     """Run the DiscordAgent from the command line with chat persistence."""
     channel_main(
-        DiscordAgent, "kiss-discord",
+        DiscordAgent,
+        "kiss-discord",
         channel_name="Discord",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

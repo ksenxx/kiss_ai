@@ -24,45 +24,26 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _BB_DIR = Path.home() / ".kiss" / "channels" / "bluebubbles"
 
-_PLATFORM_ERROR = json.dumps({
-    "ok": False,
-    "error": "BlueBubbles requires macOS with a running BlueBubbles server.",
-})
-
-
-def _config_path() -> Path:
-    """Return the path to the stored BlueBubbles config file."""
-    return _BB_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Bluebubbles config from disk."""
-    return load_json_config(_config_path(), ("server_url", "password",))
-
-
-def _save_config(server_url: str, password: str) -> None:
-    """Save Bluebubbles config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "server_url": server_url.strip(),
-            "password": password.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Bluebubbles config."""
-    clear_json_config(_config_path())
+_PLATFORM_ERROR = json.dumps(
+    {
+        "ok": False,
+        "error": "BlueBubbles requires macOS with a running BlueBubbles server.",
+    }
+)
+_config = ChannelConfig(
+    _BB_DIR,
+    (
+        "server_url",
+        "password",
+    ),
+)
 
 
 class BlueBubblesChannelBackend(ToolMethodBackend):
@@ -85,7 +66,7 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         if sys.platform != "darwin":  # pragma: no branch
             self._connection_info = "BlueBubbles requires macOS."
             return False
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No BlueBubbles config found."
             return False
@@ -133,13 +114,15 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
                 ts = float(msg.get("dateCreated", 0))
                 if ts > self._last_ts:  # pragma: no branch
                     self._last_ts = ts
-                messages.append({
-                    "ts": str(ts),
-                    "user": msg.get("sender", {}).get("address", ""),
-                    "text": msg.get("text", "") or "",
-                    "guid": msg.get("guid", ""),
-                    "chat_guid": channel_id,
-                })
+                messages.append(
+                    {
+                        "ts": str(ts),
+                        "user": msg.get("sender", {}).get("address", ""),
+                        "text": msg.get("text", "") or "",
+                        "guid": msg.get("guid", ""),
+                        "chat_guid": channel_id,
+                    }
+                )
             return messages, oldest
         except Exception:
             return [], oldest
@@ -226,8 +209,7 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
             return _PLATFORM_ERROR
         try:
             resp = requests.get(
-                self._url(f"/api/v1/chat/{chat_guid}"),
-                params=self._params(), timeout=10
+                self._url(f"/api/v1/chat/{chat_guid}"), params=self._params(), timeout=10
             )
             return json.dumps({"ok": True, "chat": resp.json().get("data", {})}, indent=2)[:8000]
         except Exception as e:
@@ -256,8 +238,7 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
             if after:  # pragma: no branch
                 params["after"] = after
             resp = requests.get(
-                self._url(f"/api/v1/chat/{chat_guid}/message"),
-                params=params, timeout=10
+                self._url(f"/api/v1/chat/{chat_guid}/message"), params=params, timeout=10
             )
             messages = [
                 {
@@ -326,13 +307,11 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
             return _PLATFORM_ERROR
         try:
             resp = requests.post(
-                self._url(f"/api/v1/chat/{chat_guid}/read"),
-                params=self._params(), timeout=10
+                self._url(f"/api/v1/chat/{chat_guid}/read"), params=self._params(), timeout=10
             )
             return json.dumps({"ok": resp.json().get("status") == 200})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
 
 
 class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -341,7 +320,7 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
     def __init__(self) -> None:
         super().__init__("BlueBubbles Agent")
         self._backend = BlueBubblesChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._server_url = cfg["server_url"].rstrip("/")
             self._backend._password = cfg["password"]
@@ -354,7 +333,6 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
         """Return channel-specific authentication tool functions."""
         agent = self
 
-
         def check_bluebubbles_auth() -> str:
             """Check if BlueBubbles is configured and reachable.
 
@@ -366,10 +344,16 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
                     "Not configured for BlueBubbles. Use authenticate_bluebubbles() to configure.\n"
                     "Requires BlueBubbles server running on a Mac."
                 )
-            return json.loads(agent._backend.get_server_info()).get("ok") and json.dumps({
-                "ok": True,
-                "server_url": agent._backend._server_url,
-            }) or agent._backend.get_server_info()
+            return (
+                json.loads(agent._backend.get_server_info()).get("ok")
+                and json.dumps(
+                    {
+                        "ok": True,
+                        "server_url": agent._backend._server_url,
+                    }
+                )
+                or agent._backend.get_server_info()
+            )
 
         def authenticate_bluebubbles(server_url: str, password: str) -> str:
             """Configure BlueBubbles connection.
@@ -390,7 +374,7 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
             agent._backend._password = password.strip()
             result = json.loads(agent._backend.get_server_info())
             if result.get("ok"):  # pragma: no branch
-                _save_config(server_url, password)
+                _config.save({"server_url": server_url.strip(), "password": password.strip()})
                 return json.dumps({"ok": True, "message": "BlueBubbles configured."})
             return json.dumps({"ok": False, "error": "Could not connect to BlueBubbles server."})
 
@@ -400,7 +384,7 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._server_url = ""
             agent._backend._password = ""
             return "BlueBubbles configuration cleared."
@@ -411,7 +395,7 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> BlueBubblesChannelBackend:
     """Create a configured BlueBubblesChannelBackend for daemon mode."""
     backend = BlueBubblesChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not configured. Run: kiss-bluebubbles -t 'authenticate'")
         sys.exit(1)
@@ -423,10 +407,12 @@ def _make_daemon_backend() -> BlueBubblesChannelBackend:
 def main() -> None:
     """Run the BlueBubblesAgent from the command line with chat persistence."""
     channel_main(
-        BlueBubblesAgent, "kiss-bluebubbles",
+        BlueBubblesAgent,
+        "kiss-bluebubbles",
         channel_name="BlueBubbles",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

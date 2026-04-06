@@ -22,40 +22,13 @@ from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
+    ChannelConfig,
     ToolMethodBackend,
     channel_main,
-    clear_json_config,
-    load_json_config,
-    save_json_config,
 )
 
 _SIGNAL_DIR = Path.home() / ".kiss" / "channels" / "signal"
-
-
-def _config_path() -> Path:
-    """Return the path to the stored Signal config file."""
-    return _SIGNAL_DIR / "config.json"
-
-
-def _load_config() -> dict[str, str] | None:
-    """Load stored Signal config from disk."""
-    return load_json_config(_config_path(), ("phone_number",))
-
-
-def _save_config(phone_number: str, signal_cli_path: str) -> None:
-    """Save Signal config to disk with restricted permissions."""
-    save_json_config(
-        _config_path(),
-        {
-            "phone_number": phone_number.strip(),
-            "signal_cli_path": signal_cli_path.strip(),
-        },
-    )
-
-
-def _clear_config() -> None:
-    """Delete the stored Signal config."""
-    clear_json_config(_config_path())
+_config = ChannelConfig(_SIGNAL_DIR, ("phone_number",))
 
 
 class SignalChannelBackend(ToolMethodBackend):
@@ -68,7 +41,7 @@ class SignalChannelBackend(ToolMethodBackend):
 
     def connect(self) -> bool:
         """Load Signal config."""
-        cfg = _load_config()
+        cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Signal config found."
             return False
@@ -114,11 +87,13 @@ class SignalChannelBackend(ToolMethodBackend):
                     msg = data.get("envelope", {}).get("dataMessage", {})
                     sender = data.get("envelope", {}).get("source", "")
                     if msg.get("message"):  # pragma: no branch
-                        messages.append({
-                            "ts": str(data.get("envelope", {}).get("timestamp", "")),
-                            "user": sender,
-                            "text": msg["message"],
-                        })
+                        messages.append(
+                            {
+                                "ts": str(data.get("envelope", {}).get("timestamp", "")),
+                                "user": sender,
+                                "text": msg["message"],
+                            }
+                        )
                 except json.JSONDecodeError:
                     pass
             return messages, oldest
@@ -186,9 +161,7 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with list of received messages.
         """
         try:
-            stdout, _ = self._run_cli(
-                "receive", "--output=json", "--timeout", str(timeout)
-            )
+            stdout, _ = self._run_cli("receive", "--output=json", "--timeout", str(timeout))
             messages = []
             for line in stdout.strip().split("\n"):  # pragma: no branch
                 if not line.strip():  # pragma: no branch
@@ -213,9 +186,7 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            _, stderr = self._run_cli(
-                "send", "-m", message, "-a", file_path, recipient
-            )
+            _, stderr = self._run_cli("send", "-m", message, "-a", file_path, recipient)
             if stderr and "error" in stderr.lower():  # pragma: no branch
                 return json.dumps({"ok": False, "error": stderr.strip()})
             return json.dumps({"ok": True})
@@ -255,14 +226,13 @@ class SignalChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-
 class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
     """StatefulSorcarAgent extended with Signal CLI tools."""
 
     def __init__(self) -> None:
         super().__init__("Signal Agent")
         self._backend = SignalChannelBackend()
-        cfg = _load_config()
+        cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._phone_number = cfg["phone_number"]
             self._backend._signal_cli = cfg.get("signal_cli_path", "signal-cli")
@@ -274,7 +244,6 @@ class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
-
 
         def check_signal_auth() -> str:
             """Check if Signal is configured and signal-cli is available.
@@ -290,19 +259,21 @@ class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
             try:
                 result = subprocess.run(
                     [agent._backend._signal_cli, "--version"],
-                    capture_output=True, text=True, timeout=10
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
-                return json.dumps({
-                    "ok": True,
-                    "phone_number": agent._backend._phone_number,
-                    "signal_cli_version": result.stdout.strip(),
-                })
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "phone_number": agent._backend._phone_number,
+                        "signal_cli_version": result.stdout.strip(),
+                    }
+                )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
-        def authenticate_signal(
-            phone_number: str, signal_cli_path: str = "signal-cli"
-        ) -> str:
+        def authenticate_signal(phone_number: str, signal_cli_path: str = "signal-cli") -> str:
             """Configure Signal with a phone number and signal-cli path.
 
             Args:
@@ -315,14 +286,18 @@ class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
             phone_number = phone_number.strip()
             if not phone_number:  # pragma: no branch
                 return "phone_number cannot be empty."
-            _save_config(phone_number, signal_cli_path)
+            _config.save(
+                {"phone_number": phone_number.strip(), "signal_cli_path": signal_cli_path.strip()}
+            )
             agent._backend._phone_number = phone_number
             agent._backend._signal_cli = signal_cli_path
-            return json.dumps({
-                "ok": True,
-                "message": "Signal configured.",
-                "phone_number": phone_number,
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "message": "Signal configured.",
+                    "phone_number": phone_number,
+                }
+            )
 
         def clear_signal_auth() -> str:
             """Clear the stored Signal configuration.
@@ -330,7 +305,7 @@ class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_config()
+            _config.clear()
             agent._backend._phone_number = ""
             return "Signal configuration cleared."
 
@@ -340,7 +315,7 @@ class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
 def _make_daemon_backend() -> SignalChannelBackend:
     """Create a configured SignalChannelBackend for daemon mode."""
     backend = SignalChannelBackend()
-    cfg = _load_config()
+    cfg = _config.load()
     if not cfg:  # pragma: no branch
         print("Not configured. Run: kiss-signal -t 'authenticate'")
         sys.exit(1)
@@ -352,10 +327,12 @@ def _make_daemon_backend() -> SignalChannelBackend:
 def main() -> None:
     """Run the SignalAgent from the command line with chat persistence."""
     channel_main(
-        SignalAgent, "kiss-signal",
+        SignalAgent,
+        "kiss-signal",
         channel_name="Signal",
         make_daemon_backend=_make_daemon_backend,
     )
+
 
 if __name__ == "__main__":
     main()

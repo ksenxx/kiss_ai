@@ -20,20 +20,20 @@ import yaml
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model
+from kiss.core.models.model import (
+    Model,
+    _build_text_based_tools_prompt,
+    _parse_text_based_tool_calls,
+)
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
-    _build_text_based_tools_prompt,
-    _parse_text_based_tool_calls,
 )
 from kiss.core.utils import (
     finish as utils_finish,
 )
 from kiss.core.utils import (
-    get_config_value,
     is_subpath,
-    read_project_file,
     resolve_path,
 )
 
@@ -728,36 +728,11 @@ class TestOpenAICompatibleModelEmbedding:
 
 
 class TestUtilsFunctionsExtra:
-    def test_get_config_value_default(self) -> None:
-        class Cfg:
-            pass
-
-        assert get_config_value(None, Cfg(), "missing", default="fallback") == "fallback"
-
-    def test_get_config_value_raises(self) -> None:
-        class Cfg:
-            pass
-
-        with pytest.raises(ValueError):
-            get_config_value(None, Cfg(), "missing")
-
     def test_utils_finish(self) -> None:
         result = utils_finish(status="success", analysis="good", result="42")
         payload = yaml.safe_load(result)
         assert payload["status"] == "success"
         assert payload["result"] == "42"
-
-    def test_read_project_file_success(self) -> None:
-        """Cover the filesystem path (os.path.isfile) branch (lines 161-162)."""
-        content = read_project_file("kiss/core/utils.py")
-        assert "def resolve_path" in content
-
-    def test_read_project_file_single_part(self) -> None:
-        """Cover the len(rel_parts) <= 1 (no package) branch."""
-        from kiss.core.kiss_error import KISSError
-
-        with pytest.raises(KISSError, match="Could not find"):
-            read_project_file("nonexistent_single_file.xyz")
 
     def test_resolve_path_relative(self) -> None:
         result = resolve_path("foo/bar.txt", "/base")

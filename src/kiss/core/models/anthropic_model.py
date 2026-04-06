@@ -289,16 +289,7 @@ class AnthropicModel(Model):
                 - "result": The result content string
                 - "tool_use_id": Optional explicit tool_use_id to use
         """
-        # Collect all tool_use blocks from the most recent assistant message
-        # Use a list to preserve order and handle multiple calls to the same function
-        tool_use_ids: list[tuple[str, str]] = []  # [(name, id), ...]
-        for msg in reversed(self.conversation):
-            if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
-                for b in msg["content"]:
-                    if b.get("type") == "tool_use":
-                        tool_use_ids.append((b.get("name", ""), b.get("id", "")))
-                if tool_use_ids:
-                    break
+        tool_call_ids = self._find_tool_call_ids_from_last_assistant()
 
         tool_results_blocks: list[dict[str, Any]] = []
         for i, (func_name, result_dict) in enumerate(function_results):
@@ -308,8 +299,8 @@ class AnthropicModel(Model):
 
             # Use explicit tool_use_id if provided, otherwise match by position
             tool_use_id = result_dict.get("tool_use_id")
-            if tool_use_id is None and i < len(tool_use_ids):
-                tool_use_id = tool_use_ids[i][1]
+            if tool_use_id is None and i < len(tool_call_ids):
+                tool_use_id = tool_call_ids[i][1]
             if tool_use_id is None:
                 tool_use_id = f"toolu_{func_name}_{i}"
 
