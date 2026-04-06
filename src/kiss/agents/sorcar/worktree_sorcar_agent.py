@@ -388,7 +388,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         if wt_dir is not None and wt_dir.exists():
             self._auto_commit_worktree()
             remove_result = _git("worktree", "remove", str(wt_dir),
-                                 cwd=self._repo_root)
+                                 "--force", cwd=self._repo_root)
             if remove_result.returncode != 0:  # pragma: no cover — worktree lock/perm
                 logger.warning("worktree remove failed: %s",
                                remove_result.stderr.strip())
