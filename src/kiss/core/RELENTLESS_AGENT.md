@@ -264,7 +264,7 @@ def _get_tools(self) -> list:
     return tools
 ```
 
-**System instructions.** SorcarAgent prepends the framework's `SYSTEM_PROMPT` (which contains the code style guidelines, testing instructions, and web tool usage rules that the agent sees in every session) and appends the path to a task history file so the agent has cross-task context.
+**System instructions.** SorcarAgent prepends the framework's `SYSTEM_PROMPT` (which contains the code style guidelines, testing instructions, and web tool usage rules that the agent sees in every session) and optionally appends the path of the currently active editor file for context.
 
 **Prompt enrichment.** Before calling `super().run()`, the `run()` method appends contextual hints to the user's task prompt: the path of the currently active editor file, and a note about any attached images or PDFs instructing the agent to examine them directly rather than through browser tools.
 

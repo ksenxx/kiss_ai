@@ -19,7 +19,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 <details>
 <summary><strong>Table of Contents</strong></summary>
 
-- [Installation and Launching KISS Sorcar](#installation-and-launching-kiss-sorcar)
+- [Install and Launch KISS Sorcar](#install-and-launch-kiss-sorcar)
 - [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
 - [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
 - [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
@@ -204,8 +204,8 @@ For usage examples, API reference, and configuration options, please see the [KI
 - **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, gpt-5.3-codex, codex-mini-latest
 - **OpenAI (Reasoning)**: o1, o1-mini, o1-pro, o3, o3-mini, o3-mini-high, o3-pro, o3-deep-research, o4-mini, o4-mini-high, o4-mini-deep-research
 - **OpenAI (Open Source)**: openai/gpt-oss-20b, openai/gpt-oss-120b
-- **Anthropic**: claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
-- **Anthropic (Legacy)**: claude-3-5-sonnet-20241022, claude-3-5-haiku, claude-3-5-haiku-20241022, claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307
+- **Anthropic**: claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-opus-4, claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
+- **Anthropic (Legacy)**: claude-3-5-haiku, claude-3-haiku-20240307
 - **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-1.5-pro (deprecated), gemini-1.5-flash (deprecated)
 - **Gemini (preview, unreliable function calling)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-2.5-flash-lite
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)

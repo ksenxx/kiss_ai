@@ -14,7 +14,7 @@
 
 - Write() for new files. Edit() for small changes.
 - Run Bash commands synchronously using the `timeout_seconds` parameter.
-  Use 300s (default) for commands If a command times out, retry with a higher
+  Use 300s (default) for commands. If a command times out, retry with a higher
   timeout. Only for commands expected to exceed 10 minutes, run in the
   background with output redirected to a file and poll periodically.
 - Use go_to_url() for browser tool.
