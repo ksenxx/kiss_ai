@@ -1,331 +1,307 @@
 # Redundancy, Duplication, AI Slop, and Inconsistency Analysis
 
-## Issue 1: Three different `finish()` functions with overlapping purpose
+## 1. Duplicate `finish()` Functions with Inconsistent Signatures
 
 **Files:**
-- `src/kiss/core/kiss_agent.py` — `KISSAgent.finish(result: str)` (trivial identity function)
-- `src/kiss/core/relentless_agent.py` — `finish(success, is_continue, summary)` (YAML-producing)
-- `src/kiss/core/utils.py` — `finish(status, analysis, result)` (YAML-producing)
+- `src/kiss/core/utils.py:140` — `finish(status, analysis, result)` returns YAML with `{status, analysis, result}`
+- `src/kiss/core/kiss_agent.py:464` — `KISSAgent.finish(result)` simply returns `result`
+- `src/kiss/core/relentless_agent.py:61` — `finish(success, is_continue, summary)` returns YAML with `{success, is_continue, summary}`
 
-**Problem:** Three `finish` functions serve different agent tiers but have confusingly similar names and overlapping YAML-production logic. `utils.finish` and `relentless_agent.finish` both do `yaml.dump(dict, sort_keys=False)` with slightly different keys. `KISSAgent.finish` is a trivial identity method that just returns its argument.
+**Problem:** Three completely different `finish()` signatures/semantics exist. `utils.finish` is used by non-relentless agents (e.g. GEPA), `KISSAgent.finish` is the default tool for the base agent loop, and `relentless_agent.finish` is used by RelentlessAgent sub-sessions. The `utils.finish` and `relentless_agent.finish` both produce YAML dicts but with different keys (`status/analysis/result` vs `success/is_continue/summary`). This is confusing and error-prone.
 
-**Fix:** No code change — these serve distinct agent contracts (KISSAgent's is an LLM tool, relentless_agent's manages sub-session continuations, utils' is for GEPA benchmarks). However, document the distinction clearly.
+**Fix:** Unify to a single `finish()` function that covers all use cases. The `KISSAgent.finish` is fine as a simple passthrough for the agent loop. The two YAML-producing versions should be unified into one with a superset of parameters, or the one in `utils.py` should be removed since it's only used by GEPA which could use the relentless_agent one.
 
-**Test plan:** N/A (documentation only).
+**Tests:**
+- Integration test that creates a `KISSAgent` and verifies `finish()` returns its argument unchanged
+- Integration test that calls `relentless_agent.finish()` and `utils.finish()` and verifies correct YAML output
+- Test that covers the `isinstance(success, str)` / `isinstance(is_continue, str)` coercion branches
 
 ---
 
-## Issue 2: Dead code in `utils.py` — `get_config_value`, `add_prefix_to_each_line`, `read_project_file`, `read_project_file_from_package`
+## 2. Duplicated Boolean-from-String Coercion in `relentless_agent.py`
 
-**Files:** `src/kiss/core/utils.py`
+**File:** `src/kiss/core/relentless_agent.py`
+**Lines:** 71-74 (in `finish()`), 237-243 (in `perform_task()`)
 
-**Problem:** Four functions have zero callers outside tests:
-- `get_config_value()` — never imported or called anywhere in production code
-- `add_prefix_to_each_line()` — never imported or called
-- `read_project_file()` — never imported or called
-- `read_project_file_from_package()` — never imported or called
+**Problem:** The pattern `x.lower() in ("true", "1", "yes")` is duplicated 4 times (twice for `success`, twice for `is_continue`). The same str-to-bool coercion logic appears in both `finish()` and `perform_task()`.
 
-These are dead code that adds maintenance burden and confuses the API surface.
+**Fix:** Extract a `_str_to_bool(value)` helper and use it in both locations.
 
-**Fix:** Remove all four functions and their associated tests.
-
-**Test plan:** Verify no imports break after removal. Run full test suite to confirm.
+**Tests:**
+- Test `finish()` with string "true", "false", "1", "0", "yes", "no" for both `success` and `is_continue`
+- Test `perform_task()` parsing of string-typed booleans in the YAML payload
 
 ---
 
-## Issue 3: Duplicated `usage_info_for_messages` append logic in `AnthropicModel.add_function_results_to_conversation_and_return`
+## 3. Duplicated `add_function_results_to_conversation_and_return` in AnthropicModel
 
 **Files:**
-- `src/kiss/core/models/model.py` — `Model.add_function_results_to_conversation_and_return()` appends `self.usage_info_for_messages` to result content
-- `src/kiss/core/models/anthropic_model.py` — `AnthropicModel.add_function_results_to_conversation_and_return()` duplicates the same `usage_info_for_messages` append logic
+- `src/kiss/core/models/model.py:196` — Base class implementation (OpenAI-style tool messages)
+- `src/kiss/core/models/anthropic_model.py:281` — Anthropic override (tool_result blocks)
 
-**Problem:** `AnthropicModel` overrides `add_function_results_to_conversation_and_return` entirely because Anthropic uses `tool_result` blocks with `tool_use_id` matching, vs. the base class's OpenAI-style `tool` role messages. However, the `usage_info_for_messages` appending logic is copy-pasted:
+**Problem:** Both implementations contain the same core logic: iterate function_results, match to tool calls by position from the last assistant message, append usage info, and add to conversation. The only difference is the message format (OpenAI `role: "tool"` vs Anthropic `type: "tool_result"` blocks). The Anthropic version also supports an explicit `tool_use_id` in `result_dict`, which the base class doesn't.
 
+**Fix:** This is a necessary override due to format differences, but the `tool_use_id` lookup logic (searching backwards through conversation) is duplicated. Could extract the "find tool call IDs from last assistant message" logic into a shared helper on the base class.
+
+**Tests:**
+- Test base `Model.add_function_results_to_conversation_and_return` with multiple results matching tool calls
+- Test `AnthropicModel.add_function_results_to_conversation_and_return` with `tool_use_id` in result_dict
+- Test fallback ID generation when tool_call count doesn't match result count
+
+---
+
+## 4. Channel Agent Config Persistence Boilerplate (Massive Duplication)
+
+**Files:** Every channel agent (`slack_agent.py`, `discord_agent.py`, `telegram_agent.py`, `matrix_agent.py`, etc. — 23 files)
+
+**Problem:** Every channel agent defines the same 4 functions:
 ```python
-# In model.py line 216-217:
-if self.usage_info_for_messages:
-    result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-
-# In anthropic_model.py line 306-307:
-if self.usage_info_for_messages:
-    result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-```
-
-**Fix:** Extract `_enrich_result_content(result_content: str) -> str` into the base `Model` class that appends `usage_info_for_messages` if set. Both implementations call this helper instead of duplicating the check.
-
-**Test plan:** Integration test that creates an `AnthropicModel` instance (using conversation manipulation, not API calls), sets `usage_info_for_messages`, calls `add_function_results_to_conversation_and_return`, and verifies usage info is appended to the result content in the conversation. Same for base `Model` path (via `OpenAICompatibleModel` or `GeminiModel`).
-
----
-
-## Issue 4: Inconsistent `__str__`/`__repr__` definitions across Model subclasses
-
-**Files:**
-- `src/kiss/core/models/model.py` — `Model` defines `__str__` and `__repr__ = __str__`
-- `src/kiss/core/models/openai_compatible_model.py` — `OpenAICompatibleModel` overrides `__str__` and `__repr__ = __str__` (adds base_url)
-- `src/kiss/core/models/anthropic_batch_model.py` — `AnthropicBatchModel` overrides `__str__` and `__repr__ = __str__` (custom format)
-- `src/kiss/core/models/anthropic_model.py` — No override (inherits base)
-- `src/kiss/core/models/gemini_model.py` — No override (inherits base)
-- `src/kiss/core/models/claude_code_model.py` — No override (inherits base)
-
-**Problem:** The `__repr__ = __str__` line is duplicated in 3 places. Two subclasses override to include extra info (base_url), while others rely on the base. The `AnthropicBatchModel.__str__` returns `AnthropicBatchModel(name=...)` but inheriting from `AnthropicModel` which inherits from `Model` which already returns `ClassName(name=...)` using `self.__class__.__name__` — so the override is unnecessary.
-
-**Fix:** Remove the redundant `__str__` and `__repr__` from `AnthropicBatchModel` (it already gets the correct class name from `Model.__str__` which uses `self.__class__.__name__`). Keep `OpenAICompatibleModel`'s override since it genuinely adds `base_url`.
-
-**Test plan:** Test that `str(AnthropicBatchModel(...))` returns the correct class name after removing the override. Test all model `__str__` representations.
-
----
-
-## Issue 5: `_build_create_kwargs` in `AnthropicBatchModel` uses model_name swap hack
-
-**Files:** `src/kiss/core/models/anthropic_batch_model.py`
-
-**Problem:** `AnthropicBatchModel._build_create_kwargs` temporarily swaps `self.model_name` to strip the `batch/` prefix so the parent's thinking-mode detection works:
-
-```python
-saved = self.model_name
-self.model_name = self._api_model_name
-try:
-    kwargs = super()._build_create_kwargs(tools=tools)
-finally:
-    self.model_name = saved
-kwargs["model"] = self._api_model_name
-```
-
-This is fragile and thread-unsafe. The parent `_build_create_kwargs` should use a method to get the API model name rather than reading `self.model_name` directly.
-
-**Fix:** In `AnthropicModel._build_create_kwargs`, introduce `self._get_api_model_name()` that returns `self.model_name` by default. `AnthropicBatchModel` overrides it to strip the `batch/` prefix. The parent uses this method instead of `self.model_name` for both the `model` key and the thinking-detection check.
-
-**Test plan:** Test that `AnthropicBatchModel._build_create_kwargs()` produces correct kwargs with `model` set to the stripped name and thinking config properly detected, without the swap hack.
-
----
-
-## Issue 6: `_is_retryable_error` check uses string matching on type names — fragile
-
-**File:** `src/kiss/core/kiss_agent.py`
-
-**Problem:** `_is_retryable_error` checks `type(e).__name__` against string patterns and `str(e).lower()` against phrase lists. This is AI-generated pattern matching that's fragile (class name changes, localized error messages, etc.).
-
-**Fix:** This is acceptable for now as a defense-in-depth heuristic — the patterns cover well-known API client error types. No change needed.
-
-**Test plan:** N/A.
-
----
-
-## Issue 7: `OpenAICompatibleModel._api_model_name` pattern duplicated in `AnthropicBatchModel._api_model_name`
-
-**Files:**
-- `src/kiss/core/models/openai_compatible_model.py` — `self._api_model_name` strips `openrouter/` prefix
-- `src/kiss/core/models/anthropic_batch_model.py` — `self._api_model_name` strips `batch/` prefix
-
-**Problem:** Both store a "cleaned" model name as `_api_model_name` for API calls, but the attribute name collision is accidental — they strip different prefixes for different reasons. This is not actually duplication since each is domain-specific.
-
-**Fix:** No change needed.
-
----
-
-## Issue 8: `config_to_dict` strips API_KEY by name matching, not by field metadata
-
-**File:** `src/kiss/core/utils.py`
-
-**Problem:** `config_to_dict` uses `"API_KEY" not in k` to filter sensitive fields. This is fragile — a field named `SOME_API_KEY_PREFERENCE` would be incorrectly excluded.
-
-**Fix:** This is low priority and works correctly for the current config structure. No change.
-
----
-
-## Issue 9: Channel agent config persistence has copy-paste boilerplate across 20+ agents
-
-**Files:** All files in `src/kiss/channels/` (slack_agent.py, discord_agent.py, telegram_agent.py, etc.)
-
-**Problem:** Every channel agent defines nearly identical:
-- `_config_path()` function
-- `_load_config()` function  
-- `_save_config()` function
-- `_clear_config()` function
-
-These are 4-8 line functions that differ only in the directory name and required keys. Example:
-
-```python
-# slack_agent.py
 def _config_path() -> Path:
-    return _SLACK_DIR / "config.json"
+    return _CHANNEL_DIR / "config.json"
 
 def _load_config() -> dict[str, str] | None:
-    return load_json_config(_config_path(), ("access_token",))
+    return load_json_config(_config_path(), ("required_key",))
 
-# discord_agent.py  
-def _config_path() -> Path:
-    return _DISCORD_DIR / "config.json"
+def _save_config(**kwargs) -> None:
+    save_json_config(_config_path(), {...})
 
-def _load_config() -> dict[str, str] | None:
-    return load_json_config(_config_path(), ("bot_token",))
+def _clear_config() -> None:
+    clear_json_config(_config_path())
 ```
+This is ~15-20 lines of boilerplate repeated identically 23 times (only the directory path and required keys differ).
 
-Already partially addressed via `_channel_agent_utils.py` with `load_json_config`/`save_json_config`/`clear_json_config`, but each agent still wraps these with boilerplate.
-
-**Fix:** Create a `ChannelConfig` dataclass or simple helper in `_channel_agent_utils.py`:
-
+**Fix:** Create a `ChannelConfig` class in `_channel_agent_utils.py`:
 ```python
 class ChannelConfig:
     def __init__(self, channel_name: str, required_keys: tuple[str, ...]):
-        self._dir = Path.home() / ".kiss" / "channels" / channel_name
-        self._required_keys = required_keys
-
-    @property
-    def path(self) -> Path:
-        return self._dir / "config.json"
-
-    def load(self) -> dict[str, str] | None:
-        return load_json_config(self.path, self._required_keys)
-
-    def save(self, data: dict[str, str]) -> None:
-        save_json_config(self.path, data)
-
-    def clear(self) -> None:
-        clear_json_config(self.path)
+        self.path = Path.home() / ".kiss" / "channels" / channel_name / "config.json"
+        self.required_keys = required_keys
+    
+    def load(self) -> dict[str, str] | None: ...
+    def save(self, data: dict[str, str]) -> None: ...
+    def clear(self) -> None: ...
 ```
+Then each channel becomes: `_config = ChannelConfig("discord", ("bot_token",))`
 
-Each channel agent replaces 4 functions with `_config = ChannelConfig("slack", ("access_token",))`.
-
-**Test plan:** Integration test that creates a `ChannelConfig`, saves a config to a temp dir, loads it, and clears it. Test with missing keys, empty values, and non-existent paths.
+**Tests:**
+- Integration test creating a `ChannelConfig`, saving, loading, and clearing data
+- Test with missing required keys returns None
+- Test with nonexistent file returns None
+- Test file permissions on non-Windows platforms
 
 ---
 
-## Issue 10: `Model._parse_docstring_params` dead branch — `len(parts) == 2` always True
+## 5. Channel Agent `_is_authenticated` / `_get_auth_tools` Pattern Duplication
+
+**Files:** All 23 channel agents
+
+**Problem:** Every channel agent has:
+```python
+def _is_authenticated(self) -> bool:
+    return self._backend._some_client is not None
+
+def _get_auth_tools(self) -> list:
+    # closure over agent, defining check/authenticate/clear functions
+    ...
+```
+The `_is_authenticated` implementations are all one-liners checking a backend attribute. The `_get_auth_tools` implementations all follow the same pattern: define 3 closures (check, authenticate, clear) that check config, set backend fields, and clear config. The structure is identical; only the field names and authentication logic differ.
+
+**Fix:** This is inherent to the channel-per-file architecture. The `BaseChannelAgent` already abstracts the `_get_tools()` composition. The remaining boilerplate is channel-specific configuration. Could potentially add a `backend.is_authenticated` property to the `ChannelBackend` protocol and have `BaseChannelAgent._is_authenticated` delegate to it, removing the override from all 23 agents.
+
+**Tests:**
+- Test `BaseChannelAgent._get_tools()` when `_is_authenticated()` returns True vs False
+- Test that backend tool methods are only included when authenticated
+
+---
+
+## 6. `usage_info_for_messages` Appended Inconsistently
+
+**Files:**
+- `src/kiss/core/models/model.py:209-213` (in `add_function_results_to_conversation_and_return`)
+- `src/kiss/core/models/model.py:222-224` (in `add_message_to_conversation`)
+- `src/kiss/core/models/anthropic_model.py:299-300` (in Anthropic override)
+
+**Problem:** Usage info is appended to message content in three different places with slightly different patterns:
+1. In `add_function_results_to_conversation_and_return`: appended to each tool result
+2. In `add_message_to_conversation`: appended to user messages only
+3. In Anthropic's override: appended to each tool_result content
+
+This means usage info may be duplicated if both tool results and user messages are added in the same turn. The condition `if role == "user" and self.usage_info_for_messages` in `add_message_to_conversation` also has the comment `# pragma: no branch` which is suspicious — it suggests the condition is always true when usage_info is set.
+
+**Fix:** Consider appending usage info at a single point (e.g., only in tool results, or only in user messages after tool results) to avoid duplication. The current approach has usage info appear in every tool result AND in the follow-up user message.
+
+**Tests:**
+- Test that usage_info is correctly appended to tool results
+- Test that usage_info is correctly appended to user messages
+- Test the interaction: verify usage_info isn't double-appended in a turn with both tool results and user messages
+
+---
+
+## 7. `_build_text_based_tools_prompt` and `_parse_text_based_tool_calls` Used by Two Models
+
+**Files:**
+- `src/kiss/core/models/openai_compatible_model.py` (defines them)
+- `src/kiss/core/models/claude_code_model.py` (imports and uses them)
+
+**Problem:** These are free functions in `openai_compatible_model.py` but are shared by `ClaudeCodeModel`. This is a good factoring (not duplicated), but they arguably belong in a shared module since they aren't specific to OpenAI-compatible models. The import `from kiss.core.models.openai_compatible_model import _build_text_based_tools_prompt, _parse_text_based_tool_calls` creates tight coupling between `claude_code_model.py` and `openai_compatible_model.py`.
+
+**Fix:** Move `_build_text_based_tools_prompt` and `_parse_text_based_tool_calls` to `model.py` (base class module) or a new `text_tool_calling.py` helper module.
+
+**Tests:**
+- Test `_build_text_based_tools_prompt` with various function_map inputs
+- Test `_parse_text_based_tool_calls` with JSON in code blocks, inline JSON, clean JSON
+- Test empty function_map returns empty string
+- Test malformed JSON gracefully returns empty list
+
+---
+
+## 8. `_resolve_openai_tools_schema` / `_build_openai_tools_schema` — Unnecessary Indirection
 
 **File:** `src/kiss/core/models/model.py`
 
-**Problem:** In `_parse_docstring_params`:
-```python
-parts = stripped.split(":", 1)
-if len(parts) == 2:  # pragma: no branch
-```
+**Problem:** `_resolve_openai_tools_schema` exists only to check `if tools_schema is not None: return tools_schema` before calling `_build_openai_tools_schema`. This is a one-liner check that every model subclass calls. The caching is already handled by `KISSAgent._cached_tools_schema` in `kiss_agent.py`. The `_resolve_openai_tools_schema` method adds unnecessary indirection.
 
-`str.split(":", 1)` with `":"` in the string (already checked by `if ":" in stripped`) always returns exactly 2 parts. The `if len(parts) == 2` check is dead code — it can never be False given the outer condition. The `# pragma: no branch` comment confirms this.
+**Fix:** Remove `_resolve_openai_tools_schema` and have each model do the simple `tools_schema or self._build_openai_tools_schema(function_map)` inline since it's a trivial check. Or keep it but rename to something clearer.
 
-**Fix:** Remove the unnecessary `if len(parts) == 2` check. The code already guarantees 2 parts due to the `if ":" in stripped` condition.
-
-**Test plan:** Test that docstring parsing still works correctly after removing the dead check.
+**Tests:**
+- Test `_build_openai_tools_schema` with various function types
+- Test that cached schema is used when passed to `generate_and_process_with_tools`
 
 ---
 
-## Issue 11: `_OPENAI_PREFIXES` checked inconsistently — `"openai/gpt-oss"` special case
+## 9. `DockerTools` Duplicates `UsefulTools` Logic (Read/Write/Edit)
 
-**File:** `src/kiss/core/models/model_info.py`
+**Files:**
+- `src/kiss/agents/sorcar/useful_tools.py` — `Read`, `Write`, `Edit` (local filesystem)
+- `src/kiss/docker/docker_tools.py` — `Read`, `Write`, `Edit` (via Docker bash)
 
-**Problem:** The model routing uses:
-```python
-_OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-```
+**Problem:** The `DockerTools` class replicates the exact same validation/error-handling logic as `UsefulTools` but via shell commands. For `Edit`, it generates a Python script that mirrors the exact same logic in `UsefulTools.Edit` (check same string, check file exists, count occurrences, check uniqueness, replace). The docstrings are identical. The error messages are identical.
 
-But then has a special exclusion:
-```python
-if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
-```
+**Fix:** This duplication is somewhat inherent to the Docker architecture (can't use filesystem directly). However, `DockerTools.Edit` generates an inline Python script that duplicates `UsefulTools.Edit` line-for-line. Consider extracting the core edit logic to a standalone Python script file that can be either imported locally or piped into Docker.
 
-The `openai/gpt-oss` models don't actually match `_OPENAI_PREFIXES` (they start with "openai/", not "gpt"/"o1"/etc.), so the exclusion check `not model_name.startswith("openai/gpt-oss")` is dead code — it can never trigger because `model_name.startswith(_OPENAI_PREFIXES)` would already be False for "openai/gpt-oss-*".
-
-Wait — `_TOGETHER_PREFIXES` includes `"openai/gpt-oss"`, so those models are routed to Together AI. The OpenAI prefix check is actually fine as-is. But the exclusion in the `_OPENAI_PREFIXES` branch is unnecessary dead code.
-
-**Fix:** Remove `and not model_name.startswith("openai/gpt-oss")` from the OpenAI routing check since `"openai/gpt-oss"` never matches `_OPENAI_PREFIXES` in the first place.
-
-Similarly in `get_available_models()`:
-```python
-elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
-```
-
-**Test plan:** Test that `model("openai/gpt-oss-120b")` still routes to Together AI. Test that `model("gpt-4o")` still routes to OpenAI. Verify the dead check removal doesn't change behavior.
+**Tests:**
+- Test `DockerTools.Read/Write/Edit` with a mock bash function that simulates container behavior
+- Test error cases: file not found, string not found, multiple occurrences
 
 ---
 
-## Issue 12: `KISSAgent._run_agentic_loop` has unreachable `raise KISSError` at the end
+## 10. Three Different `finish()` Return Value Patterns
 
-**File:** `src/kiss/core/kiss_agent.py`
+**Problem:** Across the codebase, there are three distinct patterns for what `finish()` returns:
+1. `KISSAgent.finish(result)` → returns raw string
+2. `relentless_agent.finish(success, is_continue, summary)` → returns YAML `{success, is_continue, summary}`
+3. `utils.finish(status, analysis, result)` → returns YAML `{status, analysis, result}`
 
-**Problem:** After the `for _ in range(self.max_steps)` loop, there's:
-```python
-raise KISSError(  # pragma: no cover
-    f"Agent {self.name} completed {self.max_steps} steps without finishing."
-)
-```
+Callers must know which `finish()` they're dealing with to parse the result correctly. RelentlessAgent's `perform_task()` parses the YAML looking for `success`/`is_continue`/`summary`. But nothing enforces that the agent's finish tool will produce these keys.
 
-This is unreachable because `_check_limits()` at the top of each iteration already raises `KISSError` when `self.step_count > self.max_steps`. Since `step_count` is incremented before `_check_limits()`, by the time `step_count` reaches `max_steps + 1`, the check fires. The loop runs `max_steps` times, with `step_count` going from 1 to `max_steps`, then on iteration `max_steps + 1` (which doesn't exist since the range is `max_steps`), the loop would exit... 
+**Fix:** Consider having RelentlessAgent's finish tool be the only one used by relentless agents, and make its return format explicit. Remove `utils.finish` if it's not needed or unify the formats.
 
-Actually, looking more carefully: `for _ in range(self.max_steps)` runs `max_steps` iterations. On the first iteration, `step_count` becomes 1. On the last iteration, `step_count` becomes `max_steps`. Then `_check_limits()` checks `self.step_count > self.max_steps` which is `max_steps > max_steps` = False. So the loop completes all iterations, and if no result was returned, the `raise` at the bottom IS reachable.
-
-Wait — but the `_check_limits` happens at the START of the step before incrementing? No, let me reread:
-
-```python
-for _ in range(self.max_steps):
-    self.step_count += 1    # Goes 1, 2, ..., max_steps
-    self._check_limits()     # Checks step_count > max_steps
-```
-
-When step_count = max_steps, the check is `max_steps > max_steps` = False, so it passes. The step executes. After all `max_steps` iterations, the loop exits and the raise is hit. So this is actually reachable in theory — but `pragma: no cover` marks it as expected to be unreachable in practice.
-
-**Fix:** No change — the code is correct. The `pragma: no cover` just means it's hard to trigger in tests.
+**Tests:**
+- Integration test verifying RelentlessAgent correctly parses its finish tool's output
+- Test edge cases where finish returns malformed YAML
 
 ---
 
-## Issue 13: `_ArtifactDirProxy.__eq__` and `__hash__` in `config.py`
+## 11. `_str_presenter` YAML Representer Registered as Global Side Effect
 
-**File:** `src/kiss/core/config.py`
+**File:** `src/kiss/core/base.py:28-32`
 
-**Problem:** `_ArtifactDirProxy` implements `__eq__` and `__hash__` to behave like a string, but it's a singleton used as a module-level variable. The `__eq__` with other `_ArtifactDirProxy` instances compares their resolved paths, and `__hash__` hashes the resolved path. This is reasonable.
+**Problem:** `yaml.add_representer(str, _str_presenter)` is called at module import time as a global side effect. This modifies the global YAML dumper for all `str` types across the entire process, affecting any code that uses `yaml.dump()`. This is a hidden global mutation.
 
-**Fix:** No change needed.
+**Fix:** Use a custom YAML Dumper subclass instead of modifying the global dumper.
+
+**Tests:**
+- Test that YAML dumping uses literal block style for multiline strings
+- Test that single-line strings are not affected
 
 ---
 
-## Summary of Planned Changes
+## 12. `SYSTEM_PROMPT` Construction with Platform-Specific Branches at Import Time
 
-| # | Type | File(s) | Change | Risk |
-|---|------|---------|--------|------|
-| 2 | Dead code | `utils.py` | Remove 4 unused functions | Low |
-| 3 | Duplication | `model.py`, `anthropic_model.py` | Extract `_enrich_result_content()` helper | Low |
-| 4 | Redundancy | `anthropic_batch_model.py` | Remove unnecessary `__str__`/`__repr__` override | Low |
-| 5 | Fragile hack | `anthropic_batch_model.py`, `anthropic_model.py` | Replace model_name swap with `_get_api_model_name()` method | Medium |
-| 9 | Boilerplate | `_channel_agent_utils.py`, all channel agents | Introduce `ChannelConfig` helper class | Medium |
-| 10 | Dead branch | `model.py` | Remove always-true `len(parts) == 2` check | Low |
-| 11 | Dead code | `model_info.py` | Remove dead `openai/gpt-oss` exclusion in OpenAI routing | Low |
+**File:** `src/kiss/core/base.py:35-58`
 
-## Test Plan for Each Change
+**Problem:** `SYSTEM_PROMPT` is built at module import time with Windows-specific branches (`sys.platform == "win32"`). The `# pragma: no branch` comments on these branches indicate they can't be coverage-tested on the development platform. The conditional reads a file (`SORCAR.md`) at import time, which is a side effect.
 
-### Issue 2 Tests
-- Verify that removing the functions doesn't break any imports
-- Run full test suite to confirm no tests reference them (except their own tests, which are also removed)
+**Fix:** This is acceptable for performance (done once at import), but the `# pragma: no branch` comments are technically AI slop — they suppress coverage warnings rather than addressing the underlying issue. Consider lazy initialization.
 
-### Issue 3 Tests
-- Test `_enrich_result_content("hello")` with empty `usage_info_for_messages` returns "hello"
-- Test `_enrich_result_content("hello")` with `usage_info_for_messages = "info"` returns "hello\n\ninfo"
-- Integration test: Create `AnthropicModel` (no API call), set conversation with assistant tool_use blocks, call `add_function_results_to_conversation_and_return` with usage info set, verify content contains the info
-- Integration test: Same for base `Model.add_function_results_to_conversation_and_return` (via any concrete subclass)
+**Tests:**
+- Not easily testable across platforms without mocking (which is forbidden). This is an accepted limitation.
 
-### Issue 4 Tests
-- Test `str(AnthropicBatchModel("batch/claude-opus-4-6", api_key="test"))` returns `"AnthropicBatchModel(name=batch/claude-opus-4-6)"`
-- Test `repr()` returns the same as `str()` for all model classes
+---
 
-### Issue 5 Tests
-- Test `AnthropicBatchModel._build_create_kwargs()` with a model name like `batch/claude-opus-4-6` produces `kwargs["model"] == "claude-opus-4-6"`
-- Test thinking config is correctly detected for `batch/claude-opus-4-6` (opus 4.x should get adaptive thinking)
-- Test `batch/claude-sonnet-4` gets budget thinking (10000 tokens)
-- Test `batch/claude-3-5-haiku` (non-4.x) gets no thinking config
+## 13. Inconsistent `verbose` Default Handling
 
-### Issue 9 Tests
-- Test `ChannelConfig("test_channel", ("token",))` with:
-  - Save and load a config in a temp directory
-  - Load from non-existent file returns None
-  - Load with missing required key returns None
-  - Clear removes the file
-  - Verify file permissions on non-Windows
+**Files:**
+- `src/kiss/core/base.py:110` — `set_printer()`: `verbose` defaults to `True` if `None`
+- `src/kiss/core/kiss_agent.py:76` — `_reset()`: `self.verbose = verbose if verbose is not None else True`
+- `src/kiss/agents/sorcar/sorcar_agent.py:109` — `_reset()`: passes `verbose if verbose is not None else False`
 
-### Issue 10 Tests
-- Test `_parse_docstring_params` with docstrings containing "Args:" section
-- Test with docstrings containing params with "(type)" format
-- Test with empty docstring
-- Test with docstring without Args section
+**Problem:** `SorcarAgent._reset()` passes `verbose=False` as default while `KISSAgent._reset()` uses `verbose=True`. The `set_printer()` method treats `verbose=None` the same as `verbose=True`. This creates confusion: is the default verbose or not?
 
-### Issue 11 Tests
-- Test that `model("openai/gpt-oss-120b")` routes to Together AI (raises or succeeds based on API key)
-- Test that `model("gpt-4o")` routes to OpenAI
-- Test `get_available_models()` includes/excludes models correctly based on API keys
+**Fix:** Standardize the default. `SorcarAgent` intentionally defaults to quiet (False) while the base agent defaults to verbose (True). This is probably intentional but should be documented clearly. No code change needed.
+
+---
+
+## 14. `_ArtifactDirProxy` in `config.py` — Over-Engineered Lazy Directory
+
+**File:** `src/kiss/core/config.py:63-80`
+
+**Problem:** `_ArtifactDirProxy` is a class with `__fspath__`, `__str__`, `__eq__`, and `__hash__` that exists solely to lazily create an artifact directory. This is over-engineered for what is essentially `os.makedirs(path, exist_ok=True)`. It also has thread-safety via `_artifact_dir_lock` but the proxy object itself doesn't use the lock in `__str__`/`__fspath__`.
+
+**Fix:** The proxy delegates to `get_artifact_dir()` which handles locking correctly. The design is actually fine — it's lazy initialization with thread safety. But `__eq__` and `__hash__` could be removed since they're unlikely to be used.
+
+**Tests:**
+- Test `artifact_dir` proxy creates directory lazily
+- Test thread-safety of `get_artifact_dir()`
+- Test `set_artifact_base_dir()` changes the directory
+
+---
+
+## 15. `get_config_value` in `utils.py` — Unused Over-Abstraction
+
+**File:** `src/kiss/core/utils.py:14-36`
+
+**Problem:** `get_config_value()` is a generic function meant to eliminate `value if value is not None else config.attr` patterns, but searching the codebase shows it's barely used. Most code still uses the inline pattern. It's also a generic function using Python 3.12 syntax (`def get_config_value[T](...)`).
+
+**Fix:** Either adopt it consistently across the codebase or remove it. If kept, verify it's used in enough places to justify its existence.
+
+**Tests:**
+- Test `get_config_value` with explicit value, config value, and default fallback
+- Test `ValueError` when no value is available
+
+---
+
+## 16. Dead Code: `read_project_file` and `read_project_file_from_package`
+
+**File:** `src/kiss/core/utils.py:170-232`
+
+**Problem:** These two functions (`read_project_file` and `read_project_file_from_package`) are not called anywhere in production code — only in test files. They are 60+ lines of dead code including complex `importlib.resources` fallback logic.
+
+**Fix:** Remove both functions and their tests. If they're needed in the future, they can be re-added.
+
+**Tests:**
+- Verify removal doesn't break any production imports
+- Remove the corresponding test methods
+
+---
+
+## Summary of Priorities
+
+| # | Issue | Severity | Effort |
+|---|-------|----------|--------|
+| 4 | Channel config persistence boilerplate (23 files) | High | Medium |
+| 1 | Three inconsistent `finish()` functions | High | Low |
+| 2 | Duplicated bool-from-string coercion | Medium | Low |
+| 7 | Text-based tool calling helpers in wrong module | Medium | Low |
+| 6 | Usage info appended inconsistently | Medium | Medium |
+| 3 | Duplicated tool-call ID lookup logic | Medium | Low |
+| 9 | DockerTools duplicates UsefulTools edit logic | Medium | High |
+| 16 | Dead code: `read_project_file` functions | Medium | Low |
+| 11 | Global YAML representer side effect | Low | Low |
+| 8 | Unnecessary `_resolve_openai_tools_schema` indirection | Low | Low |
+| 5 | Channel _is_authenticated boilerplate | Low | Medium |
+| 14 | ArtifactDirProxy over-engineering | Low | Low |
+| 15 | Unused `get_config_value` helper | Low | Low |
+| 13 | Inconsistent verbose defaults | Low | None |
+| 12 | Import-time SYSTEM_PROMPT construction | Low | None |
+| 10 | Three different finish return patterns | Low | Low |
