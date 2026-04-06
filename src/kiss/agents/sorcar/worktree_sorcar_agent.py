@@ -148,6 +148,10 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
     def _auto_commit_worktree(self) -> bool:
         """Commit any uncommitted changes in the worktree.
 
+        Generates a descriptive commit message using an LLM (fast model)
+        based on the staged diff.  Falls back to a generic message if
+        message generation fails.
+
         Returns:
             True if a commit was created, False if nothing to commit.
         """
@@ -158,8 +162,53 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         diff = _git("diff", "--cached", "--quiet", cwd=wt_dir)
         if diff.returncode == 0:
             return False
-        _git("commit", "-m", "kiss: auto-commit agent work", cwd=wt_dir)
+        msg = self._generate_worktree_commit_message(wt_dir)
+        _git("commit", "-m", msg, cwd=wt_dir)
         return True
+
+    def _generate_worktree_commit_message(self, wt_dir: Path) -> str:
+        """Generate a commit message for worktree changes using an LLM.
+
+        Gets the staged diff and asks a fast model to produce a
+        conventional-commit-style message.  Returns a fallback message
+        on any failure.
+
+        Args:
+            wt_dir: The worktree directory containing staged changes.
+
+        Returns:
+            A commit message string.
+        """
+        fallback = "kiss: auto-commit agent work"
+        try:
+            cached = _git("diff", "--cached", cwd=wt_dir)
+            diff_text = cached.stdout.strip()
+            if not diff_text:
+                return fallback
+
+            from kiss.agents.vscode.helpers import fast_model_for
+            from kiss.core.kiss_agent import KISSAgent
+
+            agent = KISSAgent("Commit Message Generator")
+            raw = agent.run(
+                model_name=fast_model_for(),
+                prompt_template=(
+                    "Generate a concise git commit message for these "
+                    "changes. Use conventional commit format with a "
+                    "clear subject line (type: description) and "
+                    "optionally a body with bullet points for multiple "
+                    "changes. Return ONLY the commit message text, no "
+                    "quotes or markdown fences.\n\n{context}"
+                ),
+                arguments={"context": f"Diff:\n{diff_text}"},
+                is_agentic=False,
+                verbose=False,
+            )
+            msg = raw.strip().strip('"').strip("'")
+            return msg if msg else fallback
+        except Exception:
+            logger.debug("Commit message generation failed", exc_info=True)
+            return fallback
 
     def _cleanup_partial_worktree(self, branch: str, wt_dir: Path) -> None:
         """Remove a partially-created worktree and branch (best-effort).
