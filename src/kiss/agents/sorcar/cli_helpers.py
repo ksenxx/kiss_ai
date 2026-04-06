@@ -119,17 +119,27 @@ def _build_chat_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _apply_chat_args(agent: StatefulSorcarAgent, args: argparse.Namespace) -> None:
+def _apply_chat_args(
+    agent: StatefulSorcarAgent,
+    args: argparse.Namespace,
+    task: str = "",
+) -> None:
     """Apply ``-n`` and ``--chat-id`` args to an agent.
+
+    When neither ``-n`` nor ``--chat-id`` is given and *task* is provided,
+    attempts to resume a previous chat session for the same task description.
 
     Args:
         agent: The stateful agent to configure.
         args: Parsed argparse namespace with ``new`` and ``chat_id``.
+        task: Task description used to look up a previous session.
     """
     if args.new:
         agent.new_chat()
     elif args.chat_id:
         agent.resume_chat_by_id(args.chat_id)
+    elif task:
+        agent.resume_chat(task)
 
 
 def _build_fallback_run_kwargs() -> dict[str, Any]:

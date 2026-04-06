@@ -11,13 +11,13 @@ run():  (blocking main loop)
 
 On each inbound message:
     Skip bot's own messages and non-allowed users.
-    Route to a per-sender session (keyed by channel+user).
+    Route to a per-thread session (keyed by channel + thread root ts).
+    Each top-level message starts a new chat session.
+    Thread replies reuse the chat session of the top-level message.
     Each session has a FIFO queue and a mutex ensuring only one
-    worker thread processes that sender's messages at a time.
-    Messages within a session share a persistent agent chat_id
-    so the conversation is multi-turn.
+    worker thread processes that session's messages at a time.
 
-Worker thread (one per active sender):
+Worker thread (one per active session):
     Drain the session queue sequentially.
     For each message, create/resume a StatefulSorcarAgent and run it,
     passing a reply() tool the agent can call to post back to the channel.
@@ -95,6 +95,11 @@ class ChannelDaemon:
         self._handler_threads: set[threading.Thread] = set()
         self._handler_threads_lock = threading.Lock()
         self._stop_event = threading.Event()
+        # Thread reply polling: thread_ts → oldest timestamp for polling.
+        # Only used when the backend supports poll_thread_messages().
+        self._active_threads: dict[str, str] = {}
+        self._active_threads_lock = threading.Lock()
+        self._poll_thread_fn = getattr(backend, "poll_thread_messages", None)
 
     def run(self) -> None:
         """Start the daemon loop. Blocks until stop() is called or fatal error."""
@@ -166,18 +171,61 @@ class ChannelDaemon:
                         continue
                     self._dispatch_message(channel_id, msg)
 
+                self._poll_active_threads(channel_id)
+
                 if self._stop_event.wait(self._poll_interval):  # pragma: no branch
                     break
         finally:
             self._disconnect_backend()
 
     def _dispatch_message(self, channel_id: str, msg: dict[str, Any]) -> None:
-        """Queue an inbound message and ensure a handler thread is running."""
-        user_id = msg.get("user", "unknown")
-        session_key = f"{channel_id}:{user_id}"
+        """Queue an inbound message and ensure a handler thread is running.
+
+        Sessions are keyed by thread root timestamp so that each top-level
+        message gets a fresh chat session while thread replies reuse the
+        session of their parent message.
+        """
+        thread_root = msg.get("thread_ts") or msg.get("ts", "")
+        session_key = f"{channel_id}:{thread_root}"
         state = self._get_sender_state(session_key)
         state.pending_messages.put(msg)
         self._start_sender_worker(session_key, channel_id, state)
+        # Register top-level messages for thread reply polling.
+        is_top_level = "thread_ts" not in msg or msg.get("thread_ts") == msg.get("ts")
+        msg_ts = msg.get("ts", "")
+        if is_top_level and msg_ts and self._poll_thread_fn is not None:
+            with self._active_threads_lock:
+                if msg_ts not in self._active_threads:
+                    self._active_threads[msg_ts] = f"{float(msg_ts) + 0.000001:.6f}"
+
+    def _poll_active_threads(self, channel_id: str) -> None:
+        """Poll tracked threads for new replies and dispatch them.
+
+        Only runs when the backend provides a ``poll_thread_messages``
+        method.  Skips bot messages and non-allowed users just like the
+        top-level message loop.
+        """
+        if self._poll_thread_fn is None:
+            return
+        with self._active_threads_lock:
+            threads = list(self._active_threads.items())
+        for thread_ts, thread_oldest in threads:
+            try:
+                msgs, new_oldest = self._poll_thread_fn(
+                    channel_id, thread_ts, thread_oldest
+                )
+            except Exception:
+                logger.debug("Error polling thread %s", thread_ts, exc_info=True)
+                continue
+            with self._active_threads_lock:
+                self._active_threads[thread_ts] = new_oldest
+            for msg in msgs:
+                if self._backend.is_from_bot(msg):
+                    continue
+                user_id = msg.get("user", "")
+                if self._allow_users and user_id not in self._allow_users:
+                    continue
+                self._dispatch_message(channel_id, msg)
 
     def _get_sender_state(self, session_key: str) -> _SenderState:
         """Return the per-sender state object for *session_key*."""

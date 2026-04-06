@@ -280,6 +280,57 @@ class SlackChannelBackend(ToolMethodBackend):
                 new_oldest = f"{ts + 0.000001:.6f}"
         return messages, new_oldest
 
+    def poll_thread_messages(
+        self, channel_id: str, thread_ts: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll a Slack thread for new replies since *oldest*.
+
+        Used by the daemon to detect user replies within active threads.
+        The parent message itself is excluded from the results.
+
+        Retries up to 3 times on transient network errors with
+        exponential backoff (same strategy as ``poll_messages``).
+
+        Args:
+            channel_id: Channel ID containing the thread.
+            thread_ts: Timestamp of the parent message (thread root).
+            oldest: Only return messages newer than this timestamp.
+            limit: Maximum number of messages to return.
+
+        Returns:
+            Tuple of (reply messages sorted oldest-first, updated oldest
+            timestamp).
+        """
+        assert self._client is not None
+        last_err: OSError | None = None
+        for attempt in range(3):  # pragma: no branch
+            try:
+                resp = self._client.conversations_replies(
+                    channel=channel_id, ts=thread_ts, oldest=oldest, limit=limit
+                )
+                break
+            except OSError as e:
+                last_err = e
+                if attempt < 2:  # pragma: no branch
+                    logger.warning(
+                        "Network error polling thread replies (attempt %d/3): %s",
+                        attempt + 1,
+                        e,
+                    )
+                    time.sleep(2**attempt)
+        else:
+            raise last_err  # type: ignore[misc]
+        messages: list[dict[str, Any]] = resp.get("messages", [])
+        # Exclude the parent message itself (always first in replies).
+        messages = [m for m in messages if m.get("ts") != thread_ts]
+        messages.sort(key=lambda m: float(m.get("ts", "0")))
+        new_oldest = oldest
+        for msg in messages:  # pragma: no branch
+            ts = float(msg.get("ts", "0"))
+            if ts >= float(new_oldest):  # pragma: no branch
+                new_oldest = f"{ts + 0.000001:.6f}"
+        return messages, new_oldest
+
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send a message to a Slack channel, optionally in a thread.
 

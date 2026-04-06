@@ -259,10 +259,11 @@ def channel_main(
         agent = agent_cls(workspace=workspace)
     else:
         agent = agent_cls()
-    _apply_chat_args(agent, args)
+    run_kwargs = _build_run_kwargs(args)
+    _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
 
     start_time = _time.time()
-    agent.run(**_build_run_kwargs(args))
+    agent.run(**run_kwargs)
     elapsed = _time.time() - start_time
 
     _print_run_stats(agent, elapsed)

@@ -160,7 +160,7 @@ class _TrackingBackend:
 
 
 def test_dispatch_no_message_loss_under_rapid_fire() -> None:
-    """All messages dispatched rapidly to one sender are eventually processed.
+    """All messages dispatched rapidly to one thread are eventually processed.
 
     Regression test for the message-loss race where a worker finishing its
     queue could miss a newly enqueued message because the dispatcher relied
@@ -194,17 +194,21 @@ def test_dispatch_no_message_loss_under_rapid_fire() -> None:
 
     daemon._handle_message = tracking_handle  # type: ignore[method-assign]
 
+    # All messages share the same thread_ts so they route to one session.
     n_messages = 20
     for i in range(n_messages):
-        daemon._dispatch_message("ch", {"user": "u1", "text": f"msg-{i}"})
+        daemon._dispatch_message(
+            "ch",
+            {"user": "u1", "text": f"msg-{i}", "thread_ts": "root", "ts": f"1.{i:06d}"},
+        )
         # Small stagger so some dispatches happen while worker is mid-drain
         if i % 5 == 0:
             time.sleep(0.01)
 
-    # Wait for all workers to finish
+    # Wait for all workers to finish (session key is now channel:thread_root)
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        state = daemon._get_sender_state("ch:u1")
+        state = daemon._get_sender_state("ch:root")
         if state.pending_messages.empty() and not state.lock.locked():
             break
         time.sleep(0.01)
@@ -268,5 +272,204 @@ def test_budget_reset_at_daemon_start_not_per_task() -> None:
 
     queue_source = inspect.getsource(ChannelDaemon._process_sender_queue)
     assert "reset_global_budget" not in queue_source
+
+
+# ---------------------------------------------------------------------------
+# Thread-session semantics: top-level → new session, thread reply → same
+# ---------------------------------------------------------------------------
+
+
+def test_top_level_messages_get_separate_sessions() -> None:
+    """Each top-level message creates a distinct session (new chat)."""
+    daemon = ChannelDaemon(
+        backend=_TrackingBackend(),  # type: ignore[arg-type]
+        channel_name="",
+        agent_name="test",
+    )
+    # Two top-level messages with different ts values.
+    daemon._dispatch_message("ch", {"user": "u1", "text": "first", "ts": "100.0"})
+    daemon._dispatch_message("ch", {"user": "u1", "text": "second", "ts": "200.0"})
+    # They should create two distinct session states.
+    state1 = daemon._sender_states.get("ch:100.0")
+    state2 = daemon._sender_states.get("ch:200.0")
+    assert state1 is not None
+    assert state2 is not None
+    assert state1 is not state2
+
+
+def test_thread_reply_reuses_parent_session() -> None:
+    """A thread reply routes to the same session as the parent top-level msg."""
+    daemon = ChannelDaemon(
+        backend=_TrackingBackend(),  # type: ignore[arg-type]
+        channel_name="",
+        agent_name="test",
+    )
+    # Top-level message.
+    daemon._dispatch_message("ch", {"user": "u1", "text": "hello", "ts": "100.0"})
+    # Thread reply (thread_ts == parent ts, ts is reply's own timestamp).
+    daemon._dispatch_message(
+        "ch",
+        {"user": "u1", "text": "reply", "thread_ts": "100.0", "ts": "100.1"},
+    )
+    # Both should be in the same session, keyed by thread root "100.0".
+    state = daemon._sender_states.get("ch:100.0")
+    assert state is not None
+    assert state.pending_messages.qsize() >= 1  # at least the reply is queued
+    # And there should be NO session for the reply's own ts.
+    assert daemon._sender_states.get("ch:100.1") is None
+
+
+def test_top_level_message_registers_active_thread() -> None:
+    """Top-level message registers its ts in _active_threads when backend
+    supports poll_thread_messages."""
+
+    class _ThreadableBackend(_TrackingBackend):
+        def poll_thread_messages(
+            self, channel_id: str, thread_ts: str, oldest: str, limit: int = 10
+        ) -> tuple[list[dict[str, Any]], str]:
+            return [], oldest
+
+    daemon = ChannelDaemon(
+        backend=_ThreadableBackend(),  # type: ignore[arg-type]
+        channel_name="",
+        agent_name="test",
+    )
+    daemon._dispatch_message("ch", {"user": "u1", "text": "hi", "ts": "50.0"})
+    assert "50.0" in daemon._active_threads
+
+
+def test_thread_reply_does_not_register_active_thread() -> None:
+    """Thread replies should NOT register a new active thread entry."""
+
+    class _ThreadableBackend(_TrackingBackend):
+        def poll_thread_messages(
+            self, channel_id: str, thread_ts: str, oldest: str, limit: int = 10
+        ) -> tuple[list[dict[str, Any]], str]:
+            return [], oldest
+
+    daemon = ChannelDaemon(
+        backend=_ThreadableBackend(),  # type: ignore[arg-type]
+        channel_name="",
+        agent_name="test",
+    )
+    # Only a thread reply, no prior top-level message.
+    daemon._dispatch_message(
+        "ch",
+        {"user": "u1", "text": "reply", "thread_ts": "50.0", "ts": "50.1"},
+    )
+    # "50.0" is the thread root but came from a reply, not a top-level msg —
+    # "50.1" definitely should NOT be registered.
+    assert "50.1" not in daemon._active_threads
+
+
+def test_no_active_threads_without_poll_thread_support() -> None:
+    """Backends without poll_thread_messages don't register active threads."""
+    daemon = ChannelDaemon(
+        backend=_TrackingBackend(),  # type: ignore[arg-type]
+        channel_name="",
+        agent_name="test",
+    )
+    assert daemon._poll_thread_fn is None
+    daemon._dispatch_message("ch", {"user": "u1", "text": "hi", "ts": "50.0"})
+    assert len(daemon._active_threads) == 0
+
+
+def test_poll_active_threads_dispatches_replies() -> None:
+    """_poll_active_threads picks up thread replies and dispatches them."""
+    replies_for: dict[str, list[dict[str, Any]]] = {
+        "100.0": [
+            {"user": "u1", "text": "user reply", "thread_ts": "100.0", "ts": "100.5"},
+        ],
+    }
+
+    class _ThreadableBackend(_TrackingBackend):
+        def poll_thread_messages(
+            self, channel_id: str, thread_ts: str, oldest: str, limit: int = 10
+        ) -> tuple[list[dict[str, Any]], str]:
+            msgs = replies_for.pop(thread_ts, [])
+            new_oldest = oldest
+            for m in msgs:
+                ts = float(m.get("ts", "0"))
+                if ts >= float(new_oldest):
+                    new_oldest = f"{ts + 0.000001:.6f}"
+            return msgs, new_oldest
+
+    daemon = ChannelDaemon(
+        backend=_ThreadableBackend(),  # type: ignore[arg-type]
+        channel_name="",
+        agent_name="test",
+    )
+
+    dispatched: list[str] = []
+
+    # Replace _dispatch_message to track what gets dispatched from thread poll.
+    orig_dispatch = daemon._dispatch_message
+
+    def tracking_dispatch(channel_id: str, msg: dict[str, Any]) -> None:
+        dispatched.append(msg.get("text", ""))
+        orig_dispatch(channel_id, msg)
+
+    daemon._dispatch_message = tracking_dispatch  # type: ignore[method-assign]
+
+    # Register a thread manually.
+    with daemon._active_threads_lock:
+        daemon._active_threads["100.0"] = "100.000001"
+
+    daemon._poll_active_threads("ch")
+    assert "user reply" in dispatched
+
+
+def test_poll_active_threads_skips_bot_and_disallowed() -> None:
+    """_poll_active_threads filters bot messages and non-allowed users."""
+
+    class _ThreadableBackend(_TrackingBackend):
+        def is_from_bot(self, msg: dict[str, Any]) -> bool:
+            return msg.get("user") == "bot"
+
+        def poll_thread_messages(
+            self, channel_id: str, thread_ts: str, oldest: str, limit: int = 10
+        ) -> tuple[list[dict[str, Any]], str]:
+            return [
+                {"user": "bot", "text": "bot msg", "thread_ts": "1.0", "ts": "1.1"},
+                {"user": "blocked", "text": "blocked msg", "thread_ts": "1.0", "ts": "1.2"},
+                {"user": "allowed", "text": "ok msg", "thread_ts": "1.0", "ts": "1.3"},
+            ], "1.300001"
+
+    daemon = ChannelDaemon(
+        backend=_ThreadableBackend(),  # type: ignore[arg-type]
+        channel_name="",
+        agent_name="test",
+        allow_users=["allowed"],
+    )
+
+    dispatched: list[str] = []
+
+    def tracking_handle(
+        session_key: str,
+        channel_id: str,
+        msg: dict[str, Any],
+        state: _SenderState,
+    ) -> None:
+        dispatched.append(msg.get("text", ""))
+
+    daemon._handle_message = tracking_handle  # type: ignore[method-assign]
+
+    with daemon._active_threads_lock:
+        daemon._active_threads["1.0"] = "1.000001"
+
+    daemon._poll_active_threads("ch")
+    # Wait briefly for the worker to process.
+    time.sleep(0.1)
+    daemon._join_handler_threads()
+    # Only the allowed user's message should have been dispatched.
+    assert dispatched == ["ok msg"]
+
+
+def test_session_key_uses_thread_root() -> None:
+    """Verify _dispatch_message uses thread_root (not user) for session key."""
+    source = inspect.getsource(ChannelDaemon._dispatch_message)
+    assert "thread_root" in source or "thread_ts" in source
+    # Must NOT key by user_id.
+    assert 'f"{channel_id}:{user_id}"' not in source
 
 
