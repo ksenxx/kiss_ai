@@ -260,11 +260,13 @@ class MultiPrinter(Printer):
             **kwargs: Additional options forwarded to each child printer.
 
         Returns:
-            str: The result from the last child printer.
+            str: The first non-empty result from child printers.
         """
         result = ""
         for p in self.printers:
-            result = p.print(content, type=type, **kwargs)
+            r = p.print(content, type=type, **kwargs)
+            if not result and r:
+                result = r
         return result
 
     def token_callback(self, token: str) -> None:

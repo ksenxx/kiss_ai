@@ -615,7 +615,7 @@ class OpenAICompatibleModel(Model):
                 cached_tokens = getattr(details, "cached_tokens", 0) or 0
                 cache_write_tokens = getattr(details, "cache_write_tokens", 0) or 0
             return (
-                prompt_tokens - cached_tokens - cache_write_tokens,
+                max(0, prompt_tokens - cached_tokens - cache_write_tokens),
                 completion_tokens,
                 cached_tokens,
                 cache_write_tokens,

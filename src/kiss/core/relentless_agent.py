@@ -108,6 +108,7 @@ class RelentlessAgent(Base):
         self.docker_manager: Any = None
         self.task_description: str = ""
         self.system_prompt: str = ""
+        self.model_config: dict[str, Any] | None = None
         self.set_printer(printer, verbose=verbose)
 
     def _docker_bash(self, command: str, description: str) -> str:

@@ -173,7 +173,7 @@ class KISSAgent(Base):
         try:
             if system_prompt:
                 model_config = dict(model_config) if model_config else {}
-                model_config["system_instruction"] = system_prompt
+                model_config.setdefault("system_instruction", system_prompt)
             self._reset(
                 model_name,
                 is_agentic,
@@ -400,7 +400,7 @@ class KISSAgent(Base):
             raise KISSError(f"Agent {self.name} budget exceeded.")
         if Base.get_global_budget_used() > 200.0:
             raise KISSError("Global budget exceeded.")
-        if self.step_count > self.max_steps:  # pragma: no branch
+        if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:

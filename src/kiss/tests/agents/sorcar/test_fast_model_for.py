@@ -37,13 +37,13 @@ class TestFastModelFor:
         self._set_key(monkeypatch, "ANTHROPIC_API_KEY")
         assert fast_model_for() == "claude-haiku-4-5"
 
-    def test_openrouter_key_returns_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_openrouter_key_returns_openrouter_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENROUTER_API_KEY")
-        assert fast_model_for() == "claude-haiku-4-5"
+        assert fast_model_for() == "openrouter/anthropic/claude-haiku-4.5"
 
-    def test_together_key_returns_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_together_key_returns_together_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "TOGETHER_API_KEY")
-        assert fast_model_for() == "claude-haiku-4-5"
+        assert fast_model_for() == "deepseek-ai/DeepSeek-R1-0528"
 
     def test_gemini_key_returns_gemini_pro(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "GEMINI_API_KEY")

@@ -281,20 +281,19 @@ class ClaudeCodeModel(Model):
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        # Temporarily augment the system prompt with tool descriptions
-        original_system = self.model_config.get("system_instruction", "")
-        self.model_config["system_instruction"] = (
+        # Use a local copy to avoid mutating shared model_config
+        original_config = self.model_config
+        config = dict(original_config)
+        original_system = config.get("system_instruction", "")
+        config["system_instruction"] = (
             (original_system + "\n\n" + tools_prompt).strip()
         )
+        self.model_config = config
 
         try:
             content, response = self.generate()
         finally:
-            # Restore original system instruction
-            if original_system:
-                self.model_config["system_instruction"] = original_system
-            else:
-                self.model_config.pop("system_instruction", None)
+            self.model_config = original_config
 
         # generate() appended a plain assistant message — replace it with
         # one that includes tool_calls if any were found in the text.

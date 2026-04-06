@@ -7,6 +7,7 @@
 
 import os
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
 _artifact_dir: str | None = None
+_artifact_dir_lock = threading.Lock()
 
 
 def _artifact_root(base_dir: str | Path | None = None) -> Path:
@@ -60,7 +62,9 @@ def get_artifact_dir() -> str:
     """Return the active artifact directory, creating it lazily if needed."""
     global _artifact_dir
     if _artifact_dir is None:
-        _artifact_dir = _generate_artifact_dir()
+        with _artifact_dir_lock:
+            if _artifact_dir is None:
+                _artifact_dir = _generate_artifact_dir()
     return _artifact_dir
 
 

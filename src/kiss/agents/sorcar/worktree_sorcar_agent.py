@@ -25,6 +25,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_run_stats,
 )
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +298,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         try:
             task_result = super().run(
                 prompt_template=prompt_template, **kwargs)
+        except KISSError:
+            raise
         except Exception as exc:
             task_result = yaml.dump({
                 "success": False,

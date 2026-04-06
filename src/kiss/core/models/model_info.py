@@ -145,6 +145,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "deepcogito/cogito-v2-1-671b": _mi(163840, 1.25, 1.25, fc=False),
     "deepseek-ai/DeepSeek-R1": _mi(163840, 3.00, 7.00, fc=False),  # Serves R1-0528
     "deepseek-ai/DeepSeek-R1-0528": _mi(163840, 3.00, 7.00),  # NEW
+    "deepseek-ai/DeepSeek-R1-0528-tput": _mi(163840, 3.00, 7.00),  # Throughput variant
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": _mi(131072, 2.00, 2.00),  # NEW
     "deepseek-ai/DeepSeek-V3-0324": _mi(163840, 1.25, 1.25),  # NEW
     "deepseek-ai/DeepSeek-V3.1": _mi(131072, 0.60, 1.70, fc=False),

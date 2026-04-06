@@ -66,31 +66,27 @@ class TestP6FileCacheProtected(unittest.TestCase):
 
 
 class TestP9RecordingsSnapshotBeforeIterate(unittest.TestCase):
-    """P9 fix: _extract_result_summary snapshots _recordings under lock,
-    then iterates the snapshot outside the lock.
+    """B7 fix: _extract_result_summary uses peek_recording(recording_id)
+    instead of directly iterating _recordings.
     """
 
     def test_snapshot_pattern_in_extract_result_summary(self) -> None:
-        """Verify _extract_result_summary takes a snapshot inside lock."""
+        """Verify _extract_result_summary uses peek_recording."""
         source = inspect.getsource(VSCodeServer._extract_result_summary)
-        assert "snapshot" in source, (
-            "P9 fix: should take a snapshot of _recordings"
+        assert "peek_recording" in source, (
+            "B7 fix: should use peek_recording instead of raw _recordings"
         )
-        # Iteration should be on snapshot, not on _recordings directly
-        lock_idx = source.find("with self.printer._lock")
-        assert lock_idx >= 0
-        # After the with block, iteration should be on snapshot
-        after_lock = source[lock_idx:]
-        assert "for events_list in snapshot" in after_lock, (
-            "P9 fix: should iterate snapshot, not _recordings"
+        assert "_recordings" not in source, (
+            "B7 fix: should not access _recordings directly"
         )
 
     def test_no_deadlock_with_concurrent_broadcast(self) -> None:
         """Verify _extract_result_summary doesn't block broadcast."""
         server = VSCodeServer()
 
+        rec_id = 999
         # Start a recording and add a result event
-        server.printer.start_recording(999)
+        server.printer.start_recording(rec_id)
         server.printer.broadcast({"type": "result", "summary": "test"})
 
         # Call _extract_result_summary in one thread while broadcasting in another
@@ -99,7 +95,7 @@ class TestP9RecordingsSnapshotBeforeIterate(unittest.TestCase):
 
         def extract() -> None:
             try:
-                r = server._extract_result_summary()
+                r = server._extract_result_summary(rec_id)
                 results.append(r)
             except Exception as e:
                 errors.append(str(e))
@@ -120,7 +116,7 @@ class TestP9RecordingsSnapshotBeforeIterate(unittest.TestCase):
 
         assert not errors, f"No errors expected: {errors}"
         assert results == ["test"]
-        server.printer.stop_recording(999)
+        server.printer.stop_recording(rec_id)
 
 
 # ---------------------------------------------------------------------------

@@ -179,8 +179,9 @@ class VSCodeServer:
         elif cmd_type == "getLastSession":
             self._get_last_session()
         elif cmd_type == "newChat":
-            if not (self._task_thread and self._task_thread.is_alive()):
-                self.agent.new_chat()
+            with self._state_lock:
+                if not (self._task_thread and self._task_thread.is_alive()):
+                    self.agent.new_chat()
         elif cmd_type == "complete":
             query = cmd.get("query", "")
             active_file = cmd.get("activeFile")
@@ -305,7 +306,7 @@ class VSCodeServer:
                     ask_user_question_callback=self._ask_user_question,
                 )
                 self._task_history_id = self.agent._last_task_id
-                result_summary = self._extract_result_summary() or "No summary available"
+                result_summary = self._extract_result_summary(rec_id) or "No summary available"
                 task_end_event = {"type": "task_done"}
             except KeyboardInterrupt:
                 self._task_history_id = self.agent._last_task_id
@@ -339,13 +340,14 @@ class VSCodeServer:
                 self._refresh_file_cache()
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
-                self._generate_followup_async(
-                    prompt,
-                    result_summary,
-                    model,
-                    gen,
-                    self._task_history_id,
-                )
+                if self._task_history_id is not None:
+                    self._generate_followup_async(
+                        prompt,
+                        result_summary,
+                        model,
+                        gen,
+                        self._task_history_id,
+                    )
                 self._task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
                 logger.debug("Cleanup interrupted", exc_info=True)
@@ -387,10 +389,18 @@ class VSCodeServer:
                 return
             tid = task_thread.ident
             if tid is not None:  # pragma: no branch — running thread always has ident
-                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                rc = ctypes.pythonapi.PyThreadState_SetAsyncExc(
                     ctypes.c_ulong(tid),
                     ctypes.py_object(KeyboardInterrupt),
                 )
+                if rc == 0:
+                    # Thread ID not found — thread already exited
+                    return
+                if rc > 1:  # pragma: no cover — rare: exception set in multiple states
+                    # Undo: clear the exception in all affected thread states
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_ulong(tid), None
+                    )
             task_thread.join(timeout=5)
 
     def _await_user_response(self) -> str:
@@ -555,15 +565,17 @@ class VSCodeServer:
         with self._state_lock:
             return self._task_generation == gen
 
-    def _extract_result_summary(self) -> str:
-        """Extract result summary from the last recorded events."""
-        with self.printer._lock:
-            snapshot = [list(v) for v in self.printer._recordings.values()]
-        for events_list in snapshot:
-            for ev in reversed(events_list):
-                if ev.get("type") == "result":
-                    summary = ev.get("summary") or ev.get("text") or ""
-                    return str(summary)
+    def _extract_result_summary(self, recording_id: int) -> str:
+        """Extract result summary from the recorded events for the given recording.
+
+        Args:
+            recording_id: The recording ID to extract the summary from.
+        """
+        events = self.printer.peek_recording(recording_id)
+        for ev in reversed(events):
+            if ev.get("type") == "result":
+                summary = ev.get("summary") or ev.get("text") or ""
+                return str(summary)
         return ""
 
     def _complete_from_active_file(

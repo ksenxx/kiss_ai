@@ -206,7 +206,7 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
 
     Args:
         limit: Maximum number of entries to return.
-            0 returns all entries.
+            0 returns up to 10000 entries (hard cap).
         offset: Number of entries to skip before returning results.
 
     Returns:
@@ -214,19 +214,16 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         ``task``, ``has_events``, ``result``, and ``chat_id`` keys.
     """
     db = _get_db()
-    sql = _HISTORY_SELECT + "ORDER BY timestamp DESC"
-    if limit > 0:
-        sql += " LIMIT ? OFFSET ?"
-        rows = db.execute(sql, (limit, offset)).fetchall()
-    else:
-        rows = db.execute(sql).fetchall()
+    effective_limit = limit if limit > 0 else 10000
+    sql = _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+    rows = db.execute(sql, (effective_limit, offset)).fetchall()
     return [dict(r) for r in rows]
 
 
 def _prefix_match_task(query: str) -> str:
-    """Find the most recent task starting with *query* (case-insensitive).
+    """Find the most recent task starting with *query* (case-sensitive).
 
-    Uses a SQL ``LIKE 'prefix%'`` query with the ``idx_th_task`` index,
+    Uses a SQL ``GLOB`` query for case-sensitive prefix matching,
     avoiding the need to load many rows into Python for prefix scanning.
 
     Args:
@@ -238,13 +235,13 @@ def _prefix_match_task(query: str) -> str:
     if not query:
         return ""
     db = _get_db()
-    # Escape LIKE wildcards in the query, then append '%'
-    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    # Escape GLOB special characters: *, ?, [
+    escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
     row = db.execute(
         "SELECT task FROM task_history "
-        "WHERE task LIKE ? ESCAPE '\\' AND LENGTH(task) > ? "
+        "WHERE task GLOB ? AND LENGTH(task) > ? "
         "ORDER BY timestamp DESC LIMIT 1",
-        (escaped + "%", len(query)),
+        (escaped + "*", len(query)),
     ).fetchone()
     return row["task"] if row else ""
 

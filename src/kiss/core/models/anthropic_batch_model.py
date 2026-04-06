@@ -58,16 +58,30 @@ class AnthropicBatchModel(AnthropicModel):
                 - ``poll_timeout`` (float): Max seconds to wait (default 86400).
             token_callback: Ignored — batch API does not support streaming.
         """
-        # Strip "batch/" prefix for the actual Anthropic model name
-        actual_model = model_name.removeprefix("batch/")
+        # Strip "batch/" prefix for the actual Anthropic API model name
+        self._api_model_name = model_name.removeprefix("batch/")
         super().__init__(
-            model_name=actual_model,
+            model_name=model_name,
             api_key=api_key,
             model_config=model_config,
             token_callback=None,  # Batch API does not stream
         )
-        # Store the original prefixed name for display/logging
-        self._batch_model_name = model_name
+
+    def _build_create_kwargs(self) -> dict[str, Any]:
+        """Build kwargs, substituting the stripped API model name.
+
+        The parent checks ``self.model_name`` for feature detection (thinking,
+        max_tokens) — temporarily swap in the stripped name so those checks work,
+        then ensure the final ``model`` key uses the API name.
+        """
+        saved = self.model_name
+        self.model_name = self._api_model_name
+        try:
+            kwargs = super()._build_create_kwargs()
+        finally:
+            self.model_name = saved
+        kwargs["model"] = self._api_model_name
+        return kwargs
 
     def _create_message(self, kwargs: dict[str, Any]) -> Any:
         """Submit a single-item batch and poll until the result is ready.
@@ -125,6 +139,6 @@ class AnthropicBatchModel(AnthropicModel):
         raise KISSError(f"No result found for batch {batch.id}")  # pragma: no cover
 
     def __str__(self) -> str:
-        return f"AnthropicBatchModel(name={self._batch_model_name})"
+        return f"AnthropicBatchModel(name={self.model_name})"
 
     __repr__ = __str__

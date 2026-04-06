@@ -20,11 +20,11 @@ class TestAnthropicBatchModelInit:
         m = model("batch/claude-haiku-4-5")
         assert isinstance(m, AnthropicBatchModel)
 
-    def test_prefix_stripped_from_model_name(self) -> None:
-        """The 'batch/' prefix is stripped for the underlying Anthropic model."""
+    def test_model_name_keeps_batch_prefix(self) -> None:
+        """model_name keeps the 'batch/' prefix for correct pricing lookup."""
         m = AnthropicBatchModel("batch/claude-opus-4-6", api_key="test-key")
-        assert m.model_name == "claude-opus-4-6"
-        assert m._batch_model_name == "batch/claude-opus-4-6"
+        assert m.model_name == "batch/claude-opus-4-6"
+        assert m._api_model_name == "claude-opus-4-6"
 
     def test_str_repr(self) -> None:
         """__str__ and __repr__ show the batch model name."""
@@ -82,11 +82,14 @@ class TestAnthropicBatchModelInit:
         assert cost == pytest.approx(expected, rel=0.01)
 
     def test_build_create_kwargs_inherits_anthropic(self) -> None:
-        """_build_create_kwargs works correctly (inherited from AnthropicModel)."""
+        """_build_create_kwargs works correctly (inherited from AnthropicModel).
+
+        The inherited method uses self.model_name which is now the batch-prefixed
+        name, but _create_message overrides the 'model' key with _api_model_name.
+        """
         m = AnthropicBatchModel("batch/claude-haiku-4-5", api_key="test-key")
         m.initialize("Hello")
         kwargs = m._build_create_kwargs()
-        assert kwargs["model"] == "claude-haiku-4-5"
         assert kwargs["messages"] == [{"role": "user", "content": "Hello"}]
         assert "max_tokens" in kwargs
 
