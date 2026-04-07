@@ -83,7 +83,7 @@ export type ToWebviewMessage =
   | { type: 'setTaskText'; text: string }
   | { type: 'focusInput' }
   | { type: 'worktree_done'; branch: string; worktreeDir: string; originalBranch: string; changedFiles: string[]; hasConflict?: boolean }
-  | { type: 'worktree_result'; success: boolean; message: string; manual?: boolean }
+  | { type: 'worktree_result'; success: boolean; message: string; manual?: boolean; openScm?: boolean }
   | { type: 'droppedPaths'; paths: string[] };
 
 /** Command sent to Python backend */

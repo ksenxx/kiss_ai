@@ -687,7 +687,13 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         assert self.server.agent._wt_branch is None
 
     def test_handle_worktree_action_manual(self) -> None:
-        """Manual action returns merge instructions."""
+        """Manual action merges --no-commit and opens SCM."""
+        self._git("checkout", "-b", "kiss/manual-test")
+        (self.repo / "manual.txt").write_text("manual content")
+        self._git("add", ".")
+        self._git("commit", "-m", "add manual")
+        self._git("checkout", "main")
+
         self.server.agent._repo_root = self.repo
         self.server.agent._wt_branch = "kiss/manual-test"
         self.server.agent._original_branch = "main"
@@ -695,10 +701,19 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         result = self.server._handle_worktree_action("manual")
         assert result["success"] is True
         assert result.get("manual") is True
-        assert "kiss/manual-test" in result["message"]
+        assert result.get("openScm") is True
+        assert "ready for review" in result["message"]
+        # State should be cleared
+        assert self.server.agent._wt_branch is None
 
     def test_worktree_action_command_routing(self) -> None:
         """worktreeAction command is routed to _handle_worktree_action."""
+        self._git("checkout", "-b", "kiss/route-test")
+        (self.repo / "route.txt").write_text("route content")
+        self._git("add", ".")
+        self._git("commit", "-m", "add route")
+        self._git("checkout", "main")
+
         self.server.agent._repo_root = self.repo
         self.server.agent._wt_branch = "kiss/route-test"
         self.server.agent._original_branch = "main"

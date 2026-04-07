@@ -768,11 +768,7 @@
     var cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
     var div = mkEl('div', 'ev ' + cls);
     var msg = ev.message || '';
-    if (ev.manual) {
-      div.innerHTML = '<pre class="wt-instructions">' + esc(msg) + '</pre>';
-    } else {
-      div.textContent = msg;
-    }
+    div.textContent = msg;
     O.appendChild(div);
     sb();
   }

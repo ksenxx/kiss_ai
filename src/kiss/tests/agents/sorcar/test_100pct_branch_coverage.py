@@ -984,17 +984,32 @@ class TestVSCodeServerUncoveredBranches:
         assert "Unknown action" in result["message"]
 
     def test_handle_worktree_action_manual(self, tmp_path: Path) -> None:
-        """_handle_worktree_action('manual') returns instructions."""
+        """_handle_worktree_action('manual') performs merge --no-commit."""
         saved = _redirect_db(str(tmp_path))
         try:
+            # Set up a real git repo with a branch
+            git = ["git", "-C", str(tmp_path)]
+            subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+            subprocess.run([*git, "commit", "--allow-empty", "-m", "init"],
+                           capture_output=True)
+            subprocess.run([*git, "branch", "-M", "main"],
+                           capture_output=True)
+            subprocess.run([*git, "checkout", "-b", "kiss/wt-test-123"],
+                           capture_output=True)
+            (tmp_path / "test.txt").write_text("content")
+            subprocess.run([*git, "add", "."], capture_output=True)
+            subprocess.run([*git, "commit", "-m", "add test"],
+                           capture_output=True)
+            subprocess.run([*git, "checkout", "main"], capture_output=True)
+
             server = VSCodeServer()
-            # Set up a pending worktree state
             server.agent._wt_branch = "kiss/wt-test-123"
             server.agent._original_branch = "main"
             server.agent._repo_root = tmp_path
             result = server._handle_worktree_action("manual")
             assert result["success"] is True
             assert result.get("manual") is True
+            assert result.get("openScm") is True
         finally:
             _restore_db(saved)
 
