@@ -375,6 +375,20 @@ export class SorcarTab {
         });
         break;
 
+      case 'resolveDroppedPaths': {
+        const workDir = this._getWorkDir();
+        const paths = (message.uris || []).map((uri: string) => {
+          try {
+            const absPath = vscode.Uri.parse(uri).fsPath;
+            return path.relative(workDir, absPath);
+          } catch {
+            return '';
+          }
+        }).filter((p: string) => p && !p.startsWith('..'));
+        this.sendToWebview({ type: 'droppedPaths', paths } as ToWebviewMessage);
+        break;
+      }
+
       case 'focusEditor':
         vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
         break;
