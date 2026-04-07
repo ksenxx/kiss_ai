@@ -1,9 +1,11 @@
-"""Integration tests for multimodal (image/PDF) support across all model providers."""
+"""Integration tests for multimodal (image/PDF/audio/video) support across all model providers."""
 
 import io
 import struct
+import tempfile
 import unittest
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -79,11 +81,244 @@ def _create_minimal_pdf() -> bytes:
 class TestAttachment(unittest.TestCase):
 
     def test_supported_mime_types(self) -> None:
+        # Images and PDF
         assert "image/jpeg" in SUPPORTED_MIME_TYPES
         assert "image/png" in SUPPORTED_MIME_TYPES
         assert "image/gif" in SUPPORTED_MIME_TYPES
         assert "image/webp" in SUPPORTED_MIME_TYPES
         assert "application/pdf" in SUPPORTED_MIME_TYPES
+        # Audio
+        assert "audio/mpeg" in SUPPORTED_MIME_TYPES
+        assert "audio/wav" in SUPPORTED_MIME_TYPES
+        assert "audio/x-wav" in SUPPORTED_MIME_TYPES
+        assert "audio/ogg" in SUPPORTED_MIME_TYPES
+        assert "audio/webm" in SUPPORTED_MIME_TYPES
+        assert "audio/flac" in SUPPORTED_MIME_TYPES
+        assert "audio/aac" in SUPPORTED_MIME_TYPES
+        assert "audio/mp4" in SUPPORTED_MIME_TYPES
+        # Video
+        assert "video/mp4" in SUPPORTED_MIME_TYPES
+        assert "video/webm" in SUPPORTED_MIME_TYPES
+        assert "video/ogg" in SUPPORTED_MIME_TYPES
+        assert "video/mpeg" in SUPPORTED_MIME_TYPES
+        assert "video/quicktime" in SUPPORTED_MIME_TYPES
+
+    def test_from_file_audio(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            f.write(b"\xff\xfb\x90\x00" + b"\x00" * 100)
+            f.flush()
+            att = Attachment.from_file(f.name)
+            assert att.mime_type == "audio/mpeg"
+            assert len(att.data) > 0
+            Path(f.name).unlink()
+
+    def test_from_file_video(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(b"\x00\x00\x00\x1c" + b"ftyp" + b"\x00" * 100)
+            f.flush()
+            att = Attachment.from_file(f.name)
+            assert att.mime_type == "video/mp4"
+            assert len(att.data) > 0
+            Path(f.name).unlink()
+
+    def test_from_file_wav(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"RIFF" + b"\x00" * 100)
+            f.flush()
+            att = Attachment.from_file(f.name)
+            assert att.mime_type in ("audio/wav", "audio/x-wav")
+            Path(f.name).unlink()
+
+    def test_from_file_mov(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mov", delete=False) as f:
+            f.write(b"\x00" * 100)
+            f.flush()
+            att = Attachment.from_file(f.name)
+            assert att.mime_type == "video/quicktime"
+            Path(f.name).unlink()
+
+
+class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
+    """Unit tests: Anthropic model skips audio/video attachments with warning."""
+
+    def test_audio_attachment_skipped_with_warning(self) -> None:
+        from kiss.core.models.anthropic_model import AnthropicModel
+
+        m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
+        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
+        with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
+            m.initialize("Transcribe this audio", attachments=[audio_att])
+        assert any("audio/mpeg" in msg for msg in log.output)
+        # Conversation should have a blocks-based content with only the text block
+        content = m.conversation[0]["content"]
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0]["type"] == "text"
+
+    def test_video_attachment_skipped_with_warning(self) -> None:
+        from kiss.core.models.anthropic_model import AnthropicModel
+
+        m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
+        video_att = Attachment(data=b"\x00\x00\x00\x1c", mime_type="video/mp4")
+        with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
+            m.initialize("Describe this video", attachments=[video_att])
+        assert any("video/mp4" in msg for msg in log.output)
+        content = m.conversation[0]["content"]
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0]["type"] == "text"
+
+    def test_mixed_attachments_image_and_audio(self) -> None:
+        from kiss.core.models.anthropic_model import AnthropicModel
+
+        m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
+        png_data = _create_png_bytes()
+        img_att = Attachment(data=png_data, mime_type="image/png")
+        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/wav")
+        with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
+            m.initialize("Analyze these", attachments=[img_att, audio_att])
+        assert any("audio/wav" in msg for msg in log.output)
+        content = m.conversation[0]["content"]
+        assert isinstance(content, list)
+        # Should have image block + text block (audio skipped)
+        types = [b["type"] for b in content]
+        assert "image" in types
+        assert "text" in types
+        assert len(content) == 2
+
+
+class TestOpenAICompatibleModelAudioVideoAttachments(unittest.TestCase):
+    """Unit tests: OpenAI model handles audio via input_audio, skips video."""
+
+    def test_audio_attachment_as_input_audio(self) -> None:
+        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
+        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
+        m.initialize("What is in this recording?", attachments=[audio_att])
+        content = m.conversation[-1]["content"]
+        assert isinstance(content, list)
+        audio_parts = [p for p in content if p["type"] == "input_audio"]
+        assert len(audio_parts) == 1
+        assert audio_parts[0]["input_audio"]["format"] == "mp3"
+        assert len(audio_parts[0]["input_audio"]["data"]) > 0
+
+    def test_audio_wav_format(self) -> None:
+        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
+        wav_att = Attachment(data=b"RIFF\x00\x00\x00\x00", mime_type="audio/wav")
+        m.initialize("Transcribe this", attachments=[wav_att])
+        content = m.conversation[-1]["content"]
+        audio_parts = [p for p in content if p["type"] == "input_audio"]
+        assert audio_parts[0]["input_audio"]["format"] == "wav"
+
+    def test_audio_x_wav_format(self) -> None:
+        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
+        wav_att = Attachment(data=b"RIFF", mime_type="audio/x-wav")
+        m.initialize("Transcribe", attachments=[wav_att])
+        content = m.conversation[-1]["content"]
+        audio_parts = [p for p in content if p["type"] == "input_audio"]
+        assert audio_parts[0]["input_audio"]["format"] == "wav"
+
+    def test_audio_ogg_format(self) -> None:
+        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
+        ogg_att = Attachment(data=b"OggS", mime_type="audio/ogg")
+        m.initialize("Listen", attachments=[ogg_att])
+        content = m.conversation[-1]["content"]
+        audio_parts = [p for p in content if p["type"] == "input_audio"]
+        assert audio_parts[0]["input_audio"]["format"] == "ogg"
+
+    def test_video_attachment_skipped_with_warning(self) -> None:
+        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+        m = OpenAICompatibleModel("gpt-4o", base_url="http://localhost", api_key="k")
+        video_att = Attachment(data=b"\x00\x00\x00\x1c", mime_type="video/mp4")
+        with self.assertLogs(
+            "kiss.core.models.openai_compatible_model", level="WARNING"
+        ) as log:
+            m.initialize("Describe this video", attachments=[video_att])
+        assert any("video/mp4" in msg for msg in log.output)
+        content = m.conversation[-1]["content"]
+        assert isinstance(content, list)
+        # Only the text part should be present
+        assert len(content) == 1
+        assert content[0]["type"] == "text"
+
+    def test_mixed_attachments_image_audio_video(self) -> None:
+        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
+        png_data = _create_png_bytes()
+        img_att = Attachment(data=png_data, mime_type="image/png")
+        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
+        video_att = Attachment(data=b"\x00" * 10, mime_type="video/webm")
+        with self.assertLogs(
+            "kiss.core.models.openai_compatible_model", level="WARNING"
+        ) as log:
+            m.initialize(
+                "Analyze all", attachments=[img_att, audio_att, video_att]
+            )
+        assert any("video/webm" in msg for msg in log.output)
+        content = m.conversation[-1]["content"]
+        types = [p["type"] for p in content]
+        assert "image_url" in types
+        assert "input_audio" in types
+        assert "text" in types
+        # Video should be skipped
+        assert types.count("text") == 1
+        assert len(content) == 3  # image + audio + text (video skipped)
+
+
+class TestGeminiModelAudioVideoAttachments(unittest.TestCase):
+    """Unit tests: Gemini model stores audio/video attachments for Part.from_bytes."""
+
+    def test_audio_attachment_stored(self) -> None:
+        from kiss.core.models.gemini_model import GeminiModel
+
+        m = GeminiModel("gemini-2.0-flash", api_key="test-key")
+        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
+        m.initialize("Transcribe this", attachments=[audio_att])
+        assert len(m.conversation) == 1
+        msg = m.conversation[0]
+        assert msg["attachments"] == [audio_att]
+        assert msg["content"] == "Transcribe this"
+
+    def test_video_attachment_stored(self) -> None:
+        from kiss.core.models.gemini_model import GeminiModel
+
+        m = GeminiModel("gemini-2.0-flash", api_key="test-key")
+        video_att = Attachment(data=b"\x00\x00\x00\x1c", mime_type="video/mp4")
+        m.initialize("Describe this", attachments=[video_att])
+        msg = m.conversation[0]
+        assert msg["attachments"] == [video_att]
+
+
+class TestAudioMimeToFormat(unittest.TestCase):
+    """Unit tests for the _audio_mime_to_format helper."""
+
+    def test_known_formats(self) -> None:
+        from kiss.core.models.openai_compatible_model import _audio_mime_to_format
+
+        assert _audio_mime_to_format("audio/mpeg") == "mp3"
+        assert _audio_mime_to_format("audio/mp3") == "mp3"
+        assert _audio_mime_to_format("audio/wav") == "wav"
+        assert _audio_mime_to_format("audio/x-wav") == "wav"
+        assert _audio_mime_to_format("audio/ogg") == "ogg"
+        assert _audio_mime_to_format("audio/webm") == "webm"
+        assert _audio_mime_to_format("audio/flac") == "flac"
+        assert _audio_mime_to_format("audio/aac") == "aac"
+        assert _audio_mime_to_format("audio/mp4") == "mp4"
+
+    def test_unknown_format_uses_subtype(self) -> None:
+        from kiss.core.models.openai_compatible_model import _audio_mime_to_format
+
+        assert _audio_mime_to_format("audio/amr") == "amr"
+        assert _audio_mime_to_format("audio/opus") == "opus"
 
 
 @requires_gemini_api_key

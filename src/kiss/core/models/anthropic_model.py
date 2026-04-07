@@ -5,6 +5,7 @@
 
 """Anthropic model implementation for Claude models."""
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -12,6 +13,8 @@ from anthropic import Anthropic
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment, Model, TokenCallback
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicModel(Model):
@@ -40,7 +43,9 @@ class AnthropicModel(Model):
 
         Args:
             prompt: The initial user prompt to start the conversation.
-            attachments: Optional list of file attachments (images, PDFs) to include.
+            attachments: Optional list of file attachments (images, PDFs, audio,
+                video) to include. Audio and video attachments are skipped with
+                a warning as Anthropic does not support them.
         """
         self.client = Anthropic(api_key=self.api_key)
         content: str | list[dict[str, Any]] = prompt
@@ -54,8 +59,13 @@ class AnthropicModel(Model):
                 }
                 if att.mime_type.startswith("image/"):
                     blocks.append({"type": "image", "source": source})
-                elif att.mime_type == "application/pdf":  # pragma: no branch
+                elif att.mime_type == "application/pdf":
                     blocks.append({"type": "document", "source": source})
+                elif att.mime_type.startswith(("audio/", "video/")):
+                    logger.warning(
+                        "Anthropic does not support %s attachments; skipping.",
+                        att.mime_type,
+                    )
             blocks.append({"type": "text", "text": prompt})
             content = blocks
         self.conversation = [{"role": "user", "content": content}]

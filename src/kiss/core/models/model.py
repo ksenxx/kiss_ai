@@ -34,16 +34,30 @@ SUPPORTED_MIME_TYPES = {
     "image/gif",
     "image/webp",
     "application/pdf",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/ogg",
+    "audio/webm",
+    "audio/flac",
+    "audio/aac",
+    "audio/mp4",
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "video/mpeg",
+    "video/quicktime",
 }
 
 
 @dataclasses.dataclass
 class Attachment:
-    """A file attachment (image or document) to include in a prompt.
+    """A file attachment (image, document, audio, or video) to include in a prompt.
 
     Attributes:
         data: Raw file bytes.
-        mime_type: MIME type string (e.g. "image/jpeg", "application/pdf").
+        mime_type: MIME type string (e.g. "image/jpeg", "application/pdf",
+            "audio/mpeg", "video/mp4").
     """
 
     data: bytes
@@ -74,6 +88,16 @@ class Attachment:
                 ".gif": "image/gif",
                 ".webp": "image/webp",
                 ".pdf": "application/pdf",
+                ".mp3": "audio/mpeg",
+                ".wav": "audio/wav",
+                ".ogg": "audio/ogg",
+                ".webm": "video/webm",
+                ".flac": "audio/flac",
+                ".aac": "audio/aac",
+                ".m4a": "audio/mp4",
+                ".mp4": "video/mp4",
+                ".mpeg": "video/mpeg",
+                ".mov": "video/quicktime",
             }
             mime_type = mime_map.get(suffix, "")
         if mime_type not in SUPPORTED_MIME_TYPES:
@@ -170,7 +194,9 @@ class Model(ABC):
 
         Args:
             prompt: The initial user prompt to start the conversation.
-            attachments: Optional list of file attachments (images, PDFs) to include.
+            attachments: Optional list of file attachments (images, PDFs, audio,
+                video) to include. Provider support varies — unsupported types
+                are skipped with a warning.
         """
         pass  # pragma: no cover
 

@@ -182,7 +182,7 @@ ______________________________________________________________________
 from kiss.core.models import Attachment, Model, AnthropicModel, ClaudeCodeModel, OpenAICompatibleModel, GeminiModel
 ```
 
-##### `class Attachment` — A file attachment (image or document) to include in a prompt.
+##### `class Attachment` — A file attachment (image, document, audio, or video) to include in a prompt.
 
 - **from_file** — Create an Attachment from a file path.<br/>`from_file(path: str) -> 'Attachment'`
 
@@ -208,7 +208,7 @@ from kiss.core.models import Attachment, Model, AnthropicModel, ClaudeCodeModel,
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
-  - `attachments`: Optional list of file attachments (images, PDFs) to include.
+  - `attachments`: Optional list of file attachments (images, PDFs, audio, video) to include. Provider support varies — unsupported types are skipped with a warning.
 
 - **generate** — Generates content from prompt.<br/>`generate() -> tuple[str, Any]`
 
@@ -353,7 +353,7 @@ ______________________________________________________________________
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
-  - `attachments`: Optional list of file attachments (images, PDFs) to include.
+  - `attachments`: Optional list of file attachments (images, PDFs, audio, video) to include. Audio and video attachments are skipped with a warning as Anthropic does not support them.
 
 - **generate** — Generates content from the current conversation.<br/>`generate() -> tuple[str, Any]`
 
