@@ -45,9 +45,10 @@ class TestTemplateConstants(unittest.TestCase):
         self.assertIn("MOST IMPORTANT INSTRUCTIONS", formatted)
 
     def test_continuation_prompt_placeholders(self) -> None:
-        """CONTINUATION_PROMPT has progress_text."""
-        formatted = CONTINUATION_PROMPT.format(progress_text="step 1 done")
+        """CONTINUATION_PROMPT has progress_text and continuation_number."""
+        formatted = CONTINUATION_PROMPT.format(progress_text="step 1 done", continuation_number=3)
         self.assertIn("step 1 done", formatted)
+        self.assertIn("Continuation 3", formatted)
         self.assertIn("Continue", formatted)
 
 

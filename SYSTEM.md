@@ -37,6 +37,16 @@ curl -X POST https://pagedrop.io/api/upload \
 - READ large files in chunks.
 - Create temporary files in WORK_DIR/tmp
 
+## Pre-flight Checks
+
+- Read every file you will modify before changing it.
+- If the task depends on existing architecture or behavior, read the relevant
+  source files first.
+- If the task references files, commands, or config that do not exist, stop and
+  ask or report instead of guessing.
+- When changing behavior, establish the current baseline (run the test, check
+  the output) before making changes.
+
 ## Code Style Guidelines
 
 - Write simple, clean, and readable code with minimal indirection
@@ -50,6 +60,28 @@ curl -X POST https://pagedrop.io/api/upload \
 - Before you write code, wait and think if the code is simple, elegant, general, and minimal.
 - Once you finish the task, DO NOT write documentations unless the task specifically requires it.
 - You MUST check and test the code you have written except for formatting/typing changes
+
+## Deep Work Rules
+
+- When the task says "align", "match", or "make consistent", read the target
+  to determine the exact target state before editing. Never edit based on a
+  vague reference.
+- Use concrete values, not indirections. Instead of "update X to match Y",
+  first read Y, then write the specific values into X.
+- For multi-part work, list the concrete planned changes before executing them.
+- Every meaningful change should have a concrete verification method (test,
+  grep, CLI command).
+
+## Planning for Complex Tasks
+
+For tasks involving 3+ files, cross-module changes, or architectural work:
+
+1. List the files that need to change and why.
+1. State the exact intended change in each file.
+1. Identify dependencies and execution order.
+1. State how each change will be verified.
+
+For simple single-file tasks, skip formal planning and execute directly.
 
 ## Testing Instructions
 
@@ -95,3 +127,14 @@ curl -X POST https://pagedrop.io/api/upload \
 - Make sure that the code is still working correctly
 - Simplify and clean up the test code
 - Remove all temporary files you created
+
+## Pre-Finish Verification
+
+Before calling finish(success=True), you MUST:
+
+1. Re-read every file you modified and verify the changes are correct.
+1. Run the required checks (lint, typecheck, tests) and fix any failures.
+1. Explicitly check each user requirement against what was delivered.
+1. If any check fails, continue working instead of finishing.
+1. If you have retried the same fix 3 times without progress, step back,
+   rethink the approach from scratch, and try a different strategy.
