@@ -67,14 +67,14 @@ export class SorcarTab {
    *   If false, start a fresh conversation with welcome suggestions.
    * @param _onDispose - Callback invoked when the tab is disposed.
    */
-  constructor(extensionUri: vscode.Uri, loadLastSession: boolean, private _onDispose: (tab: SorcarTab) => void) {
+  constructor(extensionUri: vscode.Uri, loadLastSession: boolean, private _onDispose: (tab: SorcarTab) => void, existingPanel?: vscode.WebviewPanel) {
     this._extensionUri = extensionUri;
     this._loadLastSession = loadLastSession;
     this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
 
-    // Create editor-area WebviewPanel
-    this._panel = vscode.window.createWebviewPanel(
+    // Use existing panel (restored by VSCode serializer) or create a new one
+    this._panel = existingPanel ?? vscode.window.createWebviewPanel(
       'kissSorcar.chat',
       'KS: new chat',
       rightmostColumn(),
@@ -632,14 +632,17 @@ export class TabManager {
    * Create a new chat tab, set it as active, and return it.
    * @param loadLastSession - If true, restore the last session on ready.
    *   Pass true for the auto-open tab at activation, false for Cmd+T new chats.
+   * @param existingPanel - If provided, adopt this panel instead of creating
+   *   a new one.  Used by the WebviewPanelSerializer to restore tabs across
+   *   VSCode restarts.
    */
-  createTab(loadLastSession: boolean = false): SorcarTab {
+  createTab(loadLastSession: boolean = false, existingPanel?: vscode.WebviewPanel): SorcarTab {
     const tab = new SorcarTab(this._extensionUri, loadLastSession, (disposed) => {
       this._tabs = this._tabs.filter(t => t !== disposed);
       if (this._activeTab === disposed) {
         this._activeTab = this._tabs.length > 0 ? this._tabs[this._tabs.length - 1] : undefined;
       }
-    });
+    }, existingPanel);
 
     this._tabs.push(tab);
     this._activeTab = tab;

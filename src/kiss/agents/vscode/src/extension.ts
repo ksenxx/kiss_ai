@@ -173,8 +173,26 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  // Auto-open a chat tab on activation, restoring the last session
-  tabManager.createTab(true);
+  // Restore chat tabs from the previous VSCode session.
+  // VSCode calls deserializeWebviewPanel for each saved panel of this viewType.
+  let restoredCount = 0;
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer('kissSorcar.chat', {
+      async deserializeWebviewPanel(panel: vscode.WebviewPanel, _state: unknown) {
+        restoredCount++;
+        tabManager!.createTab(true, panel);
+      },
+    })
+  );
+
+  // Auto-open a chat tab on activation unless the serializer already restored
+  // tabs.  The serializer fires asynchronously after activate() returns, so we
+  // defer the check with a short timeout.
+  setTimeout(() => {
+    if (restoredCount === 0) {
+      tabManager!.createTab(true);
+    }
+  }, 200);
 
   // Auto-install dependencies in background
   ensureDependencies().catch(err => {
