@@ -551,13 +551,7 @@ class VSCodeServer:
         are shown whenever the worktree branch still exists — even if
         the agent was killed before it could emit the event originally.
         """
-        # Discover repo root so _restore_from_git can find branches
-        if self.agent._repo_root is None:
-            toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
-            if toplevel.returncode != 0:
-                return
-            self.agent._repo_root = Path(toplevel.stdout.strip())
-        self.agent._restore_from_git()
+        self._ensure_worktree_state()
         if not self.agent._wt_pending:
             return
         changed = self._get_worktree_changed_files()
@@ -569,6 +563,20 @@ class VSCodeServer:
             "changedFiles": changed,
             "hasConflict": self._check_merge_conflict() if changed else False,
         })
+
+    def _ensure_worktree_state(self) -> None:
+        """Restore agent worktree state from git if not already set.
+
+        Discovers the repo root and calls ``_restore_from_git()`` so
+        that ``merge()``/``discard()`` work even after a server process
+        restart where in-memory state was lost.
+        """
+        if self.agent._repo_root is None:
+            toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
+            if toplevel.returncode != 0:
+                return
+            self.agent._repo_root = Path(toplevel.stdout.strip())
+        self.agent._restore_from_git()
 
     def _generate_followup_async(
         self, task: str, result: str, model: str, gen: int, task_id: int | None
@@ -805,6 +813,9 @@ class VSCodeServer:
     def _handle_worktree_action(self, action: str) -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
+        Restores agent worktree state from git if needed (e.g. after a
+        server process restart where in-memory state was lost).
+
         Args:
             action: One of ``"merge"``, ``"discard"``, or ``"manual"``.
 
@@ -812,6 +823,8 @@ class VSCodeServer:
             Dict with ``success`` bool, ``message`` string, and
             optionally ``manual`` bool.
         """
+        if not self.agent._wt_pending:
+            self._ensure_worktree_state()
         if action == "merge":
             msg = self.agent.merge()
             success = "Successfully merged" in msg

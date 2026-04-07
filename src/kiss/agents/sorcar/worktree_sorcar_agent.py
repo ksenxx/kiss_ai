@@ -221,7 +221,23 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             _git("worktree", "remove", str(wt_dir), "--force",
                  cwd=self._repo_root)
         _git("worktree", "prune", cwd=self._repo_root)
-        _git("branch", "-D", branch, cwd=self._repo_root)
+        self._delete_branch(branch)
+
+    def _delete_branch(self, branch: str) -> None:
+        """Delete a branch and its git config section (best-effort).
+
+        Tries ``-d`` first (safe delete), falls back to ``-D`` (force)
+        if the safe delete fails, and removes the ``branch.<name>.*``
+        config section.
+
+        Args:
+            branch: The branch name to delete.
+        """
+        result = _git("branch", "-d", branch, cwd=self._repo_root)
+        if result.returncode != 0:
+            _git("branch", "-D", branch, cwd=self._repo_root)
+        _git("config", "--remove-section", f"branch.{branch}",
+             cwd=self._repo_root)
 
     def run(  # type: ignore[override]
         self,
@@ -412,7 +428,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         if merge_result.returncode == 0:
             # Step 8: Success — delete branch, reset state
-            _git("branch", "-d", self._wt_branch, cwd=self._repo_root)
+            self._delete_branch(self._wt_branch)
             branch_name = self._wt_branch
             self._wt_branch = None
             self._original_branch = None
@@ -462,7 +478,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         _git("worktree", "prune", cwd=self._repo_root)
 
         # Step 5: Delete branch
-        _git("branch", "-D", self._wt_branch, cwd=self._repo_root)
+        self._delete_branch(self._wt_branch)
 
         # Step 6: Reset state
         self._wt_branch = None
@@ -538,7 +554,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         # Clean up branch and agent state
         if not has_conflicts:
-            _git("branch", "-d", self._wt_branch, cwd=self._repo_root)
+            self._delete_branch(self._wt_branch)
         self._wt_branch = None
         self._original_branch = None
 
@@ -616,6 +632,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             lines.append(f"Orphaned branches (no worktree): {orphan_branches}")
             for b in orphan_branches:
                 _git("branch", "-D", b, cwd=repo)
+                _git("config", "--remove-section", f"branch.{b}", cwd=repo)
                 lines.append(f"  Deleted: {b}")
 
         _git("worktree", "prune", cwd=repo)
