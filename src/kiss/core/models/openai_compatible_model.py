@@ -54,6 +54,35 @@ DEEPSEEK_REASONING_MODELS = {
 }
 
 
+_AUDIO_MIME_TO_FORMAT: dict[str, str] = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/ogg": "ogg",
+    "audio/webm": "webm",
+    "audio/flac": "flac",
+    "audio/aac": "aac",
+    "audio/mp4": "mp4",
+}
+
+
+def _audio_mime_to_format(mime_type: str) -> str:
+    """Map an audio MIME type to the short format string expected by OpenAI.
+
+    Args:
+        mime_type: An audio MIME type (e.g. "audio/mpeg").
+
+    Returns:
+        The short format string (e.g. "mp3"). Falls back to the MIME subtype
+        if no explicit mapping exists.
+    """
+    if mime_type in _AUDIO_MIME_TO_FORMAT:
+        return _AUDIO_MIME_TO_FORMAT[mime_type]
+    # Fallback: use the subtype portion of "audio/<subtype>"
+    return mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
+
+
 def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
     """Extract reasoning and final answer from DeepSeek R1 response.
 
@@ -152,6 +181,21 @@ class OpenAICompatibleModel(Model):
                             "type": "file",
                             "file": {"file_data": att.to_data_url()},
                         }
+                    )
+                elif att.mime_type.startswith("audio/"):
+                    # OpenAI Chat Completions uses input_audio with a format hint.
+                    fmt = _audio_mime_to_format(att.mime_type)
+                    parts.append(
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": att.to_base64(), "format": fmt},
+                        }
+                    )
+                elif att.mime_type.startswith("video/"):
+                    logger.warning(
+                        "OpenAI Chat Completions does not support video attachments; "
+                        "skipping %s.",
+                        att.mime_type,
                     )
             parts.append({"type": "text", "text": prompt})
             content = parts

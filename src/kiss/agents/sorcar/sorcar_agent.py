@@ -183,11 +183,17 @@ class SorcarAgent(RelentlessAgent):
             if attachments:
                 pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")
                 img_count = sum(1 for a in attachments if a.mime_type.startswith("image/"))
+                audio_count = sum(1 for a in attachments if a.mime_type.startswith("audio/"))
+                video_count = sum(1 for a in attachments if a.mime_type.startswith("video/"))
                 parts = []
                 if img_count:
                     parts.append(f"{img_count} image(s)")
                 if pdf_count:
                     parts.append(f"{pdf_count} PDF(s)")
+                if audio_count:
+                    parts.append(f"{audio_count} audio file(s)")
+                if video_count:
+                    parts.append(f"{video_count} video file(s)")
                 if parts:
                     prompt += (
                         f"\n\n# Important\n - User attached {', '.join(parts)}. "
