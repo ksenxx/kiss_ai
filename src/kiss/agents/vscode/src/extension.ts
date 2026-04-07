@@ -178,9 +178,10 @@ export function activate(context: vscode.ExtensionContext): void {
   let restoredCount = 0;
   context.subscriptions.push(
     vscode.window.registerWebviewPanelSerializer('kissSorcar.chat', {
-      async deserializeWebviewPanel(panel: vscode.WebviewPanel, _state: unknown) {
+      async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown) {
         restoredCount++;
-        tabManager!.createTab(true, panel);
+        const task = (state as Record<string, unknown> | null)?.task as string | undefined;
+        tabManager!.createTab(true, panel, task);
       },
     })
   );

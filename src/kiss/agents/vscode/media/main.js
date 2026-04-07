@@ -448,6 +448,7 @@
     removeSpinner();
     clearWorktreeBar();
     setTaskText('');
+    vscode.setState(null);
     if (welcome) {
       welcome.style.display = '';
       O.appendChild(welcome);
@@ -544,6 +545,7 @@
     case 'task_events':
       if (ev.task) {
         setTaskText(ev.task);
+        vscode.setState({ task: ev.task });
         if (welcome) welcome.style.display = 'none';
       }
       replayTaskEvents(ev.events || []);
@@ -1029,6 +1031,7 @@
       histCache.unshift(prompt);
     }
     setTaskText(prompt);
+    vscode.setState({ task: prompt });
     vscode.postMessage({
       type: 'submit',
       prompt: prompt,

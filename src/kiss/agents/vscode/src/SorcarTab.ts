@@ -56,6 +56,7 @@ export class SorcarTab {
   private _pendingNewChat: boolean = false;
   private _disposed: boolean = false;
   private _loadLastSession: boolean;
+  private _sessionTask: string;
   private _lastTask: string = '';
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
@@ -66,10 +67,13 @@ export class SorcarTab {
    * @param loadLastSession - If true, restore the last chat session on ready.
    *   If false, start a fresh conversation with welcome suggestions.
    * @param _onDispose - Callback invoked when the tab is disposed.
+   * @param existingPanel - Pre-created panel from the serializer.
+   * @param sessionTask - Task identifier to restore a specific session.
    */
-  constructor(extensionUri: vscode.Uri, loadLastSession: boolean, private _onDispose: (tab: SorcarTab) => void, existingPanel?: vscode.WebviewPanel) {
+  constructor(extensionUri: vscode.Uri, loadLastSession: boolean, private _onDispose: (tab: SorcarTab) => void, existingPanel?: vscode.WebviewPanel, sessionTask?: string) {
     this._extensionUri = extensionUri;
     this._loadLastSession = loadLastSession;
+    this._sessionTask = sessionTask || '';
     this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
 
@@ -243,7 +247,9 @@ export class SorcarTab {
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
-        if (this._loadLastSession) {
+        if (this._sessionTask) {
+          this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: this._sessionTask });
+        } else if (this._loadLastSession) {
           this._agentProcess.sendCommand({ type: 'getLastSession' });
         }
         this._sendActiveFileInfo();
@@ -635,14 +641,15 @@ export class TabManager {
    * @param existingPanel - If provided, adopt this panel instead of creating
    *   a new one.  Used by the WebviewPanelSerializer to restore tabs across
    *   VSCode restarts.
+   * @param sessionTask - Task identifier to restore a specific session.
    */
-  createTab(loadLastSession: boolean = false, existingPanel?: vscode.WebviewPanel): SorcarTab {
+  createTab(loadLastSession: boolean = false, existingPanel?: vscode.WebviewPanel, sessionTask?: string): SorcarTab {
     const tab = new SorcarTab(this._extensionUri, loadLastSession, (disposed) => {
       this._tabs = this._tabs.filter(t => t !== disposed);
       if (this._activeTab === disposed) {
         this._activeTab = this._tabs.length > 0 ? this._tabs[this._tabs.length - 1] : undefined;
       }
-    }, existingPanel);
+    }, existingPanel, sessionTask);
 
     this._tabs.push(tab);
     this._activeTab = tab;
