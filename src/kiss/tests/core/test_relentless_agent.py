@@ -13,8 +13,12 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import (
     CONTINUATION_PROMPT,
     IMPORTANT_INSTRUCTIONS,
+    STALL_THRESHOLD,
+    STALL_WARNING,
     TASK_PROMPT,
     RelentlessAgent,
+    _detect_stall,
+    _extract_error_phrases,
     _str_to_bool,
     finish,
 )
@@ -217,6 +221,205 @@ class TestDockerStreamCallback(unittest.TestCase):
             )
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
+
+
+class TestExtractErrorPhrases(unittest.TestCase):
+    """Tests for _extract_error_phrases()."""
+
+    def test_extracts_lines_with_error_keywords(self) -> None:
+        text = "Everything is fine\ntest_foo FAILED with AssertionError\nDone"
+        phrases = _extract_error_phrases(text)
+        self.assertEqual(len(phrases), 1)
+        self.assertIn("test_foo failed with assertionerror", phrases)
+
+    def test_skips_short_lines(self) -> None:
+        """Lines shorter than 10 chars (after normalization) are skipped."""
+        text = "error\nfail\nok error x"
+        phrases = _extract_error_phrases(text)
+        # "error" (5 chars) and "fail" (4 chars) are too short
+        # "ok error x" (10 chars) qualifies
+        self.assertEqual(len(phrases), 1)
+        self.assertIn("ok error x", phrases)
+
+    def test_skips_lines_without_keywords(self) -> None:
+        text = "The test passed successfully\nAll checks completed"
+        phrases = _extract_error_phrases(text)
+        self.assertEqual(len(phrases), 0)
+
+    def test_normalizes_whitespace(self) -> None:
+        text = "  test_bar   FAILED   with   ValueError  "
+        phrases = _extract_error_phrases(text)
+        self.assertEqual(phrases, {"test_bar failed with valueerror"})
+
+    def test_all_error_keywords(self) -> None:
+        """Each keyword in _ERROR_KEYWORDS triggers extraction."""
+        lines = [
+            "the test failure is real here",
+            "some error occurred in module",
+            "an assert violation was found",
+            "the code is broken beyond repair",
+            "traceback most recent call last",
+            "unhandled exception in handler",
+        ]
+        for line in lines:
+            phrases = _extract_error_phrases(line)
+            self.assertEqual(len(phrases), 1, f"Expected 1 phrase for: {line}")
+
+    def test_empty_input(self) -> None:
+        self.assertEqual(_extract_error_phrases(""), set())
+
+    def test_multiple_error_lines(self) -> None:
+        text = "test_a failed with error\ntest_b failed with error\nall good here"
+        phrases = _extract_error_phrases(text)
+        self.assertEqual(len(phrases), 2)
+
+
+class TestDetectStall(unittest.TestCase):
+    """Tests for _detect_stall()."""
+
+    def test_below_threshold_returns_empty(self) -> None:
+        """Fewer than threshold summaries -> no stall."""
+        summaries = [
+            "test_foo failed with AssertionError",
+            "test_foo failed with AssertionError",
+        ]
+        self.assertEqual(_detect_stall(summaries), set())
+
+    def test_no_error_phrases_returns_empty(self) -> None:
+        """Summaries without error keywords -> no stall."""
+        summaries = [
+            "Completed step one successfully",
+            "Completed step two successfully",
+            "Completed step three successfully",
+        ]
+        self.assertEqual(_detect_stall(summaries), set())
+
+    def test_different_errors_returns_empty(self) -> None:
+        """Summaries with different errors -> no stall."""
+        summaries = [
+            "test_foo failed with AssertionError",
+            "test_bar failed with ValueError now",
+            "test_baz failed with TypeError here",
+        ]
+        result = _detect_stall(summaries)
+        # The only common phrase would need to match exactly after normalization
+        # "test_foo failed..." != "test_bar failed..." so no common phrases
+        self.assertEqual(result, set())
+
+    def test_same_errors_returns_common(self) -> None:
+        """Same error phrase across threshold summaries -> stall detected."""
+        error_line = "test_foo failed with AssertionError: expected 1 got 2"
+        summaries = [
+            f"Tried to fix the code.\n{error_line}\nWill retry.",
+            f"Changed approach.\n{error_line}\nStill broken.",
+            f"Tried another fix.\n{error_line}\nNo progress.",
+        ]
+        result = _detect_stall(summaries)
+        self.assertIn(
+            "test_foo failed with assertionerror: expected 1 got 2", result
+        )
+
+    def test_uses_last_threshold_summaries(self) -> None:
+        """Only the last threshold summaries matter."""
+        error_line = "test_x failed with error in module"
+        summaries = [
+            "no errors here at all today",
+            f"Something else.\n{error_line}",
+            f"Another try.\n{error_line}",
+            f"Yet another.\n{error_line}",
+        ]
+        # Last 3 all have the error_line
+        result = _detect_stall(summaries)
+        self.assertTrue(len(result) > 0)
+
+    def test_custom_threshold(self) -> None:
+        """Custom threshold parameter works."""
+        error_line = "test_y failed with assertion error"
+        summaries = [f"Attempt.\n{error_line}"] * 5
+        result = _detect_stall(summaries, threshold=5)
+        self.assertTrue(len(result) > 0)
+        # Below threshold returns empty
+        result = _detect_stall(summaries[:4], threshold=5)
+        self.assertEqual(result, set())
+
+    def test_one_summary_without_errors_breaks_stall(self) -> None:
+        """If one of the last N summaries has no errors, no stall."""
+        error_line = "test_z failed with error in function"
+        summaries = [
+            f"Attempt 1.\n{error_line}",
+            "This attempt had no errors at all and is clean",
+            f"Attempt 3.\n{error_line}",
+        ]
+        result = _detect_stall(summaries)
+        self.assertEqual(result, set())
+
+    def test_threshold_constant(self) -> None:
+        """STALL_THRESHOLD is 3."""
+        self.assertEqual(STALL_THRESHOLD, 3)
+
+
+class TestStallWarningTemplate(unittest.TestCase):
+    """Test STALL_WARNING template formatting."""
+
+    def test_stall_warning_placeholders(self) -> None:
+        formatted = STALL_WARNING.format(continuation_number=5)
+        self.assertIn("5 times", formatted)
+        self.assertIn("Stall Warning", formatted)
+        self.assertIn("ROOT CAUSE", formatted)
+        self.assertIn("STALLED:", formatted)
+
+
+@requires_gemini_api_key
+class TestStallDetectionIntegration(unittest.TestCase):
+    """Integration test: stall detection triggers in perform_task."""
+
+    def test_stall_detected_returns_stall_result(self) -> None:
+        """Agent producing same error summary 3+ times triggers stall detection."""
+        agent = RelentlessAgent("StallIntegration")
+        with tempfile.TemporaryDirectory() as td:
+            result = agent.run(
+                model_name=TEST_MODEL,
+                prompt_template=(
+                    "Your ONLY job: call finish(success=False, is_continue=True, "
+                    "summary='test_example FAILED with AssertionError: expected 42 got 0. "
+                    "The error persists in module foo.py line 10.'). "
+                    "Do NOT modify the summary text. Do NOT call any other tool."
+                ),
+                max_steps=5,
+                max_budget=3.0,
+                max_sub_sessions=6,
+                work_dir=td,
+                verbose=False,
+            )
+        parsed = yaml.safe_load(result)
+        self.assertFalse(parsed["success"])
+        self.assertFalse(parsed.get("is_continue", True))
+        self.assertIn("STALL DETECTED", parsed["summary"])
+
+    def test_stall_warning_added_after_threshold(self) -> None:
+        """Stall warning is added after threshold continuations without common errors."""
+        agent = RelentlessAgent("StallWarn")
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                result = agent.run(
+                    model_name=TEST_MODEL,
+                    prompt_template=(
+                        "Your ONLY job: call finish(success=False, is_continue=True, "
+                        "summary='Working on step of the task, making progress'). "
+                        "Do NOT modify the summary text. Do NOT call any other tool. "
+                        "IGNORE any stall warnings in the continuation prompt."
+                    ),
+                    max_steps=5,
+                    max_budget=5.0,
+                    max_sub_sessions=5,
+                    work_dir=td,
+                    verbose=False,
+                )
+                # Agent may have reacted to stall warning and stopped
+                parsed = yaml.safe_load(result)
+                self.assertFalse(parsed["success"])
+            except KISSError:
+                pass  # Expected if all sub-sessions exhausted
 
 
 class TestNonRetryableModelErrors(unittest.TestCase):
