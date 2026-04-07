@@ -11,6 +11,7 @@
     - [`kiss.core.config`](#kisscoreconfig)
     - [`kiss.core.config_builder`](#kisscoreconfig_builder)
     - [`kiss.core.models`](#kisscoremodels)
+      - [`kiss.core.models.model`](#kisscoremodelsmodel)
       - [`kiss.core.models.model_info`](#kisscoremodelsmodel_info)
       - [`kiss.core.models.openai_compatible_model`](#kisscoremodelsopenai_compatible_model)
       - [`kiss.core.models.anthropic_model`](#kisscoremodelsanthropic_model)
@@ -246,6 +247,17 @@ from kiss.core.models import Attachment, Model, AnthropicModel, ClaudeCodeModel,
 
 ______________________________________________________________________
 
+#### `kiss.core.models.model` — *Abstract base class for LLM provider model implementations.*
+
+**`transcribe_audio`** — Transcribe audio bytes to text using OpenAI's Whisper API. This is used as a fallback for model providers that do not support audio attachments natively (e.g. Anthropic).<br/>`def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str`
+
+- `data`: Raw audio file bytes.
+- `mime_type`: MIME type of the audio (e.g. `"audio/mpeg"`).
+- `api_key`: OpenAI API key. Falls back to the `OPENAI_API_KEY` environment variable when *None*.
+- **Returns:** The transcribed text.
+
+______________________________________________________________________
+
 #### `kiss.core.models.model_info` — *Model information: pricing and context lengths for supported LLM providers.*
 
 ##### `class ModelInfo` — Container for model metadata including pricing and capabilities.
@@ -353,7 +365,7 @@ ______________________________________________________________________
 - **initialize** — Initializes the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 
   - `prompt`: The initial user prompt to start the conversation.
-  - `attachments`: Optional list of file attachments (images, PDFs, audio, video) to include. Audio and video attachments are skipped with a warning as Anthropic does not support them.
+  - `attachments`: Optional list of file attachments (images, PDFs, audio, video) to include. Audio attachments are automatically transcribed to text via OpenAI Whisper when an `OPENAI_API_KEY` is available; otherwise they are skipped with a warning. Video attachments are always skipped.
 
 - **generate** — Generates content from the current conversation.<br/>`generate() -> tuple[str, Any]`
 
