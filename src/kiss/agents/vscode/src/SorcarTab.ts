@@ -98,6 +98,15 @@ export class SorcarTab {
       []
     );
 
+    // Refresh input history when this tab regains focus so that prompts
+    // submitted from other chat tabs are visible for arrow-key cycling.
+    this._panel.onDidChangeViewState((e) => {
+      if (e.webviewPanel.active) {
+        this._agentProcess.sendCommand({ type: 'getInputHistory' });
+        this._sendActiveFileInfo();
+      }
+    });
+
     // Handle panel disposal
     this._panel.onDidDispose(() => {
       this.dispose();
