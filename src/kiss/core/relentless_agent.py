@@ -37,13 +37,15 @@ if the task is not complete and you are at risk of running out of steps or conte
 """
 
 CONTINUATION_PROMPT = """
-# Task Progress
+# Task Progress (Continuation {continuation_number})
 
 {progress_text}
 
 # Continue
 - Complete the rest of the task.
 - **DON'T** redo completed work.
+- If you have been retrying the same approach without progress, step back \
+and rethink the strategy from scratch.
 """
 
 SUMMARIZER_PROMPT = """
@@ -257,7 +259,10 @@ class RelentlessAgent(Base):
 
             summary = payload.get("summary", "")
             if summary:  # pragma: no branch
-                progress_section = CONTINUATION_PROMPT.format(progress_text=summary)
+                progress_section = CONTINUATION_PROMPT.format(
+                    progress_text=summary,
+                    continuation_number=session + 1,
+                )
         raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
 
     def run(

@@ -6,13 +6,14 @@ After deep analysis of [GSD (Get Shit Done)](https://github.com/gsd-build/get-sh
 
 GSD's core insight is that **agent quality is heavily shaped by the context it receives, not just the model's raw ability**. Everything GSD does — structured planning docs, fresh-context execution, quality gates, revision loops, and deep-work rules — serves one goal: giving the AI the right context at the right time.
 
----
+______________________________________________________________________
 
 ## Part 1: GSD's Best Ideas (Ranked by Impact for Sorcar)
 
 ### 1. Quality Gates (Pre-flight, Revision, Escalation, Abort)
 
 **What GSD does:** Every validation checkpoint in every workflow is classified into one of 4 gate types:
+
 - **Pre-flight gate** — Check preconditions before starting (does the file exist? is the config valid?). Cheap, deterministic, prevents wasted work.
 - **Revision gate** — After producing output, check quality and loop back with specific feedback if insufficient. Bounded by iteration cap (max 3). Includes stall detection (if issue count doesn't decrease, escalate).
 - **Escalation gate** — When automated resolution fails, surface the issue to the human with clear options.
@@ -33,6 +34,7 @@ GSD's core insight is that **agent quality is heavily shaped by the context it r
 ### 3. Deep Work Rules (Concrete Plans, Not Vague Instructions)
 
 **What GSD does:** Every task must include:
+
 - `<read_first>` — Files the executor MUST read before modifying anything.
 - `<acceptance_criteria>` — Verifiable conditions provable with grep/test/CLI output. Never subjective.
 - `<action>` — Concrete values, not references. Never say "align X with Y" without specifying the exact target state.
@@ -44,11 +46,12 @@ GSD's core insight is that **agent quality is heavily shaped by the context it r
 ### 4. Discuss → Research → Plan → Execute → Verify Pipeline
 
 **What GSD does:** A strict 5-phase pipeline for every significant piece of work:
+
 1. **Discuss** — Identify gray areas, capture user preferences
-2. **Research** — Investigate domain, patterns, dependencies
-3. **Plan** — Create atomic task plans with acceptance criteria
-4. **Execute** — Run plans in dependency order, often with fresh context each
-5. **Verify** — Check deliverables against criteria, run tests, and do final review
+1. **Research** — Investigate domain, patterns, dependencies
+1. **Plan** — Create atomic task plans with acceptance criteria
+1. **Execute** — Run plans in dependency order, often with fresh context each
+1. **Verify** — Check deliverables against criteria, run tests, and do final review
 
 **What Sorcar does today:** For many tasks the agent can move quickly from request to execution, and the current prompts do require verification. What is missing is a lightweight explicit pipeline that becomes mandatory only for sufficiently complex work.
 
@@ -86,7 +89,7 @@ GSD's core insight is that **agent quality is heavily shaped by the context it r
 
 **No major change needed** — this area is already aligned well with GSD's philosophy.
 
----
+______________________________________________________________________
 
 ## Part 2: Concrete Implementation Plan
 
@@ -113,10 +116,11 @@ Example prompt block:
 KISS already requires verification before finishing. The improvement is to make the verification checklist more explicit and easier for the agent to execute consistently before calling `finish(success=True)`.
 
 Suggested checklist:
+
 1. Re-read every file that was modified.
-2. Run `uv run check --full`.
-3. Run `uv run pytest -v`.
-4. Verify the task requirements and acceptance checks explicitly.
+1. Run `uv run check --full`.
+1. Run `uv run pytest -v`.
+1. Verify the task requirements and acceptance checks explicitly.
 
 Example prompt block:
 
@@ -172,6 +176,7 @@ If code changes are desired later, enhance `RelentlessAgent.perform_task()` to s
 **Concept:** After a task attempt fails verification, retry with specific error context up to a small limit. Track whether the failure set is shrinking. If it stalls, stop retrying blindly and surface the issue clearly.
 
 Possible behaviors:
+
 - Track repeated test or lint failures across continuations.
 - If the same failures persist, add an explicit rethink prompt.
 - After a small retry limit, return a clear incomplete result rather than spinning.
@@ -183,10 +188,11 @@ Possible behaviors:
 For very complex tasks, consider decomposing work into sub-tasks executed in fresh agent sessions.
 
 **Concept:**
+
 1. A planning step produces sub-tasks.
-2. Each sub-task runs in a fresh session with only the relevant context.
-3. Results are collected.
-4. A final verification pass checks the overall result.
+1. Each sub-task runs in a fresh session with only the relevant context.
+1. Results are collected.
+1. A final verification pass checks the overall result.
 
 **Where:** Prefer extending the existing agent stack rather than introducing a large parallel hierarchy immediately. If implemented, this should likely build on `RelentlessAgent`, `StatefulSorcarAgent`, and existing worktree behavior.
 
@@ -197,6 +203,7 @@ For very complex tasks, consider decomposing work into sub-tasks executed in fre
 Before adding new project-state files, evaluate whether existing persistence and history mechanisms already cover the use case. If additional state is needed, keep it minimal and avoid duplicating information stored elsewhere.
 
 Possible minimal state to capture:
+
 - recent completed tasks
 - known blockers
 - notable architecture decisions
@@ -204,7 +211,7 @@ Possible minimal state to capture:
 
 **Where:** Any implementation should fit into the existing persistence layer carefully and avoid introducing another always-on artifact unless there is a clear benefit.
 
----
+______________________________________________________________________
 
 ## Part 3: Priority Order
 
@@ -224,20 +231,20 @@ Possible minimal state to capture:
 
 **P2 items:** Larger architectural changes that should be attempted only if prompt-level improvements are not enough.
 
----
+______________________________________________________________________
 
 ## Part 4: What Not to Adopt from GSD
 
 Some GSD features are not a good fit for KISS Sorcar:
 
 1. **Enterprise workflow ceremony** — Sorcar tasks are typically direct request-to-result interactions. Avoid heavy project-management overhead.
-2. **Large command surface area** — Sorcar benefits from keeping the workflow simple rather than splitting behavior across many slash commands.
-3. **Many specialized agent roles** — The concepts of research, planning, execution, and verification are useful, but they should remain lightweight phases unless proven otherwise.
-4. **Heavy document state** — Maintaining many always-on phase documents would add complexity without clear benefit for most Sorcar tasks.
-5. **Domain-specific gates** — UI-specific, schema-specific, or security-specific gate systems should not be generalized into the core unless the project truly needs them.
-6. **Parallel execution by default** — Parallelism adds complexity and is not obviously beneficial for Sorcar's common task pattern.
+1. **Large command surface area** — Sorcar benefits from keeping the workflow simple rather than splitting behavior across many slash commands.
+1. **Many specialized agent roles** — The concepts of research, planning, execution, and verification are useful, but they should remain lightweight phases unless proven otherwise.
+1. **Heavy document state** — Maintaining many always-on phase documents would add complexity without clear benefit for most Sorcar tasks.
+1. **Domain-specific gates** — UI-specific, schema-specific, or security-specific gate systems should not be generalized into the core unless the project truly needs them.
+1. **Parallel execution by default** — Parallelism adds complexity and is not obviously beneficial for Sorcar's common task pattern.
 
----
+______________________________________________________________________
 
 ## Part 5: GSD Ideas Already Present in KISS
 
@@ -252,15 +259,15 @@ These GSD ideas already have strong analogs in KISS:
 | Git worktree isolation | `WorktreeSorcarAgent` |
 | Chat session history | `StatefulSorcarAgent` with persisted chat/task history |
 
----
+______________________________________________________________________
 
 ## Summary
 
 The best GSD ideas for KISS are mostly lightweight process improvements rather than heavy architecture changes:
 
 1. **Prompt-level gates** — centralize prerequisite checks such as read-before-write.
-2. **Deep-work rules** — require exact target states and concrete verification.
-3. **Explicit self-verification** — make the existing verification loop easier to execute consistently.
-4. **Structured planning for complex tasks** — require planning only when complexity justifies it.
+1. **Deep-work rules** — require exact target states and concrete verification.
+1. **Explicit self-verification** — make the existing verification loop easier to execute consistently.
+1. **Structured planning for complex tasks** — require planning only when complexity justifies it.
 
 These changes align with KISS's current architecture and should improve reliability without importing GSD's heavier workflow ceremony.
