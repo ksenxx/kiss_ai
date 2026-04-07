@@ -582,6 +582,21 @@
       break;
     case 'commitMessage':
       break;
+    case 'droppedPaths':
+      if (ev.paths && ev.paths.length > 0) {
+        var pos = inp.selectionStart || inp.value.length;
+        var before = inp.value.substring(0, pos);
+        var after = inp.value.substring(pos);
+        var insert = ev.paths.map(function(p) { return 'WORK_DIR/' + p; }).join(' ');
+        var needSpace = before.length > 0 && !/\s$/.test(before);
+        var trailSpace = after.length > 0 && !/^\s/.test(after) ? ' ' : '';
+        inp.value = before + (needSpace ? ' ' : '') + insert + trailSpace + after;
+        var np = before.length + (needSpace ? 1 : 0) + insert.length + trailSpace.length;
+        inp.setSelectionRange(np, np);
+        syncClearBtn();
+        inp.focus();
+      }
+      break;
     case 'worktree_done':
       showWorktreeActions(ev);
       break;
@@ -968,6 +983,16 @@
         e.preventDefault();
         e.stopPropagation();
         inputContainer.classList.remove('drag-over');
+        // Handle file URIs from VS Code explorer (text/uri-list)
+        var uriList = e.dataTransfer && e.dataTransfer.getData('text/uri-list');
+        if (uriList) {
+          var uris = uriList.split(/\r?\n/).filter(function(u) { return u && !u.startsWith('#'); });
+          if (uris.length > 0) {
+            vscode.postMessage({ type: 'resolveDroppedPaths', uris: uris });
+            return;
+          }
+        }
+        // Handle image/PDF file drops
         var files = e.dataTransfer && e.dataTransfer.files;
         if (!files) return;
         Array.from(files).forEach(function(file) {
