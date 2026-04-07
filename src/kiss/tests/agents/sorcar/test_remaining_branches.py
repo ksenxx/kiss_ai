@@ -732,3 +732,56 @@ class TestWebUseToolResolveLocatorInvisible:
             assert "Error" not in result or "Page:" in result
         finally:
             tool.close()
+
+
+class TestCrossTabInputHistory:
+    """End-to-end: a prompt submitted in one chat tab is visible in another tab's history."""
+
+    def test_prompt_visible_across_tabs(self) -> None:
+        """Submitting a prompt in tab A makes it appear in tab B's input history."""
+        # Two independent VSCodeServer instances simulate two chat editor tabs.
+        # Tab A's server writes to shared history.db via persistence; tab B reads it.
+        server_b = VSCodeServer()
+
+        events_b: list[dict] = []
+
+        def capture_b(ev: dict) -> None:
+            events_b.append(ev)
+
+        server_b.printer.broadcast = capture_b  # type: ignore[assignment]
+
+        # Tab A submits a prompt (persisted to shared history.db).
+        unique_prompt = f"cross-tab-test-{time.time()}"
+        th._add_task(unique_prompt)
+
+        # Tab B regains focus → extension sends getInputHistory.
+        server_b._handle_command({"type": "getInputHistory"})
+
+        hist = next(e for e in events_b if e.get("type") == "inputHistory")
+        assert unique_prompt in hist["tasks"]
+
+    def test_multiple_prompts_across_tabs(self) -> None:
+        """Multiple prompts from tab A all appear in tab B's history in order."""
+        server_b = VSCodeServer()
+
+        events_b: list[dict] = []
+
+        def capture_b(ev: dict) -> None:
+            events_b.append(ev)
+
+        server_b.printer.broadcast = capture_b  # type: ignore[assignment]
+
+        prompts = [f"multi-tab-{i}-{time.time()}" for i in range(3)]
+        for p in prompts:
+            th._add_task(p)
+            time.sleep(0.01)  # ensure distinct timestamps
+
+        server_b._handle_command({"type": "getInputHistory"})
+
+        hist = next(e for e in events_b if e.get("type") == "inputHistory")
+        # Most recent first
+        for p in prompts:
+            assert p in hist["tasks"]
+        # The last submitted prompt should be first in the list
+        idx = [hist["tasks"].index(p) for p in prompts]
+        assert idx[2] < idx[1] < idx[0]
