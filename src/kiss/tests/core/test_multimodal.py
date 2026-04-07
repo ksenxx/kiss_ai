@@ -1,6 +1,7 @@
 """Integration tests for multimodal (image/PDF/audio/video) support across all model providers."""
 
 import io
+import os
 import struct
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.models.model import SUPPORTED_MIME_TYPES, Attachment
+from kiss.core.models.model import SUPPORTED_MIME_TYPES, Attachment, transcribe_audio
 from kiss.tests.conftest import (
     requires_gemini_api_key,
     requires_openai_api_key,
@@ -78,6 +79,29 @@ def _create_minimal_pdf() -> bytes:
     )
 
 
+def _create_silent_wav(duration_ms: int = 500, sample_rate: int = 16000) -> bytes:
+    """Create a minimal valid WAV file with silence."""
+    num_samples = sample_rate * duration_ms // 1000
+    data_size = num_samples * 2  # 16-bit mono
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,  # chunk size
+        1,  # PCM format
+        1,  # mono
+        sample_rate,
+        sample_rate * 2,  # byte rate
+        2,  # block align
+        16,  # bits per sample
+        b"data",
+        data_size,
+    )
+    return header + b"\x00" * data_size
+
+
 class TestAttachment(unittest.TestCase):
 
     def test_supported_mime_types(self) -> None:
@@ -139,21 +163,47 @@ class TestAttachment(unittest.TestCase):
 
 
 class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
-    """Unit tests: Anthropic model skips audio/video attachments with warning."""
+    """Unit tests: Anthropic model transcribes audio or skips with warning."""
 
-    def test_audio_attachment_skipped_with_warning(self) -> None:
+    def test_audio_attachment_transcribed_when_api_key_set(self) -> None:
+        """Audio is transcribed to text when OPENAI_API_KEY is available."""
         from kiss.core.models.anthropic_model import AnthropicModel
 
+        if not os.environ.get("OPENAI_API_KEY"):
+            pytest.skip("OPENAI_API_KEY not set")
+
+        # Use a minimal but valid WAV so Whisper can process it
+        wav_data = _create_silent_wav()
         m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
-        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
-        with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
-            m.initialize("Transcribe this audio", attachments=[audio_att])
-        assert any("audio/mpeg" in msg for msg in log.output)
-        # Conversation should have a blocks-based content with only the text block
+        audio_att = Attachment(data=wav_data, mime_type="audio/wav")
+        m.initialize("Transcribe this audio", attachments=[audio_att])
         content = m.conversation[0]["content"]
         assert isinstance(content, list)
-        assert len(content) == 1
+        # Should have transcription text block + prompt text block
+        assert len(content) == 2
         assert content[0]["type"] == "text"
+        assert content[0]["text"].startswith("[Audio transcription]")
+        assert content[1]["type"] == "text"
+        assert content[1]["text"] == "Transcribe this audio"
+
+    def test_audio_attachment_skipped_when_no_api_key(self) -> None:
+        """Audio falls back to skip-with-warning when no OpenAI key is available."""
+        from kiss.core.models.anthropic_model import AnthropicModel
+
+        old_key = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
+            audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
+            with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
+                m.initialize("Transcribe this audio", attachments=[audio_att])
+            assert any("audio/mpeg" in msg for msg in log.output)
+            content = m.conversation[0]["content"]
+            assert isinstance(content, list)
+            assert len(content) == 1
+            assert content[0]["type"] == "text"
+        finally:
+            if old_key is not None:
+                os.environ["OPENAI_API_KEY"] = old_key
 
     def test_video_attachment_skipped_with_warning(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
@@ -168,23 +218,28 @@ class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
         assert len(content) == 1
         assert content[0]["type"] == "text"
 
-    def test_mixed_attachments_image_and_audio(self) -> None:
+    def test_mixed_attachments_image_audio_no_key(self) -> None:
+        """With no OpenAI key, audio is skipped but image is kept."""
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
-        png_data = _create_png_bytes()
-        img_att = Attachment(data=png_data, mime_type="image/png")
-        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/wav")
-        with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
-            m.initialize("Analyze these", attachments=[img_att, audio_att])
-        assert any("audio/wav" in msg for msg in log.output)
-        content = m.conversation[0]["content"]
-        assert isinstance(content, list)
-        # Should have image block + text block (audio skipped)
-        types = [b["type"] for b in content]
-        assert "image" in types
-        assert "text" in types
-        assert len(content) == 2
+        old_key = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
+            png_data = _create_png_bytes()
+            img_att = Attachment(data=png_data, mime_type="image/png")
+            audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/wav")
+            with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
+                m.initialize("Analyze these", attachments=[img_att, audio_att])
+            assert any("audio/wav" in msg for msg in log.output)
+            content = m.conversation[0]["content"]
+            assert isinstance(content, list)
+            types = [b["type"] for b in content]
+            assert "image" in types
+            assert "text" in types
+            assert len(content) == 2
+        finally:
+            if old_key is not None:
+                os.environ["OPENAI_API_KEY"] = old_key
 
 
 class TestOpenAICompatibleModelAudioVideoAttachments(unittest.TestCase):
@@ -319,6 +374,44 @@ class TestAudioMimeToFormat(unittest.TestCase):
 
         assert _audio_mime_to_format("audio/amr") == "amr"
         assert _audio_mime_to_format("audio/opus") == "opus"
+
+
+class TestTranscribeAudio(unittest.TestCase):
+    """Unit tests for the transcribe_audio helper."""
+
+    def test_raises_without_api_key(self) -> None:
+        old_key = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            with pytest.raises(ValueError, match="API key is required"):
+                transcribe_audio(b"\xff\xfb\x90\x00", "audio/mpeg")
+        finally:
+            if old_key is not None:
+                os.environ["OPENAI_API_KEY"] = old_key
+
+    def test_raises_with_invalid_api_key(self) -> None:
+        with pytest.raises(RuntimeError, match="transcription failed"):
+            transcribe_audio(b"\xff\xfb\x90\x00", "audio/mpeg", api_key="sk-invalid-key")
+
+    def test_mime_to_ext_mapping(self) -> None:
+        from kiss.core.models.model import _AUDIO_MIME_TO_EXT
+
+        assert _AUDIO_MIME_TO_EXT["audio/mpeg"] == ".mp3"
+        assert _AUDIO_MIME_TO_EXT["audio/wav"] == ".wav"
+        assert _AUDIO_MIME_TO_EXT["audio/x-wav"] == ".wav"
+        assert _AUDIO_MIME_TO_EXT["audio/ogg"] == ".ogg"
+        assert _AUDIO_MIME_TO_EXT["audio/webm"] == ".webm"
+        assert _AUDIO_MIME_TO_EXT["audio/flac"] == ".flac"
+        assert _AUDIO_MIME_TO_EXT["audio/aac"] == ".aac"
+        assert _AUDIO_MIME_TO_EXT["audio/mp4"] == ".m4a"
+
+    @pytest.mark.timeout(TEST_TIMEOUT)
+    def test_transcribe_silent_wav(self) -> None:
+        """Transcribe a silent WAV — should return empty or near-empty text."""
+        if not os.environ.get("OPENAI_API_KEY"):
+            pytest.skip("OPENAI_API_KEY not set")
+        wav_data = _create_silent_wav()
+        result = transcribe_audio(wav_data, "audio/wav")
+        assert isinstance(result, str)
 
 
 @requires_gemini_api_key

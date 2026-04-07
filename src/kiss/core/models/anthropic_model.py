@@ -12,7 +12,7 @@ from typing import Any
 from anthropic import Anthropic
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, TokenCallback
+from kiss.core.models.model import Attachment, Model, TokenCallback, transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,10 @@ class AnthropicModel(Model):
         Args:
             prompt: The initial user prompt to start the conversation.
             attachments: Optional list of file attachments (images, PDFs, audio,
-                video) to include. Audio and video attachments are skipped with
-                a warning as Anthropic does not support them.
+                video) to include. Audio attachments are automatically
+                transcribed to text via OpenAI Whisper when an ``OPENAI_API_KEY``
+                is available; otherwise they are skipped with a warning.  Video
+                attachments are always skipped.
         """
         self.client = Anthropic(api_key=self.api_key)
         content: str | list[dict[str, Any]] = prompt
@@ -61,7 +63,22 @@ class AnthropicModel(Model):
                     blocks.append({"type": "image", "source": source})
                 elif att.mime_type == "application/pdf":
                     blocks.append({"type": "document", "source": source})
-                elif att.mime_type.startswith(("audio/", "video/")):
+                elif att.mime_type.startswith("audio/"):
+                    try:
+                        text = transcribe_audio(att.data, att.mime_type)
+                        blocks.append(
+                            {
+                                "type": "text",
+                                "text": f"[Audio transcription]\n{text}",
+                            }
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Anthropic does not support %s attachments and "
+                            "automatic transcription failed; skipping.",
+                            att.mime_type,
+                        )
+                elif att.mime_type.startswith("video/"):
                     logger.warning(
                         "Anthropic does not support %s attachments; skipping.",
                         att.mime_type,
