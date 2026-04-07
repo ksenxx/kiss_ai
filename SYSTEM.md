@@ -99,7 +99,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Use web tools when you need to:
 
-- When you need to collect knowledge from the internet, visit at least 50 web sites and
+- When you need to collect knowledge from the internet, visit at least 100 web sites and
   collect ideas without much thinking in a file WORK_DIR/tmp/ideas.md. Then go over
   WORK_DIR/tmp/ideas.md, think deeply on how to complete the task at hand, and complete it.
 
@@ -130,7 +130,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Pre-Finish Verification
 
-Before calling finish(success=True), you MUST:
+Before calling finish(success=True, ...), you MUST:
 
 1. Re-read every file you modified and verify the changes are correct.
 1. Run the required checks (lint, typecheck, tests) and fix any failures.
