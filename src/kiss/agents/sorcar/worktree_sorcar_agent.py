@@ -470,6 +470,88 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         return f"Discarded branch '{branch_name}'."
 
+    def manual_merge(self) -> str:
+        """Merge task branch with ``--no-commit`` for interactive review.
+
+        Prepares changes in the main working tree so the user can
+        selectively stage/discard individual hunks using VS Code's
+        Source Control UI.  Changes are left unstaged (via
+        ``git reset HEAD``) when there are no conflicts.
+
+        Returns:
+            Human-readable status message.
+
+        Raises:
+            RuntimeError: If no worktree task is pending.
+        """
+        if self._wt_branch is None:
+            raise RuntimeError("No pending worktree task to merge")
+
+        if self._original_branch is None:
+            return (
+                "Cannot merge: original branch is unknown.  "
+                "Please merge manually:\n"
+                f"    git checkout <branch> && git merge {self._wt_branch}"
+            )
+
+        wt_dir = self._wt_dir
+
+        # Auto-commit and remove worktree
+        if wt_dir is not None and wt_dir.exists():
+            self._auto_commit_worktree()
+            remove_result = _git("worktree", "remove", str(wt_dir),
+                                 "--force", cwd=self._repo_root)
+            if remove_result.returncode != 0:  # pragma: no cover
+                logger.warning("worktree remove failed: %s",
+                               remove_result.stderr.strip())
+
+        _git("worktree", "prune", cwd=self._repo_root)
+
+        # Checkout original branch
+        checkout = _git("checkout", self._original_branch,
+                        cwd=self._repo_root)
+        if checkout.returncode != 0:
+            return (
+                f"Cannot checkout '{self._original_branch}': "
+                f"{checkout.stderr.strip()}\n"
+                "Fix the issue and retry, or call discard()."
+            )
+
+        # Merge with --no-commit so user can review
+        branch_name = self._wt_branch
+        merge_result = _git("merge", "--no-commit", "--no-ff",
+                            self._wt_branch, cwd=self._repo_root)
+
+        has_conflicts = "CONFLICT" in (
+            merge_result.stdout + merge_result.stderr
+        )
+
+        if merge_result.returncode != 0 and not has_conflicts:
+            return (
+                f"Merge failed: {merge_result.stderr.strip()}\n"
+                "Fix the issue and retry, or call discard()."
+            )
+
+        if not has_conflicts:
+            # Unstage so user can selectively stage desired hunks
+            _git("reset", "HEAD", cwd=self._repo_root)
+
+        # Clean up branch and agent state
+        if not has_conflicts:
+            _git("branch", "-d", self._wt_branch, cwd=self._repo_root)
+        self._wt_branch = None
+        self._original_branch = None
+
+        if has_conflicts:
+            return (
+                f"Merge of '{branch_name}' has conflicts. "
+                "Resolve them in Source Control, then commit."
+            )
+        return (
+            f"Changes from '{branch_name}' are ready for review. "
+            "Use Source Control to stage desired hunks and commit."
+        )
+
     def merge_instructions(self) -> str:
         """Return human-readable merge/discard instructions.
 
