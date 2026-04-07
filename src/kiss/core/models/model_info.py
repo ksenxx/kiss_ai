@@ -322,6 +322,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-opus-4.1": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.5": _mi(200000, 5.00, 25.00),
     "openrouter/anthropic/claude-opus-4.6": _mi(1000000, 5.00, 25.00),  # 1M context
+    "openrouter/anthropic/claude-opus-4.6-fast": _mi(1000000, 30.00, 150.00),  # NEW
     "openrouter/anthropic/claude-sonnet-4": _mi(200000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.5": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.6": _mi(1000000, 3.00, 15.00),
@@ -615,12 +616,14 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
     "openrouter/z-ai/glm-5": _mi(80000, 0.72, 2.30),  # 744B MoE - FC verified
     "openrouter/z-ai/glm-5-turbo": _mi(202752, 1.20, 4.00),  # NEW
+    "openrouter/z-ai/glm-5.1": _mi(202752, 1.00, 3.20),  # NEW
     "openrouter/z-ai/glm-5v-turbo": _mi(202752, 1.20, 4.00),  # NEW
     "Qwen/Qwen2-VL-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),  # NEW
     "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-72B-Instruct-Turbo": _mi(131072, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
+    "Qwen/Qwen2.5-VL-72B-Instruct": _mi(32768, 1.95, 8.00),  # NEW
     "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.20, 0.60, fc=False),
     "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),  # Dep 2026-03
     "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": _mi(262144, 2.00, 2.00),
