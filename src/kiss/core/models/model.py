@@ -15,6 +15,7 @@ import inspect
 import json
 import logging
 import mimetypes
+import os
 import re
 import types as types_module
 import uuid
@@ -114,6 +115,59 @@ class Attachment:
     def to_data_url(self) -> str:
         """Return a data: URL suitable for OpenAI image_url fields."""
         return f"data:{self.mime_type};base64,{self.to_base64()}"
+
+
+# Mapping from audio MIME types to file extensions for the Whisper API.
+_AUDIO_MIME_TO_EXT: dict[str, str] = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/ogg": ".ogg",
+    "audio/webm": ".webm",
+    "audio/flac": ".flac",
+    "audio/aac": ".aac",
+    "audio/mp4": ".m4a",
+}
+
+
+def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str:
+    """Transcribe audio bytes to text using OpenAI's Whisper API.
+
+    This is used as a fallback for model providers that do not support audio
+    attachments natively (e.g. Anthropic).
+
+    Args:
+        data: Raw audio file bytes.
+        mime_type: MIME type of the audio (e.g. ``"audio/mpeg"``).
+        api_key: OpenAI API key.  Falls back to the ``OPENAI_API_KEY``
+            environment variable when *None*.
+
+    Returns:
+        The transcribed text.
+
+    Raises:
+        ValueError: If no API key is available.
+        RuntimeError: If the transcription API call fails.
+    """
+    from openai import OpenAI
+
+    key = api_key or os.environ.get("OPENAI_API_KEY", "")
+    if not key:
+        raise ValueError("OpenAI API key is required for audio transcription")
+
+    ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
+    client = OpenAI(api_key=key)
+    try:
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(f"audio{ext}", data, mime_type),
+            response_format="text",
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Audio transcription failed: {exc}") from exc
+
+    return str(transcript).strip()
 
 
 class Model(ABC):
