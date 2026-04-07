@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-After deep analysis of [GSD (Get Shit Done)](https://github.com/gsd-build/get-shit-done) — a 48k-star meta-prompting and context engineering system — this document extracts its most powerful ideas and proposes concrete ways to incorporate them into KISS Sorcar's agent system. The focus is on ideas that will make the Sorcar agent **get tasks done perfectly**, not on adding enterprise ceremony.
+After deep analysis of [GSD (Get Shit Done)](https://github.com/gsd-build/get-shit-done) — a 48k-star meta-prompting and context engineering system — this document extracts its most useful ideas and proposes concrete ways to incorporate them into KISS Sorcar's agent system. The focus is on ideas that will make the Sorcar agent more reliable and consistently complete tasks well, not on adding enterprise ceremony.
 
-GSD's core insight: **the agent's quality is determined by the context it receives, not by the model's raw ability.** Everything GSD does — structured planning docs, fresh-context execution, quality gates, revision loops, deep work rules — serves one goal: giving the AI exactly the right context at the right time.
+GSD's core insight is that **agent quality is heavily shaped by the context it receives, not just the model's raw ability**. Everything GSD does — structured planning docs, fresh-context execution, quality gates, revision loops, and deep-work rules — serves one goal: giving the AI the right context at the right time.
 
 ---
 
@@ -18,199 +18,191 @@ GSD's core insight: **the agent's quality is determined by the context it receiv
 - **Escalation gate** — When automated resolution fails, surface the issue to the human with clear options.
 - **Abort gate** — Stop immediately when continuing would cause damage (context window critically low, error state).
 
-**What Sorcar does today:** The `RelentlessAgent` has continuation logic (re-spawn when steps/context exhausted) and a `finish()` tool, but no structured quality gates. The agent can silently produce broken work without self-checking.
+**What Sorcar does today:** Current KISS prompts and developer instructions already include several strong checks such as reading lessons, running `uv run check --full`, running `uv run pytest -v`, and avoiding superficial fixes. However, these checks are mostly instruction-level rather than an explicit gate model with named phases, bounded retries, and stall detection.
 
-**Proposed change:** Add a lightweight gate system to the agent loop.
+**Proposed change:** Add a lightweight gate model to the execution flow, mostly by tightening prompt structure first.
 
 ### 2. Fresh Context Per Sub-Task (Context Rot Prevention)
 
-**What GSD does:** When executing a multi-plan phase, each plan runs in a **fresh 200k-token context window**. The orchestrator spawns a new subagent for each plan, giving it only the files it needs (`<read_first>` list). This prevents "context rot" — the quality degradation as accumulated conversation fills the window.
+**What GSD does:** When executing a multi-plan phase, each plan runs in a fresh context window. The orchestrator spawns a new subagent for each plan, giving it only the files it needs (`<read_first>` list). This prevents context rot — the quality degradation that can happen as conversation history accumulates.
 
-**What Sorcar does today:** `RelentlessAgent` has continuation sessions (new sub-session when steps exhaust), which partially addresses this. But within a single session, context accumulates freely. For complex tasks, the agent often degrades in quality as it fills its window.
+**What Sorcar does today:** `RelentlessAgent` already creates continuation sub-sessions when needed, which partially addresses context accumulation. KISS also has worktree isolation and stateful chat history. What is missing is deliberate decomposition of large tasks into independently scoped fresh-context executions based on task structure rather than only on exhaustion limits.
 
-**Proposed change:** For complex tasks, decompose into sub-tasks and execute each in a fresh agent session.
+**Proposed change:** For very complex tasks, decompose into sub-tasks and execute each in a fresh agent session.
 
 ### 3. Deep Work Rules (Concrete Plans, Not Vague Instructions)
 
 **What GSD does:** Every task must include:
-- `<read_first>` — Files the executor MUST read before modifying anything (always includes the file being modified + source of truth files)
-- `<acceptance_criteria>` — Verifiable conditions provable with grep/test/CLI output. NEVER subjective ("looks correct"). ALWAYS exact strings, patterns, values.
-- `<action>` — Concrete values, not references. NEVER "align X with Y" without specifying the exact target state.
+- `<read_first>` — Files the executor MUST read before modifying anything.
+- `<acceptance_criteria>` — Verifiable conditions provable with grep/test/CLI output. Never subjective.
+- `<action>` — Concrete values, not references. Never say "align X with Y" without specifying the exact target state.
 
-**What Sorcar does today:** The system prompt (SYSTEM.md) has good rules about code style and testing, but the agent often makes vague plans internally and then executes them shallowly.
+**What Sorcar does today:** The system and developer prompts already impose strong coding, testing, and verification rules, but they do not consistently force a compact explicit plan with exact target states, required reads, and concrete acceptance checks before execution.
 
-**Proposed change:** Inject "deep work" discipline into the system prompt for complex tasks.
+**Proposed change:** Add a small set of deep-work planning rules to the prompt for complex tasks.
 
 ### 4. Discuss → Research → Plan → Execute → Verify Pipeline
 
 **What GSD does:** A strict 5-phase pipeline for every significant piece of work:
-1. **Discuss** — Identify gray areas, capture user preferences (CONTEXT.md)
-2. **Research** — Investigate domain, patterns, dependencies (RESEARCH.md)
-3. **Plan** — Create atomic task plans with frontmatter, acceptance criteria (PLAN.md)
-4. **Execute** — Run plans in dependency-ordered waves, fresh context each
-5. **Verify** — Check deliverables against criteria, run tests, human UAT
+1. **Discuss** — Identify gray areas, capture user preferences
+2. **Research** — Investigate domain, patterns, dependencies
+3. **Plan** — Create atomic task plans with acceptance criteria
+4. **Execute** — Run plans in dependency order, often with fresh context each
+5. **Verify** — Check deliverables against criteria, run tests, and do final review
 
-**What Sorcar does today:** The agent receives a task and immediately starts executing. There's no structured planning or verification phase.
+**What Sorcar does today:** For many tasks the agent can move quickly from request to execution, and the current prompts do require verification. What is missing is a lightweight explicit pipeline that becomes mandatory only for sufficiently complex work.
 
-**Proposed change:** For complex tasks (multi-file changes, architectural work), inject a structured planning phase into the agent's workflow.
+**Proposed change:** For complex tasks such as multi-file changes or architectural work, require a compact planning phase before execution.
 
 ### 5. Revision Loops with Stall Detection
 
-**What GSD does:** After the planner produces plans, a plan-checker reviews them. If issues found, loop back to planner with specific feedback (max 3 iterations). **Stall detection:** if issue count doesn't decrease between iterations, escalate to human instead of looping forever.
+**What GSD does:** After the planner produces plans, a checker reviews them. If issues are found, it loops back with specific feedback, capped at a small number of iterations. If the issue count stops decreasing, the system escalates rather than looping forever.
 
-**What Sorcar does today:** The agent runs tests and may retry on failure, but there's no structured self-review or bounded revision.
+**What Sorcar does today:** The agent does retry and continue, but there is no first-class bounded revision loop with explicit issue tracking and stall detection.
 
-**Proposed change:** After the agent makes changes, add a self-review step with bounded retries.
+**Proposed change:** Add a bounded self-review loop, first via prompt guidance and later in code if needed.
 
 ### 6. Requirements Traceability
 
-**What GSD does:** Every requirement gets an ID. Plans must reference which requirements they address. A coverage gate after planning verifies that every phase requirement appears in at least one plan.
+**What GSD does:** Every requirement gets an ID. Plans must reference the requirements they address. A coverage gate checks that every requirement is covered before execution begins.
 
-**What Sorcar does today:** The task description is the only "requirement" — there's no traceability to check if all parts were addressed.
+**What Sorcar does today:** The user request is often the only requirements artifact. For simple tasks that is fine, but larger tasks would benefit from explicit sub-requirements and a coverage check before declaring success.
 
-**Proposed change:** For complex tasks, decompose the task into checkable sub-requirements and verify coverage.
+**Proposed change:** For complex tasks, decompose the request into checkable sub-requirements and verify that all are satisfied.
 
-### 7. Wave-Based Parallel Execution
+### 7. Dependency-Ordered Execution
 
-**What GSD does:** Plans are grouped into "waves" based on dependencies. Independent plans run in parallel within a wave. Waves execute sequentially.
+**What GSD does:** Plans are grouped into dependency-ordered waves. Independent plans can run in parallel inside a wave, while waves execute sequentially.
 
-**What Sorcar does today:** Everything is sequential within a single agent.
+**What Sorcar does today:** Work is mostly sequential inside a single agent session.
 
-**Proposed change:** This is less applicable to Sorcar's single-agent model, but the dependency-ordering concept is valuable for task decomposition.
+**Proposed change:** Keep Sorcar sequential, but adopt the dependency-ordering idea for task decomposition and planning.
 
 ### 8. Self-Improvement Loop (LESSONS.md)
 
-**What GSD does:** The system maintains state across sessions (STATE.md, PROJECT.md). GSD's codebase-mapping spawns parallel agents to analyze the codebase's stack, architecture, conventions.
+**What GSD does:** The system maintains state across sessions and reuses learned context.
 
-**What Sorcar does today:** Already has LESSONS.md (read at start, updated at end). This is aligned with GSD's philosophy.
+**What Sorcar does today:** KISS already has `LESSONS.md` and explicit instructions to read it at the start and update it only when a generally useful lesson is learned.
 
-**No change needed** — Sorcar already does this well. Could be enhanced with richer project state tracking.
+**No major change needed** — this area is already aligned well with GSD's philosophy.
 
 ---
 
 ## Part 2: Concrete Implementation Plan
 
-### Phase 1: Pre-flight Gates in System Prompt (Low effort, High impact)
+### Phase 1: Tighten Prompt-Level Gates (Low effort, High impact)
 
-Add pre-flight validation rules to SYSTEM.md that the agent must follow before executing:
+Most of this behavior already exists across the current instructions. The improvement should be to consolidate and sharpen it in `SYSTEM.md` rather than duplicating similar rules in multiple places.
+
+Example prompt block:
 
 ```markdown
-## Pre-flight Checks (MANDATORY before modifying code)
-- Read every file you're about to modify FIRST — understand current state before changing
-- Run existing tests FIRST — know the baseline before you change anything
-- If the task mentions files that don't exist, STOP and report — don't guess
-- If the task requires understanding architecture, read relevant source files FIRST
+## Pre-flight Checks
+- Read every file you will modify before changing it.
+- If the task depends on architecture or existing behavior, read the relevant source of truth files first.
+- If the task references files, commands, or assumptions that do not exist, stop and report instead of guessing.
+- Establish the baseline before changing behavior when that baseline matters.
 ```
 
-**Where:** Add to `SYSTEM.md` under a new `## Quality Gates` section.
+**Where:** Refine `SYSTEM.md` so the gate language is centralized and non-redundant.
 
-**Why:** The #1 reason agents produce broken code is modifying files without reading them first. This single change would prevent the largest class of errors.
+**Why:** Consolidation reduces missed checks and makes the execution loop easier for the agent to follow consistently.
 
-### Phase 2: Self-Verification After Execution (Medium effort, High impact)
+### Phase 2: Strengthen Explicit Self-Verification (Low effort, High impact)
 
-Add a verification step to the agent's workflow. After the agent believes it's done, before calling `finish(success=True)`, it must:
+KISS already requires verification before finishing. The improvement is to make the verification checklist more explicit and easier for the agent to execute consistently before calling `finish(success=True)`.
 
-1. Re-read every file it modified
-2. Run tests (`uv run pytest -v`)
-3. Run linters (`uv run check --full`)
-4. Verify acceptance criteria are met (grep for expected patterns)
+Suggested checklist:
+1. Re-read every file that was modified.
+2. Run `uv run check --full`.
+3. Run `uv run pytest -v`.
+4. Verify the task requirements and acceptance checks explicitly.
 
-**Where:** Add to `SYSTEM.md`:
+Example prompt block:
 
 ```markdown
-## Post-Execution Verification (MANDATORY before finish)
+## Post-Execution Verification
 Before calling finish(success=True), you MUST:
-1. Run tests and fix any failures
-2. Run linters/typecheckers and fix any errors
-3. Re-read every file you modified — verify the changes are correct and complete
-4. Verify the task requirements are fully satisfied — check each sub-requirement
-5. If ANY verification fails, fix it before finishing
+1. Run the required checks and fix any failures.
+2. Re-read the modified files and verify the changes are correct and complete.
+3. Check each user requirement or sub-requirement explicitly.
+4. If any verification fails, continue working instead of finishing.
 ```
 
-### Phase 3: Deep Work Rules in System Prompt (Low effort, High impact)
+**Where:** Refine `SYSTEM.md` and avoid duplicating rules that are already enforced elsewhere unless the duplication is intentional and minimal.
 
-Add GSD's "anti-shallow execution" rules:
+### Phase 3: Add Deep-Work Planning Rules (Low effort, High impact)
+
+Add GSD's anti-shallow-execution rules in a KISS-sized form.
+
+Example prompt block:
 
 ```markdown
 ## Deep Work Rules
-- Before modifying a file, ALWAYS read it first — never assume its current state
-- When the task says "align X with Y", determine the EXACT target values first
-- Every code change must have a verifiable check: a test that passes, a grep that matches,
-  a command that succeeds
-- Never make a change based on assumption — always verify the current state first
-- When making multiple related changes, list them all upfront, then execute systematically
+- Before modifying a file, read it first.
+- When a task says "align" or "match", determine the exact target state before editing.
+- Every meaningful change should have a concrete verification method.
+- Do not act on assumptions when the current state can be checked.
+- For multi-part work, list the concrete planned changes before executing them.
 ```
 
 **Where:** Add to `SYSTEM.md`.
 
 ### Phase 4: Structured Planning for Complex Tasks (Medium effort, High impact)
 
-For tasks that involve multi-file changes, add a planning step. Modify the system prompt:
+For tasks involving multiple files or architectural changes, require a short planning step before code changes.
+
+Example prompt block:
 
 ```markdown
-## Task Planning (for tasks involving 3+ files or architectural changes)
-Before writing any code, create a brief plan:
-1. List all files that need to change and WHY
-2. For each file, describe the EXACT change (not "update to match" — the actual values)
-3. Identify dependencies between changes (what must happen first)
-4. Define how you'll verify each change worked
-Then execute the plan in dependency order.
+## Planning for Complex Tasks
+For tasks involving 3+ files, cross-module behavior, or architectural changes:
+1. List the files that need to change and why.
+2. State the exact intended change in each file.
+3. Identify dependencies and execution order.
+4. State how each change will be verified.
 ```
 
-**Where:** Add to `SYSTEM.md`.
+**Where:** Add to `SYSTEM.md` as a conditional workflow for complex tasks only.
 
 ### Phase 5: Bounded Revision Loop (Medium effort, Medium impact)
 
-Enhance `RelentlessAgent.perform_task()` to support bounded self-revision:
+If code changes are desired later, enhance `RelentlessAgent.perform_task()` to support bounded self-revision.
 
-**Concept:** After the agent finishes a task, if tests fail, re-run with specific error context (up to 3 retries). Track whether the error count is decreasing — if stalled after 2 retries, stop and report rather than spinning.
+**Concept:** After a task attempt fails verification, retry with specific error context up to a small limit. Track whether the failure set is shrinking. If it stalls, stop retrying blindly and surface the issue clearly.
 
-The `RelentlessAgent` already has continuation logic. Enhance it:
-- Track test failure count across continuations
-- If failure count doesn't decrease after a continuation, add an explicit prompt: "The same errors persist. Step back and rethink the approach."
-- After 3 failed retries of the same error, report the issue rather than retrying
+Possible behaviors:
+- Track repeated test or lint failures across continuations.
+- If the same failures persist, add an explicit rethink prompt.
+- After a small retry limit, return a clear incomplete result rather than spinning.
 
-**Where:** `src/kiss/core/relentless_agent.py`, modify continuation prompt logic.
+**Where:** `src/kiss/core/relentless_agent.py`, likely by refining continuation prompt logic rather than adding a large new subsystem.
 
-### Phase 6: Sub-Task Decomposition with Fresh Context (High effort, High impact)
+### Phase 6: Optional Task Decomposition with Fresh Context (High effort, High impact)
 
-For very complex tasks (e.g., "refactor the entire test suite"), add the ability to decompose into sub-tasks and execute each in a fresh agent session:
+For very complex tasks, consider decomposing work into sub-tasks executed in fresh agent sessions.
 
 **Concept:**
-1. The orchestrator agent reads the task and produces a list of sub-tasks
-2. Each sub-task runs in a fresh `SorcarAgent` session with minimal context (only the sub-task description + relevant files)
-3. Results from each sub-task are collected and verified
-4. A final verification pass checks the overall result
+1. A planning step produces sub-tasks.
+2. Each sub-task runs in a fresh session with only the relevant context.
+3. Results are collected.
+4. A final verification pass checks the overall result.
 
-**Where:** Create a new `OrchestratorAgent` class that spawns sub-`SorcarAgent` instances. This mirrors GSD's phase-executor spawning plan-executors.
+**Where:** Prefer extending the existing agent stack rather than introducing a large parallel hierarchy immediately. If implemented, this should likely build on `RelentlessAgent`, `StatefulSorcarAgent`, and existing worktree behavior.
 
-**Implementation sketch:**
-```python
-class OrchestratorAgent(SorcarAgent):
-    """Decomposes complex tasks into sub-tasks with fresh context each."""
+**Note:** This could be highly impactful, but it is also the riskiest architectural change and should come only after prompt-level improvements prove insufficient.
 
-    def perform_task(self, tools, attachments=None):
-        # 1. Plan: decompose task into sub-tasks
-        # 2. For each sub-task, spawn a fresh SorcarAgent
-        # 3. Collect results
-        # 4. Verify overall result
-```
+### Phase 7: Reuse Existing Persistence Before Adding New State Files (Low effort, Medium impact)
 
-This is the most impactful but also most complex change. It directly addresses context rot.
+Before adding new project-state files, evaluate whether existing persistence and history mechanisms already cover the use case. If additional state is needed, keep it minimal and avoid duplicating information stored elsewhere.
 
-### Phase 7: Project State Tracking (Low effort, Medium impact)
+Possible minimal state to capture:
+- recent completed tasks
+- known blockers
+- notable architecture decisions
+- recently modified files
 
-Add lightweight project state tracking inspired by GSD's `STATE.md`:
-
-**Concept:** Maintain a `.kiss/project_state.md` file in the work directory that tracks:
-- What the agent has done (completed tasks with summaries)
-- Known issues/blockers
-- Architecture decisions made
-- Files recently modified
-
-The agent reads this at the start of each task for context, and updates it at the end.
-
-**Where:** `src/kiss/agents/sorcar/persistence.py` — extend with project state read/write.
+**Where:** Any implementation should fit into the existing persistence layer carefully and avoid introducing another always-on artifact unless there is a clear benefit.
 
 ---
 
@@ -218,62 +210,57 @@ The agent reads this at the start of each task for context, and updates it at th
 
 | Priority | Phase | Effort | Impact | Description |
 |----------|-------|--------|--------|-------------|
-| **P0** | 1 | Low | High | Pre-flight gates in system prompt |
-| **P0** | 3 | Low | High | Deep work rules in system prompt |
-| **P0** | 2 | Medium | High | Self-verification before finish |
+| **P0** | 1 | Low | High | Tighten prompt-level gates |
+| **P0** | 2 | Low | High | Strengthen explicit self-verification |
+| **P0** | 3 | Low | High | Add deep-work planning rules |
 | **P1** | 4 | Medium | High | Structured planning for complex tasks |
 | **P1** | 5 | Medium | Medium | Bounded revision loop with stall detection |
-| **P2** | 6 | High | High | Sub-task decomposition with fresh context |
-| **P2** | 7 | Low | Medium | Project state tracking |
+| **P2** | 6 | High | High | Optional task decomposition with fresh context |
+| **P2** | 7 | Low | Medium | Reuse existing persistence before adding state |
 
-**P0 items (do first):** Pure prompt engineering. No code changes required. Immediately improves agent quality for every task.
+**P0 items:** Mostly prompt and instruction cleanup. These are the least risky changes and align best with the current architecture.
 
-**P1 items (do second):** Minor prompt + small code changes. Improve agent quality for complex tasks.
+**P1 items:** Small workflow or code refinements that improve performance on more complex tasks.
 
-**P2 items (do later):** Significant architecture changes. Transform how the agent handles large tasks.
+**P2 items:** Larger architectural changes that should be attempted only if prompt-level improvements are not enough.
 
 ---
 
-## Part 4: What NOT to Adopt from GSD
+## Part 4: What Not to Adopt from GSD
 
-GSD has many features that are **not appropriate** for KISS Sorcar:
+Some GSD features are not a good fit for KISS Sorcar:
 
-1. **Enterprise workflow ceremony** — GSD has milestones, roadmaps, sprint-like phases. Sorcar tasks are typically single-task-in, result-out. Don't add project management overhead.
-
-2. **60+ slash commands** — GSD has dozens of commands (discuss-phase, plan-phase, execute-phase, verify-work, ship, etc.). Sorcar's simplicity (one task → one result) is a strength. Don't fragment the workflow into many commands.
-
-3. **Multiple specialized agent types** — GSD has researcher, planner, plan-checker, executor, verifier as separate agents. For Sorcar, the single-agent-with-tools model is simpler and more reliable. The *concepts* (research, plan, execute, verify) should be phases within the same agent, not separate agents.
-
-4. **Heavy state management** — GSD maintains PROJECT.md, REQUIREMENTS.md, ROADMAP.md, STATE.md, CONTEXT.md, RESEARCH.md, PLAN.md, SUMMARY.md, VERIFICATION.md, UAT.md per phase. This is overkill for Sorcar's task model.
-
-5. **UI/security/schema-specific gates** — GSD has UI-SPEC gates, security threat model gates, schema push detection. These are domain-specific and don't apply to Sorcar's general-purpose agent.
-
-6. **Wave-based parallel execution** — Sorcar is a single-agent system. Parallelism adds complexity without clear benefit for most tasks.
+1. **Enterprise workflow ceremony** — Sorcar tasks are typically direct request-to-result interactions. Avoid heavy project-management overhead.
+2. **Large command surface area** — Sorcar benefits from keeping the workflow simple rather than splitting behavior across many slash commands.
+3. **Many specialized agent roles** — The concepts of research, planning, execution, and verification are useful, but they should remain lightweight phases unless proven otherwise.
+4. **Heavy document state** — Maintaining many always-on phase documents would add complexity without clear benefit for most Sorcar tasks.
+5. **Domain-specific gates** — UI-specific, schema-specific, or security-specific gate systems should not be generalized into the core unless the project truly needs them.
+6. **Parallel execution by default** — Parallelism adds complexity and is not obviously beneficial for Sorcar's common task pattern.
 
 ---
 
 ## Part 5: GSD Ideas Already Present in KISS
 
-These GSD ideas are already implemented in KISS, confirming good alignment:
+These GSD ideas already have strong analogs in KISS:
 
 | GSD Concept | KISS Equivalent |
 |-------------|----------------|
-| Self-improvement (STATE.md) | LESSONS.md read/write loop |
-| Continuation on context exhaustion | RelentlessAgent continuation sessions |
+| Self-improvement | `LESSONS.md` read/write loop |
+| Continuation on exhaustion | `RelentlessAgent` continuation sessions |
 | Fresh context on continuation | New sub-session with progress summary |
-| Atomic commits | Agent can commit per logical change |
-| Project-specific rules | SORCAR.md loaded into system prompt |
-| Git worktree isolation | WorktreeSorcarAgent |
-| Chat session history | StatefulSorcarAgent with chat_id |
+| Project-specific rules | `SORCAR.md` loaded into the agent context |
+| Git worktree isolation | `WorktreeSorcarAgent` |
+| Chat session history | `StatefulSorcarAgent` with persisted chat/task history |
 
 ---
 
 ## Summary
 
-The highest-impact changes from GSD are **all prompt engineering** — no code changes required:
+The best GSD ideas for KISS are mostly lightweight process improvements rather than heavy architecture changes:
 
-1. **Pre-flight gates**: Read before write, test before change
-2. **Deep work rules**: Concrete values, not vague references
-3. **Self-verification**: Check your work before declaring success
+1. **Prompt-level gates** — centralize prerequisite checks such as read-before-write.
+2. **Deep-work rules** — require exact target states and concrete verification.
+3. **Explicit self-verification** — make the existing verification loop easier to execute consistently.
+4. **Structured planning for complex tasks** — require planning only when complexity justifies it.
 
-These three prompt additions, inspired by GSD's quality gate taxonomy and deep work rules, would immediately and significantly improve Sorcar's task completion quality. The more complex changes (sub-task decomposition, revision loops) can follow later as the agent matures.
+These changes align with KISS's current architecture and should improve reliability without importing GSD's heavier workflow ceremony.
