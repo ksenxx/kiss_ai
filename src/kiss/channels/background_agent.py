@@ -9,6 +9,15 @@ run():  (blocking main loop)
     Poll for new messages in a loop.
     Reconnect on errors with exponential backoff (reset on success).
 
+run_once():  (one-shot poll mode)
+    Connect to backend.
+    Join the named channel.
+    Poll recent messages.
+    Skip bot messages and non-allowed users.
+    Skip messages the bot has already replied to.
+    Process each pending message with a StatefulSorcarAgent.
+    Return the number of messages processed.
+
 On each inbound message:
     Skip bot's own messages and non-allowed users.
     Route to a per-thread session (keyed by channel + thread root ts).
@@ -125,6 +134,85 @@ class ChannelDaemon:
                 if self._stop_event.wait(self._reconnect_delay):  # pragma: no branch
                     break
                 self._reconnect_delay = min(self._reconnect_delay * 2, _RECONNECT_MAX)
+
+    def run_once(self) -> int:
+        """One-shot poll: check for pending messages, process them, and exit.
+
+        Connects to the backend, joins the configured channel, retrieves
+        recent messages, filters to allowed users, skips messages the bot
+        has already replied to, and runs a StatefulSorcarAgent for each
+        pending message.  Each message is processed synchronously.
+
+        Returns:
+            Number of messages processed.
+
+        Raises:
+            RuntimeError: If connection or channel lookup fails.
+        """
+        Base.reset_global_budget()
+        if not self._backend.connect():
+            raise RuntimeError(f"Failed to connect: {self._backend.connection_info}")
+        logger.info("Connected: %s", self._backend.connection_info)
+        try:
+            channel_id = ""
+            if self._channel_name:
+                channel_id = self._backend.find_channel(self._channel_name) or ""
+                if not channel_id:
+                    raise RuntimeError(f"Channel not found: {self._channel_name!r}")
+                self._backend.join_channel(channel_id)
+                logger.info("Joined channel: %s (%s)", self._channel_name, channel_id)
+
+            messages, _ = self._backend.poll_messages(channel_id, "0", limit=50)
+
+            processed = 0
+            for msg in messages:
+                if self._backend.is_from_bot(msg):
+                    continue
+                user_id = msg.get("user", "")
+                if self._allow_users and user_id not in self._allow_users:
+                    continue
+                if self._has_bot_reply(channel_id, msg):
+                    continue
+                state = _SenderState()
+                self._handle_message(
+                    f"{channel_id}:{msg.get('ts', '')}",
+                    channel_id,
+                    msg,
+                    state,
+                )
+                processed += 1
+
+            return processed
+        finally:
+            self._disconnect_backend()
+
+    def _has_bot_reply(self, channel_id: str, msg: dict[str, Any]) -> bool:
+        """Check if the bot has already replied to a message's thread.
+
+        Uses ``poll_thread_messages`` if the backend supports it.
+        Returns ``False`` when thread polling is unavailable or the
+        message has no replies.
+
+        Args:
+            channel_id: Channel ID containing the message.
+            msg: Message dict from poll_messages.
+
+        Returns:
+            True if the bot has already replied in the thread.
+        """
+        if self._poll_thread_fn is None:
+            return False
+        if msg.get("reply_count", 0) == 0:
+            return False
+        msg_ts = msg.get("ts", "")
+        if not msg_ts:
+            return False
+        try:
+            replies, _ = self._poll_thread_fn(channel_id, msg_ts, "0", limit=100)
+            return any(self._backend.is_from_bot(r) for r in replies)
+        except Exception:
+            logger.debug("Error checking thread replies for %s", msg_ts, exc_info=True)
+            return False
 
     def stop(self) -> None:
         """Signal the daemon to stop and wait briefly for handler cleanup."""

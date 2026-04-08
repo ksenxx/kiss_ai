@@ -1420,6 +1420,11 @@ ______________________________________________________________________
 **Constructor:** `ChannelDaemon(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', poll_interval: float = _POLL_INTERVAL, allow_users: list[str] | None = None) -> None`
 
 - **run** — Start the daemon loop. Blocks until stop() is called or fatal error.<br/>`run() -> None`
+
+- **run_once** — One-shot poll: check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a StatefulSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
+
+  - **Returns:** Number of messages processed.
+
 - **stop** — Signal the daemon to stop and wait briefly for handler cleanup.<br/>`stop() -> None`
 
 ______________________________________________________________________

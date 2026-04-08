@@ -246,7 +246,8 @@ def channel_main(
 
     workspace: str = args.workspace
 
-    if make_daemon_backend is not None and getattr(args, "daemon", False):
+    daemon_channel: str = getattr(args, "daemon_channel", "")
+    if make_daemon_backend is not None and daemon_channel:
         from kiss.channels.background_agent import ChannelDaemon
 
         sig = inspect.signature(make_daemon_backend)
@@ -278,11 +279,16 @@ def channel_main(
             poll_interval=daemon_poll_interval,
             allow_users=allow_users,
         )
-        print(f"Starting {channel_name} daemon... (Ctrl+C to stop)")
-        try:
-            daemon.run()
-        except KeyboardInterrupt:
-            print("Daemon stopped.")
+        if getattr(args, "daemon", False):
+            print(f"Starting {channel_name} daemon... (Ctrl+C to stop)")
+            try:
+                daemon.run()
+            except KeyboardInterrupt:
+                print("Daemon stopped.")
+        else:
+            print(f"Checking {channel_name} channel for pending messages...")
+            count = daemon.run_once()
+            print(f"Processed {count} message(s).")
         return
 
     sig = inspect.signature(agent_cls)
