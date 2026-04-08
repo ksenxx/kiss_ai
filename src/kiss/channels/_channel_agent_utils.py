@@ -362,11 +362,6 @@ class ChannelRunner:
             logger.warning("Backend disconnect failed", exc_info=True)
 
 
-# Backward-compatible aliases for existing imports.
-ChannelPoller = ChannelRunner
-ChannelDaemon = ChannelRunner
-
-
 def channel_main(
     agent_cls: type,
     cli_name: str,
