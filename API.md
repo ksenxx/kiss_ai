@@ -1336,15 +1336,14 @@ ______________________________________________________________________
 
 ##### `class ThreadedHTTPServer(ThreadingMixIn, HTTPServer)` — HTTP server with per-request threads and address reuse enabled.
 
-**`wait_for_matching_message`** — Wait for a message matching a predicate with timeout and cancellation.<br/>`def wait_for_matching_message(*, poll: Callable[[], list[dict[str, Any]]], matches: Callable[[dict[str, Any]], bool], extract_text: Callable[[dict[str, Any]], str], timeout_seconds: float, stop_event: threading.Event | None, poll_interval: float) -> str | None`
+**`wait_for_matching_message`** — Wait for a message matching a predicate with timeout.<br/>`def wait_for_matching_message(*, poll: Callable[[], list[dict[str, Any]]], matches: Callable[[dict[str, Any]], bool], extract_text: Callable[[dict[str, Any]], str], timeout_seconds: float, poll_interval: float) -> str | None`
 
 - `poll`: Callable returning newly observed messages.
 - `matches`: Predicate selecting the desired message.
 - `extract_text`: Callable extracting the reply text from a matching message.
 - `timeout_seconds`: Maximum time to wait.
-- `stop_event`: Optional cancellation event.
 - `poll_interval`: Delay between polls.
-- **Returns:** Extracted reply text, or `None` on timeout/cancellation.
+- **Returns:** Extracted reply text, or `None` on timeout.
 
 **`drain_queue_messages`** — Drain up to `limit` messages from a queue, optionally filtering.<br/>`def drain_queue_messages(message_queue: queue.Queue[dict[str, Any]], *, limit: int, keep: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]`
 
@@ -1459,7 +1458,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a BlueBubbles message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **list_chats** — List recent iMessage conversations.<br/>`list_chats(limit: int = 25, offset: int = 0) -> str`
 
@@ -1518,7 +1517,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Discord message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **disconnect** — Release Discord backend state before stop or reconnect.<br/>`disconnect() -> None`
 
@@ -1616,7 +1615,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Feishu message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **send_text_message** — Send a text message to a Feishu chat or user.<br/>`send_text_message(receive_id: str, text: str, receive_id_type: str = 'chat_id') -> str`
 
@@ -1695,7 +1694,7 @@ ______________________________________________________________________
   - `text`: Email body text.
   - `thread_ts`: Thread ID to reply to (optional).
 
-- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll a Gmail thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
   - `channel_id`: Label ID (unused for Gmail).
   - `thread_ts`: Thread ID to poll.
@@ -1814,7 +1813,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Google Chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **list_spaces** — List Google Chat spaces (rooms and DMs).<br/>`list_spaces(page_size: int = 20, page_token: str = '') -> str`
 
@@ -1889,7 +1888,7 @@ ______________________________________________________________________
 
 - **send_message** — Send an iMessage.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Reply waiting is not supported for AppleScript-based iMessage.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Reply waiting is not supported for AppleScript-based iMessage.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **send_imessage** — Send an iMessage or SMS to a recipient.<br/>`send_imessage(recipient: str, text: str, service: str = 'iMessage') -> str`
 
@@ -1935,7 +1934,7 @@ ______________________________________________________________________
 
 - **send_message** — Send an IRC PRIVMSG.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **disconnect** — Close the IRC socket and join the reader thread.<br/>`disconnect() -> None`
 
@@ -2022,7 +2021,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a LINE push message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
@@ -2079,7 +2078,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Matrix text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2158,7 +2157,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Mattermost post.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **list_teams** — List Mattermost teams.<br/>`list_teams() -> str`
 
@@ -2240,7 +2239,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Teams channel message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2320,7 +2319,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Nextcloud Talk message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2390,7 +2389,7 @@ ______________________________________________________________________
 
 - **send_message** — Publish a Nostr note.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Reply waiting is not currently supported for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Reply waiting is not currently supported for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **is_from_bot** — Check if event is from this key.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2455,7 +2454,7 @@ ______________________________________________________________________
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **send_sms** — Send an SMS message.<br/>`send_sms(to: str, text: str) -> str`
 
@@ -2525,7 +2524,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Signal message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2606,7 +2605,7 @@ ______________________________________________________________________
   - `text`: Message text (supports Slack mrkdwn formatting).
   - `thread_ts`: If non-empty, reply in this thread.
 
-- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll a Slack thread for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
   - `channel_id`: Channel ID containing the thread.
   - `thread_ts`: Timestamp of the parent message (thread root).
@@ -2747,7 +2746,7 @@ ______________________________________________________________________
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **is_from_bot** — Check if message is from the bot's number.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
 
@@ -2834,7 +2833,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Synology Chat message via incoming webhook.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 
@@ -2868,7 +2867,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Telegram message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **send_text** — Send a text message to a Telegram chat.<br/>`send_text(chat_id: str, text: str, reply_to_message_id: str = '') -> str`
 
@@ -2983,7 +2982,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Tlon/Urbit poke.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **list_groups** — List Urbit groups.<br/>`list_groups() -> str`
 
@@ -3043,7 +3042,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Twitch chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Reply waiting is not currently supported for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Reply waiting is not currently supported for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **get_stream_info** — Get live stream information for a Twitch channel.<br/>`get_stream_info(broadcaster_login: str) -> str`
 
@@ -3129,7 +3128,7 @@ ______________________________________________________________________
   - `text`: Message text.
   - `thread_ts`: Unused for WhatsApp.
 
-- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Block until a message from a specific user is received.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
   - `channel_id`: Unused for WhatsApp.
   - `thread_ts`: Unused for WhatsApp.
@@ -3250,7 +3249,7 @@ ______________________________________________________________________
 
 - **send_message** — Send a Zalo text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
-- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
+- **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0) -> str | None`
 
 - **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
 

@@ -19,7 +19,6 @@ import json
 import logging
 import shutil
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -343,7 +342,6 @@ class SlackChannelBackend(ToolMethodBackend):
         thread_ts: str,
         user_id: str,
         timeout_seconds: float = 300.0,
-        stop_event: threading.Event | None = None,
     ) -> str | None:
         """Poll a Slack thread for a reply from a specific user.
 
@@ -385,7 +383,6 @@ class SlackChannelBackend(ToolMethodBackend):
             matches=lambda reply: reply.get("user") == user_id,
             extract_text=lambda reply: str(reply.get("text", "")),
             timeout_seconds=timeout_seconds,
-            stop_event=stop_event,
             poll_interval=_REPLY_POLL_INTERVAL,
         )
 

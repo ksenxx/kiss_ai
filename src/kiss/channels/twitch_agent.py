@@ -13,7 +13,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +101,6 @@ class TwitchChannelBackend(ToolMethodBackend):
         thread_ts: str,
         user_id: str,
         timeout_seconds: float = 300.0,
-        stop_event: threading.Event | None = None,
     ) -> str | None:
         """Reply waiting is not currently supported for Twitch."""
         return None

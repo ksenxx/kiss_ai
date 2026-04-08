@@ -6,7 +6,6 @@ No mocks, test doubles, or fakes.
 from __future__ import annotations
 
 import queue
-import threading
 from argparse import ArgumentParser
 from typing import Any
 
@@ -81,40 +80,8 @@ class TestLazyImportNotInMap:
 class TestWaitForMatchingMessage:
     """Cover branches in wait_for_matching_message."""
 
-    def test_stop_event_cancels_immediately(self) -> None:
-        """stop_event.is_set() returns True before polling (line 45->46)."""
-        from kiss.channels._backend_utils import wait_for_matching_message
-
-        stop = threading.Event()
-        stop.set()
-        result = wait_for_matching_message(
-            poll=lambda: [],
-            matches=lambda m: True,
-            extract_text=lambda m: m["text"],
-            timeout_seconds=10,
-            stop_event=stop,
-            poll_interval=0.1,
-        )
-        assert result is None
-
-    def test_stop_event_during_wait(self) -> None:
-        """stop_event fires during the sleep wait (line 55 -> True)."""
-        from kiss.channels._backend_utils import wait_for_matching_message
-
-        stop = threading.Event()
-        threading.Timer(0.05, stop.set).start()
-        result = wait_for_matching_message(
-            poll=lambda: [],
-            matches=lambda m: True,
-            extract_text=lambda m: m["text"],
-            timeout_seconds=10,
-            stop_event=stop,
-            poll_interval=5.0,
-        )
-        assert result is None
-
-    def test_no_stop_event_timeout(self) -> None:
-        """No stop_event, times out via time.sleep (else branch on line 54)."""
+    def test_timeout_no_match(self) -> None:
+        """Times out when no messages arrive."""
         from kiss.channels._backend_utils import wait_for_matching_message
 
         result = wait_for_matching_message(
@@ -122,23 +89,32 @@ class TestWaitForMatchingMessage:
             matches=lambda m: True,
             extract_text=lambda m: m["text"],
             timeout_seconds=0.05,
-            stop_event=None,
             poll_interval=0.01,
         )
         assert result is None
 
-    def test_stop_event_wait_loops_then_timeout(self) -> None:
-        """stop_event.wait returns False (loop back line 55->44), then times out."""
+    def test_match_found(self) -> None:
+        """Returns extracted text when a matching message appears."""
         from kiss.channels._backend_utils import wait_for_matching_message
 
-        stop = threading.Event()
-        # stop never set: wait() returns False each poll, loops back to top
         result = wait_for_matching_message(
-            poll=lambda: [],
+            poll=lambda: [{"text": "hello"}],
             matches=lambda m: True,
             extract_text=lambda m: m["text"],
+            timeout_seconds=1.0,
+            poll_interval=0.01,
+        )
+        assert result == "hello"
+
+    def test_no_match_skips(self) -> None:
+        """Non-matching messages are skipped, then times out."""
+        from kiss.channels._backend_utils import wait_for_matching_message
+
+        result = wait_for_matching_message(
+            poll=lambda: [{"text": "nope"}],
+            matches=lambda m: False,
+            extract_text=lambda m: m["text"],
             timeout_seconds=0.05,
-            stop_event=stop,
             poll_interval=0.01,
         )
         assert result is None

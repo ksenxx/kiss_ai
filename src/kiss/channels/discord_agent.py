@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -171,7 +170,6 @@ class DiscordChannelBackend(ToolMethodBackend):
         thread_ts: str,
         user_id: str,
         timeout_seconds: float = 300.0,
-        stop_event: threading.Event | None = None,
     ) -> str | None:
         """Poll for a reply from a specific user."""
         oldest = self._last_message_id
@@ -186,7 +184,6 @@ class DiscordChannelBackend(ToolMethodBackend):
             matches=lambda msg: msg.get("user") == user_id,
             extract_text=lambda msg: str(msg.get("text", "")),
             timeout_seconds=timeout_seconds,
-            stop_event=stop_event,
             poll_interval=2.0,
         )
 

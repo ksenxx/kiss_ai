@@ -257,7 +257,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         thread_ts: str,
         user_id: str,
         timeout_seconds: float = 300.0,
-        stop_event: threading.Event | None = None,
     ) -> str | None:
         """Block until a message from a specific user is received.
 
@@ -288,7 +287,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             matches=lambda raw: raw.get("from") == user_id,
             extract_text=lambda raw: str(raw.get("text", {}).get("body", "")),
             timeout_seconds=timeout_seconds,
-            stop_event=stop_event,
             poll_interval=2.0,
         )
 

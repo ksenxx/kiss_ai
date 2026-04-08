@@ -27,38 +27,29 @@ def wait_for_matching_message(
     matches: Callable[[dict[str, Any]], bool],
     extract_text: Callable[[dict[str, Any]], str],
     timeout_seconds: float,
-    stop_event: threading.Event | None,
     poll_interval: float,
 ) -> str | None:
-    """Wait for a message matching a predicate with timeout and cancellation.
+    """Wait for a message matching a predicate with timeout.
 
     Args:
         poll: Callable returning newly observed messages.
         matches: Predicate selecting the desired message.
         extract_text: Callable extracting the reply text from a matching message.
         timeout_seconds: Maximum time to wait.
-        stop_event: Optional cancellation event.
         poll_interval: Delay between polls.
 
     Returns:
-        Extracted reply text, or ``None`` on timeout/cancellation.
+        Extracted reply text, or ``None`` on timeout.
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
-        if stop_event and stop_event.is_set():
-            return None
         for message in poll():
             if matches(message):
                 return extract_text(message)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        sleep_for = min(poll_interval, remaining)
-        if stop_event:
-            if stop_event.wait(sleep_for):
-                return None
-        else:
-            time.sleep(sleep_for)
+        time.sleep(min(poll_interval, remaining))
 
 
 def drain_queue_messages(

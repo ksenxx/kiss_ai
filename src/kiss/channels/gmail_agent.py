@@ -17,7 +17,6 @@ from __future__ import annotations
 import base64
 import json
 import sys
-import threading
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -363,7 +362,6 @@ class GmailChannelBackend(ToolMethodBackend):
         thread_ts: str,
         user_id: str,
         timeout_seconds: float = 300.0,
-        stop_event: threading.Event | None = None,
     ) -> str | None:
         """Poll a Gmail thread for a reply from a specific user.
 
@@ -415,7 +413,6 @@ class GmailChannelBackend(ToolMethodBackend):
             ),
             extract_text=lambda msg: str(msg.get("snippet", "")),
             timeout_seconds=timeout_seconds,
-            stop_event=stop_event,
             poll_interval=5.0,
         )
 

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -102,7 +101,6 @@ class SMSChannelBackend(ToolMethodBackend):
         thread_ts: str,
         user_id: str,
         timeout_seconds: float = 300.0,
-        stop_event: threading.Event | None = None,
     ) -> str | None:
         """Poll for a reply from a specific number."""
         oldest = str(time.time())
@@ -117,7 +115,6 @@ class SMSChannelBackend(ToolMethodBackend):
             matches=lambda msg: msg.get("user") == user_id,
             extract_text=lambda msg: str(msg.get("text", "")),
             timeout_seconds=timeout_seconds,
-            stop_event=stop_event,
             poll_interval=5.0,
         )
 
