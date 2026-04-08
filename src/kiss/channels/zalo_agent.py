@@ -120,22 +120,6 @@ class ZaloChannelBackend(ToolMethodBackend):
             self._webhook_thread = None
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
-    def find_channel(self, name: str) -> str | None:
-        """Return channel name as user ID."""
-        return name if name else None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username as user ID."""
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for Zalo."""
-
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
@@ -172,14 +156,6 @@ class ZaloChannelBackend(ToolMethodBackend):
         self._webhook_server, self._webhook_thread = stop_http_server(
             self._webhook_server, self._webhook_thread
         )
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Check if message is from the bot."""
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     def send_text_message(self, to_user_id: str, text: str) -> str:
         """Send a text message to a Zalo user.

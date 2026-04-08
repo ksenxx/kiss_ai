@@ -159,11 +159,6 @@ class GoogleChatChannelBackend(ToolMethodBackend):
         self._connection_info = "Authenticated with Google Chat"
         return True
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
     def find_channel(self, name: str) -> str | None:
         """Find a Google Chat space by display name."""
         if not self._service:  # pragma: no branch
@@ -176,13 +171,6 @@ class GoogleChatChannelBackend(ToolMethodBackend):
         except Exception:
             pass
         return None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username as user ID."""
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for Google Chat — bots are added by admins."""
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
@@ -251,17 +239,6 @@ class GoogleChatChannelBackend(ToolMethodBackend):
             stop_event=stop_event,
             poll_interval=3.0,
         )
-
-    def disconnect(self) -> None:
-        """Release backend resources before stop or reconnect."""
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Check if a message is from a bot."""
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     # -------------------------------------------------------------------
     # Google Chat API tool methods

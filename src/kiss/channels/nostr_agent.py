@@ -61,22 +61,6 @@ class NostrChannelBackend(ToolMethodBackend):
             self._connection_info = f"Nostr key load failed: {e}"
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
-    def find_channel(self, name: str) -> str | None:
-        """Return channel/relay name."""
-        return name if name else None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username as public key."""
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for Nostr."""
-
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
@@ -98,16 +82,9 @@ class NostrChannelBackend(ToolMethodBackend):
         """Reply waiting is not currently supported for Nostr."""
         return None
 
-    def disconnect(self) -> None:
-        """Release backend resources before stop or reconnect."""
-
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if event is from this key."""
         return bool(msg.get("pubkey", "") == self._public_key)
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     def _publish_event(self, kind: int, content: str, tags: list | None = None) -> dict[str, Any]:
         """Publish a Nostr event to all configured relays."""

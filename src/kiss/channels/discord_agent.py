@@ -95,11 +95,6 @@ class DiscordChannelBackend(ToolMethodBackend):
             self._connection_info = f"Discord auth failed: {e}"
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
     def find_channel(self, name: str) -> str | None:
         """Find a channel by name or numeric ID.
 
@@ -131,13 +126,6 @@ class DiscordChannelBackend(ToolMethodBackend):
         except Exception:
             pass
         return None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username as user ID."""
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for Discord bots."""
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
@@ -205,14 +193,6 @@ class DiscordChannelBackend(ToolMethodBackend):
     def disconnect(self) -> None:
         """Release Discord backend state before stop or reconnect."""
         self._last_message_id = ""
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Check if a message is from a bot."""
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     # -------------------------------------------------------------------
     # Discord API tool methods

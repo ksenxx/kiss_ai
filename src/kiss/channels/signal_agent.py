@@ -50,22 +50,6 @@ class SignalChannelBackend(ToolMethodBackend):
         self._connection_info = f"Signal configured for {self._phone_number}"
         return True
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
-    def find_channel(self, name: str) -> str | None:
-        """Return phone number as channel ID."""
-        return name if name else None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username as user ID."""
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for Signal."""
-
     def _run_cli(self, *args: str) -> tuple[str, str]:
         """Run signal-cli command and return (stdout, stderr)."""
         cmd = [self._signal_cli, "-u", self._phone_number, *args]
@@ -122,16 +106,9 @@ class SignalChannelBackend(ToolMethodBackend):
             poll_interval=3.0,
         )
 
-    def disconnect(self) -> None:
-        """Release backend resources before stop or reconnect."""
-
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if a message is from the bot."""
         return bool(msg.get("user", "") == self._phone_number)
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     def send_signal_message(self, recipient: str, message: str) -> str:
         """Send a Signal text message.

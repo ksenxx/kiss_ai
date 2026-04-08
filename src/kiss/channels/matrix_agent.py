@@ -66,19 +66,6 @@ class MatrixChannelBackend(ToolMethodBackend):
             self._connection_info = f"Matrix connection failed: {e}"
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
-    def find_channel(self, name: str) -> str | None:
-        """Return room alias or ID."""
-        return name if name else None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username as user ID."""
-        return username if username else None
-
     def join_channel(self, channel_id: str) -> None:
         """Join a Matrix room."""
         if self._client:  # pragma: no branch
@@ -149,18 +136,11 @@ class MatrixChannelBackend(ToolMethodBackend):
             poll_interval=3.0,
         )
 
-    def disconnect(self) -> None:
-        """Release backend resources before stop or reconnect."""
-
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot."""
         if self._client and hasattr(self._client, "user_id"):  # pragma: no branch
             return bool(msg.get("user", "") == self._client.user_id)
         return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     def list_rooms(self) -> str:
         """List joined Matrix rooms.

@@ -259,11 +259,6 @@ class GmailChannelBackend(ToolMethodBackend):
             self._connection_info = f"Gmail auth failed: {e}"
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
     def find_channel(self, name: str) -> str | None:
         """Find a Gmail label by name (used as channel ID).
 
@@ -282,24 +277,6 @@ class GmailChannelBackend(ToolMethodBackend):
         except Exception:
             pass
         return None
-
-    def find_user(self, username: str) -> str | None:
-        """Find a user by email address (Gmail has no user directory).
-
-        Args:
-            username: Email address to return as user ID.
-
-        Returns:
-            The email address itself (Gmail uses email as user ID).
-        """
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for Gmail — labels don't require joining.
-
-        Args:
-            channel_id: Label ID (unused).
-        """
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
@@ -441,31 +418,6 @@ class GmailChannelBackend(ToolMethodBackend):
             stop_event=stop_event,
             poll_interval=5.0,
         )
-
-    def disconnect(self) -> None:
-        """Release backend resources before stop or reconnect."""
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Check if a message was sent by the bot itself.
-
-        Args:
-            msg: Message dict from poll_messages.
-
-        Returns:
-            True if the message is from the bot (always False for Gmail).
-        """
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mention markers (no-op for Gmail).
-
-        Args:
-            text: Raw message text.
-
-        Returns:
-            Unchanged text.
-        """
-        return text
 
     # -------------------------------------------------------------------
     # Gmail API tool methods (return JSON strings for LLM agent use)

@@ -37,7 +37,76 @@ class ToolMethodBackend:
 
     Public methods are discovered dynamically and filtered to exclude
     channel protocol and infrastructure methods.
+
+    Provides sensible defaults for all infrastructure methods so that
+    channel backends only need to override methods with non-trivial
+    behaviour (e.g. Slack's ``find_channel`` which queries the API).
     """
+
+    _connection_info: str = ""
+
+    @property
+    def connection_info(self) -> str:
+        """Human-readable connection status string."""
+        return self._connection_info
+
+    def find_channel(self, name: str) -> str | None:
+        """Return *name* as the channel ID.
+
+        Override for platforms that resolve names via an API call.
+
+        Args:
+            name: Channel name or identifier.
+
+        Returns:
+            The channel identifier, or ``None`` if *name* is empty.
+        """
+        return name if name else None
+
+    def find_user(self, username: str) -> str | None:
+        """Return *username* as the user ID.
+
+        Override for platforms that resolve usernames via an API call.
+
+        Args:
+            username: Username or identifier.
+
+        Returns:
+            The user identifier, or ``None`` if *username* is empty.
+        """
+        return username if username else None
+
+    def join_channel(self, channel_id: str) -> None:
+        """No-op.  Override for platforms that require joining a channel.
+
+        Args:
+            channel_id: Channel identifier.
+        """
+
+    def disconnect(self) -> None:
+        """No-op.  Override for platforms that need connection cleanup."""
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Return ``False``.  Override for platforms that can identify bot messages.
+
+        Args:
+            msg: Message dict from :meth:`poll_messages`.
+
+        Returns:
+            Whether the message was sent by the bot itself.
+        """
+        return False
+
+    def strip_bot_mention(self, text: str) -> str:
+        """Return *text* unchanged.  Override for platforms with bot @-mentions.
+
+        Args:
+            text: Raw message text.
+
+        Returns:
+            Text with bot mentions removed.
+        """
+        return text
 
     def get_tool_methods(self) -> list:
         """Return the backend's public tool methods.

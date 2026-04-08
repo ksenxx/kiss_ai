@@ -166,11 +166,6 @@ class SlackChannelBackend(ToolMethodBackend):
             self._connection_info = f"Slack auth failed: {e}"
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
     def find_channel(self, name: str) -> str | None:
         """Find a Slack channel ID by name.
 

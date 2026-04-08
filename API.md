@@ -1367,7 +1367,36 @@ ______________________________________________________________________
 
 ##### `class ToolMethodBackend` — Mixin that exposes public backend methods as agent tools.
 
+- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
+
+- **find_channel** — Return *name* as the channel ID. Override for platforms that resolve names via an API call.<br/>`find_channel(name: str) -> str | None`
+
+  - `name`: Channel name or identifier.
+  - **Returns:** The channel identifier, or `None` if *name* is empty.
+
+- **find_user** — Return *username* as the user ID. Override for platforms that resolve usernames via an API call.<br/>`find_user(username: str) -> str | None`
+
+  - `username`: Username or identifier.
+  - **Returns:** The user identifier, or `None` if *username* is empty.
+
+- **join_channel** — No-op. Override for platforms that require joining a channel.<br/>`join_channel(channel_id: str) -> None`
+
+  - `channel_id`: Channel identifier.
+
+- **disconnect** — No-op. Override for platforms that need connection cleanup.<br/>`disconnect() -> None`
+
+- **is_from_bot** — Return `False`. Override for platforms that can identify bot messages.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
+
+  - `msg`: Message dict from :meth:`poll_messages`.
+  - **Returns:** Whether the message was sent by the bot itself.
+
+- **strip_bot_mention** — Return *text* unchanged. Override for platforms with bot @-mentions.<br/>`strip_bot_mention(text: str) -> str`
+
+  - `text`: Raw message text.
+  - **Returns:** Text with bot mentions removed.
+
 - **get_tool_methods** — Return the backend's public tool methods.<br/>`get_tool_methods() -> list`
+
   - **Returns:** List of bound callable methods intended for LLM tool use.
 
 ##### `class ChannelConfig` — Encapsulates the 4-function config persistence pattern used by channel agents.
@@ -1426,25 +1455,11 @@ ______________________________________________________________________
 
 - **connect** — Connect to BlueBubbles server.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return chat GUID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for BlueBubbles.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll BlueBubbles for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a BlueBubbles message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_chats** — List recent iMessage conversations.<br/>`list_chats(limit: int = 25, offset: int = 0) -> str`
 
@@ -1494,16 +1509,10 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Discord using the stored bot token.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
 - **find_channel** — Find a channel by name or numeric ID. If *name* is already a numeric snowflake ID, returns it as-is. Otherwise queries all guilds for a channel matching the name.<br/>`find_channel(name: str) -> str | None`
 
   - `name`: Channel name or numeric ID.
   - **Returns:** The channel snowflake ID string, or None if not found.
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Discord bots.<br/>`join_channel(channel_id: str) -> None`
 
 - **poll_messages** — Poll for new Discord messages using REST API.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
@@ -1512,10 +1521,6 @@ ______________________________________________________________________
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
 - **disconnect** — Release Discord backend state before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_guilds** — List guilds (servers) the bot is a member of.<br/>`list_guilds(limit: int = 100) -> str`
 
@@ -1607,25 +1612,11 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Feishu using stored app credentials.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name as chat ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Feishu bots.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll Feishu chat for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Feishu message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **send_text_message** — Send a text message to a Feishu chat or user.<br/>`send_text_message(receive_id: str, text: str, receive_id_type: str = 'chat_id') -> str`
 
@@ -1686,21 +1677,10 @@ ______________________________________________________________________
 
   - **Returns:** True on success, False on failure.
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
 - **find_channel** — Find a Gmail label by name (used as channel ID).<br/>`find_channel(name: str) -> str | None`
 
   - `name`: Label name to search for.
   - **Returns:** Label ID string, or None if not found.
-
-- **find_user** — Find a user by email address (Gmail has no user directory).<br/>`find_user(username: str) -> str | None`
-
-  - `username`: Email address to return as user ID.
-  - **Returns:** The email address itself (Gmail uses email as user ID).
-
-- **join_channel** — No-op for Gmail — labels don't require joining.<br/>`join_channel(channel_id: str) -> None`
-
-  - `channel_id`: Label ID (unused).
 
 - **poll_messages** — Poll Gmail inbox for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
@@ -1721,18 +1701,6 @@ ______________________________________________________________________
   - `thread_ts`: Thread ID to poll.
   - `user_id`: Email address of expected sender.
   - **Returns:** The text of the user's reply.
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-  - `msg`: Message dict from poll_messages.
-  - **Returns:** True if the message is from the bot (always False for Gmail).
-
-- **strip_bot_mention** — Remove bot mention markers (no-op for Gmail).<br/>`strip_bot_mention(text: str) -> str`
-
-  - `text`: Raw message text.
-  - **Returns:** Unchanged text.
 
 - **get_profile** — Get the current user's Gmail profile.<br/>`get_profile() -> str`
 
@@ -1840,25 +1808,13 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Google Chat.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
 - **find_channel** — Find a Google Chat space by display name.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Google Chat — bots are added by admins.<br/>`join_channel(channel_id: str) -> None`
 
 - **poll_messages** — Poll a Google Chat space for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Google Chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if a message is from a bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_spaces** — List Google Chat spaces (rooms and DMs).<br/>`list_spaces(page_size: int = 20, page_token: str = '') -> str`
 
@@ -1929,25 +1885,11 @@ ______________________________________________________________________
 
 - **connect** — Check macOS and Messages.app availability.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return phone number or email as channel ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for iMessage.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll iMessage via AppleScript (basic implementation).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send an iMessage.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Reply waiting is not supported for AppleScript-based iMessage.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **send_imessage** — Send an iMessage or SMS to a recipient.<br/>`send_imessage(recipient: str, text: str, service: str = 'iMessage') -> str`
 
@@ -1986,12 +1928,6 @@ ______________________________________________________________________
 **Constructor:** `IRCChannelBackend() -> None`
 
 - **connect** — Connect to IRC server.<br/>`connect() -> bool`
-
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
 
 - **join_channel** — Join an IRC channel.<br/>`join_channel(channel_id: str) -> None`
 
@@ -2082,14 +2018,6 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with LINE and start webhook server.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name as user/group ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for LINE.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a LINE push message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
@@ -2097,10 +2025,6 @@ ______________________________________________________________________
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
 - **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **push_text_message** — Send a push text message to a LINE user or group.<br/>`push_text_message(to: str, text: str) -> str`
 
@@ -2149,12 +2073,6 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Matrix using stored config.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return room alias or ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
 - **join_channel** — Join a Matrix room.<br/>`join_channel(channel_id: str) -> None`
 
 - **poll_messages** — Poll for new Matrix messages via sync.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
@@ -2163,11 +2081,7 @@ ______________________________________________________________________
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_rooms** — List joined Matrix rooms.<br/>`list_rooms() -> str`
 
@@ -2240,25 +2154,11 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Mattermost using stored config.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Mattermost (bots are added to channels by admins).<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll Mattermost channel for new posts.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Mattermost post.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_teams** — List Mattermost teams.<br/>`list_teams() -> str`
 
@@ -2336,25 +2236,13 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Microsoft Graph API.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name as channel ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for MS Teams.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll MS Teams channel for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Teams channel message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_teams** — List Microsoft Teams the bot/user is a member of.<br/>`list_teams(limit: int = 20) -> str`
 
@@ -2426,12 +2314,6 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Nextcloud Talk.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return room token.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
 - **join_channel** — Join a Nextcloud Talk room.<br/>`join_channel(channel_id: str) -> None`
 
 - **poll_messages** — Poll a Nextcloud Talk room for new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
@@ -2440,11 +2322,7 @@ ______________________________________________________________________
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
 - **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_rooms** — List Nextcloud Talk rooms.<br/>`list_rooms() -> str`
 
@@ -2508,25 +2386,13 @@ ______________________________________________________________________
 
 - **connect** — Load Nostr keys from stored config.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel/relay name.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as public key.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Nostr.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll Nostr relays for new events (basic implementation).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Publish a Nostr note.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Reply waiting is not currently supported for Nostr.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
 - **is_from_bot** — Check if event is from this key.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **publish_note** — Publish a text note (kind 1) to Nostr.<br/>`publish_note(content: str) -> str`
 
@@ -2585,25 +2451,11 @@ ______________________________________________________________________
 
 - **connect** — Connect to phone companion app.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for phone control.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll for new SMS messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply SMS from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the phone itself (sent).<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **send_sms** — Send an SMS message.<br/>`send_sms(to: str, text: str) -> str`
 
@@ -2669,25 +2521,13 @@ ______________________________________________________________________
 
 - **connect** — Load Signal config.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Signal.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Receive pending Signal messages via signal-cli.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Signal message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
 - **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **send_signal_message** — Send a Signal text message.<br/>`send_signal_message(recipient: str, message: str) -> str`
 
@@ -2730,8 +2570,6 @@ ______________________________________________________________________
 - **connect** — Authenticate with Slack using the stored bot token. Uses the workspace set at construction time to load the appropriate token.<br/>`connect() -> bool`
 
   - **Returns:** True on success, False on failure.
-
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
 
 - **find_channel** — Find a Slack channel ID by name.<br/>`find_channel(name: str) -> str | None`
 
@@ -2905,25 +2743,13 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Twilio using stored config.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return phone number as channel ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for SMS.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll Twilio for recent inbound messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send an SMS.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific number.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
 - **is_from_bot** — Check if message is from the bot's number.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **send_sms** — Send an SMS message via Twilio.<br/>`send_sms(to: str, body: str) -> str`
 
@@ -3004,14 +2830,6 @@ ______________________________________________________________________
 
 - **connect** — Load Synology config and start webhook server.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Synology Chat.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Synology Chat message via incoming webhook.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
@@ -3019,10 +2837,6 @@ ______________________________________________________________________
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
 - **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **post_message** — Send a message to Synology Chat via incoming webhook.<br/>`post_message(text: str, user_ids: str = '') -> str`
 
@@ -3050,25 +2864,11 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Telegram using the stored bot token.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name as channel ID (Telegram uses chat_id).<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Telegram bots.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll for new Telegram updates via getUpdates.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Telegram message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if a message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot @mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **send_text** — Send a text message to a Telegram chat.<br/>`send_text(chat_id: str, text: str, reply_to_message_id: str = '') -> str`
 
@@ -3179,25 +2979,11 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Urbit ship.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Tlon.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll event queue for messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Tlon/Urbit poke.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **list_groups** — List Urbit groups.<br/>`list_groups() -> str`
 
@@ -3253,25 +3039,11 @@ ______________________________________________________________________
 
 - **connect** — Authenticate with Twitch using stored config.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Twitch.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Poll for Twitch events (basic REST polling).<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Twitch chat message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
 
 - **wait_for_reply** — Reply waiting is not currently supported for Twitch.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
-
-- **disconnect** — Release backend resources before stop or reconnect.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **get_stream_info** — Get live stream information for a Twitch channel.<br/>`get_stream_info(broadcaster_login: str) -> str`
 
@@ -3344,22 +3116,6 @@ ______________________________________________________________________
 
   - **Returns:** True on success, False on failure.
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Find a WhatsApp channel by name (returns name as channel ID).<br/>`find_channel(name: str) -> str | None`
-
-  - `name`: Channel name / phone number.
-  - **Returns:** The name itself as the channel ID.
-
-- **find_user** — Find a user by phone number (returns phone number as user ID).<br/>`find_user(username: str) -> str | None`
-
-  - `username`: Phone number in E.164 format.
-  - **Returns:** The phone number itself as user ID.
-
-- **join_channel** — No-op for WhatsApp — no channel joining required.<br/>`join_channel(channel_id: str) -> None`
-
-  - `channel_id`: Phone number (unused).
-
 - **poll_messages** — Drain the webhook message queue and return new messages.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
   - `channel_id`: Recipient phone number (unused — all messages returned).
@@ -3381,16 +3137,6 @@ ______________________________________________________________________
   - **Returns:** The text of the user's reply.
 
 - **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if a message was sent by the bot itself.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-  - `msg`: Message dict from poll_messages.
-  - **Returns:** Always False — WhatsApp webhooks only deliver inbound messages.
-
-- **strip_bot_mention** — Remove bot mention markers (no-op for WhatsApp).<br/>`strip_bot_mention(text: str) -> str`
-
-  - `text`: Raw message text.
-  - **Returns:** Unchanged text.
 
 - **send_text_message** — Send a text message to a WhatsApp number.<br/>`send_text_message(to: str, body: str, preview_url: bool = False) -> str`
 
@@ -3500,14 +3246,6 @@ ______________________________________________________________________
 
 - **connect** — Load Zalo config and start webhook server.<br/>`connect() -> bool`
 
-- **connection_info** — Human-readable connection status string.<br/>`connection_info() -> str` *(property)*
-
-- **find_channel** — Return channel name as user ID.<br/>`find_channel(name: str) -> str | None`
-
-- **find_user** — Return username as user ID.<br/>`find_user(username: str) -> str | None`
-
-- **join_channel** — No-op for Zalo.<br/>`join_channel(channel_id: str) -> None`
-
 - **poll_messages** — Drain the webhook message queue.<br/>`poll_messages(channel_id: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
 - **send_message** — Send a Zalo text message.<br/>`send_message(channel_id: str, text: str, thread_ts: str = '') -> None`
@@ -3515,10 +3253,6 @@ ______________________________________________________________________
 - **wait_for_reply** — Poll for a reply from a specific user.<br/>`wait_for_reply(channel_id: str, thread_ts: str, user_id: str, timeout_seconds: float = 300.0, stop_event: threading.Event | None = None) -> str | None`
 
 - **disconnect** — Stop the embedded webhook server and release backend resources.<br/>`disconnect() -> None`
-
-- **is_from_bot** — Check if message is from the bot.<br/>`is_from_bot(msg: dict[str, Any]) -> bool`
-
-- **strip_bot_mention** — Remove bot mentions from text.<br/>`strip_bot_mention(text: str) -> str`
 
 - **send_text_message** — Send a text message to a Zalo user.<br/>`send_text_message(to_user_id: str, text: str) -> str`
 

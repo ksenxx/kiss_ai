@@ -71,22 +71,6 @@ class PhoneControlChannelBackend(ToolMethodBackend):
             self._connection_info = f"Phone connection failed: {e}"
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
-    def find_channel(self, name: str) -> str | None:
-        """Return phone number as channel ID."""
-        return name if name else None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username as user ID."""
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for phone control."""
-
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
@@ -147,17 +131,6 @@ class PhoneControlChannelBackend(ToolMethodBackend):
             stop_event=stop_event,
             poll_interval=3.0,
         )
-
-    def disconnect(self) -> None:
-        """Release backend resources before stop or reconnect."""
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Check if message is from the phone itself (sent)."""
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     def send_sms(self, to: str, text: str) -> str:
         """Send an SMS message.

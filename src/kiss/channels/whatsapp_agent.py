@@ -198,40 +198,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             self._webhook_thread = None
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
-    def find_channel(self, name: str) -> str | None:
-        """Find a WhatsApp channel by name (returns name as channel ID).
-
-        Args:
-            name: Channel name / phone number.
-
-        Returns:
-            The name itself as the channel ID.
-        """
-        return name if name else None
-
-    def find_user(self, username: str) -> str | None:
-        """Find a user by phone number (returns phone number as user ID).
-
-        Args:
-            username: Phone number in E.164 format.
-
-        Returns:
-            The phone number itself as user ID.
-        """
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for WhatsApp — no channel joining required.
-
-        Args:
-            channel_id: Phone number (unused).
-        """
-
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
@@ -331,28 +297,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         self._webhook_server, self._webhook_thread = stop_http_server(
             self._webhook_server, self._webhook_thread
         )
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Check if a message was sent by the bot itself.
-
-        Args:
-            msg: Message dict from poll_messages.
-
-        Returns:
-            Always False — WhatsApp webhooks only deliver inbound messages.
-        """
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mention markers (no-op for WhatsApp).
-
-        Args:
-            text: Raw message text.
-
-        Returns:
-            Unchanged text.
-        """
-        return text
 
     # -------------------------------------------------------------------
     # WhatsApp API tool methods (return JSON strings for LLM agent use)

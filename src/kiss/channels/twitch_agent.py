@@ -85,22 +85,6 @@ class TwitchChannelBackend(ToolMethodBackend):
             self._connection_info = f"Twitch connection failed: {e}"
             return False
 
-    @property
-    def connection_info(self) -> str:
-        """Human-readable connection status string."""
-        return self._connection_info
-
-    def find_channel(self, name: str) -> str | None:
-        """Return channel name."""
-        return name if name else None
-
-    def find_user(self, username: str) -> str | None:
-        """Return username."""
-        return username if username else None
-
-    def join_channel(self, channel_id: str) -> None:
-        """No-op for Twitch."""
-
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
@@ -122,17 +106,6 @@ class TwitchChannelBackend(ToolMethodBackend):
     ) -> str | None:
         """Reply waiting is not currently supported for Twitch."""
         return None
-
-    def disconnect(self) -> None:
-        """Release backend resources before stop or reconnect."""
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Check if message is from the bot."""
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Remove bot mentions from text."""
-        return text
 
     def get_stream_info(self, broadcaster_login: str) -> str:
         """Get live stream information for a Twitch channel.
