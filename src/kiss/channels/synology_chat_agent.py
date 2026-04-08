@@ -237,7 +237,8 @@ class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
             if not agent._backend._webhook_url:  # pragma: no branch
                 return (
                     "Not configured for Synology Chat. Use authenticate_synology() to configure.\n"
-                    "You need the incoming webhook URL from Synology Chat integration settings."
+                    "You need the incoming webhook URL from Synology Chat > "
+                    "Integration > Incoming Webhooks > Create."
                 )
             return json.dumps(
                 {

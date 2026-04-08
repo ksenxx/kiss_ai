@@ -56,7 +56,7 @@ class PhoneControlChannelBackend(ToolMethodBackend):
         if not cfg:  # pragma: no branch
             self._connection_info = "No phone config found."
             return False
-        self._device_url = f"http://{cfg['device_ip']}:{cfg['device_port']}"
+        self._device_url = f"http://{cfg['device_ip']}:{cfg.get('device_port', '8080')}"
         self._api_key = cfg.get("api_key", "")
         try:
             resp = requests.get(self._url("/api/device/info"), headers=self._headers(), timeout=5)
@@ -343,8 +343,10 @@ class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
             """
             if not agent._backend._device_url:  # pragma: no branch
                 return (
-                    "Not configured for phone control. Use authenticate_phone() to configure.\n"
-                    "Requires a companion app running on your Android device."
+                    "Not configured for phone control. "
+                    "Use authenticate_phone(device_ip=...) to configure.\n"
+                    "Requires a companion REST app running on your Android device "
+                    "on the same network. Provide the device's local IP address."
                 )
             try:
                 result = json.loads(agent._backend.get_device_info())

@@ -424,7 +424,8 @@ class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
             if agent._backend._client is None:  # pragma: no branch
                 return (
                     "Not authenticated with Twilio. Use authenticate_sms() to configure.\n"
-                    "You need account_sid, auth_token, and from_number from twilio.com/console."
+                    "You need account_sid, auth_token, and from_number from "
+                    "https://console.twilio.com/ (Dashboard > Account Info)."
                 )
             try:
                 result = json.loads(agent._backend.get_account_info())

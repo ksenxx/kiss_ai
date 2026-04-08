@@ -331,7 +331,9 @@ class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent):
             if not agent._backend._client_id:  # pragma: no branch
                 return (
                     "Not authenticated with Twitch. Use authenticate_twitch() to configure.\n"
-                    "You need client_id and access_token from https://dev.twitch.tv/console."
+                    "You need client_id, client_secret, and access_token from "
+                    "https://dev.twitch.tv/console/apps — register an app, then "
+                    "generate an OAuth token at https://id.twitch.tv/oauth2/authorize."
                 )
             try:
                 result = agent._backend._get("/users")

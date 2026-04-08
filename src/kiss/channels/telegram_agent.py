@@ -162,11 +162,15 @@ class TelegramChannelBackend(ToolMethodBackend):
             }
             if photo_url_or_path.startswith("http"):  # pragma: no branch
                 kwargs["photo"] = photo_url_or_path
+                if caption:  # pragma: no branch
+                    kwargs["caption"] = caption
+                msg = self._bot.send_photo(**kwargs)
             else:
-                kwargs["photo"] = open(photo_url_or_path, "rb")
-            if caption:  # pragma: no branch
-                kwargs["caption"] = caption
-            msg = self._bot.send_photo(**kwargs)
+                with open(photo_url_or_path, "rb") as f:
+                    kwargs["photo"] = f
+                    if caption:  # pragma: no branch
+                        kwargs["caption"] = caption
+                    msg = self._bot.send_photo(**kwargs)
             return json.dumps({"ok": True, "message_id": msg.message_id})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -503,7 +507,8 @@ class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
             if agent._backend._bot is None:  # pragma: no branch
                 return (
                     "Not authenticated with Telegram. Use authenticate_telegram(bot_token=...) "
-                    "to configure. Get a token from @BotFather on Telegram."
+                    "to configure. Get a token by messaging @BotFather on Telegram: "
+                    "send /newbot, follow the prompts, and copy the HTTP API token."
                 )
             try:
                 me = agent._backend._bot.get_me()

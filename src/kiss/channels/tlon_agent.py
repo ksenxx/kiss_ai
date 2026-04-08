@@ -265,8 +265,10 @@ class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
             """
             if not agent._backend._ship_url:  # pragma: no branch
                 return (
-                    "Not configured for Tlon. Use authenticate_tlon(ship_url=..., code=...) "
-                    "to configure. You need your ship URL and +code from the Urbit terminal."
+                    "Not configured for Tlon/Urbit. "
+                    "Use authenticate_tlon(ship_url=..., code=...) to configure.\n"
+                    "You need your ship URL (e.g. http://localhost:8080) and "
+                    "the access code from running +code in your Urbit dojo terminal."
                 )
             return json.dumps({"ok": True, "ship_url": agent._backend._ship_url})
 
