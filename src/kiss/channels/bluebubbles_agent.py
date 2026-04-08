@@ -47,7 +47,7 @@ _config = ChannelConfig(
 
 
 class BlueBubblesChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for BlueBubbles REST API."""
+    """Channel backend for BlueBubbles REST API."""
 
     def __init__(self) -> None:
         self._server_url: str = ""

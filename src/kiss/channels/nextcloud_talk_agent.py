@@ -39,7 +39,7 @@ _config = ChannelConfig(
 
 
 class NextcloudTalkChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Nextcloud Talk REST API."""
+    """Channel backend for Nextcloud Talk REST API."""
 
     def __init__(self) -> None:
         self._url: str = ""

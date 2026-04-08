@@ -52,7 +52,6 @@
   - [`kiss.channels`](#kisschannels)
     - [`kiss.channels._backend_utils`](#kisschannels_backend_utils)
     - [`kiss.channels._channel_agent_utils`](#kisschannels_channel_agent_utils)
-    - [`kiss.channels.background_agent`](#kisschannelsbackground_agent)
     - [`kiss.channels.bluebubbles_agent`](#kisschannelsbluebubbles_agent)
     - [`kiss.channels.discord_agent`](#kisschannelsdiscord_agent)
     - [`kiss.channels.feishu_agent`](#kisschannelsfeishu_agent)
@@ -1387,6 +1386,13 @@ ______________________________________________________________________
 
 ##### `class BaseChannelAgent` — Mixin for channel agent classes that provides a standard `_get_tools()`
 
+##### `class ChannelPoller` — One-shot channel poller that checks for pending messages and runs agents.
+
+**Constructor:** `ChannelPoller(backend: Any, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', allow_users: list[str] | None = None) -> None`
+
+- **run_once** — Check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a StatefulSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
+  - **Returns:** Number of messages processed.
+
 **`load_json_config`** — Load a JSON config file containing string values.<br/>`def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, str] | None`
 
 - `path`: Config file path.
@@ -1412,20 +1418,9 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.background_agent` — *Channel poller — polls a ChannelBackend and runs agents.*
-
-##### `class ChannelPoller` — One-shot channel poller that checks for pending messages and runs agents.
-
-**Constructor:** `ChannelPoller(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', allow_users: list[str] | None = None) -> None`
-
-- **run_once** — Check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a StatefulSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
-  - **Returns:** Number of messages processed.
-
-______________________________________________________________________
-
 #### `kiss.channels.bluebubbles_agent` — *BlueBubbles Agent — StatefulSorcarAgent extension with BlueBubbles REST API tools.*
 
-##### `class BlueBubblesChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for BlueBubbles REST API.
+##### `class BlueBubblesChannelBackend(ToolMethodBackend)` — Channel backend for BlueBubbles REST API.
 
 **Constructor:** `BlueBubblesChannelBackend() -> None`
 
@@ -1493,7 +1488,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
 
-##### `class DiscordChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Discord REST API v10.
+##### `class DiscordChannelBackend(ToolMethodBackend)` — Channel backend for Discord REST API v10.
 
 **Constructor:** `DiscordChannelBackend() -> None`
 
@@ -1606,7 +1601,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.feishu_agent` — *Feishu/Lark Agent — StatefulSorcarAgent extension with Feishu Open Platform tools.*
 
-##### `class FeishuChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Feishu/Lark Open Platform.
+##### `class FeishuChannelBackend(ToolMethodBackend)` — Channel backend for Feishu/Lark Open Platform.
 
 **Constructor:** `FeishuChannelBackend() -> None`
 
@@ -1683,7 +1678,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.gmail_agent` — *Gmail Agent — StatefulSorcarAgent extension with Gmail API tools.*
 
-##### `class GmailChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Gmail.
+##### `class GmailChannelBackend(ToolMethodBackend)` — Channel backend for Gmail.
 
 **Constructor:** `GmailChannelBackend() -> None`
 
@@ -1839,7 +1834,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.googlechat_agent` — *Google Chat Agent — StatefulSorcarAgent extension with Google Chat API tools.*
 
-##### `class GoogleChatChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Google Chat API.
+##### `class GoogleChatChannelBackend(ToolMethodBackend)` — Channel backend for Google Chat API.
 
 **Constructor:** `GoogleChatChannelBackend() -> None`
 
@@ -1928,7 +1923,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.imessage_agent` — *iMessage Agent — StatefulSorcarAgent extension with iMessage tools via AppleScript.*
 
-##### `class IMessageChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for iMessage via AppleScript.
+##### `class IMessageChannelBackend(ToolMethodBackend)` — Channel backend for iMessage via AppleScript.
 
 **Constructor:** `IMessageChannelBackend() -> None`
 
@@ -1986,7 +1981,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.irc_agent` — *IRC Agent — StatefulSorcarAgent extension with IRC tools.*
 
-##### `class IRCChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for IRC via raw socket.
+##### `class IRCChannelBackend(ToolMethodBackend)` — Channel backend for IRC via raw socket.
 
 **Constructor:** `IRCChannelBackend() -> None`
 
@@ -2081,7 +2076,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.line_agent` — *LINE Agent — StatefulSorcarAgent extension with LINE Messaging API tools.*
 
-##### `class LineChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for LINE Messaging API.
+##### `class LineChannelBackend(ToolMethodBackend)` — Channel backend for LINE Messaging API.
 
 **Constructor:** `LineChannelBackend() -> None`
 
@@ -2148,7 +2143,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.matrix_agent` — *Matrix Agent — StatefulSorcarAgent extension with Matrix protocol tools.*
 
-##### `class MatrixChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Matrix via matrix-nio.
+##### `class MatrixChannelBackend(ToolMethodBackend)` — Channel backend for Matrix via matrix-nio.
 
 **Constructor:** `MatrixChannelBackend() -> None`
 
@@ -2239,7 +2234,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.mattermost_agent` — *Mattermost Agent — StatefulSorcarAgent extension with Mattermost REST API tools.*
 
-##### `class MattermostChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Mattermost REST API.
+##### `class MattermostChannelBackend(ToolMethodBackend)` — Channel backend for Mattermost REST API.
 
 **Constructor:** `MattermostChannelBackend() -> None`
 
@@ -2335,7 +2330,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.msteams_agent` — *Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.*
 
-##### `class MSTeamsChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Microsoft Teams via Graph API.
+##### `class MSTeamsChannelBackend(ToolMethodBackend)` — Channel backend for Microsoft Teams via Graph API.
 
 **Constructor:** `MSTeamsChannelBackend() -> None`
 
@@ -2425,7 +2420,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.nextcloud_talk_agent` — *Nextcloud Talk Agent — StatefulSorcarAgent extension with Nextcloud Talk API tools.*
 
-##### `class NextcloudTalkChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Nextcloud Talk REST API.
+##### `class NextcloudTalkChannelBackend(ToolMethodBackend)` — Channel backend for Nextcloud Talk REST API.
 
 **Constructor:** `NextcloudTalkChannelBackend() -> None`
 
@@ -2507,7 +2502,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.nostr_agent` — *Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.*
 
-##### `class NostrChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Nostr protocol via pynostr.
+##### `class NostrChannelBackend(ToolMethodBackend)` — Channel backend for Nostr protocol via pynostr.
 
 **Constructor:** `NostrChannelBackend() -> None`
 
@@ -2584,7 +2579,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.phone_control_agent` — *Phone Control Agent — StatefulSorcarAgent extension with Android phone control tools.*
 
-##### `class PhoneControlChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Android phone control via REST API.
+##### `class PhoneControlChannelBackend(ToolMethodBackend)` — Channel backend for Android phone control via REST API.
 
 **Constructor:** `PhoneControlChannelBackend() -> None`
 
@@ -2668,7 +2663,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.signal_agent` — *Signal Agent — StatefulSorcarAgent extension with Signal CLI tools.*
 
-##### `class SignalChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Signal via signal-cli.
+##### `class SignalChannelBackend(ToolMethodBackend)` — Channel backend for Signal via signal-cli.
 
 **Constructor:** `SignalChannelBackend() -> None`
 
@@ -2728,7 +2723,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.slack_agent` — *Slack Agent — StatefulSorcarAgent extension with Slack API tools.*
 
-##### `class SlackChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Slack.
+##### `class SlackChannelBackend(ToolMethodBackend)` — Slack channel backend.
 
 **Constructor:** `SlackChannelBackend(workspace: str = 'default') -> None`
 
@@ -2904,7 +2899,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.sms_agent` — *SMS Agent — StatefulSorcarAgent extension with Twilio SMS tools.*
 
-##### `class SMSChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Twilio SMS.
+##### `class SMSChannelBackend(ToolMethodBackend)` — Channel backend for Twilio SMS.
 
 **Constructor:** `SMSChannelBackend() -> None`
 
@@ -3003,7 +2998,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.synology_chat_agent` — *Synology Chat Agent — StatefulSorcarAgent extension with Synology Chat webhook API.*
 
-##### `class SynologyChatChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Synology Chat webhooks.
+##### `class SynologyChatChannelBackend(ToolMethodBackend)` — Channel backend for Synology Chat webhooks.
 
 **Constructor:** `SynologyChatChannelBackend() -> None`
 
@@ -3049,7 +3044,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
 
-##### `class TelegramChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Telegram Bot API.
+##### `class TelegramChannelBackend(ToolMethodBackend)` — Channel backend for Telegram Bot API.
 
 **Constructor:** `TelegramChannelBackend() -> None`
 
@@ -3178,7 +3173,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.tlon_agent` — *Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.*
 
-##### `class TlonChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Tlon/Urbit Eyre HTTP.
+##### `class TlonChannelBackend(ToolMethodBackend)` — Channel backend for Tlon/Urbit Eyre HTTP.
 
 **Constructor:** `TlonChannelBackend() -> None`
 
@@ -3252,7 +3247,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.twitch_agent` — *Twitch Agent — StatefulSorcarAgent extension with Twitch Helix API + Chat tools.*
 
-##### `class TwitchChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Twitch Helix API.
+##### `class TwitchChannelBackend(ToolMethodBackend)` — Channel backend for Twitch Helix API.
 
 **Constructor:** `TwitchChannelBackend() -> None`
 
@@ -3341,7 +3336,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
 
-##### `class WhatsAppChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for WhatsApp Business Cloud API.
+##### `class WhatsAppChannelBackend(ToolMethodBackend)` — Channel backend for WhatsApp Business Cloud API.
 
 **Constructor:** `WhatsAppChannelBackend() -> None`
 
@@ -3499,7 +3494,7 @@ ______________________________________________________________________
 
 #### `kiss.channels.zalo_agent` — *Zalo Agent — StatefulSorcarAgent extension with Zalo Official Account API tools.*
 
-##### `class ZaloChannelBackend(ToolMethodBackend)` — ChannelBackend implementation for Zalo OA API.
+##### `class ZaloChannelBackend(ToolMethodBackend)` — Channel backend for Zalo OA API.
 
 **Constructor:** `ZaloChannelBackend() -> None`
 

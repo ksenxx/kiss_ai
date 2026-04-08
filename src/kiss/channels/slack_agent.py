@@ -115,18 +115,17 @@ def _clear_token(workspace: str = "default") -> None:
 
 
 # ---------------------------------------------------------------------------
-# SlackChannelBackend — used by background_agent.py and SlackAgent tools
+# SlackChannelBackend — used by ChannelPoller and SlackAgent tools
 # ---------------------------------------------------------------------------
 
 _REPLY_POLL_INTERVAL = 2.0
 
 
 class SlackChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Slack.
+    """Slack channel backend.
 
     Provides channel monitoring, message sending, and reply waiting for
-    the background agent. Implements the ``ChannelBackend`` protocol
-    defined in ``kiss.channels``.
+    the channel poller and interactive agent.
     """
 
     def __init__(self, workspace: str = "default") -> None:

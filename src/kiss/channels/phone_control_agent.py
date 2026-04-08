@@ -34,7 +34,7 @@ _config = ChannelConfig(_PHONE_DIR, ("device_ip",))
 
 
 class PhoneControlChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Android phone control via REST API."""
+    """Channel backend for Android phone control via REST API."""
 
     def __init__(self) -> None:
         self._device_url: str = ""

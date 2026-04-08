@@ -369,23 +369,23 @@ class TestI6DocstringReferencesNonExistentParams:
 
 
 # ---------------------------------------------------------------------------
-# I7: background_agent.py — unnecessary callable() check
+# I7: ChannelPoller — unnecessary callable() check
 # ---------------------------------------------------------------------------
 class TestI7UnnecessaryCallableCheck:
     def test_disconnect_backend_calls_disconnect_directly(self) -> None:
         """_disconnect_backend should call disconnect() directly since
         it's a required protocol method, not use getattr+callable guard.
         """
-        from kiss.channels.background_agent import ChannelDaemon
+        from kiss.channels._channel_agent_utils import ChannelPoller
 
-        source = inspect.getsource(ChannelDaemon._disconnect_backend)
+        source = inspect.getsource(ChannelPoller._disconnect_backend)
 
         has_getattr = "getattr(self._backend" in source
         has_callable = "callable(disconnect)" in source
 
         assert not (has_getattr and has_callable), (
             "_disconnect_backend uses getattr+callable guard for disconnect(), "
-            "which is a required ChannelBackend protocol method. "
+            "which is unnecessary. "
             "Should call self._backend.disconnect() directly."
         )
 

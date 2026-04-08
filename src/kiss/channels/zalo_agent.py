@@ -46,7 +46,7 @@ _config = ChannelConfig(_ZALO_DIR, ("access_token",))
 
 
 class ZaloChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Zalo OA API.
+    """Channel backend for Zalo OA API.
 
     Uses webhook queue pattern for receiving inbound messages.
     """

@@ -30,7 +30,7 @@ _config = ChannelConfig(_NOSTR_DIR, ("private_key",))
 
 
 class NostrChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Nostr protocol via pynostr."""
+    """Channel backend for Nostr protocol via pynostr."""
 
     def __init__(self) -> None:
         self._private_key: Any = None

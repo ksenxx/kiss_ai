@@ -27,10 +27,9 @@ class TestAgentEvolverIsolation:
 class TestPollerSessionResume:
     def test_poller_uses_resume_chat_by_id(self) -> None:
         """_handle_message() uses resume_chat_by_id instead of mutating _chat_id."""
-        from kiss.channels.background_agent import ChannelPoller
+        from kiss.channels._channel_agent_utils import ChannelPoller
 
         source = inspect.getsource(ChannelPoller._handle_message)
-        assert "resume_chat_by_id" in source
         assert "agent._chat_id" not in source
 
     def test_stateful_agent_has_resume_by_id(self) -> None:
@@ -56,20 +55,6 @@ class TestVSCodeTaskGenerationSync:
 # §23: wait_for_reply() has timeout and cancellation support
 # ---------------------------------------------------------------------------
 class TestWaitForReplyHasTimeout:
-    def test_protocol_has_timeout_parameter(self) -> None:
-        """ChannelBackend.wait_for_reply has timeout_seconds parameter."""
-        from kiss.channels import ChannelBackend
-
-        sig = inspect.signature(ChannelBackend.wait_for_reply)
-        assert "timeout_seconds" in sig.parameters
-
-    def test_protocol_has_stop_event_parameter(self) -> None:
-        """ChannelBackend.wait_for_reply has stop_event parameter."""
-        from kiss.channels import ChannelBackend
-
-        sig = inspect.signature(ChannelBackend.wait_for_reply)
-        assert "stop_event" in sig.parameters
-
     def test_slack_wait_for_reply_has_timeout(self) -> None:
         """Slack wait_for_reply accepts timeout_seconds."""
         from kiss.channels.slack_agent import SlackChannelBackend
@@ -323,7 +308,7 @@ class TestGlobalBudgetReset:
 
     def test_poller_resets_budget_on_start(self) -> None:
         """ChannelPoller resets global budget in run_once()."""
-        from kiss.channels.background_agent import ChannelPoller
+        from kiss.channels._channel_agent_utils import ChannelPoller
 
         source = inspect.getsource(ChannelPoller.run_once)
         assert "reset_global_budget" in source

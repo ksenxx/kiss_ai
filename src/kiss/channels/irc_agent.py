@@ -40,7 +40,7 @@ _config = ChannelConfig(
 
 
 class IRCChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for IRC via raw socket."""
+    """Channel backend for IRC via raw socket."""
 
     def __init__(self) -> None:
         self._sock: socket.socket | None = None

@@ -38,7 +38,7 @@ _config = ChannelConfig(
 
 
 class MatrixChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Matrix via matrix-nio."""
+    """Channel backend for Matrix via matrix-nio."""
 
     def __init__(self) -> None:
         self._client: Any = None

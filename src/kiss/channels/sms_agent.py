@@ -38,7 +38,7 @@ _config = ChannelConfig(
 
 
 class SMSChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Twilio SMS."""
+    """Channel backend for Twilio SMS."""
 
     def __init__(self) -> None:
         self._client: Any = None

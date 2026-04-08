@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from kiss.channels.background_agent import ChannelPoller, _SenderState
+from kiss.channels._channel_agent_utils import ChannelPoller
 from kiss.channels.slack_agent import (
     SlackChannelBackend,
     _save_token,
@@ -166,15 +166,6 @@ class TestHasBotReply:
         poller = self._make_poller_with_poll_fn(poll_fn)
         msg = {"ts": "1234.5678", "reply_count": 1, "user": "U_HUMAN"}
         assert poller._has_bot_reply("C_TEST", msg) is False
-
-
-class TestSenderState:
-    """Tests for _SenderState dataclass."""
-
-    def test_initial_state(self) -> None:
-        """_SenderState has empty chat_id."""
-        state = _SenderState()
-        assert state.chat_id == ""
 
 
 class TestCLIOneShotMode:

@@ -32,7 +32,7 @@ _config = ChannelConfig(_SIGNAL_DIR, ("phone_number",))
 
 
 class SignalChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Signal via signal-cli."""
+    """Channel backend for Signal via signal-cli."""
 
     def __init__(self) -> None:
         self._phone_number: str = ""
