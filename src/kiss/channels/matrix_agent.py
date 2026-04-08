@@ -423,7 +423,9 @@ class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
             if agent._backend._client is None:  # pragma: no branch
                 return (
                     "Not authenticated with Matrix. Use authenticate_matrix() to configure.\n"
-                    "You need: homeserver_url, access_token (from Element > Settings > Security)."
+                    "You need: homeserver_url (e.g. https://matrix.org) and access_token.\n"
+                    "To get an access token: Element > All Settings > Help & About > "
+                    "scroll to 'Access Token', or use the POST /_matrix/client/v3/login API."
                 )
             try:
                 resp = agent._backend.list_rooms()

@@ -313,17 +313,19 @@ class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
                     "Not configured for Nostr. Use authenticate_nostr(private_key=...) "
                     "to configure. Provide an nsec... key or hex private key."
                 )
-            return (
-                json.loads(agent._backend.get_profile()).get("ok")
-                and json.dumps(
-                    {
-                        "ok": True,
-                        "pubkey": agent._backend._public_key[:16] + "...",
-                        "relays": agent._backend._relays,
-                    }
-                )
-                or json.dumps({"ok": False, "error": "Key error"})
-            )
+            try:
+                result = json.loads(agent._backend.get_profile())
+                if result.get("ok"):  # pragma: no branch
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "pubkey": agent._backend._public_key[:16] + "...",
+                            "relays": agent._backend._relays,
+                        }
+                    )
+                return json.dumps({"ok": False, "error": result.get("error", "Unknown error")})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
 
         def authenticate_nostr(private_key: str, relays: str = "wss://relay.damus.io") -> str:
             """Configure Nostr with a private key.

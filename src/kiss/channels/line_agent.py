@@ -330,7 +330,9 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
             if agent._backend._api is None:  # pragma: no branch
                 return (
                     "Not authenticated with LINE. Use authenticate_line(channel_access_token=...) "
-                    "to configure. Get a token from LINE Developers Console."
+                    "to configure. Get a token from https://developers.line.biz/console/\n"
+                    "Create a Messaging API channel, then find the Channel access token "
+                    "on the channel's 'Messaging API' tab."
                 )
             try:
                 quota = json.loads(agent._backend.get_quota())

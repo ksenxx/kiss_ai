@@ -406,7 +406,10 @@ class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
             if not agent._backend._client_id:  # pragma: no branch
                 return (
                     "Not authenticated with MS Teams. Use authenticate_msteams() to configure.\n"
-                    "You need: tenant_id, client_id, client_secret from Azure portal."
+                    "You need: tenant_id, client_id, client_secret from "
+                    "https://portal.azure.com > App registrations.\n"
+                    "Register an app, add Microsoft Graph API permissions "
+                    "(ChannelMessage.Send, Team.ReadBasic.All, etc.), and create a client secret."
                 )
             try:
                 token = agent._backend._token()

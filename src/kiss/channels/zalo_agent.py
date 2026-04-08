@@ -389,7 +389,8 @@ class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
             if not agent._backend._access_token:  # pragma: no branch
                 return (
                     "Not authenticated with Zalo. Use authenticate_zalo(access_token=...) "
-                    "to configure. Get a token from Zalo for Developers portal."
+                    "to configure. Get a token from https://developers.zalo.me/ — "
+                    "create an Official Account app and find the access token in its settings."
                 )
             try:
                 result = json.loads(agent._backend.get_oa_info())

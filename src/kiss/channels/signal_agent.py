@@ -228,7 +228,9 @@ class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
             if not agent._backend._phone_number:  # pragma: no branch
                 return (
                     "Not configured for Signal. Use authenticate_signal(phone_number=...) "
-                    "to configure. Requires signal-cli to be installed and registered."
+                    "to configure. Requires signal-cli (https://github.com/AsamK/signal-cli) "
+                    "to be installed and registered with: "
+                    "signal-cli -u +NUMBER register && signal-cli -u +NUMBER verify CODE"
                 )
             try:
                 result = subprocess.run(

@@ -523,11 +523,13 @@ class GoogleChatAgent(BaseChannelAgent, StatefulSorcarAgent):
                     )
                 return (
                     "Not authenticated with Google Chat. To set up:\n"
-                    "Option 1 (Bot): Save service account JSON to "
-                    f"{_service_account_path()}\n"
-                    "Option 2 (OAuth): Save credentials JSON to "
-                    f"{_credentials_path()}\n"
-                    "Then call authenticate_googlechat()."
+                    "Option 1 (Service Account): Create at "
+                    "https://console.cloud.google.com/iam-admin/serviceaccounts, "
+                    f"download JSON, save to {_service_account_path()}\n"
+                    "Option 2 (OAuth): Create OAuth credentials at "
+                    "https://console.cloud.google.com/apis/credentials, "
+                    f"download JSON, save to {_credentials_path()}\n"
+                    "Enable the Google Chat API, then call authenticate_googlechat()."
                 )
             try:
                 resp = agent._backend._service.spaces().list(pageSize=1).execute()

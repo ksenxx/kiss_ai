@@ -311,19 +311,24 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
             """
             if not agent._backend._server_url:  # pragma: no branch
                 return (
-                    "Not configured for BlueBubbles. Use authenticate_bluebubbles() to configure.\n"
-                    "Requires BlueBubbles server running on a Mac."
+                    "Not configured for BlueBubbles. "
+                    "Use authenticate_bluebubbles(server_url=..., password=...) "
+                    "to configure.\n"
+                    "Requires BlueBubbles server (https://bluebubbles.app) running on a Mac. "
+                    "Find the server URL and password in the BlueBubbles server app settings."
                 )
-            return (
-                json.loads(agent._backend.get_server_info()).get("ok")
-                and json.dumps(
-                    {
-                        "ok": True,
-                        "server_url": agent._backend._server_url,
-                    }
-                )
-                or agent._backend.get_server_info()
-            )
+            try:
+                result = json.loads(agent._backend.get_server_info())
+                if result.get("ok"):  # pragma: no branch
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "server_url": agent._backend._server_url,
+                        }
+                    )
+                return json.dumps({"ok": False, "error": result.get("error", "Unknown error")})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
 
         def authenticate_bluebubbles(server_url: str, password: str) -> str:
             """Configure BlueBubbles connection.

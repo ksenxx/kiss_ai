@@ -412,9 +412,11 @@ class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
             """
             if agent._backend._client is None:  # pragma: no branch
                 return (
-                    "Not authenticated with Feishu. "
-                    "Use authenticate_feishu(app_id=..., app_secret=...) "
-                    "to configure. Get credentials from the Feishu Open Platform developer console."
+                    "Not authenticated with Feishu/Lark. "
+                    "Use authenticate_feishu(app_id=..., app_secret=...) to configure.\n"
+                    "Get credentials from: https://open.feishu.cn/app (Feishu) "
+                    "or https://open.larksuite.com/app (Lark international).\n"
+                    "Create an app and find app_id and app_secret on the app's Credentials page."
                 )
             try:
                 resp = agent._backend.list_chats(page_size=1)

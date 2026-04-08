@@ -360,8 +360,11 @@ class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
             if not agent._backend._url:  # pragma: no branch
                 return (
                     "Not authenticated with Nextcloud Talk. "
-                    "Use authenticate_nextcloud() to configure.\n"
-                    "You need: server URL, username, and password."
+                    "Use authenticate_nextcloud(url=..., username=..., password=...) "
+                    "to configure.\n"
+                    "You need: Nextcloud server URL (e.g. 'https://cloud.example.com'), "
+                    "username, and password (or an app password from "
+                    "Settings > Security > Devices & sessions)."
                 )
             try:
                 result = json.loads(agent._backend.list_rooms())

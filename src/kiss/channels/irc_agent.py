@@ -391,8 +391,10 @@ class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
             """
             if not agent._backend._nick:  # pragma: no branch
                 return (
-                    "Not configured for IRC. Use authenticate_irc(server=..., nick=...) "
-                    "to configure and connect."
+                    "Not configured for IRC. "
+                    "Use authenticate_irc(server=..., nick=...) to configure and connect.\n"
+                    "Example: authenticate_irc(server='irc.libera.chat', nick='MyBot', "
+                    "port=6697, use_tls=True)"
                 )
             return json.dumps(
                 {

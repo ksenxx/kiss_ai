@@ -413,8 +413,9 @@ class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
             if agent._backend._driver is None:  # pragma: no branch
                 return (
                     "Not authenticated with Mattermost. "
-                    "Use authenticate_mattermost() to configure.\n"
-                    "You need: server URL and a personal access token."
+                    "Use authenticate_mattermost(url=..., token=...) to configure.\n"
+                    "You need: server URL (e.g. 'mattermost.example.com') and a "
+                    "personal access token from Profile > Security > Personal Access Tokens."
                 )
             try:
                 result = json.loads(agent._backend.get_user("me"))
