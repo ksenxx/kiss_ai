@@ -39,7 +39,7 @@ _config = ChannelConfig(
 
 
 class TwitchChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Twitch Helix API."""
+    """Channel backend for Twitch Helix API."""
 
     def __init__(self) -> None:
         self._client_id: str = ""

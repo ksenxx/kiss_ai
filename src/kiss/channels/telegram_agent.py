@@ -37,7 +37,7 @@ _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 
 
 class TelegramChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Telegram Bot API.
+    """Channel backend for Telegram Bot API.
 
     Uses python-telegram-bot sync Bot for API calls and long-polling
     getUpdates for message polling.

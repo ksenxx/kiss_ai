@@ -38,7 +38,7 @@ _config = ChannelConfig(
 
 
 class MattermostChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Mattermost REST API."""
+    """Channel backend for Mattermost REST API."""
 
     def __init__(self) -> None:
         self._driver: Any = None

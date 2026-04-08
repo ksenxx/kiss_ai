@@ -41,7 +41,7 @@ _config = ChannelConfig(_DISCORD_DIR, ("bot_token",))
 
 
 class DiscordChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Discord REST API v10."""
+    """Channel backend for Discord REST API v10."""
 
     def __init__(self) -> None:
         self._bot_token: str = ""

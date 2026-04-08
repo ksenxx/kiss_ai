@@ -52,7 +52,7 @@ def _get_access_token(tenant_id: str, client_id: str, client_secret: str) -> str
 
 
 class MSTeamsChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Microsoft Teams via Graph API."""
+    """Channel backend for Microsoft Teams via Graph API."""
 
     def __init__(self) -> None:
         self._tenant_id: str = ""

@@ -44,7 +44,7 @@ def _run_osascript(script: str) -> tuple[str, str]:
 
 
 class IMessageChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for iMessage via AppleScript."""
+    """Channel backend for iMessage via AppleScript."""
 
     def __init__(self) -> None:
         self._enabled: bool = False

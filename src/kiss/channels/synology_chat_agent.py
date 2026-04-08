@@ -45,7 +45,7 @@ _config = ChannelConfig(_SYNOLOGY_DIR, ("webhook_url",))
 
 
 class SynologyChatChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Synology Chat webhooks.
+    """Channel backend for Synology Chat webhooks.
 
     Sends messages via the incoming webhook URL. Receives messages
     via a webhook server (outgoing webhook from Synology Chat).

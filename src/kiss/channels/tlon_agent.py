@@ -34,7 +34,7 @@ _config = ChannelConfig(_TLON_DIR, ("ship_url",))
 
 
 class TlonChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Tlon/Urbit Eyre HTTP."""
+    """Channel backend for Tlon/Urbit Eyre HTTP."""
 
     def __init__(self) -> None:
         self._ship_url: str = ""

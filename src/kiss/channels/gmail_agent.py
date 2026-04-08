@@ -225,16 +225,15 @@ def _extract_attachments(payload: dict) -> list[dict[str, Any]]:  # type: ignore
 
 
 # ---------------------------------------------------------------------------
-# GmailChannelBackend — used by background_agent.py and GmailAgent tools
+# GmailChannelBackend
 # ---------------------------------------------------------------------------
 
 
 class GmailChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Gmail.
+    """Channel backend for Gmail.
 
     Provides email monitoring, sending, and reply waiting for
-    the background agent. Implements the ``ChannelBackend`` protocol
-    defined in ``kiss.channels``.
+    the channel poller and interactive agent.
     """
 
     def __init__(self) -> None:

@@ -38,7 +38,7 @@ _config = ChannelConfig(
 
 
 class FeishuChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Feishu/Lark Open Platform."""
+    """Channel backend for Feishu/Lark Open Platform."""
 
     def __init__(self) -> None:
         self._client: Any = None

@@ -143,7 +143,7 @@ def _clear_config() -> None:
 
 
 class GoogleChatChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for Google Chat API."""
+    """Channel backend for Google Chat API."""
 
     def __init__(self) -> None:
         self._service: Any = None

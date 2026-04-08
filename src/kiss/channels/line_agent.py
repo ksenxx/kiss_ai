@@ -43,7 +43,7 @@ _config = ChannelConfig(_LINE_DIR, ("channel_access_token",))
 
 
 class LineChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for LINE Messaging API.
+    """Channel backend for LINE Messaging API.
 
     Uses webhook queue pattern for receiving inbound messages.
     """

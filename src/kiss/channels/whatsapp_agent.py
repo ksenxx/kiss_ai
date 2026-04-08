@@ -89,16 +89,15 @@ def _api_request(
 
 
 # ---------------------------------------------------------------------------
-# WhatsAppChannelBackend — used by background_agent.py and WhatsAppAgent tools
+# WhatsAppChannelBackend
 # ---------------------------------------------------------------------------
 
 
 class WhatsAppChannelBackend(ToolMethodBackend):
-    """ChannelBackend implementation for WhatsApp Business Cloud API.
+    """Channel backend for WhatsApp Business Cloud API.
 
     Provides channel monitoring via webhook queue, message sending,
-    and reply waiting for the background agent. Implements the
-    ``ChannelBackend`` protocol defined in ``kiss.channels``.
+    and reply waiting for the channel poller and interactive agent.
 
     For message polling, uses a webhook queue pattern: an embedded HTTP
     server receives POST events from the WhatsApp platform and buffers

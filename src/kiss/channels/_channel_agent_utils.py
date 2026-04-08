@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import threading
 import time as _time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import yaml
+
+logger = logging.getLogger(__name__)
 
 _NON_TOOL_METHODS = frozenset(
     {
@@ -175,6 +181,191 @@ class BaseChannelAgent:
         return tools
 
 
+class ChannelPoller:
+    """One-shot channel poller that checks for pending messages and runs agents.
+
+    Connects to a backend, retrieves recent messages, filters to
+    allowed users, skips messages the bot has already replied to, and
+    runs a StatefulSorcarAgent for each pending message.
+    """
+
+    def __init__(
+        self,
+        backend: Any,
+        channel_name: str,
+        agent_name: str,
+        extra_tools: list | None = None,
+        model_name: str = "",
+        max_budget: float = 5.0,
+        work_dir: str = "",
+        allow_users: list[str] | None = None,
+    ) -> None:
+        self._backend = backend
+        self._channel_name = channel_name
+        self._agent_name = agent_name
+        self._extra_tools = extra_tools or []
+        self._model_name = model_name
+        self._max_budget = max_budget
+        self._work_dir = work_dir or str(Path.home() / ".kiss" / "channel_work")
+        self._allow_users = set(allow_users) if allow_users else None
+        self._poll_thread_fn = getattr(backend, "poll_thread_messages", None)
+
+    def run_once(self) -> int:
+        """Check for pending messages, process them, and exit.
+
+        Connects to the backend, joins the configured channel, retrieves
+        recent messages, filters to allowed users, skips messages the bot
+        has already replied to, and runs a StatefulSorcarAgent for each
+        pending message.  Each message is processed synchronously.
+
+        Returns:
+            Number of messages processed.
+
+        Raises:
+            RuntimeError: If connection or channel lookup fails.
+        """
+        from kiss.core.base import Base
+
+        Base.reset_global_budget()
+        if not self._backend.connect():
+            raise RuntimeError(f"Failed to connect: {self._backend.connection_info}")
+        logger.info("Connected: %s", self._backend.connection_info)
+        try:
+            channel_id = ""
+            if self._channel_name:
+                channel_id = self._backend.find_channel(self._channel_name) or ""
+                if not channel_id:
+                    raise RuntimeError(f"Channel not found: {self._channel_name!r}")
+                self._backend.join_channel(channel_id)
+                logger.info("Joined channel: %s (%s)", self._channel_name, channel_id)
+
+            messages, _ = self._backend.poll_messages(channel_id, "0", limit=50)
+
+            processed = 0
+            for msg in messages:
+                if self._backend.is_from_bot(msg):
+                    continue
+                user_id = msg.get("user", "")
+                if self._allow_users and user_id not in self._allow_users:
+                    continue
+                if self._has_bot_reply(channel_id, msg):
+                    continue
+                self._handle_message(channel_id, msg)
+                processed += 1
+
+            return processed
+        finally:
+            self._disconnect_backend()
+
+    def _has_bot_reply(self, channel_id: str, msg: dict[str, Any]) -> bool:
+        """Check if the bot has already replied to a message's thread.
+
+        Uses ``poll_thread_messages`` if the backend supports it.
+        Returns ``False`` when thread polling is unavailable or the
+        message has no replies.
+
+        Args:
+            channel_id: Channel ID containing the message.
+            msg: Message dict from poll_messages.
+
+        Returns:
+            True if the bot has already replied in the thread.
+        """
+        if self._poll_thread_fn is None:
+            return False
+        if msg.get("reply_count", 0) == 0:
+            return False
+        msg_ts = msg.get("ts", "")
+        if not msg_ts:
+            return False
+        try:
+            replies, _ = self._poll_thread_fn(channel_id, msg_ts, "0", limit=100)
+            return any(self._backend.is_from_bot(r) for r in replies)
+        except Exception:
+            logger.debug("Error checking thread replies for %s", msg_ts, exc_info=True)
+            return False
+
+    def _handle_message(self, channel_id: str, msg: dict[str, Any]) -> None:
+        """Run one agent task for an inbound message."""
+        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+
+        text = self._backend.strip_bot_mention(msg.get("text", ""))
+        thread_ts = msg.get("thread_ts", msg.get("ts", ""))
+        session_key = f"{channel_id}:{msg.get('ts', '')}"
+
+        agent = StatefulSorcarAgent(self._agent_name)
+        agent.new_chat()
+
+        tools = list(self._extra_tools)
+        replied = threading.Event()
+
+        def reply(message: str) -> str:
+            """Send a reply to the current conversation.
+
+            Args:
+                message: Text to send as the bot's reply.
+
+            Returns:
+                JSON string with ok status.
+            """
+            replied.set()
+            try:
+                self._backend.send_message(channel_id, message, thread_ts)
+                return json.dumps({"ok": True})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        tools.append(reply)
+
+        Path(self._work_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            result = agent.run(
+                prompt_template=text,
+                model_name=self._model_name,
+                max_budget=self._max_budget,
+                work_dir=self._work_dir,
+                tools=tools,
+                verbose=False,
+            )
+            if not replied.is_set():  # pragma: no branch
+                result_yaml = yaml.safe_load(result)
+                summary = (result_yaml.get("summary", "") if result_yaml else "") or result
+                self._send_reply(channel_id, summary, thread_ts)
+        except Exception as e:
+            logger.error("Agent error for %s: %s", session_key, e, exc_info=True)
+            self._send_reply(channel_id, f"Error processing your message: {e}", thread_ts)
+
+    def _send_reply(self, channel_id: str, text: str, thread_ts: str) -> None:
+        """Send a reply message, retrying once on transient failure.
+
+        Args:
+            channel_id: Channel to post to.
+            text: Message text.
+            thread_ts: Thread timestamp for threading.
+        """
+        for attempt in range(2):
+            try:
+                self._backend.send_message(channel_id, text, thread_ts)
+                return
+            except Exception:
+                if attempt == 0:
+                    logger.warning("Reply failed, retrying...", exc_info=True)
+                    _time.sleep(1)
+                else:
+                    logger.error("Reply failed after retry", exc_info=True)
+
+    def _disconnect_backend(self) -> None:
+        """Best-effort backend cleanup hook."""
+        try:
+            self._backend.disconnect()
+        except Exception:
+            logger.warning("Backend disconnect failed", exc_info=True)
+
+
+# Backward-compatible aliases for existing imports.
+ChannelDaemon = ChannelPoller
+
+
 def channel_main(
     agent_cls: type,
     cli_name: str,
@@ -246,8 +437,6 @@ def channel_main(
 
     channel: str = getattr(args, "channel", "")
     if make_backend is not None and channel:
-        from kiss.channels.background_agent import ChannelPoller
-
         sig = inspect.signature(make_backend)
         if "workspace" in sig.parameters:
             backend = make_backend(workspace=workspace)
