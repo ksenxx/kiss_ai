@@ -181,8 +181,8 @@ class BaseChannelAgent:
         return tools
 
 
-class ChannelPoller:
-    """One-shot channel poller that checks for pending messages and runs agents.
+class ChannelRunner:
+    """One-shot channel message runner.
 
     Connects to a backend, retrieves recent messages, filters to
     allowed users, skips messages the bot has already replied to, and
@@ -363,7 +363,8 @@ class ChannelPoller:
 
 
 # Backward-compatible aliases for existing imports.
-ChannelDaemon = ChannelPoller
+ChannelPoller = ChannelRunner
+ChannelDaemon = ChannelRunner
 
 
 def channel_main(
@@ -455,7 +456,7 @@ def channel_main(
                 else:
                     allow_users.append(raw)
             allow_users = allow_users or None
-        poller = ChannelPoller(
+        runner = ChannelRunner(
             backend=backend,
             channel_name=channel,
             agent_name=f"{channel_name} Background Agent",
@@ -466,7 +467,7 @@ def channel_main(
             allow_users=allow_users,
         )
         print(f"Checking {channel_name} channel for pending messages...")
-        count = poller.run_once()
+        count = runner.run_once()
         print(f"Processed {count} message(s).")
         return
 

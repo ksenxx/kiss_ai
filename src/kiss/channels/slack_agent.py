@@ -115,7 +115,7 @@ def _clear_token(workspace: str = "default") -> None:
 
 
 # ---------------------------------------------------------------------------
-# SlackChannelBackend — used by ChannelPoller and SlackAgent tools
+# SlackChannelBackend — used by ChannelRunner and SlackAgent tools
 # ---------------------------------------------------------------------------
 
 _REPLY_POLL_INTERVAL = 2.0

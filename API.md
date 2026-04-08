@@ -1386,9 +1386,9 @@ ______________________________________________________________________
 
 ##### `class BaseChannelAgent` — Mixin for channel agent classes that provides a standard `_get_tools()`
 
-##### `class ChannelPoller` — One-shot channel poller that checks for pending messages and runs agents.
+##### `class ChannelRunner` — One-shot channel message runner.
 
-**Constructor:** `ChannelPoller(backend: Any, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', allow_users: list[str] | None = None) -> None`
+**Constructor:** `ChannelRunner(backend: Any, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', allow_users: list[str] | None = None) -> None`
 
 - **run_once** — Check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a StatefulSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
   - **Returns:** Number of messages processed.

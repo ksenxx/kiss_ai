@@ -1,4 +1,4 @@
-"""Integration tests for ChannelPoller.run_once() — no mocks or test doubles.
+"""Integration tests for ChannelRunner.run_once() — no mocks or test doubles.
 
 Tests the one-shot poll mode: run_once(), _has_bot_reply(), and the CLI
 integration for ``--channel``.
@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from kiss.channels._channel_agent_utils import ChannelPoller
+from kiss.channels._channel_agent_utils import ChannelRunner
 from kiss.channels.slack_agent import (
     SlackChannelBackend,
     _save_token,
@@ -53,7 +53,7 @@ class TestRunOnceConnectFailure:
         """run_once() raises RuntimeError when backend.connect() returns False."""
         backend = SlackChannelBackend()
         # No token saved — connect() returns False immediately
-        poller = ChannelPoller(
+        poller = ChannelRunner(
             backend=backend,
             channel_name="test-channel",
             agent_name="test",
@@ -65,7 +65,7 @@ class TestRunOnceConnectFailure:
         """run_once() raises RuntimeError with an invalid token (auth fails)."""
         _save_token("xoxb-invalid-for-run-once-test")
         backend = SlackChannelBackend()
-        poller = ChannelPoller(
+        poller = ChannelRunner(
             backend=backend,
             channel_name="test-channel",
             agent_name="test",
@@ -75,15 +75,15 @@ class TestRunOnceConnectFailure:
 
 
 class TestHasBotReply:
-    """Tests for ChannelPoller._has_bot_reply() logic."""
+    """Tests for ChannelRunner._has_bot_reply() logic."""
 
     def _make_poller_with_poll_fn(
         self, poll_fn: Any = None
-    ) -> ChannelPoller:
+    ) -> ChannelRunner:
         """Create a poller with a configurable poll_thread_fn."""
         backend = SlackChannelBackend()
         backend._bot_user_id = "U_BOT"
-        poller = ChannelPoller(
+        poller = ChannelRunner(
             backend=backend,
             channel_name="test",
             agent_name="test",

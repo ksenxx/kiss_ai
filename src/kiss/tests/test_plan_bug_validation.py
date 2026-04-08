@@ -27,9 +27,9 @@ class TestAgentEvolverIsolation:
 class TestPollerSessionResume:
     def test_poller_uses_resume_chat_by_id(self) -> None:
         """_handle_message() uses resume_chat_by_id instead of mutating _chat_id."""
-        from kiss.channels._channel_agent_utils import ChannelPoller
+        from kiss.channels._channel_agent_utils import ChannelRunner
 
-        source = inspect.getsource(ChannelPoller._handle_message)
+        source = inspect.getsource(ChannelRunner._handle_message)
         assert "agent._chat_id" not in source
 
     def test_stateful_agent_has_resume_by_id(self) -> None:
@@ -307,10 +307,10 @@ class TestGlobalBudgetReset:
         assert callable(Base.reset_global_budget)
 
     def test_poller_resets_budget_on_start(self) -> None:
-        """ChannelPoller resets global budget in run_once()."""
-        from kiss.channels._channel_agent_utils import ChannelPoller
+        """ChannelRunner resets global budget in run_once()."""
+        from kiss.channels._channel_agent_utils import ChannelRunner
 
-        source = inspect.getsource(ChannelPoller.run_once)
+        source = inspect.getsource(ChannelRunner.run_once)
         assert "reset_global_budget" in source
 
 
