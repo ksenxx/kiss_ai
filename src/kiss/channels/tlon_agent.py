@@ -30,7 +30,7 @@ from kiss.channels._channel_agent_utils import (
 )
 
 _TLON_DIR = Path.home() / ".kiss" / "channels" / "tlon"
-_config = ChannelConfig(_TLON_DIR, ("ship_url",))
+_config = ChannelConfig(_TLON_DIR, ("ship_url", "code"))
 
 
 class TlonChannelBackend(ToolMethodBackend):

@@ -28,6 +28,7 @@ _NON_TOOL_METHODS = frozenset(
         "strip_bot_mention",
         "disconnect",
         "get_tool_methods",
+        "poll_thread_messages",
     }
 )
 

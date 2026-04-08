@@ -34,6 +34,7 @@ _config = ChannelConfig(
     (
         "url",
         "username",
+        "password",
     ),
 )
 
@@ -388,9 +389,9 @@ class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
             agent._backend._url = url.strip().rstrip("/")
-            agent._backend._auth = (username.strip(), password)
+            agent._backend._auth = (username.strip(), password.strip())
             try:
-                result = self._backend.list_rooms()
+                result = agent._backend.list_rooms()
                 data = json.loads(result)
                 if data.get("ok"):  # pragma: no branch
                     _config.save(
