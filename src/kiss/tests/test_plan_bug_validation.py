@@ -5,8 +5,6 @@ inspecting real code — no mocks, patches, fakes, or test doubles.
 """
 
 import inspect
-import threading
-import time
 
 
 # ---------------------------------------------------------------------------
@@ -24,14 +22,14 @@ class TestAgentEvolverIsolation:
 
 
 # ---------------------------------------------------------------------------
-# §19: daemon uses public resume_chat_by_id — not private _chat_id
+# §19: poller uses public resume_chat_by_id — not private _chat_id
 # ---------------------------------------------------------------------------
-class TestDaemonSessionResume:
-    def test_daemon_uses_resume_chat_by_id(self) -> None:
+class TestPollerSessionResume:
+    def test_poller_uses_resume_chat_by_id(self) -> None:
         """_handle_message() uses resume_chat_by_id instead of mutating _chat_id."""
-        from kiss.channels.background_agent import ChannelDaemon
+        from kiss.channels.background_agent import ChannelPoller
 
-        source = inspect.getsource(ChannelDaemon._handle_message)
+        source = inspect.getsource(ChannelPoller._handle_message)
         assert "resume_chat_by_id" in source
         assert "agent._chat_id" not in source
 
@@ -40,162 +38,6 @@ class TestDaemonSessionResume:
         from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 
         assert hasattr(StatefulSorcarAgent, "resume_chat_by_id")
-
-
-# ---------------------------------------------------------------------------
-# §20: sender state maps are synchronized
-# ---------------------------------------------------------------------------
-class TestDaemonSenderStateSynchronized:
-    def test_sender_states_created_under_lock(self) -> None:
-        """_get_sender_state() uses _sender_states_lock."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon._get_sender_state)
-        assert "with self._sender_states_lock:" in source
-
-
-# ---------------------------------------------------------------------------
-# §21: daemon checks busy BEFORE spawning thread
-# ---------------------------------------------------------------------------
-class TestDaemonBusyCheckBeforeSpawn:
-    def test_lock_acquired_before_thread_creation(self) -> None:
-        """_start_sender_worker() acquires lock before creating the thread."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon._start_sender_worker)
-        lines = source.split("\n")
-        acquire_line = None
-        thread_line = None
-        for i, line in enumerate(lines):
-            if "lock.acquire(" in line and acquire_line is None:
-                acquire_line = i
-            if "threading.Thread(" in line and thread_line is None:
-                thread_line = i
-        assert acquire_line is not None and thread_line is not None
-        assert acquire_line < thread_line
-
-
-# ---------------------------------------------------------------------------
-# §22: daemon uses _stop_event.wait() instead of time.sleep()
-# ---------------------------------------------------------------------------
-class TestDaemonStopAwareWaits:
-    def test_poll_loop_uses_event_wait(self) -> None:
-        """_connect_and_poll() uses self._stop_event.wait() for poll delay."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon._connect_and_poll)
-        assert "self._stop_event.wait(self._poll_interval)" in source
-        assert "time.sleep(self._poll_interval)" not in source
-
-    def test_reconnect_uses_event_wait(self) -> None:
-        """run() reconnect backoff uses self._stop_event.wait()."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon.run)
-        assert "self._stop_event.wait(self._reconnect_delay)" in source
-        assert "time.sleep(self._reconnect_delay)" not in source
-
-    def test_stop_unblocks_poll_promptly(self) -> None:
-        """stop() interrupts a long poll interval within 2 seconds."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        class FakeBackend:
-            connection_info = "test"
-
-            def connect(self) -> bool:
-                return True
-
-            def find_channel(self, name: str) -> str:
-                return "ch"
-
-            def join_channel(self, channel_id: str) -> None:
-                pass
-
-            def poll_messages(self, channel_id: str, oldest: str) -> tuple:
-                return [], oldest
-
-            def is_from_bot(self, msg: dict) -> bool:
-                return False
-
-            def strip_bot_mention(self, text: str) -> str:
-                return text
-
-            def send_message(
-                self, channel_id: str, text: str, thread_ts: str = ""
-            ) -> None:
-                pass
-
-            def disconnect(self) -> None:
-                pass
-
-        daemon = ChannelDaemon(
-            backend=FakeBackend(),  # type: ignore[arg-type]
-            channel_name="",
-            agent_name="test",
-            poll_interval=30.0,
-        )
-        started = threading.Event()
-
-        def run_daemon() -> None:
-            started.set()
-            try:
-                daemon.run()
-            except Exception:
-                pass
-
-        t = threading.Thread(target=run_daemon, daemon=True)
-        t.start()
-        started.wait(timeout=5)
-        time.sleep(0.3)
-        daemon.stop()
-        t.join(timeout=2.0)
-        assert not t.is_alive(), "stop() should unblock within 2s"
-
-
-# ---------------------------------------------------------------------------
-# §22A: daemon invokes backend disconnect on stop and reconnect
-# ---------------------------------------------------------------------------
-class TestDaemonCallsBackendDisconnect:
-    def test_stop_calls_disconnect(self) -> None:
-        """stop() calls _disconnect_backend()."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon.stop)
-        assert "disconnect" in source
-
-    def test_connect_and_poll_has_finally_cleanup(self) -> None:
-        """_connect_and_poll() has a finally block calling _disconnect_backend."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon._connect_and_poll)
-        assert "finally:" in source
-        assert "self._disconnect_backend()" in source
-
-    def test_reconnect_calls_disconnect(self) -> None:
-        """_connect_and_poll calls _disconnect_backend in finally block."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon._connect_and_poll)
-        assert "self._disconnect_backend()" in source
-
-
-# ---------------------------------------------------------------------------
-# §22B: daemon tracks and joins handler threads
-# ---------------------------------------------------------------------------
-class TestDaemonTracksHandlerThreads:
-    def test_handler_threads_tracked(self) -> None:
-        """ChannelDaemon tracks handler threads in a collection."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        init_source = inspect.getsource(ChannelDaemon.__init__)
-        assert "_handler_threads" in init_source
-
-    def test_stop_joins_handler_threads(self) -> None:
-        """stop() calls _join_handler_threads."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon.stop)
-        assert "join" in source
 
 
 # ---------------------------------------------------------------------------
@@ -479,33 +321,12 @@ class TestGlobalBudgetReset:
         assert hasattr(Base, "reset_global_budget")
         assert callable(Base.reset_global_budget)
 
-    def test_daemon_resets_budget_on_start(self) -> None:
-        """ChannelDaemon resets global budget once at daemon start."""
-        from kiss.channels.background_agent import ChannelDaemon
+    def test_poller_resets_budget_on_start(self) -> None:
+        """ChannelPoller resets global budget in run_once()."""
+        from kiss.channels.background_agent import ChannelPoller
 
-        source = inspect.getsource(ChannelDaemon.run)
+        source = inspect.getsource(ChannelPoller.run_once)
         assert "reset_global_budget" in source
-
-
-# ---------------------------------------------------------------------------
-# §37: daemon queues messages instead of dropping them
-# ---------------------------------------------------------------------------
-class TestDaemonQueuesMessages:
-    def test_dispatch_uses_queue(self) -> None:
-        """_dispatch_message enqueues to pending_messages."""
-        from kiss.channels.background_agent import ChannelDaemon
-
-        source = inspect.getsource(ChannelDaemon._dispatch_message)
-        assert "pending_messages" in source
-
-    def test_sender_state_has_queue(self) -> None:
-        """_SenderState has a pending_messages queue."""
-        from kiss.channels.background_agent import _SenderState
-
-        state = _SenderState()
-        assert hasattr(state, "pending_messages")
-        state.pending_messages.put({"text": "hello"})
-        assert state.pending_messages.get_nowait() == {"text": "hello"}
 
 
 # ---------------------------------------------------------------------------

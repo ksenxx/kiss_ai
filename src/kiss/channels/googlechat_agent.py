@@ -605,8 +605,8 @@ class GoogleChatAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_googlechat_auth, authenticate_googlechat, clear_googlechat_auth]
 
 
-def _make_daemon_backend() -> GoogleChatChannelBackend:
-    """Create a configured GoogleChatChannelBackend for daemon mode."""
+def _make_backend() -> GoogleChatChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = GoogleChatChannelBackend()
     service = _load_service()
     if not service:  # pragma: no branch
@@ -622,7 +622,7 @@ def main() -> None:
         GoogleChatAgent,
         "kiss-gchat",
         channel_name="Google Chat",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

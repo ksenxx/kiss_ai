@@ -1,8 +1,8 @@
 """Integration tests for all new channel agents — no mocks or test doubles.
 
 Tests agent instantiation, auth trio presence, config persistence,
-backend tool discovery, and ChannelDaemon construction for every
-new channel agent created by the OpenClaw port.
+and backend tool discovery for every new channel agent created by
+the OpenClaw port.
 """
 
 from __future__ import annotations
@@ -381,24 +381,6 @@ def test_main_exits_with_no_args(info: dict) -> None:
         sys.argv = original_argv
 
 
-# ---------------------------------------------------------------------------
-# Test: ChannelDaemon construction
-# ---------------------------------------------------------------------------
 
-
-def test_channel_daemon_stop() -> None:
-    """ChannelDaemon.stop() sets the stop event."""
-    from kiss.channels.background_agent import ChannelDaemon
-    from kiss.channels.discord_agent import DiscordChannelBackend
-
-    backend = DiscordChannelBackend()
-    daemon = ChannelDaemon(
-        backend=backend,
-        channel_name="",
-        agent_name="Test",
-    )
-    assert not daemon._stop_event.is_set()
-    daemon.stop()
-    assert daemon._stop_event.is_set()
 
 

@@ -649,8 +649,8 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
         ]
 
 
-def _make_daemon_backend() -> DiscordChannelBackend:
-    """Create a configured DiscordChannelBackend for daemon mode."""
+def _make_backend() -> DiscordChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = DiscordChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -666,7 +666,7 @@ def main() -> None:
         DiscordAgent,
         "kiss-discord",
         channel_name="Discord",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

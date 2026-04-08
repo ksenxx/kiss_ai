@@ -502,8 +502,8 @@ class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_msteams_auth, authenticate_msteams, clear_msteams_auth]
 
 
-def _make_daemon_backend() -> MSTeamsChannelBackend:
-    """Create a configured MSTeamsChannelBackend for daemon mode."""
+def _make_backend() -> MSTeamsChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = MSTeamsChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -522,7 +522,7 @@ def main() -> None:
         MSTeamsAgent,
         "kiss-msteams",
         channel_name="MS Teams",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

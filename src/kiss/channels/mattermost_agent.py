@@ -519,8 +519,8 @@ class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_mattermost_auth, authenticate_mattermost, clear_mattermost_auth]
 
 
-def _make_daemon_backend() -> MattermostChannelBackend:
-    """Create a configured MattermostChannelBackend for daemon mode."""
+def _make_backend() -> MattermostChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = MattermostChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -546,7 +546,7 @@ def main() -> None:
         MattermostAgent,
         "kiss-mattermost",
         channel_name="Mattermost",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

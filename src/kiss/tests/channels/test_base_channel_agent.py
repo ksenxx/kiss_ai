@@ -4,7 +4,7 @@ Verifies that:
 1. All 23 channel agents inherit from BaseChannelAgent
 2. BaseChannelAgent._get_tools() properly delegates to _get_auth_tools()
    and conditionally includes backend tools based on _is_authenticated()
-3. channel_main() handles CLI parsing for both daemon and non-daemon modes
+3. channel_main() handles CLI parsing for interactive and poll modes
 """
 
 from __future__ import annotations
@@ -185,10 +185,10 @@ def test_channel_main_no_args_exits(capsys: pytest.CaptureFixture[str]) -> None:
         sys.argv = original_argv
 
 
-def test_channel_main_usage_includes_daemon_flag(
+def test_channel_main_usage_includes_channel_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """channel_main() usage includes [--daemon] when make_daemon_backend is set."""
+    """channel_main() usage includes [--channel CH] when make_backend is set."""
     from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 
     class FakeAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -202,10 +202,10 @@ def test_channel_main_usage_includes_daemon_flag(
                 FakeAgent,
                 "kiss-test",
                 channel_name="Test",
-                make_daemon_backend=lambda: None,
+                make_backend=lambda: None,
             )
         captured = capsys.readouterr()
-        assert "--daemon" in captured.out
+        assert "--channel CH" in captured.out
     finally:
         sys.argv = original_argv
 
@@ -231,10 +231,10 @@ def test_channel_main_usage_includes_chat_flags(
         sys.argv = original_argv
 
 
-def test_channel_main_usage_no_daemon_flag(
+def test_channel_main_usage_no_channel_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """channel_main() usage omits [--daemon] when make_daemon_backend is None."""
+    """channel_main() usage omits [--channel CH] when make_backend is None."""
     from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 
     class FakeAgent(BaseChannelAgent, StatefulSorcarAgent):
@@ -246,7 +246,7 @@ def test_channel_main_usage_no_daemon_flag(
         with pytest.raises(SystemExit):
             channel_main(FakeAgent, "kiss-test")
         captured = capsys.readouterr()
-        assert "--daemon" not in captured.out
+        assert "--channel CH" not in captured.out
     finally:
         sys.argv = original_argv
 
@@ -273,8 +273,8 @@ def test_channel_main_list_chats_exits(
         sys.argv = original_argv
 
 
-# Modules that have _make_daemon_backend
-_DAEMON_MODULES = [
+# Modules that have _make_backend (support poll mode)
+_POLL_MODULES = [
     "kiss.channels.bluebubbles_agent",
     "kiss.channels.discord_agent",
     "kiss.channels.feishu_agent",
@@ -294,8 +294,8 @@ _DAEMON_MODULES = [
     "kiss.channels.zalo_agent",
 ]
 
-# Modules without daemon support
-_NO_DAEMON_MODULES = [
+# Modules without poll mode support
+_NO_POLL_MODULES = [
     "kiss.channels.gmail_agent",
     "kiss.channels.imessage_agent",
     "kiss.channels.nostr_agent",
@@ -305,22 +305,22 @@ _NO_DAEMON_MODULES = [
 ]
 
 
-@pytest.mark.parametrize("module_path", _DAEMON_MODULES)
-def test_daemon_modules_have_make_daemon_backend(module_path: str) -> None:
-    """Modules with daemon support expose a _make_daemon_backend() function."""
+@pytest.mark.parametrize("module_path", _POLL_MODULES)
+def test_poll_modules_have_make_backend(module_path: str) -> None:
+    """Modules with poll mode support expose a _make_backend() function."""
     mod = importlib.import_module(module_path)
-    assert hasattr(mod, "_make_daemon_backend")
-    assert callable(mod._make_daemon_backend)
+    assert hasattr(mod, "_make_backend")
+    assert callable(mod._make_backend)
 
 
-@pytest.mark.parametrize("module_path", _NO_DAEMON_MODULES)
-def test_non_daemon_modules_have_no_make_daemon_backend(module_path: str) -> None:
-    """Modules without daemon support don't expose _make_daemon_backend()."""
+@pytest.mark.parametrize("module_path", _NO_POLL_MODULES)
+def test_non_poll_modules_have_no_make_backend(module_path: str) -> None:
+    """Modules without poll mode support don't expose _make_backend()."""
     mod = importlib.import_module(module_path)
-    assert not hasattr(mod, "_make_daemon_backend")
+    assert not hasattr(mod, "_make_backend")
 
 
-@pytest.mark.parametrize("module_path", _DAEMON_MODULES + _NO_DAEMON_MODULES)
+@pytest.mark.parametrize("module_path", _POLL_MODULES + _NO_POLL_MODULES)
 def test_all_modules_have_main(module_path: str) -> None:
     """All channel agent modules expose a main() function."""
     mod = importlib.import_module(module_path)

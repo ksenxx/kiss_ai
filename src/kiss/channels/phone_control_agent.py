@@ -428,8 +428,8 @@ class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_phone_auth, authenticate_phone, clear_phone_auth]
 
 
-def _make_daemon_backend() -> PhoneControlChannelBackend:
-    """Create a configured PhoneControlChannelBackend for daemon mode."""
+def _make_backend() -> PhoneControlChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = PhoneControlChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -446,7 +446,7 @@ def main() -> None:
         PhoneControlAgent,
         "kiss-phone",
         channel_name="Phone Control",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

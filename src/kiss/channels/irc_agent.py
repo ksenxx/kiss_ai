@@ -472,8 +472,8 @@ class IRCAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_irc_auth, authenticate_irc, clear_irc_auth]
 
 
-def _make_daemon_backend() -> IRCChannelBackend:
-    """Create a configured IRCChannelBackend for daemon mode."""
+def _make_backend() -> IRCChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = IRCChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -490,8 +490,7 @@ def main() -> None:
         IRCAgent,
         "kiss-irc",
         channel_name="IRC",
-        make_daemon_backend=_make_daemon_backend,
-        daemon_poll_interval=1.0,
+        make_backend=_make_backend,
     )
 
 

@@ -512,8 +512,8 @@ class SMSAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_sms_auth, authenticate_sms, clear_sms_auth]
 
 
-def _make_daemon_backend() -> SMSChannelBackend:
-    """Create a configured SMSChannelBackend for daemon mode."""
+def _make_backend() -> SMSChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = SMSChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -532,7 +532,7 @@ def main() -> None:
         SMSAgent,
         "kiss-sms",
         channel_name="SMS",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

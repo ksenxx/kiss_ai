@@ -518,8 +518,8 @@ class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_matrix_auth, authenticate_matrix, clear_matrix_auth]
 
 
-def _make_daemon_backend() -> MatrixChannelBackend:
-    """Create a configured MatrixChannelBackend for daemon mode."""
+def _make_backend() -> MatrixChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = MatrixChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -538,7 +538,7 @@ def main() -> None:
         MatrixAgent,
         "kiss-matrix",
         channel_name="Matrix",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

@@ -392,8 +392,8 @@ class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_bluebubbles_auth, authenticate_bluebubbles, clear_bluebubbles_auth]
 
 
-def _make_daemon_backend() -> BlueBubblesChannelBackend:
-    """Create a configured BlueBubblesChannelBackend for daemon mode."""
+def _make_backend() -> BlueBubblesChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = BlueBubblesChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -410,7 +410,7 @@ def main() -> None:
         BlueBubblesAgent,
         "kiss-bluebubbles",
         channel_name="BlueBubbles",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

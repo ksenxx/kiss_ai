@@ -439,8 +439,8 @@ class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_nextcloud_auth, authenticate_nextcloud, clear_nextcloud_auth]
 
 
-def _make_daemon_backend() -> NextcloudTalkChannelBackend:
-    """Create a configured NextcloudTalkChannelBackend for daemon mode."""
+def _make_backend() -> NextcloudTalkChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = NextcloudTalkChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -457,7 +457,7 @@ def main() -> None:
         NextcloudTalkAgent,
         "kiss-nextcloud",
         channel_name="Nextcloud Talk",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

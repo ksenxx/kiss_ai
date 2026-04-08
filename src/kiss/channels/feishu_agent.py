@@ -496,8 +496,8 @@ class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_feishu_auth, authenticate_feishu, clear_feishu_auth]
 
 
-def _make_daemon_backend() -> FeishuChannelBackend:
-    """Create a configured FeishuChannelBackend for daemon mode."""
+def _make_backend() -> FeishuChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = FeishuChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -517,7 +517,7 @@ def main() -> None:
         FeishuAgent,
         "kiss-feishu",
         channel_name="Feishu",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
     )
 
 

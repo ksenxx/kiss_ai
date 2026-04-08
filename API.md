@@ -1402,30 +1402,24 @@ ______________________________________________________________________
 
 - `path`: Config file path.
 
-**`channel_main`** — Standard CLI entry point shared by all channel agents. Handles argument parsing, daemon mode, and interactive (one-shot) mode. Each channel agent's `main()` delegates to this function.<br/>`def channel_main(agent_cls: type, cli_name: str, *, channel_name: str = '', make_daemon_backend: Callable[..., Any] | None = None, daemon_poll_interval: float = 3.0, extra_usage: str = '') -> None`
+**`channel_main`** — Standard CLI entry point shared by all channel agents. Handles argument parsing and either one-shot poll mode (when `--channel` is given) or interactive mode (when `-t` is given). Each channel agent's `main()` delegates to this function.<br/>`def channel_main(agent_cls: type, cli_name: str, *, channel_name: str = '', make_backend: Callable[..., Any] | None = None, extra_usage: str = '') -> None`
 
 - `agent_cls`: The channel Agent class to instantiate (e.g. `SlackAgent`).
 - `cli_name`: CLI command name for the usage message (e.g. `"kiss-slack"`).
-- `channel_name`: Human-readable channel name (e.g. `"Slack"`). Used in daemon messages and agent naming.
-- `make_daemon_backend`: Factory that creates and configures a backend for daemon mode. May accept a `workspace` keyword argument; if so, the `--workspace` CLI value is forwarded. Should call `sys.exit(1)` if required config is missing. Pass `None` to disable daemon mode.
-- `daemon_poll_interval`: Message poll interval for daemon mode in seconds.
+- `channel_name`: Human-readable channel name (e.g. `"Slack"`). Used in status messages and agent naming.
+- `make_backend`: Factory that creates and configures a backend for poll mode. May accept a `workspace` keyword argument; if so, the `--workspace` CLI value is forwarded. Should call `sys.exit(1)` if required config is missing. Pass `None` to disable poll mode.
 - `extra_usage`: Additional usage flags to append to the usage line (e.g. `"[--list-workspaces]"`).
 
 ______________________________________________________________________
 
-#### `kiss.channels.background_agent` — *Background channel daemon — polls a ChannelBackend and runs agents.*
+#### `kiss.channels.background_agent` — *Channel poller — polls a ChannelBackend and runs agents.*
 
-##### `class ChannelDaemon` — Background daemon that monitors a ChannelBackend and triggers agents.
+##### `class ChannelPoller` — One-shot channel poller that checks for pending messages and runs agents.
 
-**Constructor:** `ChannelDaemon(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', poll_interval: float = _POLL_INTERVAL, allow_users: list[str] | None = None) -> None`
+**Constructor:** `ChannelPoller(backend: ChannelBackend, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', allow_users: list[str] | None = None) -> None`
 
-- **run** — Start the daemon loop. Blocks until stop() is called or fatal error.<br/>`run() -> None`
-
-- **run_once** — One-shot poll: check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a StatefulSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
-
+- **run_once** — Check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a StatefulSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
   - **Returns:** Number of messages processed.
-
-- **stop** — Signal the daemon to stop and wait briefly for handler cleanup.<br/>`stop() -> None`
 
 ______________________________________________________________________
 
@@ -2765,7 +2759,7 @@ ______________________________________________________________________
   - `limit`: Maximum number of messages to return.
   - **Returns:** Tuple of (messages sorted oldest-first, updated oldest timestamp).
 
-- **poll_thread_messages** — Poll a Slack thread for new replies since *oldest*. Used by the daemon to detect user replies within active threads. The parent message itself is excluded from the results. Retries up to 3 times on transient network errors with exponential backoff (same strategy as `poll_messages`).<br/>`poll_thread_messages(channel_id: str, thread_ts: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
+- **poll_thread_messages** — Poll a Slack thread for new replies since *oldest*. Used by the poller to detect user replies within active threads. The parent message itself is excluded from the results. Retries up to 3 times on transient network errors with exponential backoff (same strategy as `poll_messages`).<br/>`poll_thread_messages(channel_id: str, thread_ts: str, oldest: str, limit: int = 10) -> tuple[list[dict[str, Any]], str]`
 
   - `channel_id`: Channel ID containing the thread.
   - `thread_ts`: Timestamp of the parent message (thread root).

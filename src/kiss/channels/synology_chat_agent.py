@@ -303,8 +303,8 @@ class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_synology_auth, authenticate_synology, clear_synology_auth]
 
 
-def _make_daemon_backend() -> SynologyChatChannelBackend:
-    """Create a configured SynologyChatChannelBackend for daemon mode."""
+def _make_backend() -> SynologyChatChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = SynologyChatChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -321,8 +321,7 @@ def main() -> None:
         SynologyChatAgent,
         "kiss-synology",
         channel_name="Synology Chat",
-        make_daemon_backend=_make_daemon_backend,
-        daemon_poll_interval=1.0,
+        make_backend=_make_backend,
     )
 
 

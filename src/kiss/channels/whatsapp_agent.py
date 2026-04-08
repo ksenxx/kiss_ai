@@ -100,7 +100,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
     and reply waiting for the background agent. Implements the
     ``ChannelBackend`` protocol defined in ``kiss.channels``.
 
-    For the daemon loop, uses a webhook queue pattern: an embedded HTTP
+    For message polling, uses a webhook queue pattern: an embedded HTTP
     server receives POST events from the WhatsApp platform and buffers
     them; ``poll_messages()`` drains this buffer.
     """

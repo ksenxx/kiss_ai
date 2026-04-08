@@ -407,8 +407,8 @@ class LineAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_line_auth, authenticate_line, clear_line_auth]
 
 
-def _make_daemon_backend() -> LineChannelBackend:
-    """Create a configured LineChannelBackend for daemon mode."""
+def _make_backend() -> LineChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = LineChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -427,8 +427,7 @@ def main() -> None:
         LineAgent,
         "kiss-line",
         channel_name="LINE",
-        make_daemon_backend=_make_daemon_backend,
-        daemon_poll_interval=1.0,
+        make_backend=_make_backend,
     )
 
 

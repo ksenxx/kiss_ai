@@ -180,26 +180,25 @@ def channel_main(
     cli_name: str,
     *,
     channel_name: str = "",
-    make_daemon_backend: Callable[..., Any] | None = None,
-    daemon_poll_interval: float = 3.0,
+    make_backend: Callable[..., Any] | None = None,
     extra_usage: str = "",
 ) -> None:
     """Standard CLI entry point shared by all channel agents.
 
-    Handles argument parsing, daemon mode, and interactive (one-shot) mode.
+    Handles argument parsing and either one-shot poll mode (when
+    ``--channel`` is given) or interactive mode (when ``-t`` is given).
     Each channel agent's ``main()`` delegates to this function.
 
     Args:
         agent_cls: The channel Agent class to instantiate (e.g. ``SlackAgent``).
         cli_name: CLI command name for the usage message (e.g. ``"kiss-slack"``).
         channel_name: Human-readable channel name (e.g. ``"Slack"``).
-            Used in daemon messages and agent naming.
-        make_daemon_backend: Factory that creates and configures a
-            backend for daemon mode.  May accept a ``workspace`` keyword
-            argument; if so, the ``--workspace`` CLI value is forwarded.
-            Should call ``sys.exit(1)`` if required config is missing.
-            Pass ``None`` to disable daemon mode.
-        daemon_poll_interval: Message poll interval for daemon mode in seconds.
+            Used in status messages and agent naming.
+        make_backend: Factory that creates and configures a backend for
+            poll mode.  May accept a ``workspace`` keyword argument; if
+            so, the ``--workspace`` CLI value is forwarded.  Should call
+            ``sys.exit(1)`` if required config is missing.
+            Pass ``None`` to disable poll mode.
         extra_usage: Additional usage flags to append to the usage line
             (e.g. ``"[--list-workspaces]"``).
     """
@@ -217,8 +216,8 @@ def channel_main(
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]
         parts.append("[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]")
         parts.append("[--workspace WS]")
-        if make_daemon_backend is not None:
-            parts.append("[--daemon]")
+        if make_backend is not None:
+            parts.append("[--channel CH]")
         if extra_usage:
             parts.append(extra_usage)
         print(" ".join(parts))
@@ -230,9 +229,8 @@ def channel_main(
         default="default",
         help="Workspace identifier for multi-workspace token management (default: 'default')",
     )
-    if make_daemon_backend is not None:
-        parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
-        parser.add_argument("--daemon-channel", default="", help="Channel/chat to monitor")
+    if make_backend is not None:
+        parser.add_argument("--channel", default="", help="Channel/chat to monitor for messages")
         parser.add_argument(
             "--allow-users",
             default="",
@@ -246,15 +244,15 @@ def channel_main(
 
     workspace: str = args.workspace
 
-    daemon_channel: str = getattr(args, "daemon_channel", "")
-    if make_daemon_backend is not None and daemon_channel:
-        from kiss.channels.background_agent import ChannelDaemon
+    channel: str = getattr(args, "channel", "")
+    if make_backend is not None and channel:
+        from kiss.channels.background_agent import ChannelPoller
 
-        sig = inspect.signature(make_daemon_backend)
+        sig = inspect.signature(make_backend)
         if "workspace" in sig.parameters:
-            backend = make_daemon_backend(workspace=workspace)
+            backend = make_backend(workspace=workspace)
         else:
-            backend = make_daemon_backend()
+            backend = make_backend()
         allow_users_raw = [u.strip() for u in args.allow_users.split(",") if u.strip()]
         allow_users: list[str] | None = None
         if allow_users_raw:
@@ -268,27 +266,19 @@ def channel_main(
                 else:
                     allow_users.append(raw)
             allow_users = allow_users or None
-        daemon = ChannelDaemon(
+        poller = ChannelPoller(
             backend=backend,
-            channel_name=args.daemon_channel,
+            channel_name=channel,
             agent_name=f"{channel_name} Background Agent",
             extra_tools=backend.get_tool_methods(),
             model_name=args.model_name,
             max_budget=args.max_budget,
-            work_dir=args.work_dir or str(Path.home() / ".kiss" / "daemon_work"),
-            poll_interval=daemon_poll_interval,
+            work_dir=args.work_dir or str(Path.home() / ".kiss" / "channel_work"),
             allow_users=allow_users,
         )
-        if getattr(args, "daemon", False):
-            print(f"Starting {channel_name} daemon... (Ctrl+C to stop)")
-            try:
-                daemon.run()
-            except KeyboardInterrupt:
-                print("Daemon stopped.")
-        else:
-            print(f"Checking {channel_name} channel for pending messages...")
-            count = daemon.run_once()
-            print(f"Processed {count} message(s).")
+        print(f"Checking {channel_name} channel for pending messages...")
+        count = poller.run_once()
+        print(f"Processed {count} message(s).")
         return
 
     sig = inspect.signature(agent_cls)

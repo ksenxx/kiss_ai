@@ -6,9 +6,6 @@ or test doubles are used.
 """
 
 import inspect
-import threading
-import time
-from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -50,113 +47,7 @@ class TestC1DoubleCountingReasoningTokens:
         )
 
 
-# ---------------------------------------------------------------------------
-# C2/R1: background_agent.py — Message orphaned race
-# ---------------------------------------------------------------------------
-class TestC2MessageOrphanedRace:
-    def test_message_not_orphaned_when_queue_fills_during_drain(self) -> None:
-        """A message put on the queue while the worker is about to exit
-        must still be processed — not orphaned.
 
-        We reproduce this by calling _process_sender_queue on an empty
-        queue (so it returns immediately), then putting a message on the
-        queue, and checking if _start_sender_worker can start a new worker
-        (because the old one's lock is still held).
-        """
-        from kiss.channels.background_agent import ChannelDaemon
-
-        # Build a minimal ChannelDaemon with a dummy backend
-        class DummyBackend:
-            connection_info = "test"
-
-            def connect(self) -> bool:
-                return True
-
-            def find_channel(self, name: str) -> str | None:
-                return name
-
-            def find_user(self, username: str) -> str | None:
-                return username
-
-            def join_channel(self, channel_id: str) -> None:
-                pass
-
-            def poll_messages(
-                self, channel_id: str, oldest: str, limit: int = 10
-            ) -> tuple[list[dict[str, Any]], str]:
-                return [], oldest
-
-            def is_from_bot(self, msg: dict[str, Any]) -> bool:
-                return False
-
-            def strip_bot_mention(self, text: str) -> str:
-                return text
-
-            def send_message(
-                self, channel_id: str, text: str, thread_ts: str = ""
-            ) -> None:
-                pass
-
-            def disconnect(self) -> None:
-                pass
-
-            def wait_for_reply(
-                self,
-                channel_id: str,
-                thread_ts: str,
-                user_id: str,
-                timeout_seconds: float = 300.0,
-                stop_event: threading.Event | None = None,
-            ) -> str | None:
-                return None
-
-        daemon = ChannelDaemon(
-            backend=DummyBackend(),
-            channel_name="test",
-            agent_name="test",
-        )
-
-        processed: list[str] = []
-        processing_started = threading.Event()
-
-        state = daemon._get_sender_state("test:u1")
-
-        # Monkey-patch _handle_message to track processing and create a
-        # window for the race: while the first message is being handled,
-        # a second message arrives.
-        def patched_handle(
-            session_key: str,
-            channel_id: str,
-            msg: dict[str, Any],
-            st: Any,
-        ) -> None:
-            processed.append(msg.get("text", ""))
-            if len(processed) == 1:
-                # Signal that the first message is being processed
-                processing_started.set()
-                # Give the main thread time to enqueue the second message
-                time.sleep(0.1)
-
-        daemon._handle_message = patched_handle  # type: ignore[assignment]
-
-        # Enqueue first message and start worker
-        state.pending_messages.put({"text": "msg1", "user": "u1"})
-        daemon._start_sender_worker("test:u1", "ch1", state)
-
-        # Wait for worker to start processing first message
-        processing_started.wait(timeout=2)
-        # Enqueue second message while worker is busy in _handle_message
-        state.pending_messages.put({"text": "msg2", "user": "u1"})
-
-        # Wait for worker threads to finish
-        time.sleep(0.5)
-        daemon._join_handler_threads()
-
-        assert "msg1" in processed, "First message should have been processed"
-        assert "msg2" in processed, (
-            "Second message should have been processed (not orphaned). "
-            "The worker should re-check the queue before releasing the lock."
-        )
 
 
 # ---------------------------------------------------------------------------

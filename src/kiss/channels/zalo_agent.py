@@ -465,8 +465,8 @@ class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent):
         return [check_zalo_auth, authenticate_zalo, clear_zalo_auth]
 
 
-def _make_daemon_backend() -> ZaloChannelBackend:
-    """Create a configured ZaloChannelBackend for daemon mode."""
+def _make_backend() -> ZaloChannelBackend:
+    """Create a configured backend for channel poll mode."""
     backend = ZaloChannelBackend()
     cfg = _config.load()
     if not cfg:  # pragma: no branch
@@ -483,8 +483,7 @@ def main() -> None:
         ZaloAgent,
         "kiss-zalo",
         channel_name="Zalo",
-        make_daemon_backend=_make_daemon_backend,
-        daemon_poll_interval=1.0,
+        make_backend=_make_backend,
     )
 
 

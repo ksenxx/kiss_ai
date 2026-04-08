@@ -283,7 +283,7 @@ class SlackChannelBackend(ToolMethodBackend):
     ) -> tuple[list[dict[str, Any]], str]:
         """Poll a Slack thread for new replies since *oldest*.
 
-        Used by the daemon to detect user replies within active threads.
+        Used by the poller to detect user replies within active threads.
         The parent message itself is excluded from the results.
 
         Retries up to 3 times on transient network errors with
@@ -1077,8 +1077,8 @@ def _list_workspaces() -> None:
             print(f"{ws:<20} {'✗ error':<12} {'-':<20} -")
 
 
-def _make_daemon_backend(workspace: str = "default") -> SlackChannelBackend:
-    """Create a configured SlackChannelBackend for daemon mode.
+def _make_backend(workspace: str = "default") -> SlackChannelBackend:
+    """Create a configured backend for channel poll mode.
 
     Args:
         workspace: Workspace identifier for token lookup.
@@ -1111,7 +1111,7 @@ def main() -> None:
         SlackAgent,
         "kiss-slack",
         channel_name="Slack",
-        make_daemon_backend=_make_daemon_backend,
+        make_backend=_make_backend,
         extra_usage="[--list-workspaces] [--delete-workspace WS]",
     )
 
