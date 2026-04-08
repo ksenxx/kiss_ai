@@ -30,7 +30,7 @@ from kiss.channels._channel_agent_utils import (
 )
 
 _MSTEAMS_DIR = Path.home() / ".kiss" / "channels" / "msteams"
-_config = ChannelConfig(_MSTEAMS_DIR, ("tenant_id", "client_id"))
+_config = ChannelConfig(_MSTEAMS_DIR, ("tenant_id", "client_id", "client_secret"))
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 

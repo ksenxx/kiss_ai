@@ -57,7 +57,8 @@ class IRCChannelBackend(ToolMethodBackend):
             return False
         try:
             self._nick = cfg["nick"]
-            sock = socket.create_connection((cfg["server"], int(cfg["port"])), timeout=30)
+            port = int(cfg.get("port", "6667"))
+            sock = socket.create_connection((cfg["server"], port), timeout=30)
             if cfg.get("use_tls"):  # pragma: no branch
                 import ssl
 
@@ -467,7 +468,6 @@ def _make_backend() -> IRCChannelBackend:
         print("Not configured. Run: kiss-irc -t 'authenticate'")
         sys.exit(1)
     backend._nick = cfg["nick"]
-    backend.connect()
     return backend
 
 
