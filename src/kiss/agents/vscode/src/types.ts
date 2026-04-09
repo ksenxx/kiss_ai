@@ -21,7 +21,7 @@ export interface SessionInfo {
 
 /** Messages from webview to extension */
 export type FromWebviewMessage =
-  | { type: 'submit'; prompt: string; model: string; attachments: Attachment[] }
+  | { type: 'submit'; prompt: string; model: string; attachments: Attachment[]; useWorktree?: boolean }
   | { type: 'stop' }
   | { type: 'selectModel'; model: string }
   | { type: 'getModels' }
@@ -104,4 +104,5 @@ export interface AgentCommand {
   sessionId?: string;
   activeFileContent?: string;
   action?: 'merge' | 'discard';
+  useWorktree?: boolean;
 }

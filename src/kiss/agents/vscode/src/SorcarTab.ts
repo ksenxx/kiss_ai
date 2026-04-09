@@ -262,7 +262,7 @@ export class SorcarTab {
     this._panel.title = truncated;
   }
 
-  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
+  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean): void {
     const workDir = this._getWorkDir();
     const started = this._agentProcess.start(workDir);
     if (!started) {
@@ -280,6 +280,7 @@ export class SorcarTab {
       workDir,
       activeFile,
       attachments,
+      useWorktree,
     });
   }
 
@@ -321,6 +322,7 @@ export class SorcarTab {
           message.model,
           this._getVisibleEditorFile() || undefined,
           message.attachments,
+          message.useWorktree,
         );
         break;
       }

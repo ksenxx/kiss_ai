@@ -34,6 +34,7 @@ from kiss.agents.sorcar.persistence import (
     _search_history,
     _set_latest_chat_events,
 )
+from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.diff_merge import _git
@@ -88,7 +89,9 @@ class VSCodeServer:
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        self.agent = WorktreeSorcarAgent("Sorcar VS Code")
+        self._stateful_agent = StatefulSorcarAgent("Sorcar VS Code")
+        self._worktree_agent = WorktreeSorcarAgent("Sorcar VS Code")
+        self._use_worktree = False
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         self._stop_event: threading.Event | None = None
         self._user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
@@ -116,6 +119,18 @@ class VSCodeServer:
         self._complete_worker.start()
         self._task_history_id: int | None = None
         self._flush_interval: float = 5  # seconds between crash-recovery flushes
+
+    @property
+    def agent(self) -> StatefulSorcarAgent:
+        """Return the currently active agent based on the worktree toggle.
+
+        Returns:
+            WorktreeSorcarAgent when worktree mode is enabled,
+            StatefulSorcarAgent otherwise.
+        """
+        if self._use_worktree:
+            return self._worktree_agent
+        return self._stateful_agent
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -249,6 +264,7 @@ class VSCodeServer:
 
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
+        self._use_worktree = bool(cmd.get("useWorktree", False))
         prompt = cmd.get("prompt", "")
         model = cmd.get("model") or self._selected_model
         work_dir = cmd.get("workDir") or self.work_dir
@@ -313,19 +329,19 @@ class VSCodeServer:
                 self._task_history_id = self.agent._last_task_id
                 result_summary = self._extract_result_summary(rec_id) or "No summary available"
                 task_end_event = {"type": "task_done"}
-                if self.agent._wt_pending:
+                if self._use_worktree and self._worktree_agent._wt_pending:
                     changed = self._get_worktree_changed_files()
                     if changed:
                         self.printer.broadcast({
                             "type": "worktree_done",
-                            "branch": self.agent._wt_branch,
-                            "worktreeDir": str(self.agent._wt_dir),
-                            "originalBranch": self.agent._original_branch,
+                            "branch": self._worktree_agent._wt_branch,
+                            "worktreeDir": str(self._worktree_agent._wt_dir),
+                            "originalBranch": self._worktree_agent._original_branch,
                             "changedFiles": changed,
                             "hasConflict": self._check_merge_conflict(),
                         })
                     else:
-                        self.agent.discard()
+                        self._worktree_agent.discard()
             except KeyboardInterrupt:
                 self._task_history_id = self.agent._last_task_id
                 result_summary = "Task stopped by user"
@@ -550,15 +566,18 @@ class VSCodeServer:
         are shown whenever the worktree branch still exists — even if
         the agent was killed before it could emit the event originally.
         """
+        if not self._use_worktree:
+            return
+        wt = self._worktree_agent
         self._ensure_worktree_state()
-        if not self.agent._wt_pending:
+        if not wt._wt_pending:
             return
         changed = self._get_worktree_changed_files()
         self.printer.broadcast({
             "type": "worktree_done",
-            "branch": self.agent._wt_branch,
-            "worktreeDir": str(self.agent._wt_dir),
-            "originalBranch": self.agent._original_branch,
+            "branch": wt._wt_branch,
+            "worktreeDir": str(wt._wt_dir),
+            "originalBranch": wt._original_branch,
             "changedFiles": changed,
             "hasConflict": self._check_merge_conflict() if changed else False,
         })
@@ -569,14 +588,18 @@ class VSCodeServer:
         Discovers the repo root and calls ``_restore_from_git()`` so
         that ``merge()``/``discard()`` work even after a server process
         restart where in-memory state was lost.
+        Only applicable when using the worktree agent.
         """
-        repo_root = self.agent._repo_root
+        if not self._use_worktree:
+            return
+        wt = self._worktree_agent
+        repo_root = wt._repo_root
         if repo_root is None:
             toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
             if toplevel.returncode != 0:
                 return
             repo_root = Path(toplevel.stdout.strip())
-        self.agent._restore_from_git(repo_root)
+        wt._restore_from_git(repo_root)
 
     def _generate_followup_async(
         self, task: str, result: str, model: str, gen: int, task_id: int | None
@@ -770,21 +793,24 @@ class VSCodeServer:
         Returns:
             True if the merge would fail, False otherwise.
         """
-        if not self.agent._wt_branch or not self.agent._original_branch:
+        if not self._use_worktree:
             return False
-        repo_root = str(self.agent._repo_root) if self.agent._repo_root else self.work_dir
+        wt = self._worktree_agent
+        if not wt._wt_branch or not wt._original_branch:
+            return False
+        repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
         # Check 1: tree-level merge conflicts
         result = _git(repo_root,
                       "merge-tree", "--write-tree",
-                      self.agent._original_branch,
-                      self.agent._wt_branch)
+                      wt._original_branch,
+                      wt._wt_branch)
         if result.returncode != 0:
             return True
         # Check 2: dirty working tree files that overlap with merge changes
         merge_files = _git(repo_root,
                            "diff", "--name-only",
-                           self.agent._original_branch,
-                           self.agent._wt_branch)
+                           wt._original_branch,
+                           wt._wt_branch)
         if merge_files.returncode != 0 or not merge_files.stdout.strip():
             return False
         dirty = _git(repo_root, "diff", "--name-only")
@@ -807,14 +833,17 @@ class VSCodeServer:
         Returns:
             Sorted deduplicated list of relative file paths.
         """
-        if not self.agent._original_branch:
+        if not self._use_worktree:
             return []
-        wt_dir = self.agent._wt_dir
+        wt = self._worktree_agent
+        if not wt._original_branch:
+            return []
+        wt_dir = wt._wt_dir
         if wt_dir and wt_dir.exists():
             # Compare worktree working tree against original branch
             # (includes both committed and uncommitted changes)
             tracked = _git(str(wt_dir), "diff", "--name-only",
-                           self.agent._original_branch)
+                           wt._original_branch)
             files = (tracked.stdout.strip().splitlines()
                      if tracked.returncode == 0 else [])
             # Also include untracked new files
@@ -824,12 +853,12 @@ class VSCodeServer:
                 files.extend(untracked.stdout.strip().splitlines())
             return sorted(set(files))
         # Worktree already removed — fall back to branch diff
-        if not self.agent._wt_branch:
+        if not wt._wt_branch:
             return []
-        repo_root = str(self.agent._repo_root) if self.agent._repo_root else self.work_dir
+        repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
         result = _git(repo_root, "diff", "--name-only",
-                      self.agent._original_branch,
-                      self.agent._wt_branch)
+                      wt._original_branch,
+                      wt._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []
 
     def _handle_worktree_action(self, action: str) -> dict[str, Any]:
@@ -845,14 +874,17 @@ class VSCodeServer:
             Dict with ``success`` bool, ``message`` string, and
             optionally ``manual`` bool.
         """
-        if not self.agent._wt_pending:
+        if not self._use_worktree:
+            return {"success": False, "message": "Worktree mode is not enabled"}
+        wt = self._worktree_agent
+        if not wt._wt_pending:
             self._ensure_worktree_state()
         if action == "merge":
-            msg = self.agent.merge()
+            msg = wt.merge()
             success = "Successfully merged" in msg
             return {"success": success, "message": msg}
         elif action == "discard":
-            msg = self.agent.discard()
+            msg = wt.discard()
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
 

@@ -1029,7 +1029,8 @@
       model: selectedModel,
       attachments: attachments.map(function(a) {
         return { name: a.name, mimeType: a.type, data: a.data };
-      })
+      }),
+      useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.classList.contains('active'))
     });
     inp.value = '';
     inp.style.height = 'auto';

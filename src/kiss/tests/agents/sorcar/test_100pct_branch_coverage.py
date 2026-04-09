@@ -269,13 +269,15 @@ class TestVSCodeServerUncoveredBranches:
     def test_check_merge_conflict_no_branches(self) -> None:
         """_check_merge_conflict returns False when no wt_branch (line 733)."""
         server = VSCodeServer()
-        server.agent._wt = None
+        server._use_worktree = True
+        server._worktree_agent._wt = None  # type: ignore[attr-defined]
         assert server._check_merge_conflict() is False
 
     def test_get_worktree_changed_files_no_branches(self) -> None:
         """_get_worktree_changed_files returns [] when no branches."""
         server = VSCodeServer()
-        server.agent._wt = None
+        server._use_worktree = True
+        server._worktree_agent._wt = None  # type: ignore[attr-defined]
         assert server._get_worktree_changed_files() == []
 
     def test_check_merge_conflict_dirty_worktree(self, tmp_path: Path) -> None:
@@ -305,7 +307,8 @@ class TestVSCodeServerUncoveredBranches:
             (repo / "f.txt").write_text("dirty local change")
 
             server = VSCodeServer()
-            server.agent._wt = GitWorktree(
+            server._use_worktree = True
+            server._worktree_agent._wt = GitWorktree(
                 repo_root=repo, branch="test-branch",
                 original_branch="main",
                 wt_dir=repo / ".kiss-worktrees" / "test-branch",
@@ -320,6 +323,7 @@ class TestVSCodeServerUncoveredBranches:
     def test_handle_worktree_action_unknown(self) -> None:
         """_handle_worktree_action with unknown action (server.py line end)."""
         server = VSCodeServer()
+        server._use_worktree = True
         result = server._handle_worktree_action("unknown_action")
         assert result["success"] is False
         assert "Unknown action" in result["message"]
