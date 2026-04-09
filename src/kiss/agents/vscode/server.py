@@ -314,7 +314,6 @@ class VSCodeServer:
                 result_summary = self._extract_result_summary(rec_id) or "No summary available"
                 task_end_event = {"type": "task_done"}
                 if self.agent._wt_pending:
-                    self.agent._auto_commit_worktree()
                     changed = self._get_worktree_changed_files()
                     if changed:
                         self.printer.broadcast({
@@ -796,17 +795,39 @@ class VSCodeServer:
         return bool(dirty_set & merge_set)
 
     def _get_worktree_changed_files(self) -> list[str]:
-        """List files changed in the worktree branch vs the original.
+        """List files changed in the worktree vs the original branch.
+
+        Detects both committed changes on the worktree branch and
+        uncommitted changes in the worktree working tree.  When the
+        worktree directory exists, runs ``git diff`` and
+        ``git ls-files --others`` inside it so that uncommitted
+        edits and new files are included.  Falls back to a branch-
+        to-branch diff when the worktree has already been removed.
 
         Returns:
-            List of relative file paths that differ between the original
-            and worktree branches.
+            Sorted deduplicated list of relative file paths.
         """
-        if not self.agent._wt_branch or not self.agent._original_branch:
+        if not self.agent._original_branch:
+            return []
+        wt_dir = self.agent._wt_dir
+        if wt_dir and wt_dir.exists():
+            # Compare worktree working tree against original branch
+            # (includes both committed and uncommitted changes)
+            tracked = _git(str(wt_dir), "diff", "--name-only",
+                           self.agent._original_branch)
+            files = (tracked.stdout.strip().splitlines()
+                     if tracked.returncode == 0 else [])
+            # Also include untracked new files
+            untracked = _git(str(wt_dir), "ls-files",
+                             "--others", "--exclude-standard")
+            if untracked.returncode == 0 and untracked.stdout.strip():
+                files.extend(untracked.stdout.strip().splitlines())
+            return sorted(set(files))
+        # Worktree already removed — fall back to branch diff
+        if not self.agent._wt_branch:
             return []
         repo_root = str(self.agent._repo_root) if self.agent._repo_root else self.work_dir
-        result = _git(repo_root,
-                      "diff", "--name-only",
+        result = _git(repo_root, "diff", "--name-only",
                       self.agent._original_branch,
                       self.agent._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []

@@ -540,3 +540,134 @@ class TestServerWorktreeWorkflow:
         assert "test done" in result
         assert server.agent._wt_pending
         server.agent.discard()
+
+    # -- Premature commit bug (changes must NOT be committed before user acts) --
+
+    def test_task_does_not_commit_before_user_action(self) -> None:
+        """After task finishes, worktree changes must NOT be committed yet.
+
+        The agent should leave changes uncommitted in the worktree so
+        the user can review them before choosing Commit and Merge.
+        """
+        server, events = _make_server(self.repo)
+        server.agent.run(
+            prompt_template="task1", work_dir=str(self.repo)
+        )
+
+        wt_dir = server.agent._wt_dir
+        assert wt_dir is not None and wt_dir.exists()
+        # Simulate agent making changes (files written but NOT committed)
+        (wt_dir / "agent_file.txt").write_text("agent wrote this")
+
+        # Check: the worktree branch should have NO new commits beyond
+        # what was on the original branch (the file is uncommitted)
+        branch = server.agent._wt_branch
+        original = server.agent._original_branch
+        assert branch is not None and original is not None
+        r = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-list", "--count",
+             f"{original}..{branch}"],
+            capture_output=True, text=True,
+        )
+        assert r.stdout.strip() == "0", (
+            "Worktree branch should have no new commits before user action"
+        )
+
+        # The changed file detection should still find the uncommitted file
+        changed = server._get_worktree_changed_files()
+        assert "agent_file.txt" in changed
+
+        server.agent.discard()
+
+    def test_merge_commits_then_merges(self) -> None:
+        """merge() should commit uncommitted changes, then merge."""
+        server, events = _make_server(self.repo)
+        server.agent.run(
+            prompt_template="task1", work_dir=str(self.repo)
+        )
+
+        wt_dir = server.agent._wt_dir
+        assert wt_dir is not None
+        (wt_dir / "agent_file.txt").write_text("agent wrote this")
+
+        # Before merge: no commits on the branch
+        branch = server.agent._wt_branch
+        assert branch is not None
+
+        # Merge should auto-commit the changes and merge
+        result = server._handle_worktree_action("merge")
+        assert result["success"] is True
+
+        # File should now be on original branch
+        assert _file_in_repo(self.repo, "agent_file.txt")
+        assert (self.repo / "agent_file.txt").read_text() == "agent wrote this"
+
+    def test_discard_drops_uncommitted_changes(self) -> None:
+        """discard() should throw away uncommitted worktree changes."""
+        server, events = _make_server(self.repo)
+        server.agent.run(
+            prompt_template="task1", work_dir=str(self.repo)
+        )
+
+        wt_dir = server.agent._wt_dir
+        assert wt_dir is not None
+        (wt_dir / "agent_file.txt").write_text("should be discarded")
+
+        server._handle_worktree_action("discard")
+        assert not _file_in_repo(self.repo, "agent_file.txt")
+
+    def test_get_worktree_changed_files_detects_uncommitted(self) -> None:
+        """_get_worktree_changed_files() must detect uncommitted changes."""
+        server, events = _make_server(self.repo)
+        server.agent.run(
+            prompt_template="task1", work_dir=str(self.repo)
+        )
+
+        wt_dir = server.agent._wt_dir
+        assert wt_dir is not None
+        (wt_dir / "new.txt").write_text("new file")
+        (wt_dir / "README.md").write_text("modified\n")
+
+        changed = server._get_worktree_changed_files()
+        assert "README.md" in changed
+        assert "new.txt" in changed
+
+        server.agent.discard()
+
+    def test_run_task_inner_does_not_auto_commit(self) -> None:
+        """_run_task_inner must NOT call _auto_commit_worktree().
+
+        The auto-commit should only happen when the user clicks
+        'Commit and Merge', not when the task finishes.
+        """
+        server, events = _make_server(self.repo)
+        # We'll inspect the agent after run() to check no commit happened.
+        # The patched super().run() returns immediately without making
+        # file changes, so we check the run_task_inner flow by verifying
+        # the worktree has 0 branch commits.
+        server.agent.run(
+            prompt_template="task1", work_dir=str(self.repo)
+        )
+
+        wt_dir = server.agent._wt_dir
+        assert wt_dir is not None
+
+        # Create files to simulate what the agent tool would have done
+        (wt_dir / "tool_output.txt").write_text("from tool")
+
+        # Now simulate what _run_task_inner does after the task:
+        # It should detect changes WITHOUT committing
+        changed = server._get_worktree_changed_files()
+        assert len(changed) > 0
+
+        # Verify nothing was committed
+        branch = server.agent._wt_branch
+        original = server.agent._original_branch
+        r = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-list", "--count",
+             f"{original}..{branch}"],
+            capture_output=True, text=True,
+        )
+        assert r.stdout.strip() == "0"
+
+        server.agent.discard()
