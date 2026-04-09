@@ -66,6 +66,33 @@ path = "src/kiss/_version.py"
 packages = ["src/kiss"]
 # JSON files in package directories are included automatically by hatchling
 
+# Include all git-managed files outside src/kiss/ in the wheel
+[tool.hatch.build.targets.wheel.force-include]
+".dockerignore" = "kiss/.dockerignore"
+".github" = "kiss/.github"
+".gitignore" = "kiss/.gitignore"
+".pylintrc" = "kiss/.pylintrc"
+"API.md" = "kiss/API.md"
+"COMMON_TASKS_FOR_SORCAR_DEVELOPMENT.md" = "kiss/COMMON_TASKS_FOR_SORCAR_DEVELOPMENT.md"
+"Dockerfile" = "kiss/Dockerfile"
+"LICENSE" = "kiss/LICENSE"
+"PLAN.md" = "kiss/PLAN.md"
+"README.md" = "kiss/README.md"
+"SORCAR.md" = "kiss/SORCAR.md"
+"SYSTEM.md" = "kiss/SYSTEM.md"
+"assets" = "kiss/assets"
+"example_prompt.md" = "kiss/example_prompt.md"
+"gsd.md" = "kiss/gsd.md"
+"install.sh" = "kiss/install.sh"
+"pyproject.toml" = "kiss/pyproject.toml"
+"pyrightconfig.json" = "kiss/pyrightconfig.json"
+"redundancy.md" = "kiss/redundancy.md"
+"scripts/release.sh" = "kiss/scripts/release.sh"
+"scripts/slack-daemon.sh" = "kiss/scripts/slack-daemon.sh"
+"sorcar" = "kiss/sorcar"
+"sorcar-linux" = "kiss/sorcar-linux"
+"uv.lock" = "kiss/uv.lock"
+
 [dependency-groups]
 dev = [
     "mypy>=1.19.1",
