@@ -101,13 +101,12 @@ class TestResumeSessionWithTask:
             orig(ev)
 
         server.printer.broadcast = capture  # type: ignore[assignment]
-        # Use a task that doesn't exist — will trigger "No recorded events" error
+        # Use a task that doesn't exist — silently returns (no error broadcast)
         server._handle_command(
             {"type": "resumeSession", "sessionId": "nonexistent-task-999"}
         )
         err = [e for e in events if e.get("type") == "error"]
-        assert len(err) == 1
-        assert "No recorded events" in str(err[0].get("text", ""))
+        assert len(err) == 0
 
 
 # ---------------------------------------------------------------------------
