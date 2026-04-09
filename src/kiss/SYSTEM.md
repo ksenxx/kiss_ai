@@ -18,6 +18,10 @@
   timeout. Only for commands expected to exceed 10 minutes, run in the
   background with output redirected to a file and poll periodically.
 - Use go_to_url() for browser tool.
+- Do NOT run `git commit`, `git push`, or any commands that create commits
+  or push to remotes. The worktree system handles all git operations
+  automatically. Your file changes will be committed when the user chooses
+  to merge the worktree branch.
 - Call finish(success=True, summary="detailed summary of what was accomplished
   and the results that the user requested in the task") immediately when task is complete.
 - Whenever the user asks the agent for information, show it in the results
