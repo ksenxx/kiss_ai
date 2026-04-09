@@ -59,6 +59,7 @@ export class SorcarTab {
   private _sessionTask: string;
   private _lastTask: string = '';
   private _worktreeDir: string = '';
+  private _worktreeActionResolve: (() => void) | null = null;
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
   get panel(): vscode.WebviewPanel { return this._panel; }
@@ -136,9 +137,21 @@ export class SorcarTab {
           this._openWorktreeInScm(dir);
         }
       }
-      if (msg.type === 'worktree_result' && (msg as any).success && this._worktreeDir) {
-        this._closeWorktreeInScm(this._worktreeDir);
-        this._worktreeDir = '';
+      if (msg.type === 'worktree_result') {
+        if (this._worktreeActionResolve) {
+          this._worktreeActionResolve();
+          this._worktreeActionResolve = null;
+        }
+        const result = msg as any;
+        if (result.success) {
+          vscode.window.showInformationMessage(result.message || 'Worktree action completed.');
+        } else {
+          vscode.window.showErrorMessage(result.message || 'Worktree action failed.');
+        }
+        if (result.success && this._worktreeDir) {
+          this._closeWorktreeInScm(this._worktreeDir);
+          this._worktreeDir = '';
+        }
       }
 
       this.sendToWebview(msg);
@@ -419,12 +432,23 @@ export class SorcarTab {
         break;
       }
 
-      case 'worktreeAction':
+      case 'worktreeAction': {
+        const wtAction = (message as any).action;
+        const progressTitle = wtAction === 'merge'
+          ? 'Committing and merging worktree…'
+          : wtAction === 'discard'
+            ? 'Discarding worktree…'
+            : 'Processing worktree action…';
+        vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: progressTitle },
+          () => new Promise<void>((resolve) => { this._worktreeActionResolve = resolve; }),
+        );
         this._agentProcess.sendCommand({
           type: 'worktreeAction',
-          action: (message as any).action,
+          action: wtAction,
         });
         break;
+      }
 
       case 'resolveDroppedPaths': {
         const workDir = this._getWorkDir();

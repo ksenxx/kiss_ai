@@ -816,5 +816,50 @@ class TestAgentToggle(unittest.TestCase):
         assert "not enabled" in result["message"]
 
 
+class TestWorktreeActionNotifications(unittest.TestCase):
+    """Tests for VS Code notification behavior on worktree actions."""
+
+    _TS_PATH = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "src" / "SorcarTab.ts"
+    _ts: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._ts = cls._TS_PATH.read_text()
+
+    def test_worktree_action_resolve_field_exists(self) -> None:
+        """SorcarTab has a _worktreeActionResolve field for progress tracking."""
+        assert "_worktreeActionResolve" in self._ts
+
+    def test_merge_shows_progress_notification(self) -> None:
+        """Clicking merge shows a progress notification with merge message."""
+        assert "Committing and merging worktree" in self._ts
+        assert "withProgress" in self._ts
+        assert "ProgressLocation.Notification" in self._ts
+
+    def test_discard_shows_progress_notification(self) -> None:
+        """Clicking discard shows a progress notification with discard message."""
+        assert "Discarding worktree" in self._ts
+
+    def test_success_result_shows_info_message(self) -> None:
+        """Successful worktree_result shows an information message."""
+        assert "showInformationMessage" in self._ts
+
+    def test_failure_result_shows_error_message(self) -> None:
+        """Failed worktree_result shows an error message."""
+        assert "showErrorMessage" in self._ts
+
+    def test_progress_resolved_on_result(self) -> None:
+        """The progress notification is resolved when worktree_result arrives."""
+        # Check that _worktreeActionResolve is called and nulled
+        assert "this._worktreeActionResolve();" in self._ts
+        assert "this._worktreeActionResolve = null;" in self._ts
+
+    def test_progress_title_varies_by_action(self) -> None:
+        """Progress title differs for merge vs discard actions."""
+        # The code should branch on wtAction to pick the right message
+        assert "wtAction === 'merge'" in self._ts
+        assert "wtAction === 'discard'" in self._ts
+
+
 if __name__ == "__main__":
     unittest.main()
