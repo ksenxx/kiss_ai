@@ -84,6 +84,7 @@ export type ToWebviewMessage =
   | { type: 'focusInput' }
   | { type: 'worktree_created'; worktreeDir: string; branch: string }
   | { type: 'worktree_done'; branch: string; worktreeDir: string; originalBranch: string; changedFiles: string[]; hasConflict?: boolean }
+  | { type: 'worktree_progress'; message: string }
   | { type: 'worktree_result'; success: boolean; message: string }
   | { type: 'droppedPaths'; paths: string[] };
 
