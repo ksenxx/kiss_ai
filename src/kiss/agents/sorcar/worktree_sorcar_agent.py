@@ -455,7 +455,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
     if len(sys.argv) <= 1:
         print(
-            "Usage: sorcar-wt [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
+            "Usage: sorcar [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
             "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] "
             "[-l] [--cleanup]"
         )
